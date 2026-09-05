@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(g4dump)
+find_package(Geant4 REQUIRED)
+include(${Geant4_USE_FILE})
+add_executable(g4dump g4dump.cc)
+target_link_libraries(g4dump ${Geant4_LIBRARIES})

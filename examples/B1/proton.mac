@@ -1,0 +1,30 @@
+# Example B1 with a proton beam.
+#
+# This is Geant4's own B1 proton run - the one commented out at the bottom of run1.mac - at the
+# energy Geant4 chose, 210 MeV. Everything else is B1: the same 20x20x30 cm water envelope, the
+# same A-150 cone and compact-bone trapezoid, the same 16x16 cm beam spread over the envelope's
+# front face, and the same scoring volume.
+#
+# 210 MeV is a good choice for this geometry and not an arbitrary one. The range of a 210 MeV
+# proton is 287 mm of water; a ray that misses the cone crosses 190 mm of water-equivalent
+# before it reaches the front face of Shape2, so the Bragg peak lands about 56 mm into the
+# 60 mm of bone. The dose this reports is therefore a peak dose, which is what makes it a
+# meaningful comparison: a beam that stopped short would report zero from both codes and prove
+# nothing.
+#
+# The same file runs against this port's exampleB1.exe and against a real Geant4 11.1.1 build
+# of B1 (ref/B1build). Note that those are not the same physics: B1's list is QBBC, which for a
+# proton adds hadElastic and protonInelastic on top of the EM processes, and this port has no
+# hadronic physics at all. ref/b1hadron/proton_emonly.mac runs the Geant4 side with those two
+# switched off, which is the apples-to-apples number; running this file on both sides gives the
+# other one - what the missing hadronic physics costs.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle proton
+/gun/energy 210 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

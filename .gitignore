@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------- build output
+/out/
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.dll
+
+# CMake / MSBuild trees for the programs that link the real Geant4
+/ref/dumpbuild/
+/ref/protonbuild/
+/ref/B1build/
+/examples/B1/build/
+/examples/B1/*/build/
+
+# ---------------------------------------------------------------- not ours
+# A Geant4 11.1.1 source tree, kept locally so tools/g4src.sh can read the
+# implementation this port is transcribed from. 249 MB, and Geant4's to
+# distribute, not this project's. Point tools/g4src.sh at your own install.
+/reference-geant4/
+
+# ---------------------------------------------------------------- generated data
+# The oracle: ~34 MB of CSV dumped from a real Geant4 11.1.1 by ref/dump/g4dump.cc.
+# Regenerate with ref/oracle/run.bat - which is checked in, along with the dumper.
+# Checking the CSVs in would be checking in a copy of Geant4's answers rather than
+# the means of asking for them.
+/ref/oracle/*.csv
+/ref/oracle/*.hh
+/ref/oracle/*.txt
+
+# Viewer output. The offscreen renderer writes these next to the example.
+*.png
+/examples/B1/exampleB1.out
+
+# Scratch
+/tests/_probe*
+*.log

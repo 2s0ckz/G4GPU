@@ -1,0 +1,5 @@
+# Batch initialisation, for a run driven from C++ rather than from a macro.
+# Not one of Geant4's B1 macros; it exists so that a run started with -n can still be
+# preceded by a macro that sets the geometry up.
+/control/verbose 0
+/run/initialize

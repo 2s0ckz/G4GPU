@@ -1,0 +1,8 @@
+# Build products. Object files go to out/B1 at the repository root, not here: a directory of
+# .obj files next to a project that imports .obj meshes is a genuinely confusing place to put
+# them.
+exampleB1.exe
+exampleB1.pdb
+*.obj
+*.lib
+*.exp

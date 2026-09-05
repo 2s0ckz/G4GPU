@@ -1,0 +1,39 @@
+# Macro file for example B1
+#
+# Can be run in batch, without graphic
+# or interactively: Idle> /control/execute run1.mac
+#
+# Change the default number of workers (in multi-threading mode)
+#/run/numberOfThreads 4
+#
+# Initialize kernel
+/run/initialize
+#
+/control/verbose 2
+/run/verbose 2
+/event/verbose 0
+/tracking/verbose 1
+#
+# gamma 6 MeV to the direction (0.,0.,1.)
+#
+/gun/particle gamma
+/gun/energy 6 MeV
+#
+/run/beamOn 5
+#
+# proton 210 MeV to the direction (0.,0.,1.)
+#
+# Geant4's run1.mac continues with a proton run, and so does this one. /tracking/verbose is
+# accepted and does nothing - a step happens inside a device kernel, where G4cout cannot be
+# reached - so it is set to 0 here rather than Geant4's 2, and the line above says so when it
+# is not.
+#
+/gun/particle proton
+/gun/energy 210 MeV
+/tracking/verbose 0
+#
+/run/beamOn 1
+#
+# examples/B1/proton.mac runs this beam at the statistics a comparison needs, and
+# examples/B1/alpha.mac does the same for an 840 MeV alpha - 210 MeV per nucleon, so the two
+# have the same range and stop in the same place.

@@ -1,0 +1,24 @@
+# examples/B1/proton.mac with QBBC's hadronic processes switched off.
+#
+# For the real Geant4 build of B1 only. This port has no hadronic physics, so comparing its
+# answer against a full QBBC run measures that absence rather than the transport; this macro
+# removes it from the Geant4 side so the two are running the same physics.
+#
+# Switched off by UI command rather than by editing B1's physics list, because B1's physics
+# list is the thing being kept identical. /process/inactivate is Geant4's own supported way to
+# do this and it leaves the tables and the cuts exactly as QBBC built them.
+#
+# Everything below the inactivations is character for character examples/B1/proton.mac.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/process/inactivate hadElastic
+/process/inactivate protonInelastic
+
+/gun/particle proton
+/gun/energy 210 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

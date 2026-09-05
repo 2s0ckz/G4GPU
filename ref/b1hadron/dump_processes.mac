@@ -1,0 +1,7 @@
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+/particle/select proton
+/particle/process/dump
+/particle/select alpha
+/particle/process/dump

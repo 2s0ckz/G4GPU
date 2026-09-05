@@ -1,0 +1,145 @@
+Example B1
+==========
+
+Geant4's first basic example, ported to this GPU transport, file for file.
+
+It is here for one reason: it is the calibration. Geant4 11.1.1 was run on the same geometry
+for 2,000,000 events and reported a dose of 427.385 +/- 0.870 picogray per 10,000 events; this
+example reports 427.499, which is 0.09 sigma away. Every claim in docs/RESULT.md rests on that
+number, and it is computed by this code and no other.
+
+    exampleB1                    interactive: runs init_vis.mac, opens the viewer
+    exampleB1 run1.mac           batch, from a macro
+    exampleB1 run2.mac           batch, 10,000 events
+    exampleB1 -n 2000000         batch, an event count and nothing else
+
+
+The geometry
+------------
+
+Unchanged from Geant4's:
+
+- **World**, 24 x 24 x 36 cm of G4_AIR
+- **Envelope**, 20 x 20 x 30 cm of G4_WATER, inside it
+- **Shape 1**, a cone of G4_A-150_TISSUE, r 2 -> 4 cm, half-length 3 cm, at (0, 2, -7) cm
+- **Shape 2**, a trapezoid of G4_BONE_COMPACT_ICRU, 12 x 10 -> 12 x 16 cm, half-length 3 cm,
+  at (0, -1, 7) cm - the scoring volume
+
+The primary is a 6 MeV gamma along +z, spread uniformly over 80% of the envelope's transverse
+size, starting at z = -15 cm. The production range cut is 0.7 mm.
+
+
+The files
+---------
+
+The same layout and the same class names as Geant4's B1, because a project you already know
+how to read is worth more than a tidier one you do not:
+
+    exampleB1.cc                     main(): run manager, physics list, actions, session
+    include/ + src/
+      DetectorConstruction           the geometry above, and the sensitive detector
+      ActionInitialization           creates the actions, in Build() and BuildForMaster()
+      PrimaryGeneratorAction         the gun
+      RunAction                      accumulates edep, prints the dose and its rms
+      EventAction                    per-event accumulation
+      SteppingAction                 filters to the scoring volume, adds the deposit
+    exampleB1.in, run1.mac, run2.mac, init_vis.mac, vis.mac, init.mac
+    CMakeLists.txt                   cmake build, as a Geant4 example has
+    build.bat                        the direct nvcc build the pipeline uses
+
+
+Three differences from Geant4's B1
+----------------------------------
+
+**DetectorConstruction has a ConstructSDandField().** Geant4's B1 does not: it gets its dose
+purely from the stepping action, which decides per step whether the step was in the scoring
+volume. Here the steps happen inside a device kernel, so that decision has to be made before
+the run: a volume with a sensitive detector gets a scorer slot and the kernels accumulate into
+it. The stepping action still runs and still reads the deposit off the step it is handed.
+
+**A step is an aggregate.** `UserSteppingAction` is called once per event and per volume with a
+sensitive detector, with that event's total in that volume - not once per step. B1's stepping
+action adds up what it is given, and the sum over an event of the per-step deposits is the
+event's deposit, so the answer is exactly right. An action that did something non-additive
+with a step would not be. `G4Step::IsAggregated()` returns true so that such an action can
+detect it; the full story is at the top of `src/g4/G4Step.hh`.
+
+**The proton runs are commented out.** Geant4's run1.mac, run2.mac and exampleB1.in each
+follow the gamma run with 210 MeV protons. This transport carries gamma, e- and e+; hadron
+transport is not implemented, and `/run/beamOn` refuses a species it cannot transport rather
+than treating a proton as a gamma. The lines are left in the macros, commented, so that the
+difference is visible.
+
+Two smaller ones, both consequences of running on a GPU rather than a CPU:
+
+- `PrimaryGeneratorAction::GeneratePrimaries` is called **once per run**, not once per event.
+  Geant4's B1 draws two random numbers there to spread the beam; here the spread is set on the
+  gun as a distribution (`SetBeamCrossSectionRectangular`) and the device samples it per
+  event. See `src/g4/G4UserActions.hh`.
+- `G4UserTrackingAction` and `G4UserStackingAction` compile but are never called, and say so
+  when registered.
+
+
+Building
+--------
+
+With cmake, the way a Geant4 example is built:
+
+    cmake -S . -B build
+    cmake --build build --config Release
+
+Or directly, which is what `build_all.bat` runs:
+
+    build.bat
+
+Both produce `exampleB1.exe`. There is also a `GNUmakefile`, as in Geant4's B1 - Geant4's
+delegates to `$(G4INSTALL)/config/binmake.gmk` and there is no such install here, so this one
+runs the same two nvcc invocations itself:
+
+    make            build
+    make run        build and run exampleB1.in
+    make clean
+
+Object files go to `out/B1` at the root of the tree, not into a directory here - a project that
+can import CAD meshes should not have a pile of files called `*.obj` next to its source meaning
+something else entirely.
+
+
+The file set
+------------
+
+Everything Geant4's `examples/basic/B1` has, with three files that are not identical in kind:
+
+| file | here |
+|---|---|
+| `exampleB1.cc`, `include/`, `src/` | the same six classes, with the same responsibilities |
+| `exampleB1.in`, `run1.mac`, `run2.mac`, `init_vis.mac`, `vis.mac` | the same macros; `run2.mac`'s proton section is commented, because nothing here transports a hadron yet |
+| `CMakeLists.txt`, `GNUmakefile` | both build this project rather than linking Geant4 |
+| `README`, `History` | `History` tracks the port's B1; Geant4's own is in its source tree |
+| `exampleB1.out` | this port's output for `exampleB1.in`, generated by running it - not Geant4's |
+| `tsg_offscreen.mac` | offscreen rendering, through this viewer's own export command rather than ToolsSG |
+
+`DetectorConstruction::ConstructSDandField` is the one addition: the device needs the scored
+volume before the run begins. The comment at that function says why.
+
+
+
+What it prints
+--------------
+
+`exampleB1.out` holds the output of `exampleB1 exampleB1.in` as a reference - 10,000 6 MeV
+gammas. It was produced by running it, not written by hand, so the timings in it are one
+machine's on one day and will not reproduce; the dose will, to within the rms printed beside
+it. Geant4's own `exampleB1.out` is 970 lines and this one is 23, almost all of the difference
+being physics-table printout and per-100-event progress that a batched GPU run has nothing to
+say about.
+
+The dose block is Geant4's; everything after the marked line in `RunAction::EndOfRunAction` is
+this project's - the comparison against Geant4 11.1.1 and the throughput.
+
+The rms deserves a note. It is this run's own: the second moment of the per-event energy
+deposit distribution, accumulated exactly as Geant4's B1 accumulates it, through
+`EventAction` and `RunAction::AddEdep`. That it lands on 0.870 picogray per 10,000 events -
+the same as Geant4's - is a second, independent check on the physics, and a stronger one than
+the mean, because two transports can agree on an average while disagreeing about the shape of
+the distribution behind it.

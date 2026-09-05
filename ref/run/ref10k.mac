@@ -1,0 +1,9 @@
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+/event/verbose 0
+/tracking/verbose 0
+/gun/particle gamma
+/gun/energy 6 MeV
+/run/printProgress 100000
+/run/beamOn 10000

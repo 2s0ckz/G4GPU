@@ -1,0 +1,23 @@
+# Example B1 with an alpha beam.
+#
+# The companion to proton.mac, and the energy is chosen so that the two are the same experiment
+# with a different projectile: 840 MeV is 210 MeV per nucleon, and an alpha at 210 MeV/u has
+# very nearly the same range in water as a 210 MeV proton (288 mm against 287 mm). The Bragg
+# peak therefore lands in the same place inside Shape2, and the difference between the two runs
+# is the projectile's charge and mass rather than where it stopped.
+#
+# Everything else is B1 exactly as it ships.
+#
+# As with proton.mac, this file on both sides compares against QBBC, which for an alpha adds
+# hadElastic, alphaInelastic, ionElastic and ionInelastic that this port does not have.
+# ref/b1hadron/alpha_emonly.mac is the like-for-like variant.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle alpha
+/gun/energy 840 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

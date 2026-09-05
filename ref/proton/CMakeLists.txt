@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(g4proton)
+find_package(Geant4 REQUIRED)
+include(${Geant4_USE_FILE})
+add_executable(g4proton proton_depth.cc)
+target_link_libraries(g4proton ${Geant4_LIBRARIES})

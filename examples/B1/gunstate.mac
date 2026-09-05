@@ -1,0 +1,19 @@
+# The gun commands vis.mac applies, then a run - so that a macro-driven run can be compared
+# against the same example in batch.
+#
+# This exists because the two disagreed by a third and nothing noticed. vis.mac set
+# `/gun/beamRectangular 8 8 cm`; B1's generator draws its own spot and calls
+# SetParticlePosition; the position was sampled twice and a third of the beam missed the
+# detector. Batch said 429 pGy, interactive said 287, both looked reasonable, and the pipeline
+# only ever ran batch. See docs/RISK.md V3 and tests/test_gun_position.cu.
+#
+# Every interactive path deserves a macro that a machine can run.
+/control/verbose 0
+/run/initialize
+/gun/particle gamma
+/gun/energy 6 MeV
+# Deliberately set, and deliberately expected to make no difference: B1's generator sets the
+# position per event, and a position means a point. If this line changes the answer, the
+# extension has taken over a Geant4 method again.
+/gun/beamRectangular 8 8 cm
+/run/beamOn 10000

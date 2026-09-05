@@ -1,0 +1,21 @@
+-clean up the project (i.e. stop updating irrelevant old versions like b1_vis.exe)
+-not sure exactly how you use the G4 data in your physics scripts, but just make sure it's not hard-coded (any needed empirical data should be read by the model at runtime directly from those data files)
+-fix scene generalizability
+-implement all solid primitives and boolean operations
+-dont use parent and daughter volumes like standard geant4 does. just assign a layer index to objects and higher layers take priority if overlapping. world volume has layer index=0. Anything outside the world volume gets cut off at the boundary.
+-fix particle source generalizability
+-have the visualization option have a control bar that allows users to input number of events and press run, resets each time. (includes program text output also in a sidebar or something)
+-use visualization macros like Geant4 does
+-organize project code (e.g. B1) to have the same filesystem architecture as GEANT4 projects (i.e. a project directory containing: a file for "main", "source" directory with detectorconstruction, primarygeneratoraction, runaction, etc etc..., and "include" directory if needed). We want development to be familiar for veteran Geant4 users (with all the familiar object-oriented classes and functions). Also all the utilities like units, G4double, G4threevector etc etc..
+
+Make a model-building GUI:
+- Same visualization engine as the visualization option
+- upper toolbar with dropdowns: File (save, exit, etc), Insert(primitive, import [CAD file or voxelized volume {.h5, .mat, .bin, .raw}; ask if voxel values are discrete {e.g. phantom} or continuous {e.g. CT scan with HU mapping) when importing], or flat detector [voxelized box with given width, height, depth, number of rows, number of columns]), Boolean (subtract, union, intersection), Scoring (dose, energy deposit, fluence, etc -> can be assigned to existing volumes)
+- can insert solid primitives, choose dimensions, enter xyz coordinate or place at center, click to select and manually drag along x,y, or z axis or delete etc. model this part after the Microsoft 3D Builder UI, if familiar with it.
+- Left upper sidebar: list of elements (can add or delete; user defines Z,A, etc)
+- Left middle sidebar: list of materials/compounds (can add or delete, select component elements, mass or molar fraction, density, state etc)
+- Left lower sidebar: list of solids (primitives, imported CAD models) or voxel volumes (under each voxel volume a sublist of unique voxel values if discrete). For each row: volume name (or voxel value), material assignment, visualization color picker box (click for pop up window)
+- Right upper sidebar: source definition (can add or delete, select from beam [define rectangular or elipse cross-section, direction], point source [define direction and angular spread], isotropic shell [define radius], define particle, define energy or import energy spectrum csv file; or radioactive source [define nuclide and amount/Bq or curies])
+- Right lower sidebar: physics processes toggles.
+- Keep track of the model state and write it to a compilable project when user clicks save (i.e. a project directory with code than can be edited further and compiled)
+- Or, just run directly from the the GUI.

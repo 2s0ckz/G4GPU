@@ -1,0 +1,95 @@
+#//////////////////////////////////////////////////////////////////////
+# Offscreen rendering: produce PNG files from a macro, with no one watching.
+#//////////////////////////////////////////////////////////////////////
+#
+# Geant4's B1 ships a tsg_offscreen.mac that drives the ToolsSG offscreen viewer. There is no
+# ToolsSG here - the renderer is CUDA, rasterising into a surface that the window displays -
+# so this macro drives the same command set against that renderer, for the one file format it
+# can produce.
+#
+#   /vis/ogl/export [file]                write the current frame now
+#   /vis/tsg/offscreen/set/file <name>    arm a file for the next rebuild
+#   /vis/tsg/offscreen/set/file auto <prefix> [true]   number them, true resets the index
+#   /vis/tsg/offscreen/set/format zb_png  the only format here
+#   /vis/viewer/rebuild                   redraw, and write the armed file
+#
+# What a rebuild writes is the picture the window shows: the same surface, not a second
+# rendering of it. So there is no offscreen path that can drift away from the interactive one.
+#
+# The formats Geant4 offers and this does not, with the reason, because the commands answer
+# rather than fail silently:
+#
+#   zb_jpeg                     needs a JPEG encoder; there is a PNG writer and no other
+#   gl2ps_eps/ps/pdf/svg/tex/pgf   need a vector back end. This renderer rasterises on the
+#                               GPU and keeps no display list to replay, so there is nothing
+#                               to emit as vectors.
+#
+# Size, likewise. `/vis/tsg/offscreen/set/size 2000 1500` is refused: the surface is allocated
+# at /vis/open and the camera's aspect ratio follows it. Ask for the size *before* opening -
+#
+#   /vis/open TSG_OFFSCREEN 2000x1500
+#
+# - or pass -w/-h on the command line. `set/size 0 0`, which in Geant4 means "back to the
+# viewer's own size", is accepted because that is the only size there is.
+#
+# One honest difference from ToolsSG: a window still opens. This viewer has no headless
+# surface - the picture a rebuild writes is the window's own back buffer - so in macro mode
+# the window appears, the frames are written, and the program exits. That also means the
+# machine needs a display; over a session with no desktop, use `g4view.exe -shot <theta> <phi>`
+# instead, which does the same thing from the command line.
+#
+# Run it on its own:
+#
+#   ./exampleB1.exe tsg_offscreen.mac
+#
+# Geant4's tsg_offscreen.mac says "execute vis.mac first" because it is meant to be typed into
+# an interactive session that already has a scene. Run as a macro it is a fresh process, so
+# this one does its own /run/initialize and builds its own scene - otherwise every /vis/ command
+# in it reports "no geometry to draw", which is what the first version of this file did:
+#
+#   ./exampleB1.exe tsg_offscreen.mac
+#
+# It can also be run after init_vis.mac in an interactive session, where the second
+# /run/initialize is a no-op.
+#
+#//////////////////////////////////////////////////////////////////////
+
+/run/initialize
+/vis/verbose confirmations
+
+# 1200x1200 here rather than the default, to show that the geometry string is honoured. The
+# viewer says so if the window manager gives it less - a client area cannot exceed the screen,
+# so on a 1080p display this comes back as 1200x1061 and the log line says it did.
+/vis/open TSG_OFFSCREEN 1200x1200
+/vis/drawVolume
+/vis/scene/add/trajectories smooth
+/vis/scene/endOfEventAction accumulate
+
+# The default automatic name, as in Geant4: an index that starts at one.
+/vis/tsg/offscreen/set/file auto g4gpu_offscreen_ true
+/vis/viewer/rebuild
+# -> g4gpu_offscreen_1.png, the empty geometry
+
+/run/beamOn 10
+/vis/viewer/rebuild
+# -> g4gpu_offscreen_2.png, with ten events of trajectories
+
+# A named prefix, as in Geant4's B1_ example.
+/vis/tsg/offscreen/set/file auto B1_ true
+/vis/viewer/rebuild
+/run/beamOn 10
+/vis/viewer/rebuild
+# -> B1_1.png and B1_2.png
+
+# An explicit file name rather than an index.
+/vis/tsg/offscreen/set/format zb_png
+/vis/tsg/offscreen/set/file B1_zb.png
+/vis/viewer/rebuild
+
+# Two views of the same scene, to show the export is of whatever is on screen.
+/vis/viewer/set/viewpointThetaPhi 90 0
+/vis/ogl/export B1_side.png
+/vis/viewer/set/viewpointThetaPhi 0 0
+/vis/ogl/export B1_front.png
+
+/vis/verbose warnings

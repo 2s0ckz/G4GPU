@@ -1,0 +1,19 @@
+# Macro file for example B1 test
+
+/run/initialize
+
+# gamma 6 MeV
+/gun/particle gamma
+/gun/energy 6 MeV
+#
+/run/printProgress 100
+/run/beamOn 10000
+#
+# proton 210 MeV, which is Geant4's own second half of this macro. Left commented, as it is in
+# Geant4's exampleB1.in, so that the batch test stays the gamma run it has always been;
+# examples/B1/proton.mac runs it, with a note on why 210 MeV is the right energy here.
+#
+#/gun/particle proton
+#/gun/energy 210 MeV
+#
+#/run/beamOn 1000
