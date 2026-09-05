@@ -15,6 +15,8 @@
 // checks the result against Geant4's own answers, in that order. The order matters - the
 // generator compiles the raw header *in*, so regenerating the raw header and re-running an old
 // generator binary silently produces the old tables from the new data (docs/RISK.md O6).
+#include "fmt17.hh"
+
 #include <cstdio>
 #include <vector>
 
@@ -51,7 +53,9 @@ double Float32(double v) { return static_cast<double>(static_cast<float>(v)); }
 void EmitRow(std::FILE* f, const double* v, int n, const char* indent) {
   std::fprintf(f, "%s{", indent);
   for (int i = 0; i < n; ++i) {
-    std::fprintf(f, "real_t(%.17g)%s", v[i], (i + 1 < n) ? "," : "");
+    char nb[64];
+    std::fprintf(f, "real_t(%s)%s", g4gpu::tools::fmt17(v[i], nb, sizeof nb),
+                 (i + 1 < n) ? "," : "");
   }
   std::fprintf(f, "}");
 }

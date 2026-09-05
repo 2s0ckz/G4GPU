@@ -2,6 +2,14 @@
 # Extracts the Barashenkov nucleon-nucleus cross-section tables from G4BarashenkovData.hh
 # into tools/barashenkov_raw.hh.
 #
+#
+# The arrays are `static constexpr`, not `inline constexpr`. This header is included by exactly
+# one translation unit - tools/gen_barashenkov.cc - so `static` is correct, and it is what lets
+# the whole refresh chain build with the MinGW g++ that ships alongside Git for Windows.
+# `inline` variables are C++17 and GCC 6.3 accepts `-std=c++17` without implementing them, so
+# the previous form compiled only under nvcc and quietly made this one table the only piece of
+# the refresh that needed the full MSVC toolchain.
+#
 #   sh tools/extract_barashenkov.sh [<geant4 source root>]
 #
 # The tree comes from tools/g4src.sh, which refuses a version that does not match the oracle
@@ -101,7 +109,7 @@ namespace g4gpu::data::barashenkov_raw {
 
 HDR
   while read -r name n vals; do
-    printf 'inline constexpr double %s[%s] = {%s};\n' "$name" "$n" "$vals"
+    printf 'static constexpr double %s[%s] = {%s};\n' "$name" "$n" "$vals"
   done < "$TMP"
   cat <<'FTR'
 

@@ -23,15 +23,37 @@ what is there and what is not.
 | plateau dose, 0–60 mm | — | +0.052% | per proton |
 | distal 80–20 width | 1.126 mm | 1.130 mm | +0.004 mm |
 
-| | events/s | 2M events |
-|---|---|---|
-| reference driver | 2.69 × 10⁶ | 744 ms |
-| example B1, through the general engine | 2.71 × 10⁶ | 739 ms |
+### Throughput
+
+Events per second in real time, excluding initialisation - geometry, physics tables, data
+loading - and excluding the final dose report. This is host wall clock over generating every
+primary and running every batch, the same scope as Geant4's own `G4Timer`, which brackets
+`InitializeEventLoop` to `TerminateEventLoop`.
+
+| example B1, 6 MeV gammas, 2M events | events/s | 2M events |
+|---|--:|--:|
+| **real time, primaries generated host-side through `GeneratePrimaries()`** | **1.6 × 10⁶** | 1238 ms |
+| reference driver, primaries generated on the device | 2.5 × 10⁶ | 790 ms |
+| *GPU kernels alone, B1 (measures less - see below)* | *2.37 × 10⁶* | *845 ms* |
+
+The gap between the first and third rows is **198 ns per event**, and it is flat: 210 ns/event
+at 250k, 197 at 2M, linear across a factor of eight. That is the host loop calling your
+`GeneratePrimaries()` once per event and filling a `G4PrimaryVertex` - the price of the
+Geant4-shaped API, not of the transport. It is 31% of a B1 run because a 6 MeV gamma is cheap
+(13 track-steps per event); on a heavier problem it is a smaller share. The reference driver
+seeds primaries with a device kernel and does not pay it at all, which is where the 2.5 × 10⁶
+comes from and what a batched primary path would recover.
+
+**The GPU-only number is not the one to compare against Geant4.** It is measured with CUDA
+events from the first kernel, so it cannot see primary generation, and quoting it against
+Geant4's `Real=` would be comparing a smaller thing to a larger one. `examples/B1` prints both,
+labelled, for that reason. `src/host/transport_run.cuh` documents which is which.
 
 Bit-reproducible across batch sizes and thread counts: the RNG is counter-based and keyed on
 `(rng_key, step)` carried by the track, never on its buffer slot.
 
-*(RTX 3070, FP64. `G4GPU_FP32` compiles the whole transport in single precision.)*
+*(RTX 3070, FP64, best of three runs. `G4GPU_FP32` compiles the whole transport in single
+precision.)*
 
 ---
 

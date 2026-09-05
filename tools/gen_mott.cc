@@ -25,6 +25,7 @@
 #define __device__
 #endif
 
+#include "fmt17.hh"
 #include "mott_raw.hh"
 
 int main(int argc, char** argv) {
@@ -100,8 +101,9 @@ int main(int argc, char** argv) {
       "__host__ __device__ inline real_t mott_target_mass(int z) {\n"
       "  static const real_t v[93] = {\n");
   for (int z = 0; z <= 92; ++z) {
-    std::fprintf(f, "%sreal_t(%.17g)%s", (z % 4 == 0) ? "    " : " ", mass[z],
-                 (z < 92) ? "," : "");
+    char nb[64];
+    std::fprintf(f, "%sreal_t(%s)%s", (z % 4 == 0) ? "    " : " ",
+                 g4gpu::tools::fmt17(mass[z], nb, sizeof nb), (z < 92) ? "," : "");
     if (z % 4 == 3 || z == 92) { std::fprintf(f, "\n"); }
   }
   std::fprintf(f, "%s",
@@ -132,8 +134,11 @@ int main(int argc, char** argv) {
   for (int z = 0; z <= 92; ++z) {
     std::fprintf(f, "    {");
     for (int i = 0; i < 30; ++i) {
-      std::fprintf(f, "real_t(%.17g)%s",
-                   g4gpu::data::mott_raw::kMottCoef[static_cast<std::size_t>(z) * 30 + i],
+      char nb[64];
+      std::fprintf(f, "real_t(%s)%s",
+                   g4gpu::tools::fmt17(
+                       g4gpu::data::mott_raw::kMottCoef[static_cast<std::size_t>(z) * 30 + i],
+                       nb, sizeof nb),
                    (i < 29) ? "," : "");
     }
     std::fprintf(f, "}%s\n", (z < 92) ? "," : "");

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "fmt17.hh"
 #include "barashenkov_raw.hh"
 
 using namespace g4gpu::data::barashenkov_raw;
@@ -157,7 +158,9 @@ int main() {
           case 2: x = e.inel_n[k] * 1e-25; break;
           default: x = e.inel_p[k] * 1e-25; break;
         }
-        std::fprintf(f, "%s%.17g,", (col % 4 == 0) ? "\n      " : " ", x);
+        char nb[64];
+        std::fprintf(f, "%s%s,", (col % 4 == 0) ? "\n      " : " ",
+                     g4gpu::tools::fmt17(x, nb, sizeof nb));
         ++col;
       }
     }

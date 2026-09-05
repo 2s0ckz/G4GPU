@@ -201,10 +201,41 @@ other stage would notice.
 
 ## Performance, current
 
-| | events/s | 2M events |
-|---|---|---|
-| reference driver (`b1_gpu_sched.exe`) | 2.69e6 | 744 ms |
-| example B1, via the general engine | 2.71e6 | 739 ms |
+Two numbers, and only one of them answers "how many events per second, in real time".
+
+| example B1, 6 MeV gammas | events/s | 2M events | what it measures |
+|---|--:|--:|---|
+| **event loop** | **1.6e6** | 1238 ms | host wall clock: primary generation + every batch |
+| GPU kernels alone | 2.37e6 | 845 ms | CUDA events, from the first kernel |
+| reference driver (`b1_gpu_sched.exe`) | 2.5e6 | 790 ms | no host per-event loop; seeds on the device |
+
+**The event-loop number is the one to quote and the one to compare against Geant4**, whose
+`G4Timer` brackets `InitializeEventLoop` to `TerminateEventLoop` - primary generation included,
+physics-table building excluded. Same scope on both sides. The GPU number is measured with CUDA
+events from the first kernel and so cannot see primary generation at all; it is a smaller number
+measuring a smaller thing.
+
+This document previously quoted 2.69e6 and 2.71e6 without saying which timer produced them.
+They were the GPU-only figures, and stale. A performance number whose scope is not stated is
+not a performance number.
+
+**Where the 0.77e6 goes.** The gap between the first two rows is a flat 198 ns per event:
+
+| events | wall | gpu | gap | per event |
+|--:|--:|--:|--:|--:|
+| 250,000 | 206.5 ms | 154.2 ms | 52.4 ms | 210 ns |
+| 500,000 | 331.3 ms | 230.4 ms | 100.9 ms | 202 ns |
+| 1,000,000 | 617.3 ms | 419.4 ms | 197.9 ms | 198 ns |
+| 2,000,000 | 1238.2 ms | 845.1 ms | 393.1 ms | 197 ns |
+
+Linear across a factor of eight, so it is a per-event constant and not a fixed overhead. It is
+the host loop calling the user's `GeneratePrimaries()` once per event and filling a
+`G4PrimaryVertex` - the price of presenting a Geant4-shaped API, not of the transport.
+
+It is 31% of a B1 run because a 6 MeV gamma is cheap: 13 track-steps per event. On a heavier
+problem the same 198 ns is a smaller share. And it is removable: `b1_gpu_sched.exe` seeds its
+primaries with a device kernel, pays none of it, and reaches 2.5e6 - so a batched primary path
+through the G4-shaped API is worth about 1.4x on light events.
 
 Bit-reproducible across batch sizes and thread counts: the RNG is counter-based and keyed on
 `(rng_key, step)` carried by the track, never on its buffer slot.
