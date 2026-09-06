@@ -32,17 +32,22 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 
 | example B1, 6 MeV gammas, 2M events | events/s | 2M events |
 |---|--:|--:|
-| **real time, primaries generated host-side through `GeneratePrimaries()`** | **1.6 × 10⁶** | 1238 ms |
+| **real time, primaries generated host-side through `GeneratePrimaries()`** | **1.91 × 10⁶** | 1049 ms |
 | reference driver, primaries generated on the device | 2.5 × 10⁶ | 790 ms |
-| *GPU kernels alone, B1 (measures less - see below)* | *2.37 × 10⁶* | *845 ms* |
+| *GPU kernels alone, B1 (measures less - see below)* | *2.37 × 10⁶* | *843 ms* |
 
-The gap between the first and third rows is **198 ns per event**, and it is flat: 210 ns/event
-at 250k, 197 at 2M, linear across a factor of eight. That is the host loop calling your
-`GeneratePrimaries()` once per event and filling a `G4PrimaryVertex` - the price of the
-Geant4-shaped API, not of the transport. It is 31% of a B1 run because a 6 MeV gamma is cheap
-(13 track-steps per event); on a heavier problem it is a smaller share. The reference driver
-seeds primaries with a device kernel and does not pay it at all, which is where the 2.5 × 10⁶
-comes from and what a batched primary path would recover.
+The gap between the first and third rows is **103 ns per event**, flat from 1M to 2M events:
+the virtual call into your `GeneratePrimaries()`, two `G4UniformRand()` draws, `sample_primary`,
+and the readback into the primary array. That is the price of the Geant4-shaped API, not of the
+transport, and it is 20% of a B1 run only because a 6 MeV gamma is cheap - 13 track-steps per
+event. On a heavier problem the same 103 ns is a smaller share.
+
+It was 198 ns until `G4Event` stopped allocating. A `G4PrimaryVertex` owns a
+`std::vector<G4PrimaryParticle>`, so a generator that built one on the stack and added it did
+two mallocs and two frees per event for a single primary. `G4Event::NewPrimaryVertex` hands
+back a reused slot whose particle vector is cleared but not freed; `AddPrimaryVertex` assigns
+into a slot rather than pushing a new one. Nothing was removed from the API and the dose did
+not move by a digit.
 
 **The GPU-only number is not the one to compare against Geant4.** It is measured with CUDA
 events from the first kernel, so it cannot see primary generation, and quoting it against

@@ -205,8 +205,8 @@ Two numbers, and only one of them answers "how many events per second, in real t
 
 | example B1, 6 MeV gammas | events/s | 2M events | what it measures |
 |---|--:|--:|---|
-| **event loop** | **1.6e6** | 1238 ms | host wall clock: primary generation + every batch |
-| GPU kernels alone | 2.37e6 | 845 ms | CUDA events, from the first kernel |
+| **event loop** | **1.91e6** | 1049 ms | host wall clock: primary generation + every batch |
+| GPU kernels alone | 2.37e6 | 843 ms | CUDA events, from the first kernel |
 | reference driver (`b1_gpu_sched.exe`) | 2.5e6 | 790 ms | no host per-event loop; seeds on the device |
 
 **The event-loop number is the one to quote and the one to compare against Geant4**, whose
@@ -219,23 +219,44 @@ This document previously quoted 2.69e6 and 2.71e6 without saying which timer pro
 They were the GPU-only figures, and stale. A performance number whose scope is not stated is
 not a performance number.
 
-**Where the 0.77e6 goes.** The gap between the first two rows is a flat 198 ns per event:
+**Where the rest goes, and where half of it went.**
+
+The gap between the first two rows was a flat 198 ns per event - linear from 250k to 2M, so a
+per-event constant rather than a fixed overhead. The obvious suspect was B1's generator, which
+scans `G4LogicalVolume::Registry()` with a `dynamic_cast` and a string compare *every event* to
+find the envelope, exactly as upstream B1 does. Caching it changed nothing measurable: the
+registry holds four volumes.
+
+The actual cost was allocation. A `G4PrimaryVertex` owns a `std::vector<G4PrimaryParticle>`, so
+one primary per event cost four heap operations:
+
+    G4PrimaryVertex vertex(...);        // malloc, building it on the stack
+    vertex.SetPrimary(particle);
+    event->AddPrimaryVertex(vertex);    // malloc, copying it in
+    ...
+    event.Reset(i);                     // two frees
+
+`G4Event::NewPrimaryVertex` now returns a reused slot whose particle vector has been cleared
+but not freed; `AddPrimaryVertex` assigns into a slot instead of pushing a new one; `Reset`
+drops the count without destroying the storage. The gun builds its vertex in place.
 
 | events | wall | gpu | gap | per event |
 |--:|--:|--:|--:|--:|
-| 250,000 | 206.5 ms | 154.2 ms | 52.4 ms | 210 ns |
-| 500,000 | 331.3 ms | 230.4 ms | 100.9 ms | 202 ns |
-| 1,000,000 | 617.3 ms | 419.4 ms | 197.9 ms | 198 ns |
-| 2,000,000 | 1238.2 ms | 845.1 ms | 393.1 ms | 197 ns |
+| 250,000 | 180.8 ms | 143.3 ms | 37.5 ms | 150 ns |
+| 1,000,000 | 522.6 ms | 419.7 ms | 102.9 ms | 103 ns |
+| 2,000,000 | 1049.3 ms | 842.7 ms | 206.6 ms | 103 ns |
 
-Linear across a factor of eight, so it is a per-event constant and not a fixed overhead. It is
-the host loop calling the user's `GeneratePrimaries()` once per event and filling a
-`G4PrimaryVertex` - the price of presenting a Geant4-shaped API, not of the transport.
+1.6e6 -> 1.91e6 events/s, dose bit-identical at 0.0230088 pGy and 0.0187 sigma, and nothing
+removed from the API - `AddPrimaryVertex` still works for a generator that builds its own
+vertex.
 
-It is 31% of a B1 run because a 6 MeV gamma is cheap: 13 track-steps per event. On a heavier
-problem the same 198 ns is a smaller share. And it is removable: `b1_gpu_sched.exe` seeds its
-primaries with a device kernel, pays none of it, and reaches 2.5e6 - so a batched primary path
-through the G4-shaped API is worth about 1.4x on light events.
+The remaining 103 ns is the virtual call, two `G4UniformRand()` draws, `sample_primary` and the
+readback into the primary array. Closing it means sampling on the device, which is what this
+port did *before* `GeneratePrimaries` was called per event - and which closed the set of
+expressible generators, a Gaussian beam spot included. See the comment on
+`G4VUserPrimaryGeneratorAction::GeneratePrimaries`. It could return as an opt-in fast path for
+a plain `G4ParticleGun`, worth about 1.24x on light events; it is not worth reinstating as the
+only path.
 
 Bit-reproducible across batch sizes and thread counts: the RNG is counter-based and keyed on
 `(rng_key, step)` carried by the track, never on its buffer slot.

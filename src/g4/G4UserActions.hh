@@ -90,6 +90,17 @@ class G4PrimaryVertex {
   void SetT0(G4double t) { t0_ = t; }
 
   void SetPrimary(const G4PrimaryParticle& p) { particles_.push_back(p); }
+
+  /// Re-points this vertex at a new position without giving up its particle storage.
+  ///
+  /// `particles_.clear()` keeps the allocation; destroying the vertex would not. That is the
+  /// whole difference between a run that allocates once and one that allocates twice per
+  /// event - see G4Event::NewPrimaryVertex.
+  void ResetForReuse(const G4ThreeVector& position, G4double t0) {
+    position_ = position;
+    t0_ = t0;
+    particles_.clear();
+  }
   G4int GetNumberOfParticle() const { return static_cast<G4int>(particles_.size()); }
   const G4PrimaryParticle& GetPrimary(G4int i) const {
     return particles_[static_cast<std::size_t>(i)];
@@ -118,25 +129,59 @@ class G4Event {
 
   void AddPrimaryVertex(G4PrimaryVertex* v) {
     if (v == nullptr) { return; }
-    vertices_.push_back(*v);
+    AddPrimaryVertex(*v);
     delete v;  // Geant4 takes ownership of the vertex; generators new one per event.
   }
-  void AddPrimaryVertex(const G4PrimaryVertex& v) { vertices_.push_back(v); }
 
-  G4int GetNumberOfPrimaryVertex() const { return static_cast<G4int>(vertices_.size()); }
+  /// Copies a vertex in. Assigns into a reused slot rather than pushing a new one, so the
+  /// destination's particle vector keeps its capacity and the copy costs no allocation once
+  /// the run is warm.
+  void AddPrimaryVertex(const G4PrimaryVertex& v) {
+    if (n_vertices_ == vertices_.size()) { vertices_.emplace_back(); }
+    vertices_[n_vertices_++] = v;
+  }
+
+  /// Adds an empty vertex at @p position and hands back a reference to fill in.
+  ///
+  /// WHY THIS EXISTS, since AddPrimaryVertex already works. A G4PrimaryVertex owns a
+  /// std::vector of particles. A generator that builds one on the stack and adds it does one
+  /// allocation constructing it, one more copying it in, and two frees when the next event
+  /// resets - four heap operations per event for a single primary. Measured on example B1 at
+  /// two million events that was 198 ns/event, flat from 250k to 2M, and about a third of the
+  /// run's wall clock: 1.6e6 events/s against 2.37e6 for the kernels alone.
+  ///
+  /// This returns a slot whose particle vector has been cleared but not freed, so the steady
+  /// state allocates nothing at all. G4ParticleGun uses it.
+  ///
+  /// It is an addition, not a replacement. `AddPrimaryVertex` is what Geant4 has and what a
+  /// generator building its own vertex will call, and it still works; this is the same thing
+  /// with the allocation taken out for the case that is hot.
+  G4PrimaryVertex& NewPrimaryVertex(const G4ThreeVector& position, G4double t0) {
+    if (n_vertices_ == vertices_.size()) { vertices_.emplace_back(); }
+    G4PrimaryVertex& v = vertices_[n_vertices_++];
+    v.ResetForReuse(position, t0);
+    return v;
+  }
+
+  G4int GetNumberOfPrimaryVertex() const { return static_cast<G4int>(n_vertices_); }
   const G4PrimaryVertex& GetPrimaryVertex(G4int i) const {
     return vertices_[static_cast<std::size_t>(i)];
   }
 
-  /// Clears the vertices and sets a new id, so one object can serve a whole run.
+  /// Drops this event's vertices and sets a new id, so one object can serve a whole run.
+  ///
+  /// The vertices are *not* destroyed - the count is reset and the objects are left in place
+  /// with their particle storage intact, to be overwritten by the next event. Destroying them
+  /// would free exactly the allocations NewPrimaryVertex exists to keep.
   void Reset(G4int id) {
     id_ = id;
-    vertices_.clear();
+    n_vertices_ = 0;
   }
 
  private:
   G4int id_;
   std::vector<G4PrimaryVertex> vertices_;
+  std::size_t n_vertices_ = 0;
 };
 
 class G4VUserPrimaryGeneratorAction {
@@ -274,8 +319,8 @@ inline void G4ParticleGun::GeneratePrimaryVertex(G4Event* event) {
   G4double ekin = 0;
   g4gpu::sample_primary(src_, rng, pos, dir, ekin);
 
-  G4PrimaryVertex vertex(G4ThreeVector(pos.x, pos.y, pos.z), 0.);
-  G4PrimaryParticle particle(definition_, G4ThreeVector(dir.x, dir.y, dir.z), ekin);
-  vertex.SetPrimary(particle);
-  event->AddPrimaryVertex(vertex);
+  // Built in place in the event rather than on the stack and copied: see
+  // G4Event::NewPrimaryVertex for what that is worth and why it is measured in the README.
+  G4PrimaryVertex& vertex = event->NewPrimaryVertex(G4ThreeVector(pos.x, pos.y, pos.z), 0.);
+  vertex.SetPrimary(G4PrimaryParticle(definition_, G4ThreeVector(dir.x, dir.y, dir.z), ekin));
 }
