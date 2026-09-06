@@ -1872,3 +1872,93 @@ dumper that already existed.
 The narrower rule: a derived physical constant should be derived once, in `units.cuh`, and
 never spelled as a literal at a call site - even a literal that is more accurate, because
 matching Geant4 is the requirement and Geant4's constants are its own.
+
+### V9: Rayleigh scattering deflected nothing, and the story I told about finding it was false
+
+`G4RayleighAngularGenerator` needs `fFactor = 0.5*(cm/(h_Planck*c_light))^2`. The port had:
+
+```cpp
+// h*c = 1.23984193e-18 MeV*mm; cm = 10 mm.
+return real_t(0.5) * (real_t(10.0) / real_t(1.23984193e-18))
+     * (real_t(10.0) / real_t(1.23984193e-18));
+```
+
+`h*c` is `2*pi*hbarc` = 2*pi * 197.327e-12 = **1.23984e-9** MeV*mm. The literal was nine orders
+of magnitude too small, so `fFactor` was 1e18 too large, so in
+
+```cpp
+cost = 1.0 - x/(b*xx);          // xx = fFactor * ekin^2
+```
+
+the quotient underflowed to zero and `cost` came out exactly 1.0 on every scatter. Every
+Rayleigh interaction in every run this port has ever done consumed a step and turned the photon
+by nothing at all.
+
+It is derived now - `units::twopi<real_t>() * units::hbarc<real_t>()` - which is what V8 was
+written about, one entry earlier in this same file, about a different hand-typed constant in a
+different model. Two for two. The rule is not "be careful with constants", it is that a derived
+physical constant has exactly one home and a literal at a call site is a defect on sight.
+
+#### Why it survived
+
+Coherent scattering transfers no energy. It only turns a photon, so a completely dead
+deflection changes a dose by a fraction of a per cent and nothing else. `test_rayleigh`
+validated the *cross section* against G4EMLOW's epics2017/rayl to better than 1e-6 across 3,400
+points and never touched the angular distribution, because there was no test of the angular
+distribution - `rayleigh_angular_tables.cuh` was the one baked table in the port with neither
+an extractor nor a test, which `tools/refresh_tables.sh` had said in as many words.
+
+The bug was found by going and writing that missing test. The first run reported 4.4e9 standard
+errors.
+
+Worth noting what was *not* wrong: `tools/extract_rayleigh_angular.sh`, written at the same
+time, reproduced all 909 hand-transcribed fit parameters exactly. The table was perfect. The
+constant feeding the sampler that reads it was not.
+
+#### The part that matters more
+
+On seeing the fix, I wrote that the pipeline had been reporting this all along, and quoted:
+
+```
+rayleigh off: dose10k 429.8201 pGy (+0.0017, 0.0 sigma), steps -9104 (-0.35%)
+```
+
+with the line "a process whose removal changes the answer by zero sigma is a process that is
+not doing anything", and added that I had read past it every run of the session.
+
+**That was wrong.** With the bug fixed, the same toggle reads:
+
+```
+rayleigh off: dose10k 429.8198 pGy (-0.0000, 0.0 sigma), steps -9181 (-0.35%)
+```
+
+Zero sigma either way. The toggle is not sensitive to whether Rayleigh deflects, because at
+6 MeV in this geometry Rayleigh is 0.35% of steps and the scoring volume is large enough that
+turning photons inside it changes nothing measurable. The line was never evidence of the bug.
+B1's dose moved by 0.0003 pGy across the fix - 427.408 pGy, 0.0187 sigma to 0.0190 sigma.
+
+So the diagnosis was right and the *story* about the diagnosis was invented: a satisfying
+narrative - the evidence was there all along, I just wasn't reading - attached to a number that
+does not support it, and asserted without running the one check that would have refuted it. The
+check was free. The pipeline had already printed the post-fix line by the time I wrote the
+claim.
+
+This is S12 again, in the same session, one entry after S12 was written: a conclusion that
+felt explanatory, was consistent with what I had in front of me, and was never tested against
+the case that would have falsified it. S12's rule was "before believing a bisect, remove the
+thing you already changed and re-run it". The general form is broader and this is the third
+instance of it in this file: **an explanation that accounts for the evidence is not thereby
+supported by it.** Ask what the evidence would look like if the explanation were false. Here it
+would look identical, and one grep would have shown that.
+
+#### What this says about the process-toggle test
+
+It is a good test and it did not fail here - it was never designed to catch this. It measures
+whether a process contributes *dose*, which is exactly the right question for Compton, pair
+and photoelectric, and structurally the wrong one for a process that transfers no energy. The
+same blind spot covers anything else whose only observable is a direction.
+
+Rayleigh matters where a photon's direction after scattering matters - scatter fractions,
+imaging geometries, anything below about 100 keV where its share of the cross section is not
+0.35%. B1 at 6 MeV is not that problem, which is why B1 could not see this and why B1 passing
+is not evidence that it is fixed. `tests/test_rayleigh_angular.cu` is.

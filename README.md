@@ -116,7 +116,8 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4PairProductionRelModel` | pair production, cross section and final state, with LPM | `test_vs_oracle` | < 1e-6 |
 | `G4LivermorePhotoElectricModel` | photoelectric, EPICS2017 data | `test_photoelectric` | < 1e-6 (21,022 points) |
 | `G4SauterGavrilaAngularDistribution` | photoelectron direction | `test_photoelectric` | < 1e-6 |
-| `G4LivermoreRayleighModel` + `G4RayleighAngularGenerator` | Rayleigh, EPICS2017 | `test_rayleigh` | < 1e-6 (3,400 points) |
+| `G4LivermoreRayleighModel` | Rayleigh cross section, EPICS2017 | `test_rayleigh` | < 1e-6 (3,400 points) |
+| `G4RayleighAngularGenerator` | Rayleigh deflection, Cullen three-term fit | `test_rayleigh_angular` | 2.9 sigma over 154 comparisons ² |
 
 #### Electrons and positrons
 
@@ -149,6 +150,10 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4WentzelVIModel` | multiple scattering for hadrons | `test_wentzel_msc` | round trip < 1e-6 |
 | `G4ScreeningMottCrossSection` | the Mott/Rutherford ratio | `test_mott` | see note ¹ |
 | `G4ComponentBarNucleonNucleusXsc` | Barashenkov nucleon–nucleus cross sections, Z = 2…92 | `test_nucleon_xs` | **2.0e-15** (10,738 pts) |
+
+² A rejection sampler has no closed form to diff, so this compares the first two moments of
+cos(theta) over a million draws per point against a million of Geant4's. 2.9 standard errors
+over 154 comparisons is sampling noise. It found a real bug on its first run - see RISK.md V9.
 
 ¹ The Mott table is interpolated; `test_mott` reports the interpolation residual against
 Geant4's own tabulated points, which is 0.28–4.6% depending on energy — that is the table's

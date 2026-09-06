@@ -82,6 +82,7 @@
 #include "G4ICRU49NuclearStoppingModel.hh"
 #include "G4ICRU73QOModel.hh"
 #include "G4UrbanMscModel.hh"
+#include "G4RayleighAngularGenerator.hh"
 #include "G4DataVector.hh"
 #include "G4VProcess.hh"
 #include "G4ProductionCutsTable.hh"
@@ -1500,7 +1501,53 @@ int main() {
     std::fclose(f);
   }
 
-  std::printf("wrote urban_msc.csv ion_fluctuation.csv nucleon_xs.csv icru73qo.csv nuclear_stopping.csv atomic_masses.csv bragg.csv wentzel.csv hadron_radiative.csv muon_models.csv corrections.csv ionisation_params.csv density_correction.csv bethe_bloch.csv brems_rel.csv cuts.csv gamma_xs.csv electron_tables.csv materials.csv annihilation.csv hadron_tables.csv coulomb.csv\n");
+  // ---------------- G4RayleighAngularGenerator::SampleDirection
+  //
+  // The one baked table in this port that had neither an extractor nor a test. Its parameters
+  // are compiled into G4RayleighAngularGenerator - they are NOT the re-ff-Z.dat files in
+  // G4EMLOW, which are the cross section - so a Geant4 change to them could not be noticed by
+  // any means the project had. tools/extract_rayleigh_angular.sh closes the reproducibility
+  // half; this closes the validation half.
+  //
+  // The sampler is a rejection loop, so there is no closed form to diff. What is dumped is the
+  // first two moments of cos(theta) over a large sample, which is enough to catch a wrong
+  // parameter row, a swapped weight and slope, a mis-transcribed series expansion, or an
+  // acceptance test with the wrong power - each of those moves a mean or a width by far more
+  // than the standard error of a million draws.
+  //
+  // Two moments and not one. <cos> alone is insensitive to a symmetric widening: the
+  // distribution is forward-peaked, and an error that broadens it while keeping its centre
+  // would pass on the mean and fail on the second moment.
+  {
+    FILE* f = std::fopen("rayleigh_angular.csv", "w");
+    std::fprintf(f, "Z,energy_MeV,samples,mean_cos,mean_cos2\n");
+    G4RayleighAngularGenerator gen;
+    // Z across the fitted range, including the ends: index 0 is a placeholder zero in Geant4's
+    // tables and Z=100 is the last row, so both edges are where an off-by-one would land.
+    const G4int zs[] = {1, 2, 6, 8, 13, 26, 47, 74, 82, 92, 100};
+    // 1 keV to 10 MeV. The low end is where the series expansions below `numlim` are taken and
+    // the high end is where they are not, so both branches are exercised.
+    const double es[] = {0.001, 0.005, 0.02, 0.1, 0.5, 2.0, 10.0};
+    const int kN = 1000000;
+    for (G4int Z : zs) {
+      for (double e : es) {
+        G4DynamicParticle dp(G4Gamma::Gamma(), G4ThreeVector(0, 0, 1), e * MeV);
+        // Fixed seed per point so the dump is reproducible run to run.
+        CLHEP::HepRandom::setTheSeed(12345 + Z * 131 + G4int(e * 1000));
+        double s1 = 0, s2 = 0;
+        for (int i = 0; i < kN; ++i) {
+          const G4ThreeVector& d = gen.SampleDirection(&dp, 0.0, Z, nullptr);
+          const double c = d.z();  // incident direction is +z, so z is cos(theta)
+          s1 += c;
+          s2 += c * c;
+        }
+        std::fprintf(f, "%d,%.17g,%d,%.17g,%.17g\n", Z, e, kN, s1 / kN, s2 / kN);
+      }
+    }
+    std::fclose(f);
+  }
+
+  std::printf("wrote rayleigh_angular.csv urban_msc.csv ion_fluctuation.csv nucleon_xs.csv icru73qo.csv nuclear_stopping.csv atomic_masses.csv bragg.csv wentzel.csv hadron_radiative.csv muon_models.csv corrections.csv ionisation_params.csv density_correction.csv bethe_bloch.csv brems_rel.csv cuts.csv gamma_xs.csv electron_tables.csv materials.csv annihilation.csv hadron_tables.csv coulomb.csv\n");
   delete rm;
   return 0;
 }

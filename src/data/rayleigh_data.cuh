@@ -89,10 +89,25 @@ struct RayleighParams {
 };
 
 /// fFactor = 0.5 * (cm / (h_Planck * c_light))^2, in 1/MeV^2.
+///
+/// DERIVED, not a literal, and the reason is that the literal was wrong. It read
+/// `h*c = 1.23984193e-18 MeV*mm`; the true value is 2*pi*hbarc = 1.23984e-9 MeV*mm, nine
+/// orders of magnitude larger. That made `xx` 1e18 too big, so `x/(b*xx)` underflowed to zero,
+/// so `cost = 1 - 0` and every Rayleigh scatter came out perfectly forward. Rayleigh was
+/// consuming steps and deflecting nothing.
+///
+/// It hid for as long as it did because coherent scattering transfers no energy: the process
+/// only turns a photon, so a broken deflection costs a fraction of a per cent of dose and
+/// nothing else. build_all.bat had been printing the evidence every run -
+/// `rayleigh off: ... (+0.0017, 0.0 sigma)` - a process whose removal changes the answer by
+/// zero sigma is a process that is not doing anything.
+///
+/// CLHEP: h_Planck = 2*pi*hbar_Planck and hbarc = hbar_Planck*c_light, so
+/// h_Planck*c_light = 2*pi*hbarc. Written that way here so it cannot drift from units.cuh.
 template <typename real_t> __host__ __device__ constexpr real_t rayleigh_factor() {
-  // h*c = 1.23984193e-18 MeV*mm; cm = 10 mm.
-  return real_t(0.5) * (real_t(10.0) / real_t(1.23984193e-18))
-         * (real_t(10.0) / real_t(1.23984193e-18));
+  constexpr real_t hc = units::twopi<real_t>() * units::hbarc<real_t>();  // MeV*mm
+  constexpr real_t cm = real_t(10);                                      // mm
+  return real_t(0.5) * (cm / hc) * (cm / hc);
 }
 
 /// Coherent scattering deflection, transcribed from
