@@ -195,6 +195,9 @@ struct App {
   /// from the same array. Assigning by looking at the picture is the whole workflow.
   short* d_voxel_class = nullptr;
   unsigned int* d_class_rgba = nullptr;
+  /// How many entries d_class_rgba holds. Kept so the selftest can read back the array the
+  /// kernel reads, rather than assuming a length from the class list of one solid.
+  int class_rgba_n = 0;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
   /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
@@ -545,10 +548,12 @@ static void RebuildScene(App& a) {
   if (a.d_class_rgba != nullptr) {
     cudaFree(a.d_class_rgba);
     a.d_class_rgba = nullptr;
+    a.class_rgba_n = 0;
   }
   if (!scene.pool.voxel_class_rgba.empty()) {
     CUDA_CHECK(cudaMalloc(&a.d_class_rgba,
                           sizeof(unsigned int) * scene.pool.voxel_class_rgba.size()));
+    a.class_rgba_n = static_cast<int>(scene.pool.voxel_class_rgba.size());
     CUDA_CHECK(cudaMemcpy(a.d_class_rgba, scene.pool.voxel_class_rgba.data(),
                           sizeof(unsigned int) * scene.pool.voxel_class_rgba.size(),
                           cudaMemcpyHostToDevice));
@@ -1258,6 +1263,79 @@ int main(int argc, char** argv) {
         SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_class_color.png");
         a.popup = Popup::kNone;
         a.popup_target2 = -1;
+      }
+      // A colour table, from a file, all the way to the bytes the render kernel reads.
+      //
+      // The parser has its own test - tests/test_voxel_import.cu - and this is the other half:
+      // that what it wrote into the class list survives being flattened into the solid pool
+      // and uploaded. Those are three separate arrays with three separate offsets, and a
+      // table that parses perfectly and lands nowhere looks exactly like one that works.
+      //
+      // The file dialog is not driven: it is modal, and there is nothing here to answer it.
+      // So this calls the reader the button calls, with a file written here.
+      if (frame == 41) {
+        int vs = -1;
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (!a.model.solids[i].voxel_classes.empty()) {
+            vs = static_cast<int>(i);
+            break;
+          }
+        }
+        if (vs < 0) {
+          std::printf("selftest: FAILED - no voxel volume to color from a table\n");
+        } else {
+          Solid& s = a.model.solids[static_cast<std::size_t>(vs)];
+          // Row 0 as bytes, row 1 as fractions, so both halves of the scale rule travel.
+          const std::string tp = "D:/g4gpu/out/selftest_colour_table.txt";
+          std::FILE* tf = std::fopen(tp.c_str(), "wb");
+          if (tf != nullptr) {
+            std::fprintf(tf, "# selftest\n%g 255 0 0 255\n",
+                         s.voxel_classes[0].value);
+            if (s.voxel_classes.size() > 1) {
+              std::fprintf(tf, "%g 0.0 1.0 0.0 0.5\n", s.voxel_classes[1].value);
+            }
+            std::fclose(tf);
+          }
+          std::string note;
+          const ColourTableResult res = ReadVoxelColourTable(tp, s, note);
+          std::printf("selftest: color table - %s\n", note.c_str());
+          const bool red = res.ok && s.voxel_classes[0].r == 1.0f
+                           && s.voxel_classes[0].g == 0.0f
+                           && s.voxel_classes[0].opacity == 1.0f;
+          if (!red) {
+            std::printf("selftest: FAILED - the table did not reach the class list\n");
+          }
+          a.sel_solid = vs;
+          a.model.Touch();
+          a.scene_dirty = true;
+        }
+      }
+      // The scene was rebuilt at the top of this frame, so the device array is the new one.
+      if (frame == 42) {
+        if (a.d_class_rgba == nullptr || a.class_rgba_n <= 0) {
+          std::printf("selftest: FAILED - no class colours were uploaded\n");
+        } else {
+          std::vector<unsigned int> back(static_cast<std::size_t>(a.class_rgba_n));
+          CUDA_CHECK(cudaMemcpy(back.data(), a.d_class_rgba,
+                                sizeof(unsigned int) * back.size(), cudaMemcpyDeviceToHost));
+          // 0xAARRGGBB, as build_scene packs it: opaque pure red.
+          bool found = false;
+          for (unsigned int v : back) {
+            if (v == 0xFFFF0000u) { found = true; }
+          }
+          std::printf(found
+                          ? "selftest: the colour table reached the render array\n"
+                          : "selftest: FAILED - opaque red is not in the uploaded colours\n");
+        }
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_colour_table.png");
+        // And the control itself, which lives below the solid's numbers and so is off the
+        // bottom of the section until it is scrolled to. A photograph rather than an
+        // assertion: what is being checked is that a button is drawn where it was placed and
+        // is legible next to its neighbours, and there is no way to assert legible.
+        a.solids_scroll.offset = a.solids_scroll.content_h;
+      }
+      if (frame == 43) {
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_colour_table_button.png");
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

@@ -264,6 +264,35 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
                    anchored ? a.model.solids[static_cast<std::size_t>(s.anchor)].name
                             : std::string("in world coordinates"),
                    anchored ? ui::theme::kAccent : ui::theme::kTextDim, bw2 - 4);
+  y += row + 5;
+
+  // A colour table, for a phantom with more classes than anyone will click through.
+  //
+  // A segmentation arrives with its classes grey and the importer's default opacity, which is
+  // enough to see the shape of and useless for telling one organ from another. Assigning 261
+  // colours through the picker is not a thing a person does, and every segmentation that has
+  // 261 classes came with a table naming them - so read the table.
+  if (s.shape == Shape::kVoxelGrid && !s.voxel_classes.empty()) {
+    if (ui::Button(c, 413, {panel.x + 8, y, bw2, row + 2}, "Color table")) {
+      const std::string p = FileDialog(
+          a, "Color table\0*.txt;*.csv;*.ctbl;*.lut\0All files\0*.*\0", false, nullptr);
+      if (!p.empty()) {
+        std::string note;
+        const ColourTableResult res = ReadVoxelColourTable(p, s, note);
+        Log((res.ok ? "color table: " : "color table not applied: ") + note);
+        if (res.ok) {
+          // The class colours are baked into the solid pool when the scene is flattened, so
+          // the picture only changes on a rebuild - the same path a colour picked by hand
+          // takes.
+          a.model.Touch();
+          a.scene_dirty = true;
+        }
+      }
+    }
+    c.canvas.TextFit(panel.x + 14 + bw2, y + 4, "index r g b a per row",
+                     ui::theme::kTextDim, bw2 - 4);
+    y += row + 5;
+  }
   return y + row + 10;
 }
 

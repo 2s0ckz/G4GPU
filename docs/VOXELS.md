@@ -71,6 +71,56 @@ Two consequences follow, and both are visible:
   grid crossed corner to corner that is up to ~1500 iterations in the worst case, bounded by
   `max_steps`. Geant4's regular navigation does the same thing.
 
+## Seeing one
+
+A segmented phantom is drawn cell by cell, not as the box that bounds it. `render_geometry`
+walks the cells along each ray with `geom::VoxelWalk` and composites each class's colour front
+to back, shading by the face the cell was entered through - without the face normal every cell
+shades identically and the result is fog with an outline.
+
+Two consequences of compositing front to back:
+
+* **Index 0 is imported invisible.** In every segmentation convention 0 means "nothing here",
+  and it is also the commonest value, so an opaque 0 is a solid block with the anatomy inside
+  it.
+* **Every other class is imported at a tenth.** Opaque cells show only the first surface a ray
+  meets, which for a segmentation is the skin. At 0.1 about thirty cells of tissue accumulate
+  to 96%, so the interior reads through and the outline still reads as a surface.
+
+Both are defaults, in `ClassifyVoxels`; the class list in the SOLIDS panel edits them per
+class.
+
+### The colour table
+
+A real segmentation has dozens or hundreds of classes and arrives with a table naming them.
+**Colour table** in the solid's panel reads one, and `ReadVoxelColourTable`
+(`src/builder/import.hh`) is the parser. One row per class:
+
+```
+# comment; ; and // also start one
+1, 255, 0, 0, 255
+2  0.0  1.0  0.0  0.5
+```
+
+* Fields are separated by commas, whitespace, or both. `index r g b` is enough; a fifth field
+  is alpha, and a row without one leaves the class's opacity alone.
+* **The first column is the value in the segmentation file**, not the row number - that is what
+  a phantom's own table is keyed by, so a class list sorted or filtered differently still takes
+  the same colours. For a volume classified into *bands* (a CT, `VoxelKind::kContinuous`) there
+  is no such external number, so there the first column is the band's position, 0 first.
+* **The scale is decided per value by how the number is written.** A field holding `.`, `e` or
+  `E` is read on 0-1; anything else on 0-255. So `0.5` and `128` are both a half, and the two
+  forms may be mixed in one file. The edge is real: `1` is 1/255 and `1.0` is full. The log
+  line reports how many values were read each way, so a table read the wrong way is visible
+  there rather than only in the picture.
+* A row whose index names no class, and a line of four-plus fields that are not all numbers -
+  a header, say - are counted and reported rather than silently dropped. A table from a
+  different phantom looks exactly like one that partly matches, and `atof` would have read
+  `index,r,g,b,a` as class 0 painted black.
+
+The class colours are baked into the solid pool when the scene is flattened, so they reach the
+picture on the next rebuild, like a colour picked by hand.
+
 ## Scoring
 
 `G4PSEnergyDeposit3D` (`src/g4/G4SDManager.hh`) is the per-cell scorer. Its `cells` vector is

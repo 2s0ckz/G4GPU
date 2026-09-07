@@ -2501,3 +2501,59 @@ Nothing was looking for it. It turned up while adding a SECOND test with its own
 compiled alongside a scene like the other hook test is" has no answer that is not this. A
 defect that only surfaces when somebody does the same thing twice is one a single instance
 cannot show you.
+
+### V17: a parser that cannot fail, and an expected count written from impression
+
+Two things about reading a colour table, neither of which reached a wrong answer, both recorded
+because the first was one keystroke from shipping and the second is a habit this register
+already has an entry for.
+
+#### `atof` has no way to say no
+
+The first draft of `ReadVoxelColourTable` read each field with `std::atof`. That function returns
+zero for text it cannot parse and reports nothing. A colour table with a header row -
+
+```
+index, r, g, b, a
+1, 255, 0, 0, 255
+```
+
+- has five fields on its first line, all of them words, and `atof` reads that line as index 0,
+red 0, green 0, blue 0, alpha 0. So the header would have been applied: class 0 painted opaque
+black, counted among the rows that worked, and reported in the log as a row that applied. The
+one class where this is hardest to see is exactly class 0, which the importer has already made
+invisible.
+
+The fix is `std::strtod` with the end pointer checked against the end of the token, plus an
+`isfinite` test, because `nan` and `inf` do parse whole and a NaN colour is undefined behaviour
+by the time `build_scene` casts it to a byte. A line of four or more fields that are not all
+numbers is now counted as malformed and reported, rather than being read as zeros.
+
+The general point is not about `atof`. It is that a reader whose failure mode is a plausible
+value cannot be tested by feeding it good input, and every test written while thinking about
+the format is good input. The test that catches this had to be written by asking what the file
+would look like if a person made it in a spreadsheet - which is where a header comes from.
+
+Reverting the validation, the way the fix was checked:
+
+```
+FAIL: comments, blanks, headers and short lines are not rows
+FAIL: one row named a class
+FAIL: the header and the nan are counted, not silently read as zero
+FAIL: and the nan row changed nothing
+```
+
+#### The count written from impression
+
+The same test asserts how many values were read on each scale, because the scale rule is per
+value - `0.5` is a half and `128` is a half - and the counts are what make a table read the
+wrong way visible in the log. For the mixed-form file the assertion was first written as
+`on_unit == 13`. The file has ten fractional fields: four on each of the first two rows, and
+two on the third, where `255` and `0` are the bytes. Thirteen is not a number that appears
+anywhere in it.
+
+It was corrected by counting the fields before the test was first run, so it never produced a
+result. That is luck about timing, not method: V10 in this register is a threshold written the
+same way, from impression rather than from the thing it measures, and that one did produce a
+false failure at 1.93 sigma. An expected value in a test is a prediction, and a prediction
+worth asserting is one worth deriving.

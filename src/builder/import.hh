@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -342,6 +343,200 @@ inline bool ReadStl(const std::string& path, std::vector<float>& tri, std::strin
   return ReadMesh(path, tri, note);
 }
 
+/// What reading a colour table did, for the log.
+struct ColourTableResult {
+  int rows = 0;        ///< data rows parsed
+  int applied = 0;     ///< rows whose index named a class
+  int unmatched = 0;   ///< rows whose index named nothing
+  int malformed = 0;   ///< lines with four-plus fields that are not all numbers
+  int on_unit = 0;     ///< values read as 0-1
+  int on_255 = 0;      ///< values read as 0-255
+  int clamped = 0;
+  bool ok = false;
+};
+
+/// Reads a per-class colour table: one row per voxel class, `index r g b [a]`.
+///
+/// The index is the class's VALUE - the number in the segmentation file - and not its position
+/// in the list, because that is what a segmentation's own colour table is keyed by. A row whose
+/// index names no class is counted and skipped rather than silently dropped: a table from a
+/// different phantom is a mistake worth being told about, and it looks exactly like a table
+/// that partly matches.
+///
+/// SCALE IS DECIDED BY THE WAY EACH NUMBER IS WRITTEN. `0.5` is a half; `128` is a half. A
+/// token holding a decimal point or an exponent is read on 0-1, anything else on 0-255. That
+/// is the convention colour tables in the wild use and it is unambiguous per value - which
+/// matters, because the alternative rules are all worse: a per-file guess from the maximum
+/// value cannot tell a 0-255 table that happens to top out at 1 from a 0-1 table, and asking
+/// the user is a question they should not have to answer about a file that already says.
+///
+/// The edge is real and is worth knowing: `1` is 1/255, very nearly black, and `1.0` is full.
+/// Both counts are reported so a table read the wrong way is visible in the log rather than
+/// only in the picture.
+inline ColourTableResult ReadVoxelColourTable(const std::string& path, Solid& s,
+                                              std::string& note) {
+  ColourTableResult r;
+  char buf[256];
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (f == nullptr) {
+    note = "could not open " + path;
+    return r;
+  }
+  std::string text;
+  {
+    char chunk[4096];
+    std::size_t n = 0;
+    while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0) { text.append(chunk, n); }
+  }
+  std::fclose(f);
+
+  // A number, or false. strtod rather than atof because atof cannot fail: it returns zero for
+  // a word, so the header line `index,r,g,b,a` would read as class 0 painted black. Requiring
+  // the whole token to be consumed is what tells a header from a row.
+  auto number = [](const std::string& tok, double& out) {
+    if (tok.empty()) { return false; }
+    char* end = nullptr;
+    out = std::strtod(tok.c_str(), &end);
+    // `nan` and `inf` parse whole, and a NaN colour is undefined behaviour by the time the
+    // scene builder casts it to a byte, so they are not numbers for this purpose.
+    return end == tok.c_str() + tok.size() && std::isfinite(out);
+  };
+
+  // One channel, on whichever scale it was written in.
+  auto scale = [&r](const std::string& tok, double v) {
+    const bool fractional = tok.find('.') != std::string::npos
+                            || tok.find('e') != std::string::npos
+                            || tok.find('E') != std::string::npos;
+    double u = fractional ? v : v / 255.0;
+    if (fractional) { ++r.on_unit; } else { ++r.on_255; }
+    if (u < 0.0) { u = 0.0; ++r.clamped; }
+    if (u > 1.0) { u = 1.0; ++r.clamped; }
+    return static_cast<float>(u);
+  };
+
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    const std::size_t nl = text.find('\n', at);
+    std::string line = text.substr(at, (nl == std::string::npos) ? std::string::npos : nl - at);
+    at = (nl == std::string::npos) ? text.size() + 1 : nl + 1;
+    // Trim, then skip blanks and the three comment markers a table might use.
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+      line.pop_back();
+    }
+    std::size_t b = 0;
+    while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) { ++b; }
+    line = line.substr(b);
+    if (line.empty() || line[0] == '#' || line[0] == ';'
+        || (line.size() > 1 && line[0] == '/' && line[1] == '/')) {
+      continue;
+    }
+    // Commas or whitespace, either or both: a table is as likely to be CSV as columns.
+    std::vector<std::string> tok;
+    std::string cur;
+    for (char ch : line) {
+      if (ch == ',' || ch == ' ' || ch == '\t') {
+        if (!cur.empty()) { tok.push_back(cur); cur.clear(); }
+      } else {
+        cur.push_back(ch);
+      }
+    }
+    if (!cur.empty()) { tok.push_back(cur); }
+    if (tok.size() < 4) { continue; }   // not a row: too few fields to be one
+
+    // Every field a number, or the line is not a row. Counted, because a table with a stray
+    // word in it is a table the user should look at rather than one that half worked.
+    double num[5] = {0, 0, 0, 0, 0};
+    const std::size_t want = (tok.size() >= 5) ? 5 : 4;
+    bool all = true;
+    for (std::size_t k = 0; k < want; ++k) {
+      if (!number(tok[k], num[k])) { all = false; break; }
+    }
+    if (!all) {
+      ++r.malformed;
+      continue;
+    }
+    ++r.rows;
+    const float rr = scale(tok[1], num[1]);
+    const float gg = scale(tok[2], num[2]);
+    const float bb = scale(tok[3], num[3]);
+    const bool have_a = (want == 5);
+    const float aa = have_a ? scale(tok[4], num[4]) : 0.0f;
+
+    // Which class the row names.
+    //
+    // For a segmentation - the case this exists for - it is the VALUE in the file, because
+    // that is what the phantom's own colour table is keyed by, and a class list sorted or
+    // filtered differently must still take the same colours. For continuous BANDS there is no
+    // such external number: a band is `>= 300 HU`, invented here rather than read, so a row
+    // there names the band by position, 0 for the first.
+    VoxelClass* target = nullptr;
+    if (s.voxel_kind == VoxelKind::kDiscrete) {
+      for (VoxelClass& c : s.voxel_classes) {
+        if (c.value == num[0]) {
+          target = &c;
+          break;
+        }
+      }
+    } else if (num[0] >= 0 && num[0] < static_cast<double>(s.voxel_classes.size())) {
+      target = &s.voxel_classes[static_cast<std::size_t>(num[0])];
+    }
+    if (target == nullptr) {
+      ++r.unmatched;
+      continue;
+    }
+    target->r = rr;
+    target->g = gg;
+    target->b = bb;
+    if (have_a) {
+      target->opacity = aa;
+      // A table that says a class is transparent is saying it should not be drawn; `visible`
+      // is the checkbox beside it and would otherwise contradict the number it was just given.
+      target->visible = (aa > 0.0f);
+    }
+    ++r.applied;
+  }
+
+  r.ok = (r.applied > 0);
+  if (!r.ok) {
+    if (r.rows == 0) {
+      std::snprintf(buf, sizeof buf,
+                    "no rows in this file. A row is `index r g b [a]`, comma or space "
+                    "separated;\n  %d lines had four or more fields but were not numbers.",
+                    r.malformed);
+    } else if (s.voxel_kind == VoxelKind::kDiscrete) {
+      std::snprintf(buf, sizeof buf,
+                    "%d rows read and none of their indices name a class in this phantom.\n"
+                    "  The first column is the value in the segmentation, not the row number.",
+                    r.rows);
+    } else {
+      std::snprintf(buf, sizeof buf,
+                    "%d rows read and none of them name a band. This volume is classified by\n"
+                    "  value bands, so the first column is the band's position - 0 for the "
+                    "first of %d.",
+                    r.rows, static_cast<int>(s.voxel_classes.size()));
+    }
+    note = buf;
+    return r;
+  }
+  std::snprintf(buf, sizeof buf, "%d of %d rows applied", r.applied, r.rows);
+  note = buf;
+  if (r.unmatched > 0) {
+    std::snprintf(buf, sizeof buf, ", %d matched no class in this phantom", r.unmatched);
+    note += buf;
+  }
+  std::snprintf(buf, sizeof buf, "; %d values read as 0-1 and %d as 0-255", r.on_unit, r.on_255);
+  note += buf;
+  if (r.clamped > 0) {
+    std::snprintf(buf, sizeof buf, ", %d clamped to range", r.clamped);
+    note += buf;
+  }
+  if (r.malformed > 0) {
+    std::snprintf(buf, sizeof buf, ", %d lines skipped as not numeric", r.malformed);
+    note += buf;
+  }
+  return r;
+}
+
 inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::string& note) {
   s.voxel_kind = kind;
   s.voxel_classes.clear();
@@ -434,17 +629,22 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
         case 4: c.r = static_cast<float>(t); c.g = static_cast<float>(p); c.b = 1.0f; break;
         default: c.r = 1.0f; c.g = static_cast<float>(p); c.b = static_cast<float>(qv); break;
       }
-      // Index 0 starts invisible.
+      // Index 0 invisible, and everything else nearly so.
       //
       // In every segmentation convention 0 is "nothing here" - air, background, outside the
       // patient - and it is also the most common value in the file, so a phantom imported
       // opaque is a solid block with the anatomy hidden inside it. Opening it means finding
       // the class list and turning one slider down before anything can be seen at all.
       //
-      // Opacity, not `visible`: the class stays in the list, keeps its material assignment,
-      // and is transported exactly as before. Only the picture changes, and one drag puts it
-      // back.
-      if (c.value == 0.0) { c.opacity = 0.0f; }
+      // The rest at a tenth, because the renderer composites front to back and a phantom of
+      // opaque cells shows only the first surface a ray meets - which for a segmentation is
+      // the skin, and the skin is the one structure nobody imports a phantom to look at. At
+      // a tenth, thirty cells of tissue accumulate to about 96% and the interior reads
+      // through: bone shows inside soft tissue rather than behind it.
+      //
+      // Opacity, not `visible`: a class stays in the list, keeps its material assignment, and
+      // is transported exactly as before. Only the picture changes, and one drag puts it back.
+      c.opacity = (c.value == 0.0) ? 0.0f : 0.1f;
       s.voxel_classes.push_back(c);
     }
     std::snprintf(buf, sizeof buf,
