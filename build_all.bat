@@ -67,6 +67,13 @@ rem that a track's recorded segments join up - is a property of a path, and a sy
 rem has no path.
 set TESTS_SCENE=test_trajectory
 
+rem A project with its own step hook AND NOTHING ELSE LINKED. It builds its own detector, so
+rem it needs no scene, and it must not be given one: a second translation unit that includes
+rem g4/G4RunManager.hh without the same G4STEP_HOOK sees G4RunManager holding a differently
+rem sized engine, which is one class with two layouts across the link - undefined, and the
+rem kind of undefined that works until a member moves.
+set TESTS_HOOK=test_voxel_scoring
+
 echo --- drivers ---
 rem /IMPLIB keeps the import library and its .exp out of the project root. They are a
 rem link-time artefact of an exe that exports symbols, not something anyone runs.
@@ -93,8 +100,12 @@ for %%T in (%TESTS_SCENE%) do (
   %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
     "%~dp0out\transport_run.obj" -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
 )
+for %%T in (%TESTS_HOOK%) do (
+  %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu ^
+    -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
+)
 rem From here on they are just tests - run and counted with the rest.
-set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT% %TESTS_SCENE%
+set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT% %TESTS_SCENE% %TESTS_HOOK%
 echo BUILD OK
 if "%MODE%"=="build" exit /b 0
 

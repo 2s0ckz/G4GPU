@@ -2439,3 +2439,65 @@ equivalence - it tests the answer on one scene. Both are needed, and they fail i
 directions: the pipeline catches a rewrite that is wrong where it matters, the A/B catches a
 rewrite that is wrong where this scene happens not to look. Deleting the reference copy is part
 of the job, because a second implementation kept "for comparison" is just the duplication again.
+
+### V16: one class, two sizes, in one link
+
+`tests/test_custom_hook.cu` defines `G4STEP_HOOK` and is compiled together with
+`src/scenes/scene_b1.cu`, which includes the same run manager header without defining it. The
+engine stores its hook by value, so:
+
+```
+with    G4STEP_HOOK: sizeof(G4RunManager) = 48120
+without G4STEP_HOOK: sizeof(G4RunManager) = 48136
+```
+
+One class, two layouts, across one link. Measured with a three-translation-unit program rather
+than reasoned about, because "the sizes probably differ" is not a finding.
+
+#### How it would have failed, which is not where you would look
+
+Every member of `G4RunManager` is defined in the class body, so all of them are inline: the
+linker keeps ONE copy of each and discards the rest. `new G4RunManager` sizes its allocation in
+whichever translation unit writes it - the test's, at 48120 bytes.
+
+If the surviving copies had come from `scene_b1.cu`'s 48136-byte layout, every member declared
+after `engine_` - `last_stats_`, `run_`, `run_voxel_scores_`, `primaries_`, `slot_pv_`,
+`slot_mat_` - would be addressed sixteen bytes too high, off the end of a heap block. MSVC keeps
+the first COMDAT it encounters and the link order happened to agree, so it worked. Nothing about
+the code arranged that.
+
+Note what does NOT protect it: the members `scene_b1.cu` actually touches all precede `engine_`,
+so their offsets agree in both layouts. That is why the first diagnosis, written before the
+measurement, said it "works by luck of member ordering". Member ordering is not what it turns
+on - the discarded-COMDAT choice is - and a fix aimed at the ordering would have left it exactly
+as fragile.
+
+#### The fix is not the one the defect suggests
+
+The obvious remedy is to stop linking those two files, which is what the task raising this
+proposed. It fixes the test and leaves the defect: `scenes/scene_registry.hh` is shipped API, so
+any user project that combines its own step hook with a registered scene hits the same thing,
+and that is an ordinary thing to want to do rather than a contrivance.
+
+So the engine is held behind a pointer instead. A pointer is the same size whatever it points
+at, so the layout no longer depends on the including translation unit's choice of hook:
+
+```
+after: with hook 13952, without hook 13952
+```
+
+- the same measurement that found it, showing it gone. `G4RunManager` also stops being a 48 kB
+object, because it had a 34 kB engine embedded in it.
+
+What remains true is the rule that was already documented: a translation unit which CONSTRUCTS a
+run manager must define the same hook as the one that instantiated the engine. One .cu, one
+instantiation. That is a rule about behaviour, not about layout, and it is enforced by the link
+failing rather than by luck.
+
+#### And what found it
+
+Nothing was looking for it. It turned up while adding a SECOND test with its own hook
+(`test_voxel_scoring.cu`) and asking where to put its build rule - the question "can this be
+compiled alongside a scene like the other hook test is" has no answer that is not this. A
+defect that only surfaces when somebody does the same thing twice is one a single instance
+cannot show you.

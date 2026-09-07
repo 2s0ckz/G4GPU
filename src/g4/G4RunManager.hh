@@ -86,10 +86,14 @@ class G4RunManager {
   /// G4Random::setTheSeed() in main() after constructing the run manager, as Geant4's examples
   /// do, and last writer wins. Doing it in Initialize() would silently outrank that.
   G4RunManager() {
+    engine_ = new g4gpu::host::TransportEngine<G4double, G4StepHook>();
     Instance() = this;
     G4Random::setTheSeed(static_cast<long>(seed_));
   }
-  ~G4RunManager() { engine_.Free(); }
+  ~G4RunManager() {
+    engine_->Free();
+    delete engine_;
+  }
 
   static G4RunManager*& Instance() {
     static G4RunManager* inst = nullptr;
@@ -155,8 +159,8 @@ class G4RunManager {
   /// whole run can compare against a real number.
   /// The share of free device memory the track buffers may take. See
   /// TransportEngine::SetMemoryFraction. Set before Initialize().
-  void SetMemoryFraction(G4double f) { engine_.SetMemoryFraction(f); }
-  G4double GetMemoryFraction() const { return engine_.GetMemoryFraction(); }
+  void SetMemoryFraction(G4double f) { engine_->SetMemoryFraction(f); }
+  G4double GetMemoryFraction() const { return engine_->GetMemoryFraction(); }
 
   void SetBatchSize(G4int n) { batch_ = n; }
   G4int GetBatchSize() const { return batch_; }
@@ -218,11 +222,11 @@ class G4RunManager {
   const G4Run* GetCurrentRun() const { return &run_; }
   const g4gpu::host::RunStats& GetLastRunStats() const { return last_stats_; }
   const g4gpu::g4::FlatScene& GetScene() const { return scene_; }
-  g4gpu::host::TransportEngine<G4double, G4StepHook>& GetEngine() { return engine_; }
+  g4gpu::host::TransportEngine<G4double, G4StepHook>& GetEngine() { return *engine_; }
 
   /// The per-step hook. Set it before BeamOn; see G4StepHook above.
-  void SetStepHook(const G4StepHook& h) { engine_.SetStepHook(h); }
-  G4StepHook& GetStepHook() { return engine_.GetStepHook(); }
+  void SetStepHook(const G4StepHook& h) { engine_->SetStepHook(h); }
+  G4StepHook& GetStepHook() { return engine_->GetStepHook(); }
 
   /// The mass of a scored volume, kg, for converting energy deposit to dose.
   ///
@@ -405,7 +409,28 @@ class G4RunManager {
   std::unique_ptr<G4UserTrackingAction> tracking_action_;
   std::unique_ptr<G4UserStackingAction> stacking_action_;
   g4gpu::g4::FlatScene scene_;
-  g4gpu::host::TransportEngine<G4double, G4StepHook> engine_;
+  /// BEHIND A POINTER, so that sizeof(G4RunManager) does not depend on which step hook the
+  /// including translation unit chose.
+  ///
+  /// Held by value, it did. The engine stores its hook by value, so a project defining
+  /// G4STEP_HOOK saw a G4RunManager of one size and every other translation unit - the scene
+  /// registry, the viewer, anything including this header without the define - saw another:
+  /// measured, 48120 bytes against 48136. One class, two layouts, in one link.
+  ///
+  /// That is undefined, and the way it would have failed is worth stating because it is not
+  /// obvious. Every member here is inline, so the linker keeps ONE copy of each and discards
+  /// the rest; `new G4RunManager` sizes its allocation in the translation unit that writes it.
+  /// If the surviving copies came from the larger layout while the allocation came from the
+  /// smaller, every member after this one - last_stats_, run_, primaries_, slot_pv_ - would be
+  /// addressed sixteen bytes too high, past the end. It worked because MSVC keeps the first
+  /// COMDAT it sees and the order happened to agree. Nothing guaranteed it.
+  ///
+  /// A pointer is the same size whatever it points at, so the layout is now identical in every
+  /// translation unit and a scene installer calling SetUserInitialization through either copy
+  /// reaches the same offset. What is still true, and is the documented rule, is that a
+  /// translation unit which CONSTRUCTS a run manager must define the same hook as the one that
+  /// instantiated the engine - see the note at the top of transport_run_impl.cuh.
+  g4gpu::host::TransportEngine<G4double, G4StepHook>* engine_ = nullptr;
   g4gpu::host::RunStats last_stats_;
   G4Run run_;
   G4ParticleGun* gun_ = nullptr;
@@ -494,9 +519,9 @@ inline void G4RunManager::Initialize() {
     }
     std::printf("%s\n", scene_.materials.count > 4 ? " ..." : "");
   }
-  engine_.SetProcesses(processes_);
-  engine_.Upload(scene_, batch_);
-  batch_ = engine_.ChosenBatch();
+  engine_->SetProcesses(processes_);
+  engine_->Upload(scene_, batch_);
+  batch_ = engine_->ChosenBatch();
   initialised_ = true;
 }
 
@@ -611,10 +636,10 @@ inline g4gpu::host::RunStats G4RunManager::RunEvents(G4int n_events, std::vector
   // a second BeamOn in one process an independent sample rather than a repeat: the device
   // streams carry on from where the last run left them, exactly as CLHEP's engine does for the
   // primaries on the host. See the note on stream_pos_.
-  stats = engine_.BeamOn(static_cast<int>(primaries_.size()), primaries_.data(), seed_, sums,
+  stats = engine_->BeamOn(static_cast<int>(primaries_.size()), primaries_.data(), seed_, sums,
                          sums_sq, traj, sink.get(), stream_pos_);
   stream_pos_ += static_cast<long long>(primaries_.size());
-  const std::vector<double>& v = engine_.voxel_scores();
+  const std::vector<double>& v = engine_->voxel_scores();
   if (!v.empty()) { run_voxel_scores_ = v; }
 
   // A filtered scorer's total is what Accept() accumulated, not what the device summed. Done
