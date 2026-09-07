@@ -543,12 +543,30 @@ class G4VoxelGrid : public G4VSolid {
     return cells_[static_cast<std::size_t>(i) + nx_ * (j + static_cast<std::size_t>(ny_) * k)];
   }
   std::vector<short>& Cells() { return cells_; }
+  /// The class index per cell, for the renderer. Same length as Cells(), or empty.
+  std::vector<short>& ClassCells() { return class_cells_; }
+  /// One colour per class, 0xAARRGGBB, for the renderer. Empty draws the volume as one box.
+  std::vector<unsigned int>& ClassColours() { return class_rgba_; }
 
   G4int Build(g4gpu::g4::SolidPool& pool) const override {
     g4gpu::g4::Sol s = make(g4gpu::geom::SolidType::kVoxelGrid,
                             {hx_, hy_, hz_, static_cast<G4double>(nx_),
                              static_cast<G4double>(ny_), static_cast<G4double>(nz_)});
-    s.a = pool.add_voxels(cells_.data(), static_cast<int>(cells_.size()));
+    s.a = pool.add_voxels(cells_.data(), static_cast<int>(cells_.size()),
+                          (class_cells_.size() == cells_.size()) ? class_cells_.data()
+                                                                 : nullptr);
+    // Where this volume's class colours are, for the renderer to look up per cell. Zero
+    // classes leaves p[7] at 0, which is what tells the renderer to draw the box and nothing
+    // more - every voxel volume that is not a segmentation, and every one whose values are
+    // physical properties rather than indices.
+    if (!class_rgba_.empty() && class_cells_.size() == cells_.size()) {
+      s.p[6] = static_cast<G4double>(
+          pool.add_class_colours(class_rgba_.data(), static_cast<int>(class_rgba_.size())));
+      s.p[7] = static_cast<G4double>(class_rgba_.size());
+    } else {
+      s.p[6] = 0;
+      s.p[7] = 0;
+    }
     s.b = static_cast<int>(cells_.size());
     return pool.add_solid(s);
   }
@@ -562,6 +580,10 @@ class G4VoxelGrid : public G4VSolid {
   G4double hx_, hy_, hz_;
   G4int nx_, ny_, nz_;
   std::vector<short> cells_;
+  /// Parallel to cells_, holding which voxel class each cell came from. Render-only; see
+  /// SolidPool::voxel_class_cells.
+  std::vector<short> class_cells_;
+  std::vector<unsigned int> class_rgba_;
 };
 
 // ---------------------------------------------------------------- tessellated

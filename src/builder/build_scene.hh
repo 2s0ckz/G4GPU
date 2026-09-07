@@ -233,18 +233,86 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
       // bands cannot both claim a voxel and leave the choice to iteration order.
       const std::size_t n = static_cast<std::size_t>(nx) * ny * nz;
       const bool have_values = (s.voxel_values.size() == n);
+      const bool classify = have_values && !s.voxel_classes.empty();
+      if (classify) {
+        grid->ClassCells().assign(n, static_cast<short>(-1));
+        // The colour and opacity each class is drawn with. `visible` off is opacity zero
+        // rather than a separate flag, because the renderer's only question per cell is how
+        // much of the colour behind it survives - and index 0 arrives hidden from the
+        // importer, which is what lets a phantom be seen at all.
+        grid->ClassColours().clear();
+        grid->ClassColours().reserve(s.voxel_classes.size());
+        for (const VoxelClass& vc : s.voxel_classes) {
+          const unsigned int al =
+              vc.visible ? static_cast<unsigned int>(vc.opacity * 255.0f + 0.5f) : 0u;
+          grid->ClassColours().push_back(
+              (al << 24) | (static_cast<unsigned int>(vc.r * 255.0f + 0.5f) << 16)
+              | (static_cast<unsigned int>(vc.g * 255.0f + 0.5f) << 8)
+              | static_cast<unsigned int>(vc.b * 255.0f + 0.5f));
+        }
+      }
+
+      // A DIRECT MAP from value to class for the discrete case, not a search per cell.
+      //
+      // This was a linear scan of the class list inside the loop over cells. At the 64 classes
+      // the importer used to cap at, on a small phantom, nobody noticed. A 225x225x500
+      // segmentation with 261 classes is 25.3 million cells times up to 261 comparisons -
+      // six billion - and it runs on every scene rebuild, which is every edit. Raising the
+      // class cap without this would have turned an import into a hang.
+      //
+      // Discrete classes are whole numbers over a modest range (the importer requires exactly
+      // that, so a class list that got here has it), so the map is an array indexed by value.
+      // The continuous case keeps the scan: its classes are bands, there are nine of them, and
+      // nine comparisons a cell is not worth a second mechanism.
+      std::vector<short> by_value;
+      double vlo = 0;
+      bool direct = false;
+      if (classify && s.voxel_kind == VoxelKind::kDiscrete) {
+        double vhi = 0;
+        vlo = s.voxel_classes.front().value;
+        vhi = vlo;
+        for (const VoxelClass& c : s.voxel_classes) {
+          if (c.value < vlo) { vlo = c.value; }
+          if (c.value > vhi) { vhi = c.value; }
+        }
+        const double span = vhi - vlo + 1.0;
+        if (span > 0 && span < 1.0e7) {
+          by_value.assign(static_cast<std::size_t>(span), static_cast<short>(-1));
+          for (std::size_t ci = 0; ci < s.voxel_classes.size(); ++ci) {
+            const double off = s.voxel_classes[ci].value - vlo;
+            if (off >= 0 && off < span) {
+              by_value[static_cast<std::size_t>(off)] = static_cast<short>(ci);
+            }
+          }
+          direct = true;
+        }
+      }
+
       for (std::size_t idx = 0; idx < n; ++idx) {
         int mat = s.material;
-        if (have_values && !s.voxel_classes.empty()) {
+        int cls = -1;
+        if (classify) {
           const float v = s.voxel_values[idx];
-          for (const VoxelClass& c : s.voxel_classes) {
-            const bool hit = (s.voxel_kind == VoxelKind::kDiscrete)
-                                 ? (static_cast<double>(v) == c.value)
-                                 : (v >= c.value && v < c.value_max);
-            if (hit) {
-              mat = c.material;
-              break;
+          if (direct) {
+            const double off = static_cast<double>(v) - vlo;
+            if (off >= 0 && off < static_cast<double>(by_value.size())) {
+              cls = by_value[static_cast<std::size_t>(off)];
             }
+          } else {
+            for (std::size_t ci = 0; ci < s.voxel_classes.size(); ++ci) {
+              const VoxelClass& c = s.voxel_classes[ci];
+              const bool hit = (s.voxel_kind == VoxelKind::kDiscrete)
+                                   ? (static_cast<double>(v) == c.value)
+                                   : (v >= c.value && v < c.value_max);
+              if (hit) {
+                cls = static_cast<int>(ci);
+                break;
+              }
+            }
+          }
+          if (cls >= 0) {
+            mat = s.voxel_classes[static_cast<std::size_t>(cls)].material;
+            grid->ClassCells()[idx] = static_cast<short>(cls);
           }
         }
         grid->Cells()[idx] = static_cast<short>(mat);

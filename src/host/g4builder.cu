@@ -189,6 +189,12 @@ struct App {
   // rendering
   vis::TrajectoryBuffer traj{};
   vis::VolumeStyle* d_styles = nullptr;
+  /// Per-cell class index, and the class colour table the renderer looks up in. Both
+  /// render-only: the transport reads the per-cell MATERIAL, which is -1 until a class has one
+  /// assigned, so a phantom nobody has assigned yet would be invisible if the picture came
+  /// from the same array. Assigning by looking at the picture is the whole workflow.
+  short* d_voxel_class = nullptr;
+  unsigned int* d_class_rgba = nullptr;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
   /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
@@ -523,6 +529,31 @@ static void RebuildScene(App& a) {
                           cudaMemcpyHostToDevice));
   }
 
+  // The two render-only voxel arrays. Freed and reuploaded with the scene, because both are
+  // indexed by the pool offsets the flattening just chose.
+  if (a.d_voxel_class != nullptr) {
+    cudaFree(a.d_voxel_class);
+    a.d_voxel_class = nullptr;
+  }
+  if (!scene.pool.voxel_class_cells.empty()) {
+    CUDA_CHECK(cudaMalloc(&a.d_voxel_class,
+                          sizeof(short) * scene.pool.voxel_class_cells.size()));
+    CUDA_CHECK(cudaMemcpy(a.d_voxel_class, scene.pool.voxel_class_cells.data(),
+                          sizeof(short) * scene.pool.voxel_class_cells.size(),
+                          cudaMemcpyHostToDevice));
+  }
+  if (a.d_class_rgba != nullptr) {
+    cudaFree(a.d_class_rgba);
+    a.d_class_rgba = nullptr;
+  }
+  if (!scene.pool.voxel_class_rgba.empty()) {
+    CUDA_CHECK(cudaMalloc(&a.d_class_rgba,
+                          sizeof(unsigned int) * scene.pool.voxel_class_rgba.size()));
+    CUDA_CHECK(cudaMemcpy(a.d_class_rgba, scene.pool.voxel_class_rgba.data(),
+                          sizeof(unsigned int) * scene.pool.voxel_class_rgba.size(),
+                          cudaMemcpyHostToDevice));
+  }
+
   // Frame the camera on the world the first time.
   static bool framed = false;
   if (!framed && !scene.volumes.empty()) {
@@ -794,7 +825,8 @@ static void DrawFrame(App& a) {
 
   if (a.vis_attr.show_solids) {
     vis::render_geometry<real_t><<<grid, block>>>(a.engine->geometry(), a.d_styles, cam,
-                                                  a.d_fb, a.vis_attr.voxel_grid_lines);
+                                                  a.d_fb, a.vis_attr.voxel_grid_lines,
+                                                  a.d_voxel_class, a.d_class_rgba);
   } else {
     CUDA_CHECK(cudaMemset(a.d_fb, 0xFF, sizeof(unsigned long long) * w * h));
   }

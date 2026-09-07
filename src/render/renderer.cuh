@@ -118,9 +118,16 @@ struct VolumeStyle {
 /// Capped at kMaxLayers surfaces per pixel. A ray through a detector crosses a handful; the
 /// cap is what stops a pathological model from making one pixel cost a thousand.
 template <typename real_t>
+/// @param voxel_class per cell, parallel to geometry.voxels.material and indexed the same way
+///        (VoxelGrid::index already carries the per-volume offset). Null renders voxel volumes
+///        as the single box they were always rendered as.
+/// @param class_rgba  0xAARRGGBB per class, concatenated over volumes. A voxel solid's
+///        p[6] says where its own run starts and p[7] how many classes long it is.
 __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeStyle* styles,
                                 Camera cam, unsigned long long* fb,
-                                bool grid_lines = true) {
+                                bool grid_lines = true,
+                                const short* voxel_class = nullptr,
+                                const unsigned int* class_rgba = nullptr) {
   const int px = blockIdx.x * blockDim.x + threadIdx.x;
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= cam.width || py >= cam.height) { return; }
@@ -182,6 +189,78 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     real_t ndl = -dot(n, dir);
     if (ndl < real_t(0)) { ndl = -ndl; }
     const float shade = 0.25f + 0.75f * static_cast<float>(ndl);
+
+    // A voxel volume whose cells are coloured individually is not one surface.
+    //
+    // Everything above found where the ray enters the grid's bounding box. For an ordinary
+    // solid that is the surface to shade and there is nothing more to say; for a segmented
+    // phantom it is the outside of a box with the anatomy inside it, and shading it is how an
+    // imported CT came to draw as a featureless slab.
+    //
+    // So walk the cells. Each one contributes its class's colour and opacity, front to back,
+    // by the same accumulation the outer loop uses for whole volumes - and a class at zero
+    // opacity contributes nothing, which is what makes index 0 (air, background, outside the
+    // patient) get out of the way and the tissue behind it visible.
+    //
+    // Shading is by the face the cell was entered through: VoxelWalk reports the axis, and the
+    // normal is the unit vector along it. Without that every cell shades identically and the
+    // result is fog with an outline. With it, the boundary between two classes reads as a
+    // surface, which is what makes the picture anatomy rather than a colour field.
+    if (vol.solid.type == geom::SolidType::kVoxelGrid && voxel_class != nullptr
+        && class_rgba != nullptr && static_cast<int>(vol.solid.p[7]) > 0) {
+      const geom::VoxelGrid<real_t> grid = geom::voxel_grid_of(vol.solid);
+      // p[6] and p[7] are spare on a voxel grid - p[0..2] is the half extent and
+      // p[3..5] the cell counts - so the class run rides on the SOLID, exactly as the
+      // cell-array offset rides in `a`. Nothing records which model solid a flattened
+      // volume came from (the scene is built from the Geant4 placement tree), so a
+      // per-volume style could not have carried it.
+      const int cbase = static_cast<int>(vol.solid.p[6]);
+      const int ccount = static_cast<int>(vol.solid.p[7]);
+      geom::VoxelWalk<real_t> walk;
+      // A nudge inside, so the entry point is unambiguously in the first cell rather than on
+      // its face - the same reason the outer loop nudges past each surface it crosses.
+      const Vec3<real_t> start = hit_local + real_t(1e-4) * local_dir;
+      if (walk.Start(grid, start, local_dir)) {
+        Vec3<real_t> face_n = n;   // the grid's own surface, for the first cell
+        bool more = true;
+        while (more && acc_a < 0.995f) {
+          const int idx = walk.Index(grid);
+          if (idx >= 0 && idx < geometry.voxels.count) {
+            const int cls = static_cast<int>(voxel_class[idx]);
+            if (cls >= 0 && cls < ccount) {
+              const unsigned int rgba = class_rgba[cbase + cls];
+              const float ca = static_cast<float>((rgba >> 24) & 0xFFu) * (1.0f / 255.0f);
+              if (ca > 0.0f) {
+                real_t nd = -dot(face_n, dir);
+                if (nd < real_t(0)) { nd = -nd; }
+                const float sh = 0.25f + 0.75f * static_cast<float>(nd);
+                const float w = ca * (1.0f - acc_a);
+                acc_r += w * static_cast<float>((rgba >> 16) & 0xFFu) * sh;
+                acc_g += w * static_cast<float>((rgba >> 8) & 0xFFu) * sh;
+                acc_b += w * static_cast<float>(rgba & 0xFFu) * sh;
+                acc_a += w;
+                if (first_t < 0) {
+                  first_t = static_cast<float>(travelled - kNudge + walk.t);
+                }
+              }
+            }
+          }
+          more = walk.Next(grid);
+          if (more) {
+            // The face just crossed, in the grid's frame, taken to global.
+            Vec3<real_t> ln{real_t(0), real_t(0), real_t(0)};
+            const real_t sgn = (walk.step[walk.axis] > 0) ? real_t(-1) : real_t(1);
+            if (walk.axis == 0) { ln.x = sgn; }
+            else if (walk.axis == 1) { ln.y = sgn; }
+            else { ln.z = sgn; }
+            face_n = geom::dir_to_global(vol.xform, ln);
+          }
+        }
+      }
+      // The grid has been accounted for over its whole depth, so the outer walk resumes past
+      // it rather than shading its box as well.
+      continue;
+    }
 
     // Voxel gridlines.
     //

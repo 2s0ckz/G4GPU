@@ -2333,3 +2333,62 @@ resizes while a list is open left the list pinned to where the button used to be
 reported it, because it needs a dropdown open across a layout change; it is the same class of
 error as the layering - state captured once when it needed to be refreshed - and the same edit
 fixes both, since the geometry is now re-recorded every frame the list is drawn open.
+
+### V15: an imported phantom was a grey box, and the reason was one style per volume
+
+Reported: importing a 225x225x500 segmentation with 261 material indices shows only the outer
+box; making that box transparent makes everything disappear rather than revealing the anatomy.
+
+Both halves are the same fact. A voxel volume is **one volume** in the flattened geometry, so it
+got **one `VolumeStyle`** - one colour, one opacity - and `render_geometry` shaded its bounding
+box and drew gridlines on the surface. The 261 classes an import produces were stored, editable
+in the GUI, and connected to nothing that draws. Turning the box transparent removed the only
+thing being drawn, which is exactly what "everything just disappears" is.
+
+The fix is a cell march: `VoxelWalk` in geometry/voxels.cuh steps the grid cell by cell, and the
+renderer composites each cell's class colour front to back with the same accumulation it already
+used for whole volumes. A class at zero opacity contributes nothing, which is what lets index 0 -
+air, background, outside the patient - get out of the way.
+
+#### Why the picture cannot come from the transport's data
+
+The cells already on the device hold a **material** index, and that was the tempting thing to
+colour by. It does not work, and the reason is the workflow: a freshly imported phantom has no
+materials assigned - the log says "assign a material to each class in the list to transport it" -
+so every cell is -1 and every cell is identical. **You assign materials by looking at the
+picture**, so a picture that needs the assignment first is no use.
+
+So there is a second per-cell array, holding the class, render-only and parallel to the material
+one. It is 50 MB for a 25-million-cell phantom, which is 0.6% of this card against being unable
+to see what you are assigning.
+
+#### Shading by the face, which is what makes it anatomy
+
+Compositing colours alone gives fog with an outline: every cell contributes the same shade, so no
+surface reads. `VoxelWalk` reports the axis of the boundary each cell was entered through, and
+that axis is the face normal - so the boundary between two classes lights like a surface. That is
+the difference between a colour field and something you can recognise an organ in.
+
+#### The six billion comparisons underneath it
+
+`build_scene.hh` mapped each cell's value to its class by **scanning the class list**, inside the
+loop over cells. At the 64 classes the importer used to cap at, on a small phantom, nobody
+noticed. 25.3 million cells times up to 261 classes is 6.6e9 comparisons, and it runs on every
+scene rebuild - which is every edit. Raising the class cap (V14) without this would have turned
+an import into an apparent hang: the two changes had to land together, and the fact that they
+did is luck rather than design, because the cap was raised first.
+
+It is a direct-address map now, which the importer's own requirement makes possible: indices are
+whole numbers over a modest range, so the map is an array indexed by value. The continuous case
+keeps the scan - nine bands, nine comparisons.
+
+#### What is not fixed
+
+There are now **two DDAs** over a voxel grid: `VoxelWalk`, and `voxel_step` which answers the
+transport's question of how far to the next material change. They should be one, with
+`voxel_step` written over the walk. This codebase has been bitten twice by a duplicated
+*constant* (V8, V9) and a duplicated traversal is the same defect with more surface area.
+
+It was not done in this change deliberately: `voxel_step` decides where tracks stop, so rewriting
+it belongs in a change whose evidence is the physics comparisons rather than a screenshot. The
+duplication is recorded here rather than left to be discovered.

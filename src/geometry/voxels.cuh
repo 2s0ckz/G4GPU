@@ -91,6 +91,76 @@ __host__ __device__ inline int voxel_material_at(const VoxelStore<real_t>& vs,
   return vs.material[idx];
 }
 
+/// A cell-by-cell walk along a ray, as an iterator.
+///
+/// Amanatides-Woo, the same traversal voxel_step() below performs, exposed differently: that
+/// one answers the transport's question - how far to the next material change - and this one
+/// hands back every cell and THE AXIS IT WAS ENTERED BY. The axis is the face normal, and a
+/// renderer without it composites a phantom into uniform fog: no face is lit differently from
+/// any other, so there is no shape to see. Which is the whole point of drawing it.
+///
+/// The two traversals ought to be one, with voxel_step written over this. They are not, and
+/// this note is here rather than absent because a second copy of a DDA is exactly the kind of
+/// duplication this codebase has been bitten by before - see docs/RISK.md on hand-copied
+/// constants. The reason for not doing it in the same change is that voxel_step is transport:
+/// it decides where tracks stop, and rewriting it belongs in a change whose checks are the
+/// physics ones rather than a picture.
+template <typename real_t>
+struct VoxelWalk {
+  int ijk[3];
+  real_t t_next[3];
+  real_t t_delta[3];
+  int step[3];
+  int axis;      ///< axis of the boundary just crossed; -1 before the first Next()
+  real_t t;      ///< ray parameter of that crossing
+
+  /// @param q,d in the grid's own frame. False if @p q is not inside the grid.
+  __host__ __device__ bool Start(const VoxelGrid<real_t>& g, const Vec3<real_t>& q,
+                                 const Vec3<real_t>& d) {
+    voxel_cell_of(g, q, ijk);
+    for (int k = 0; k < 3; ++k) {
+      if (ijk[k] < 0 || ijk[k] >= g.n[k]) { return false; }
+    }
+    const real_t p[3] = {q.x, q.y, q.z};
+    const real_t dir[3] = {d.x, d.y, d.z};
+    for (int k = 0; k < 3; ++k) {
+      if (fabs(dir[k]) < kTolerance<real_t>()) {
+        step[k] = 0;
+        t_next[k] = kInfinity<real_t>();
+        t_delta[k] = kInfinity<real_t>();
+        continue;
+      }
+      step[k] = (dir[k] > real_t(0)) ? 1 : -1;
+      const real_t edge =
+          -g.half[k] + g.cell[k] * static_cast<real_t>(ijk[k] + ((step[k] > 0) ? 1 : 0));
+      t_next[k] = (edge - p[k]) / dir[k];
+      if (t_next[k] < real_t(0)) { t_next[k] = real_t(0); }
+      t_delta[k] = g.cell[k] / fabs(dir[k]);
+    }
+    axis = -1;
+    t = real_t(0);
+    return true;
+  }
+
+  /// Advances one cell. False when the ray leaves the grid.
+  __host__ __device__ bool Next(const VoxelGrid<real_t>& g) {
+    int k = 0;
+    if (t_next[1] < t_next[k]) { k = 1; }
+    if (t_next[2] < t_next[k]) { k = 2; }
+    if (t_next[k] >= kInfinity<real_t>()) { return false; }
+    t = t_next[k];
+    ijk[k] += step[k];
+    if (ijk[k] < 0 || ijk[k] >= g.n[k]) { return false; }
+    t_next[k] += t_delta[k];
+    axis = k;
+    return true;
+  }
+
+  __host__ __device__ int Index(const VoxelGrid<real_t>& g) const {
+    return g.index(ijk[0], ijk[1], ijk[2]);
+  }
+};
+
 /// Distance to the next point where the *material* changes, walking cells along the ray.
 ///
 /// Returns kInfinity if the material never changes before the ray leaves the grid; the caller

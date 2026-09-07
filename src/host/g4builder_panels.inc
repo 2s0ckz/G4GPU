@@ -1875,6 +1875,13 @@ static void InsertSelftestVoxels(App& a) {
   }
   // Two discrete classes, one per value, both on the first material: what the classifier
   // would produce for this data, set directly because there is no file to classify.
+  //
+  // Coloured differently and with value 0 hidden, which is what ClassifyVoxels does to a real
+  // import - and what makes this fixture exercise the renderer rather than only the transport.
+  // Two classes of the same grey at full opacity composite to a plain box, so the selftest
+  // capture would have looked identical whether the cell march worked or not. The transport is
+  // untouched by it: a class contributes its MATERIAL to the cells, and both still carry the
+  // same one.
   s.voxel_classes.clear();
   for (int v = 0; v < 2; ++v) {
     VoxelClass c;
@@ -1882,6 +1889,13 @@ static void InsertSelftestVoxels(App& a) {
     c.value_max = v + 1;
     c.material = s.material;
     c.label = (v == 0) ? "even" : "odd";
+    if (v == 0) {
+      c.opacity = 0.0f;   // as index 0 arrives from an import: background, out of the way
+    } else {
+      c.r = 0.95f;
+      c.g = 0.55f;
+      c.b = 0.25f;
+    }
     s.voxel_classes.push_back(c);
   }
   a.sel_solid = a.model.AddSolid(s);
