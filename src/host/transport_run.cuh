@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "core/step_hook.cuh"
 #include "g4/G4Flatten.hh"
 #include "host/pe_upload.cuh"
 #include "physics/source.cuh"
@@ -37,33 +38,63 @@ namespace g4gpu::host {
 template <typename real_t>
 struct DeviceTracks {
   TrackBuffer<real_t> view{};
+  bool slab_backed_ = false;
 
-  void alloc(int capacity) {
-    view.capacity = capacity;
-    const size_t nr = sizeof(real_t) * capacity;
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.x, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.y, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.z, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.dx, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.dy, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.dz, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.ekin, nr));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.volume, sizeof(int) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.event, sizeof(int) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.rng_key, sizeof(unsigned int) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.msc_tlimit, sizeof(real_t) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.msc_tlimitmin, sizeof(real_t) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.step, sizeof(unsigned int) * capacity));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.count, sizeof(int)));
-    G4GPU_CUDA_CHECK(cudaMalloc(&view.overflow, sizeof(int)));
+  /// Re-points the arrays at a new range of the same slab, with a new capacity.
+  ///
+  /// The count and overflow counters are deliberately NOT re-carved: overflow accumulates over
+  /// the whole run and would be lost every time the split moved, which would turn a dropped
+  /// track from an announced failure into a silent one.
+  void recarve(int capacity, TrackSlab* slab) {
+    int* keep_count = view.count;
+    int* keep_overflow = view.overflow;
+    G4GPU_CUDA_CHECK(allocate_track_buffer(view, capacity, nullptr, slab));
+    view.count = keep_count;
+    view.overflow = keep_overflow;
+  }
+
+  /// With `slab`, the arrays are carved from a shared allocation and this object owns none of
+  /// them; free_all() then only clears the view. Without one it allocates as it always did,
+  /// which is what b1_gpu_sched.cu still does.
+  void alloc(int capacity, TrackSlab* slab = nullptr) {
+    G4GPU_CUDA_CHECK(allocate_track_buffer(view, capacity, nullptr, slab));
+    slab_backed_ = (slab != nullptr);
+    if (slab_backed_) {
+      // The two counters get their own allocations and never live in the slab.
+      //
+      // A re-carve lays the arrays out from the slab's offset zero again, so anything
+      // carved after them is written straight over by track data on the next partition.
+      // The counters are exactly that: recarve() preserves the POINTERS, which then aimed
+      // at memory now holding positions and energies. The count read back was garbage, the
+      // next launch sized itself from it, and the kernel walked off the end of the buffer.
+      // Found by forcing an overflow on purpose - it cannot happen while the pool is
+      // generous, which is every run that does not go looking for it.
+      G4GPU_CUDA_CHECK(cudaMalloc(&view.count, sizeof(int)));
+      G4GPU_CUDA_CHECK(cudaMalloc(&view.overflow, sizeof(int)));
+    }
     reset();
     G4GPU_CUDA_CHECK(cudaMemset(view.overflow, 0, sizeof(int)));
   }
   void reset() { G4GPU_CUDA_CHECK(cudaMemset(view.count, 0, sizeof(int))); }
+  /// Clears the dropped-track counter. Called before each attempt at a batch, so that what is
+  /// read afterwards belongs to that attempt and not to one that was already retried.
+  void reset_overflow() { G4GPU_CUDA_CHECK(cudaMemset(view.overflow, 0, sizeof(int))); }
+  /// Tracks in the buffer, never more than it can hold.
+  ///
+  /// The clamp is load-bearing. append() bumps the cursor with an unconditional atomicAdd
+  /// and only then checks whether the slot exists, so after an overflow the raw cursor is
+  /// larger than the capacity - it counts what was OFFERED. The drain loop sizes the next
+  /// kernel launch from this, one thread per track, and each thread loads its own index, so
+  /// an unclamped cursor would put threads to work reading past the end of every array in
+  /// the buffer.
+  ///
+  /// That was unreachable while the species capacities were four times what B1 needed. The
+  /// adaptive pool makes them tight, which makes this reachable, which is why it is here.
+  /// The dropped tracks are still counted - see overflow() - so nothing is hidden by it.
   int count() const {
     int c = 0;
     G4GPU_CUDA_CHECK(cudaMemcpy(&c, view.count, sizeof(int), cudaMemcpyDeviceToHost));
-    return c;
+    return (c > view.capacity) ? view.capacity : c;
   }
   int overflow() const {
     int c = 0;
@@ -71,12 +102,15 @@ struct DeviceTracks {
     return c;
   }
   void free_all() {
-    cudaFree(view.x); cudaFree(view.y); cudaFree(view.z);
-    cudaFree(view.dx); cudaFree(view.dy); cudaFree(view.dz);
-    cudaFree(view.ekin); cudaFree(view.volume); cudaFree(view.event);
-    cudaFree(view.rng_key); cudaFree(view.msc_tlimit); cudaFree(view.msc_tlimitmin);
-    cudaFree(view.step); cudaFree(view.count); cudaFree(view.overflow);
-    view = TrackBuffer<real_t>{};
+    if (slab_backed_) {
+      // The arrays were carved from the engine's arena, which the engine frees in one
+      // piece; the two counters are ours.
+      cudaFree(view.count);
+      cudaFree(view.overflow);
+      view = TrackBuffer<real_t>{};
+      return;
+    }
+    free_track_buffer(view);
   }
 };
 
@@ -96,6 +130,35 @@ struct RunStats {
   double event_loop_ms = 0;
   long long track_steps = 0;
   int max_iterations = 0;
+  /// Times a stepping action asked for a track status this transport cannot do what Geant4
+  /// would do with: fSuspend, fPostponeToNextEvent (nowhere to put a track aside - every track
+  /// in flight is in a species buffer being stepped in lockstep) or fKillTrackAndSecondaries
+  /// (whose secondaries are already in their buffers by the time a hook runs, so only the
+  /// track itself dies).
+  ///
+  /// Those requests are honoured as far as they can be - the track is killed - and counted
+  /// here, because a run that asked for something it did not get should say so rather than
+  /// leave someone to find out from a dose that is quietly wrong.
+  /// Tracks that were alive but not stepped this iteration, because the output buffer had no
+  /// room for what they would have produced. They were carried forward untouched and stepped
+  /// later, so nothing is lost - this is the cost of a tight pool, measured in deferred steps
+  /// rather than in a wrong answer.
+  long long throttled = 0;
+  /// Events that lost a track and were transported again on a repair pass. Not an error - the
+  /// answer is the one a run with room to spare would have given - but every one of them cost
+  /// its shower being computed twice. If this is large, raise SetLiveTracksPerEvent.
+  long long events_repaired = 0;
+  /// Batches that ran out of buffer space and were re-run with a smaller batch. Not an error -
+  /// every event is still transported, and the answer is the same one a correctly sized run
+  /// would have produced - but it costs the work already done on the attempt that overflowed.
+  /// If this is large, raise SetLiveTracksPerEvent so the first attempt fits.
+  long long batch_retries = 0;
+  long long unsupported_track_status = 0;
+  /// Secondaries that did not fit the arena behind GetSecondaryInCurrentStep(), and so are
+  /// missing from the lists a stepping action saw. GetNumberOfSecondariesInCurrentStep() stays
+  /// exact regardless. Zero in every run of this project's pipeline; if it is not zero, raise
+  /// the arena with SetSecondaryArenaCapacity.
+  long long secondary_overflow = 0;
   int peak_gamma = 0, peak_electron = 0, peak_positron = 0;
   int peak_proton = 0, peak_alpha = 0;
   long long abandoned = 0;
@@ -116,11 +179,98 @@ struct EventSink {
 };
 
 /// Owns the device-side scene and the track buffers, and runs events on them.
-template <typename real_t>
+///
+/// @tparam StepHook a device functor called once per step of every track - the general
+///         step-level customisation point, and the only one that sees a real step rather than
+///         an event aggregate. See core/step_hook.cuh, which is where the important part is:
+///         a hook must REDUCE on the device, because anything that stores per step scales
+///         with the amount of transport and so fails on exactly the runs worth doing.
+///
+///         The default is StepTap, which materialises steps into a capped buffer. That is the
+///         right default only because it is the one hook that answers an arbitrary question
+///         without being recompiled, and it is gated at runtime by a null pointer, so the
+///         stock build pays one predicated load per step and nothing else. It is for
+///         debugging and small runs. For production, instantiate this class on a StepTally
+///         (or any other reducer) whose footprint is set by the question rather than by the
+///         number of steps:
+///
+///             using QHook = StepTally<double, BinByEvent, QWeight>;
+///             TransportEngine<double, QHook> engine;
+///
+///         and add `template class TransportEngine<double, QHook>;` next to the existing
+///         explicit instantiation at the bottom of transport_run.cu. A custom hook means
+///         rebuilding that translation unit either way - the kernels live there.
+template <typename real_t, typename StepHook = StepTap<real_t>>
 class TransportEngine {
  public:
   /// Uploads @p scene. Materials were built with their production cuts already applied.
-  void Upload(const g4::FlatScene& scene, int batch_size = 1048576, int threads = 128);
+  ///
+  /// @p batch_size 0 - the default - sizes the batch from the memory the device actually has
+  /// free, which is what you want unless you have a reason not to. Pass a positive number to
+  /// choose it yourself; it is honoured even if it does not fit, with a warning saying by how
+  /// much, because a caller who asked for a specific batch usually has a reason and would
+  /// rather see the allocation fail than be silently given a different run.
+  ///
+  /// Automatic sizing matters more than it used to. A track carries the G4Track block now, so
+  /// a slot is 232 bytes rather than 88, and the batch that used to be the fixed default -
+  /// 1048576 - needs 4.1 GB of track buffers where it once needed 1.6. That is more than an
+  /// 8 GB card has free with a desktop running, which is not a hypothetical: it is how this
+  /// was found.
+  void Upload(const g4::FlatScene& scene, int batch_size = 0, int threads = 128);
+
+  /// What Upload actually chose. Only meaningful after Upload.
+  int ChosenBatch() const { return batch_; }
+
+  /// Let a run finish even though particles were dropped for want of buffer space.
+  ///
+  /// Off by default, and it should stay off for anything whose answer matters: a dropped track
+  /// is a particle that stopped being transported, so the dose comes out low and the run still
+  /// looks like it worked. With this off, such a run ends instead of reporting.
+  void AllowDroppedTracks(bool yes) { allow_dropped_ = yes; }
+  bool DroppedTracksAllowed() const { return allow_dropped_; }
+
+  /// Live track slots reserved per event, shared across all species. Default 4.
+  ///
+  /// This replaces five fixed per-species capacities that summed to 8.5 slots per event. They
+  /// were guesses, and measurement showed them wrong in shape as well as size: B1 peaks at 1.00
+  /// live gammas per event against 2 reserved, and 0.90 electrons against 4. A single pool
+  /// divided by what is actually alive needs far less, because memory reserved for electrons is
+  /// now available to gammas when the shower does not go that way.
+  ///
+  /// 4 is measured B1 peak (2.0) doubled. What this number bounds is CONCURRENCY - tracks alive
+  /// at one instant, summed over the batch - not how many secondaries a step may create or how
+  /// many tracks an event may produce. Raise it for a problem with higher multiplicity than a
+  /// 6 MeV gamma beam; if it is too low the engine says so, loudly, because a dropped track is
+  /// a dose that is too low rather than a slow run.
+  ///
+  /// Set before Upload.
+  void SetLiveTracksPerEvent(double n) { live_per_event_ = (n < 1.0) ? 1.0 : n; }
+  double GetLiveTracksPerEvent() const { return live_per_event_; }
+
+  /// The share of FREE device memory the track buffers may occupy. Default 0.55.
+  ///
+  /// It governs both halves of the batch decision, deliberately: an automatic batch is the
+  /// largest that fits inside this share, and a batch you set yourself is refused if it does
+  /// not. One number, so raising it raises both - and so that "how much of the card may this
+  /// run take" has a single answer rather than two that could disagree.
+  ///
+  /// It is a share of what is FREE rather than of what the card has, because a desktop is
+  /// usually holding a gigabyte or two and that memory is not available whatever the card's
+  /// specification says.
+  ///
+  /// Why not all of it: the track buffers are the biggest allocation but not the only one.
+  /// The scene follows them - and a voxel phantom or a triangle mesh is not small - along with
+  /// the per-event score array, the secondary arena, and whatever the driver keeps back.
+  /// Leaving room means being wrong about the estimate costs throughput instead of a run.
+  /// Raise it if you know what else is on the card; on a headless compute GPU 0.8 is
+  /// reasonable, and on a desktop card driving monitors it is not.
+  ///
+  /// Set before Upload. Clamped to [0.05, 0.95] - 1.0 is not offered, because the allocations
+  /// that follow the track buffers are not optional.
+  void SetMemoryFraction(double f) {
+    mem_fraction_ = (f < 0.05) ? 0.05 : ((f > 0.95) ? 0.95 : f);
+  }
+  double GetMemoryFraction() const { return mem_fraction_; }
 
   /// Runs @p n_events from primaries the host generated, filling `score_sum` and
   /// `score_sum_sq` with one entry per scorer.
@@ -155,6 +305,19 @@ class TransportEngine {
   void SetProcesses(const ProcessFlags& f) { processes_ = f; }
   const ProcessFlags& GetProcesses() const { return processes_; }
 
+  /// How many secondaries the arena behind GetSecondaryInCurrentStep() can hold in one kernel
+  /// launch, across every track in flight. Not a per-step limit - a step may create as many
+  /// secondaries as physics makes - and the default is sized against the batch. Set before
+  /// Upload.
+  void SetSecondaryArenaCapacity(int n) { sec_capacity_ = n; }
+
+  /// The per-step hook, copied by value into every kernel launch. Set it before BeamOn; the
+  /// copy the kernels get is taken at launch, so any device pointers inside it must already
+  /// be allocated.
+  void SetStepHook(const StepHook& h) { hook_ = h; }
+  StepHook& GetStepHook() { return hook_; }
+  const StepHook& GetStepHook() const { return hook_; }
+
  private:
   static std::vector<int> DistinctZ(const g4::FlatScene& scene) {
     std::vector<int> zs;
@@ -175,6 +338,11 @@ class TransportEngine {
 
   int batch_ = 0, threads_ = 128, n_volumes_ = 0, n_materials_ = 0, n_scorers_ = 1;
   ProcessFlags processes_{};
+  StepHook hook_{};
+  int sec_capacity_ = 0;
+  double mem_fraction_ = 0.55;
+  double live_per_event_ = 4.0;
+  bool allow_dropped_ = false;
   geom::Volume<real_t>* d_vols_ = nullptr;
   data::Material<real_t>* d_mats_ = nullptr;
   em::RangeTable<real_t>* d_rt_ = nullptr;
@@ -185,6 +353,23 @@ class TransportEngine {
   real_t* d_tri_ = nullptr;
   real_t* d_bvh_ = nullptr;
   double* d_score_ = nullptr;
+  /// Device counter behind RunStats::unsupported_track_status.
+  int* d_status_warn_ = nullptr;
+  /// The one allocation every species buffer is carved out of. See TrackSlab.
+  char* d_track_arena_ = nullptr;
+  /// Event ids that lost a track, so a repair pass can transport just those events again
+  /// instead of the whole batch. See the repair block in BeamOn.
+  int* d_dropped_ = nullptr;
+  int* d_dropped_count_ = nullptr;
+  int dropped_capacity_ = 0;
+  /// Bytes in each half of the arena; the two halves ping-pong.
+  size_t arena_half_ = 0;
+  /// Live-track slots each half may hold, shared across the species. See
+  /// SetLiveTracksPerEvent.
+  long long pool_ = 0;
+  /// The arena behind G4Step::GetSecondaryInCurrentStep. Reset once per kernel launch, so it
+  /// only ever has to hold the secondaries made by one launch rather than by a whole run.
+  SecondaryArena sec_{};
   /// Energy deposit per voxel cell, summed over the whole run, or null when no scorer asks
   /// for it. One entry per cell in the scene's voxel pool, so a scene with no voxel volume
   /// allocates nothing.
@@ -200,10 +385,28 @@ class TransportEngine {
   std::vector<double> h_voxel_score_;
   geom::Geometry<real_t> geom_{};
   Scene<real_t> scene_{};
-  DeviceTracks<real_t> gamma_[2], electron_[2], positron_[2];
-  /// Sized far smaller than the lepton buffers: nothing in the EM physics creates a hadron,
-  /// so these hold primaries and nothing else. One slot per event in the batch is exact.
-  DeviceTracks<real_t> proton_[2], alpha_[2];
+  /// Every track in flight, of every species, on each side of the ping-pong.
+  ///
+  /// There used to be five of these per side, one per species, and their capacities had to be
+  /// guessed before the run - which is what tied the memory layout to the physics list and made
+  /// "how many electrons might there be" a question somebody had to answer in advance. There is
+  /// one number now: how many tracks may be alive. Whether they are gammas or alphas is the
+  /// pool's business only in so far as each carries its own species.
+  DeviceTracks<real_t> tracks_[2];
+
+  /// Per-species index lists into tracks_, rebuilt every iteration by build_species_lists.
+  ///
+  /// Dispatch still needs each species contiguous - a warp whose threads take different physics
+  /// paths serialises through all of them - and this is what provides it. Four bytes a slot
+  /// against 232, and it buys the separation between how tracks are STORED and how they are
+  /// DISPATCHED that the five buffers used to conflate.
+  int* idx_[2][kNumTrackSpecies] = {};
+  /// The same five pointers, in device memory, because the scatter kernel indexes them.
+  int** d_idx_[2] = {};
+  /// How many tracks each list holds; kNumTrackSpecies ints per side, read back each iteration.
+  int* idx_n_[2] = {};
+  /// Tracks whose species no kernel steps. Counted, never quietly routed somewhere plausible.
+  int* d_unknown_ = nullptr;
 };
 
 
@@ -212,6 +415,6 @@ class TransportEngine {
 // those stubs collide at link time ("is not a specialization of a function template"). So the
 // kernels and these method bodies live in transport_run.cu, and the instantiation for double
 // is declared here and defined there.
-extern template class TransportEngine<double>;
+extern template class TransportEngine<double, StepTap<double>>;
 
 }  // namespace g4gpu::host

@@ -44,7 +44,21 @@ if "%MODE%"=="" set MODE=all
 set SRC=%~dp0src
 set NV=nvcc -std=c++17 -O2 -I "%SRC%"
 set NVG=nvcc -std=c++17 -O2 -arch=sm_86 -I "%SRC%"
-set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle
+set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle test_track_arena
+
+rem Tests that launch real kernels rather than calling __host__ __device__ code on the
+rem host. They need the arch flag: StepTally reduces with atomicAdd on a double, which
+rem does not exist before sm_60, and %NV% has no -arch so it defaults below that. This is
+rem how that was found - the test would not compile until it was built like the engine.
+set TESTS_GPU=test_step_hook
+
+rem test_custom_hook is a *project*, not a test of a function: it defines its own stepping
+rem action, instantiates the engine for it in its own translation unit, and links nothing of
+rem g4gpu's. It is built the way a user project with a custom hook is built, so if that
+rem arrangement ever stops working this fails at compile or link time. It takes ~3.5 minutes
+rem because it compiles the transport kernels for its own hook type - which is the honest cost
+rem of the arrangement and is measured in docs/RESULT.md rather than hidden.
+set TESTS_PROJECT=test_custom_hook
 
 echo --- drivers ---
 rem /IMPLIB keeps the import library and its .exp out of the project root. They are a
@@ -61,6 +75,15 @@ echo --- tests ---
 for %%T in (%TESTS%) do (
   %NV% -o tests\%%T.exe tests\%%T.cu || exit /b 1
 )
+for %%T in (%TESTS_GPU%) do (
+  %NVG% -o tests\%%T.exe tests\%%T.cu -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
+)
+for %%T in (%TESTS_PROJECT%) do (
+  %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
+    -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
+)
+rem From here on they are just tests - run and counted with the rest.
+set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT%
 echo BUILD OK
 if "%MODE%"=="build" exit /b 0
 
@@ -175,6 +198,34 @@ rem Eight switches once sat in the GUI, were written into generated projects, an
 rem read by the stepper: turning Compton off changed the dose by exactly zero. See RISK.md A3.
 rem This runs the scene once per switch and fails if any of them changes nothing.
 "%~dp0g4dose.exe" -verify-processes -n 200000 || exit /b 1
+
+echo.
+echo --- the step hook sees every step ---
+rem The general step-level customisation point (core/step_hook.cuh). Its whole claim is that
+rem a hook is handed every real step exactly once, charged to the right event - so that is
+rem what this asserts, against the scorer, which counts the same energy by a different route.
+rem A hook that quietly missed a class of steps would still produce plausible-looking output,
+rem which is why this is checked rather than assumed.
+"%~dp0g4dose.exe" -verify-step-hook -n 20000 || exit /b 1
+
+echo.
+echo --- the pool size does not change the answer, odd or even ---
+rem The throttle defers a track it has no room for rather than dropping it, so the dose must
+rem not depend on how many live slots a run was given. Three pools, and 2.5 is there for a
+rem second reason: it makes the pool ODD, which every other configuration in this pipeline
+rem could not. A track slot is 236 bytes, so an odd pool put the second half of the ping-pong
+rem arena at 4 mod 8 and every double in it was misaligned - a device fault that the default
+rem -live 4 could never reach. tests\test_track_arena.exe checks the arithmetic; this checks
+rem that a real run gives the same number three ways.
+for %%L in (8.0 4.0 2.5) do (
+  "%~dp0g4dose.exe" -n 200000 -live %%L > "%TEMP%\g4gpu_pool_%%L.txt" 2>&1 || (
+    echo FATAL: g4dose failed at -live %%L
+    type "%TEMP%\g4gpu_pool_%%L.txt"
+    exit /b 1
+  )
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_pool.ps1" ^
+  -Prefix "%TEMP%\g4gpu_pool_" -Labels "8.0,4.0,2.5" || exit /b 1
 echo.
 echo --- viewer selftest ---
 rem An interactive window cannot be tested by clicking, so the viewer drives its own camera
@@ -352,11 +403,18 @@ rem separate emitter, and nothing compared the two. So a generated PrimaryGenera
 rem fired one of the model's two beams for the whole run passed everything: it built, it ran,
 rem and it reported a dose that was not zero.
 rem
-rem 200000 events each, same model. The builder logs "selftest: compare <scorer> <MeV>"; the
-rem project prints the same scorers in its end-of-run block. A one-beam-instead-of-two run
-rem misses by tens of percent, far outside the few per cent two independent 200k-event Monte
-rem Carlos can differ by.
-"%~dp0out\selftest_project\MyDetector.exe" -n 200000 > "%TEMP%\g4gpu_cmp.txt" 2>&1 || exit /b 1
+rem A million events each, same model. The builder logs "selftest: compare <scorer> <MeV>";
+rem the project prints the same scorers in its end-of-run block. A one-beam-instead-of-two run
+rem misses by tens of percent.
+rem
+rem A million, and not the 200000 this ran for most of its life, because these are two
+rem INDEPENDENT Monte Carlos and their difference is noise until the statistics say otherwise.
+rem Measured on this model: 6.4% apart at 200000 histories, 0.80% at a million, -0.08% at four
+rem million - 1/sqrt(N), which is what agreement looks like. The threshold in
+rem compare_project.ps1 is 6%, and at 200000 the spread between two independent sides is 4.4%
+rem on dose1, so it sat 1.36 sigma out: a coin toss, and every pass it had ever given was luck
+rem rather than evidence. See docs/RISK.md V10.
+"%~dp0out\selftest_project\MyDetector.exe" -n 1000000 > "%TEMP%\g4gpu_cmp.txt" 2>&1 || exit /b 1
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_project.ps1" ^
   -Builder "%TEMP%\g4gpu_builder.txt" -Project "%TEMP%\g4gpu_cmp.txt" || exit /b 1
 

@@ -19,6 +19,22 @@
 //                   it, so demanding a big dose shift from those two would be demanding the
 //                   wrong physics; both change the number of steps enormously.
 //
+//   -verify-step-hook  the StepHook must see every step exactly once, with each step charged
+//                   to the right event. Both halves are checked against numbers the scorer
+//                   produced independently, by a completely different route - the scorer sums
+//                   on the device with atomicAdd as the steps happen, the hook is summed on
+//                   the host afterwards from the steps it was handed:
+//
+//                     sum over steps of edep                     == score_sum[0]
+//                     sum over events of (event's step sum)^2    == score_sum_sq[0]
+//
+//                   The first fails if a step is missed or counted twice or charged to the
+//                   wrong volume. The second fails if the steps are all there but attributed
+//                   to the wrong events, which the first cannot see - it is the same total
+//                   either way. This matters because "the hook sees a real step" is the whole
+//                   claim of core/step_hook.cuh, and a hook that quietly missed a class of
+//                   steps would still look completely reasonable in its output.
+//
 // Usage
 //   g4dose.exe                                 the B1 scene, 200000 events
 //   g4dose.exe -scene B1mesh -n 1000000
@@ -26,6 +42,9 @@
 //   g4dose.exe -off compton -off rayleigh      run with those processes disabled
 //   g4dose.exe -compare B1 B1mesh -n 500000
 //   g4dose.exe -verify-processes -n 200000
+//   g4dose.exe -verify-step-hook -n 20000    the per-step hook sees every step, exactly
+//   g4dose.exe -batch 500000                   choose the batch instead of sizing it from memory
+//   g4dose.exe -mem-frac 0.8                   let the track buffers take 80% of free memory
 //   g4dose.exe -list                           the registered scenes and process names
 #include <cuda_runtime.h>
 
@@ -85,7 +104,8 @@ struct Result {
 /// Which is exactly why -compare and -verify-processes each re-exec this program rather than
 /// looping in one process. See RunChild.
 Result RunOnce(const std::string& scene_name, int n_events, unsigned int seed,
-               const ProcessFlags& flags) {
+               const ProcessFlags& flags, int batch = 0, double mem_frac = 0,
+               double live = 0) {
   Result r;
   auto* rm = new G4RunManager;
   if (!scenes::Install(scene_name, rm)) {
@@ -96,6 +116,9 @@ Result RunOnce(const std::string& scene_name, int n_events, unsigned int seed,
   // After Install, because a scene's installer may set its own cut but never its processes.
   rm->SetProcesses(flags);
   rm->SetRandomSeed(seed);
+  if (mem_frac > 0) { rm->SetMemoryFraction(mem_frac); }
+  if (live > 0) { rm->GetEngine().SetLiveTracksPerEvent(live); }
+  if (batch > 0) { rm->SetBatchSize(batch); }
   rm->Initialize();
   rm->BeamOn(n_events);
 
@@ -116,6 +139,12 @@ Result RunOnce(const std::string& scene_name, int n_events, unsigned int seed,
   r.mass = mass;
   r.dose10k = (mass > 0) ? edep * MeV / joule / mass * gray / picogray * scale : 0.0;
   r.sigma10k = (mass > 0) ? rms * MeV / joule / mass * gray / picogray * scale : 0.0;
+  // A run that dropped tracks reported a dose that is too low, so it is not a result.
+  if (rm->GetLastRunStats().overflow > 0) {
+    std::printf("\nFATAL: %d tracks were dropped; this run is not a measurement.\n",
+                rm->GetLastRunStats().overflow);
+    return r;  // r.ok stays false
+  }
   r.steps = rm->GetLastRunStats().track_steps;
   r.ms = rm->GetLastRunStats().milliseconds;
   r.ok = true;
@@ -168,6 +197,240 @@ bool RunChild(const std::string& args, Result& out) {
   return true;
 }
 
+/// -verify-step-hook. See the note at the top of this file for what is being asserted.
+///
+/// Runs in this process rather than a child: it needs to reach into the engine and read a
+/// device buffer back, which no line of printed output could carry.
+bool VerifyStepHook(const std::string& scene_name, int n_events, unsigned int seed) {
+  using Rec = StepRecord<G4double>;
+
+  auto* rm = new G4RunManager;
+  if (!scenes::Install(scene_name, rm)) {
+    std::printf("\nFATAL: no scene named \"%s\".\n", scene_name.c_str());
+    return false;
+  }
+  rm->SetRandomSeed(seed);
+  rm->Initialize();
+
+  // One batch, so that DeviceStep::event - an index within the batch - identifies an event
+  // uniquely. Across batches those indices repeat and the per-event half of the check would
+  // be comparing sums of unrelated events.
+  const int batch = rm->GetEngine().batch();
+  if (n_events > batch) {
+    std::printf("\nFATAL: -verify-step-hook needs n <= the batch size (%d).\n", batch);
+    return false;
+  }
+
+  // Sized from the measured step count: B1 runs about 13 track-steps per event across all
+  // volumes, and the tap keeps only those in scorer 0, so this is roughly a 4x margin. The
+  // run asserts overflow == 0 rather than trusting the estimate.
+  const int capacity = n_events * 52 + 4096;
+  Rec* d_rec = nullptr;
+  int* d_ctl = nullptr;
+  if (cudaMalloc(&d_rec, sizeof(Rec) * static_cast<size_t>(capacity)) != cudaSuccess
+      || cudaMalloc(&d_ctl, sizeof(int) * 2) != cudaSuccess) {
+    std::printf("\nFATAL: could not allocate the step tap (%d records, %.0f MB).\n", capacity,
+                sizeof(Rec) * double(capacity) / 1048576.0);
+    return false;
+  }
+  cudaMemset(d_ctl, 0, sizeof(int) * 2);
+
+  StepTap<G4double> tap;
+  tap.records = d_rec;
+  tap.count = d_ctl;
+  tap.overflow = d_ctl + 1;
+  tap.capacity = capacity;
+  tap.score_slot = 0;     // only the scoring volume, which is what score_sum[0] counts
+  tap.only_deposits = false;  // boundary crossings with no deposit are steps too
+  rm->SetStepHook(tap);  // the passthrough users of the Geant4-shaped API get
+
+  rm->BeamOn(n_events);
+
+  int ctl[2] = {0, 0};
+  cudaMemcpy(ctl, d_ctl, sizeof(ctl), cudaMemcpyDeviceToHost);
+  const int n_rec = ctl[0], n_over = ctl[1];
+  std::vector<Rec> rec(n_rec > capacity ? capacity : n_rec);
+  if (!rec.empty()) {
+    cudaMemcpy(rec.data(), d_rec, sizeof(Rec) * rec.size(), cudaMemcpyDeviceToHost);
+  }
+  cudaFree(d_rec);
+  cudaFree(d_ctl);
+
+  const auto& run = *rm->GetCurrentRun();
+  if (run.score_sum.empty()) {
+    std::printf("\nFATAL: scene \"%s\" has no scorer.\n", scene_name.c_str());
+    return false;
+  }
+  const double want_sum = run.score_sum[0];
+  const double want_sq = run.score_sum_sq[0];
+
+  std::printf("== the step hook sees every step ==\n");
+  std::printf("  scene %s, %d events, seed 0x%X\n", scene_name.c_str(), n_events, seed);
+  std::printf("  %d steps tapped in scorer 0, %d dropped\n", n_rec, n_over);
+
+  int fails = 0;
+  if (n_over != 0) {
+    std::printf("  FAIL: the tap overflowed by %d - raise the capacity; the sums below are\n"
+                "        a truncated sample and cannot be compared to anything\n", n_over);
+    return false;
+  }
+  if (n_rec == 0) {
+    std::printf("  FAIL: no steps were tapped at all. The hook is not being called.\n");
+    return false;
+  }
+
+  // Per-event sums first; the two totals are then built from them.
+  std::vector<double> per_event(n_events, 0.0);
+  double worst_len = 0, worst_gain = 0;
+  int bad_event = 0, bad_species = 0;
+  for (const Rec& r : rec) {
+    if (r.event < 0 || r.event >= n_events) {
+      ++bad_event;
+      continue;
+    }
+    per_event[r.event] += r.edep;
+    if (r.length < 0) { worst_len = std::fmin(worst_len, r.length); }
+    // Kinetic energy can only fall across a step. A track that leaves the world keeps its
+    // energy and one that dies inside is reported at zero, so this holds for every path.
+    const double gain = r.ekin_post - r.ekin_pre;
+    if (gain > worst_gain) { worst_gain = gain; }
+    if (r.species < 0 || r.species > 32) { ++bad_species; }
+  }
+
+  double got_sum = 0, got_sq = 0;
+  for (double e : per_event) {
+    got_sum += e;
+    got_sq += e * e;
+  }
+
+  // The two sides add the same numbers in different orders - the scorer with atomicAdd on the
+  // device as the steps happen, this loop on the host afterwards - and floating-point addition
+  // is not associative, so they agree to rounding rather than bit for bit. At 1e-12 relative
+  // this still catches a single missed step: B1's smallest per-step deposit is far above
+  // 1e-12 of the run total.
+  const double kRel = 1e-12;
+  const double d_sum = std::fabs(got_sum - want_sum) / (want_sum != 0 ? std::fabs(want_sum) : 1);
+  const double d_sq = std::fabs(got_sq - want_sq) / (want_sq != 0 ? std::fabs(want_sq) : 1);
+
+  std::printf("  sum edep      hook %.15g  scorer %.15g   rel %.2e\n", got_sum, want_sum, d_sum);
+  std::printf("  sum edep^2    hook %.15g  scorer %.15g   rel %.2e\n", got_sq, want_sq, d_sq);
+
+  if (d_sum > kRel) {
+    std::printf("  FAIL: the hook and the scorer do not see the same energy (rel %.2e > %.0e).\n"
+                "        A step is being missed, counted twice, or charged to the wrong volume.\n",
+                d_sum, kRel);
+    ++fails;
+  }
+  // Only worth diagnosing when the totals DID agree. If they did not, the per-event sums are
+  // bound to differ too, and "charged to the wrong event" would be the wrong diagnosis for
+  // what is really a missing step.
+  if (d_sq > kRel && d_sum <= kRel) {
+    std::printf("  FAIL: the totals agree but the per-event sums do not (rel %.2e > %.0e).\n"
+                "        Every step is present and charged to the wrong event.\n", d_sq, kRel);
+    ++fails;
+  }
+  if (bad_event != 0) {
+    std::printf("  FAIL: %d steps carried an event index outside [0, %d).\n", bad_event, n_events);
+    ++fails;
+  }
+  if (bad_species != 0) {
+    std::printf("  FAIL: %d steps carried an unrecognised species.\n", bad_species);
+    ++fails;
+  }
+  if (worst_len < 0) {
+    std::printf("  FAIL: a step reported a negative path length (%g mm).\n", worst_len);
+    ++fails;
+  }
+  if (worst_gain > 0) {
+    std::printf("  FAIL: a step gained %g MeV of kinetic energy.\n", worst_gain);
+    ++fails;
+  }
+
+  // ---- 3. every real step says what ended it.
+  //
+  // The point of this one is coverage rather than correctness. StepReport is filled in on many
+  // separate paths through three steppers, and the failure mode of adding a field like that is
+  // not a wrong value - it is a path nobody annotated, which then reports the default forever.
+  // A default is exactly what an un-annotated path leaves behind, so requiring that no step
+  // reports one turns "did I cover every branch" into something the machine answers.
+  //
+  // The histogram is printed rather than asserted against expected fractions: B1's mix is a
+  // property of B1, and pinning it here would make this test fail for the wrong reason the
+  // first time the geometry or the beam changed.
+  {
+    const char* kProc[] = {"none",    "transport", "compton", "photoelectric", "conversion",
+                           "rayleigh", "ionisation", "brems",  "annihilation",  "msc",
+                           "nuclearstopping", "belowcut"};
+    const char* kStat[] = {"undefined", "geomboundary", "worldboundary",
+                           "poststep",  "alongstep",    "stopandkill"};
+    const int kNProc = static_cast<int>(sizeof kProc / sizeof kProc[0]);
+    const int kNStat = static_cast<int>(sizeof kStat / sizeof kStat[0]);
+    std::vector<long long> proc_n(kNProc, 0), stat_n(kNStat, 0);
+    int undefined_proc = 0, undefined_stat = 0, out_of_range = 0, no_material = 0;
+    for (const Rec& r : rec) {
+      if (r.process < 0 || r.process >= kNProc || r.status < 0 || r.status >= kNStat) {
+        ++out_of_range;
+        continue;
+      }
+      ++proc_n[r.process];
+      ++stat_n[r.status];
+      if (r.process == 0) { ++undefined_proc; }
+      if (r.status == 0) { ++undefined_stat; }
+      if (r.material < 0) { ++no_material; }
+    }
+    std::printf("  processes: ");
+    for (int i = 0; i < kNProc; ++i) {
+      if (proc_n[i] > 0) { std::printf("%s %lld  ", kProc[i], proc_n[i]); }
+    }
+    std::printf("\n  status:    ");
+    for (int i = 0; i < kNStat; ++i) {
+      if (stat_n[i] > 0) { std::printf("%s %lld  ", kStat[i], stat_n[i]); }
+    }
+    std::printf("\n");
+    if (out_of_range != 0) {
+      std::printf("  FAIL: %d steps carried a status or process outside the enum.\n",
+                  out_of_range);
+      ++fails;
+    }
+    if (undefined_proc != 0) {
+      std::printf("  FAIL: %d steps reported no defining process. Some path through the\n"
+                  "        steppers sets a deposit but never says what ended the step.\n",
+                  undefined_proc);
+      ++fails;
+    }
+    if (undefined_stat != 0) {
+      std::printf("  FAIL: %d steps reported no status, same cause as above.\n", undefined_stat);
+      ++fails;
+    }
+    if (no_material != 0) {
+      std::printf("  FAIL: %d steps reported no material, though they were inside a scored\n"
+                  "        volume and so were certainly inside some material.\n", no_material);
+      ++fails;
+    }
+  }
+
+  // Not an assertion - a demonstration that the thing the hook exists for is now computable.
+  // LET is the per-step quantity that no event aggregate can reconstruct, because the
+  // aggregate has neither a step length nor a step.
+  double dose_w_let = 0, dose_tot = 0, max_let = 0;
+  long long moved = 0;
+  for (const Rec& r : rec) {
+    if (r.length <= 0) { continue; }
+    ++moved;
+    const double let = r.edep / r.length;
+    dose_w_let += let * r.edep;
+    dose_tot += r.edep;
+    if (let > max_let) { max_let = let; }
+  }
+  if (dose_tot > 0) {
+    std::printf("  (dose-averaged LET %.4f MeV/mm, peak %.4f, over %lld steps that moved)\n",
+                dose_w_let / dose_tot, max_let, moved);
+  }
+
+  std::printf("\n%s (%d failures)\n", fails ? "FAILED" : "PASSED", fails);
+  return fails == 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -180,6 +443,10 @@ int main(int argc, char** argv) {
   std::vector<std::string> disabled;
   bool machine = false;
   bool verify_processes = false;
+  bool verify_step_hook = false;
+  int batch = 0;       // 0 = let the engine size it from device memory
+  double mem_frac = 0; // 0 = leave the engine's default
+  double live = 0;     // 0 = leave the engine's default live-tracks-per-event
 
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-scene") == 0 && i + 1 < argc) {
@@ -193,6 +460,14 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "-compare") == 0 && i + 2 < argc) {
       compare_a = argv[++i];
       compare_b = argv[++i];
+    } else if (std::strcmp(argv[i], "-batch") == 0 && i + 1 < argc) {
+      batch = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "-live") == 0 && i + 1 < argc) {
+      live = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "-mem-frac") == 0 && i + 1 < argc) {
+      mem_frac = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "-verify-step-hook") == 0) {
+      verify_step_hook = true;
     } else if (std::strcmp(argv[i], "-verify-processes") == 0) {
       verify_processes = true;
     } else if (std::strcmp(argv[i], "-list") == 0) {
@@ -263,6 +538,11 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // --------------------------------------------------------- -verify-step-hook
+  if (verify_step_hook) {
+    return VerifyStepHook(scene_name, n_events, seed) ? 0 : 1;
+  }
+
   // --------------------------------------------------------- -verify-processes
   if (verify_processes) {
     char args[512];
@@ -319,7 +599,7 @@ int main(int argc, char** argv) {
   }
 
   // ------------------------------------------------------------------ one run
-  const Result r = RunOnce(scene_name, n_events, seed, flags);
+  const Result r = RunOnce(scene_name, n_events, seed, flags, batch, mem_frac, live);
   if (!r.ok) { return 2; }
 
   if (machine) {

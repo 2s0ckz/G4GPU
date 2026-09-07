@@ -343,6 +343,167 @@ The lesson is recorded as docs/RISK.md S1, and it is the reason every comparison
 project now prints both uncertainties: a discrepancy that is "inside the reference's
 statistics" is not thereby absent, it is merely unmeasured.
 
+## The step hook
+
+`src/core/step_hook.cuh`. A device functor called once per real step of every track - the
+general step-level customisation point, as against the per-event aggregate that
+`G4UserSteppingAction` and `G4VPrimitiveScorer::Accept` are handed here.
+
+### What it costs
+
+Measured with the stock null-gated `StepTap` compiled into all three stepping kernels, against
+the same build with the hook removed entirely.
+
+| | baseline | with the hook |
+|---|---|---|
+| B1 dose10k, seed 1 / 2 / 3 (pGy) | 429.9790 / 426.1801 / 427.8784 | **identical to the last digit** |
+| track-steps, seed 1 / 2 / 3 | 1299624 / 1296532 / 1298099 | **exactly equal** |
+| 2M events, median of 6 interleaved runs | 852.0 ms | 853.2 ms (**+0.14%**) |
+| 2M events, spread within a build | ±2.4% | ±2.4% |
+
++0.14% on the median sits an order of magnitude inside the run-to-run spread, so the honest
+statement is that the cost is not measurable, not that it is 0.14%. The two builds were run
+interleaved rather than in blocks - run in blocks, the *baseline* measured 2.3% slower, which
+is the size of the drift this machine produces over a few minutes and a reminder of what a
+non-interleaved A/B is worth.
+
+The dose being bit-identical is the stronger result and the one that was actually in doubt: it
+says the hook changed no random draw and no branch. The step-length out-parameter added to
+`step_gamma`/`step_lepton`/`step_hadron` is written on every path and read by nothing but the
+hook.
+
+ptxas survived, which was not a given - it has died twice on `run_step_hadron` in this
+project's life (RISK.md S12), and this change adds a template parameter to it. That is also why
+the stock hook is gated at runtime by a null pointer rather than by a second instantiation: a
+predicated load is a known cost, and doubling the instantiation count of that kernel is not.
+
+### That it sees every step
+
+`g4dose.exe -verify-step-hook`, run by `build_all.bat`. The scorer and the hook count the same
+energy by different routes - the scorer with `atomicAdd` on the device as the steps happen, the
+hook by a host sum over the records afterwards - so agreement is evidence rather than tautology:
+
+```
+20000 events, B1, seed 0xF00D, 43487 steps tapped in scorer 0, 0 dropped
+  sum edep    hook 9088.66987121152   scorer 9088.66987121152    rel 0.00e+00
+  sum edep^2  hook 38748.4215030902   scorer 38748.4215030902    rel 0.00e+00
+```
+
+Two sums, because they fail differently. The first fails if a step is missed, double-counted or
+charged to the wrong volume. The second - the sum over events of the square of each event's own
+total - fails if every step is present but attributed to the wrong event, which the first cannot
+see, being the same total either way.
+
+Both came out bit-identical rather than merely within the 1e-12 gate. That is luck about
+summation order, not a guarantee, and the gate stays where it is.
+
+**Falsified before being believed.** A check that has never failed is not known to be capable of
+failing. Making `run_step_gamma` skip the steps that tracks die on - 0.038% of the energy, a
+plausible-looking bug that leaves the output entirely reasonable - fails it at 3.8e-4 and
+5.9e-4, nine orders above the gate:
+
+```
+  sum edep    hook 9085.19521732155   scorer 9088.66987121152    rel 3.82e-04
+  sum edep^2  hook 38725.4361767218   scorer 38748.4215030902    rel 5.93e-04
+```
+
+### The true path length
+
+`DeviceStep::length` is the stepper's own `step_len` - the true path - and not
+`|pos_post - pos_pre|`. The two differ by however much MSC deflected the track inside the step,
+always in the same direction, so a LET computed from the displacement is biased high. This is
+what `G4Step::GetStepLength` returns and what the energy loss over that step was computed
+against. It is reported by the stepper rather than reconstructed by the caller because the
+caller cannot reconstruct it.
+
+For the record, on B1 the hook gives a dose-averaged LET of 0.3786 MeV/mm with a peak of
+6.1995 MeV/mm - a quantity no event aggregate can produce, having neither a step nor a length.
+
+### Memory, which is the part that decides whether this scales
+
+The mechanism stores nothing: `DeviceStep` is a view built in registers from state the kernel
+already holds. What a step-level analysis costs is decided entirely by what the hook does, and
+there are two kinds of hook.
+
+`StepTally` reduces into a fixed device array - `atomicAdd` with the bin and the weight given as
+device functors. Its footprint is chosen at setup: a 200-bin LET spectrum is 1.6 kB whether it
+sees a thousand steps or a trillion, and a per-volume tally of a 1e5-volume geometry is 800 kB.
+Nothing about that is new here - it is what `score` and `voxel_score` already are, and
+`voxel_score` already runs at ~1e6 cells.
+
+`StepTap` materialises steps, and is therefore the one thing in this file whose cost grows with
+the amount of transport: 2.6e7 track-steps in a 2M-event B1 run at 104 bytes a record - the
+size of `StepRecord<double>`, measured rather than counted by hand - is 2.7 GB, and B1 is four
+volumes with one pencil beam. It is capped, it counts what it drops rather than
+truncating silently, and it is documented as being for debugging and small runs. It is the stock
+instantiation only because it is the one hook that answers an arbitrary question without a
+rebuild.
+
+The general point is the one worth keeping: a design whose memory scales with the number of
+steps fails exactly on the runs that are worth doing, because step count is the quantity a Monte
+Carlo exists to increase.
+
+## One track pool, and what it cost
+
+The five per-species buffers are one species-agnostic pool. A track carries its species; the
+pool takes anything; five index arrays scatter the pool's slots into per-species runs so each
+kernel still launches over its own species contiguously. The separation is between **storage**
+and **dispatch**: warp coherence needs a species contiguous *at launch*, which is what the index
+lists give, and never needed it separately *allocated*, which is what five buffers were.
+
+Why it matters is not elegance. A capacity per species is a guess per species, and the guess was
+2/4/0.5/1/1 slots per event for gamma/electron/positron/proton/alpha - which is a photon beam's
+shape, written into the scheduler. A proton run overflows the electron buffer with the proton
+buffer standing empty. One pool has no shape.
+
+### The answer did not move
+
+B1's dose is **bit-identical** before and after, which is a stronger result than it sounds: the
+prediction was that it would need a tolerance, because the pool changes which slot a secondary
+lands in and the RNG key is derived from the parent rather than the slot. Being wrong in that
+direction is the evidence that the key really is slot-independent.
+
+### The throughput
+
+Example B1, 2M events, interleaved, five runs each way against the same program built at the
+commit before this work, real time (the event-loop clock, `GeneratePrimaries` included):
+
+```
+before  1039.9  1040.5  1049.9  1052.3  1052.3 ms    median 1049.9   1.91e6 events/s
+after   1164.7  1165.2  1172.4  1173.2  1174.4 ms    median 1172.4   1.71e6 events/s
+```
+
+**10.4%**, with no overlap between the two sets. 8.0% of it is the `G4Track` state, measured
+separately and on its own (docs/G4STEP.md); the remaining ~2.5% is this - four bytes of species
+on every track, and five index arrays sized at the whole pool each, which is 20 bytes a slot
+against a 236-byte track.
+
+The reference driver `b1_gpu_sched.exe` is unchanged at 2.40e6 events/s. It keeps its own three
+buffers deliberately: it exists to be an independent implementation of the same physics, and a
+cross-check that shares the thing being checked is not a cross-check.
+
+### Nothing is dropped, and that is checked rather than argued
+
+A pool sized to the memory available is a pool that can run out, and what happens then decides
+whether the number at the end means anything. When the output buffer cannot hold what a track
+would produce, the track is carried forward untouched and stepped in a later iteration -
+`if (i >= n_step) { out.append(p); return; }` - and `RunStats::throttled` counts how often.
+
+The claim is that this costs iterations and not energy, so the check is to vary the pool and
+require the dose not to move at all:
+
+```
+dose10k by slots per event - 8.0: 429.8198, 4.0: 429.8198, 2.5: 429.8198
+```
+
+Identical, not close. Deferring a track changes the order work is done in and nothing else,
+because every random stream is keyed by the track rather than by its slot. `build_all.bat` runs
+all three through `tools/compare_pool.ps1`; the builder's model gives the same answer at 4, 8
+and 16 slots per event, deferring 49152 track-steps at the smallest and none at the largest.
+
+2.5 earns its place twice over. It is the only pool in this pipeline that is an ODD number, and
+an odd pool used to fault - see docs/RISK.md V11.
+
 ## What is still on the table
 
 See docs/ROADMAP.md, which lists what is unfinished in the order it matters. In brief: mesh

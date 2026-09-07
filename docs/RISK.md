@@ -1962,3 +1962,140 @@ Rayleigh matters where a photon's direction after scattering matters - scatter f
 imaging geometries, anything below about 100 keV where its share of the cross section is not
 0.35%. B1 at 6 MeV is not that problem, which is why B1 could not see this and why B1 passing
 is not evidence that it is fixed. `tests/test_rayleigh_angular.cu` is.
+
+### V10: a threshold that sat on its own noise floor, and a story about it that was wrong twice
+
+`compare_project.ps1` requires the builder's selftest and the project the builder generated
+from the same model to agree within 6%. This session both numbers moved and it failed. Nothing
+was wrong with either program.
+
+#### The check could not tell agreement from disagreement
+
+It ran 200000 events a side. At that size the two numbers are two independent Monte Carlo
+samples and the spread between them is the whole story:
+
+| | dose1 | cells |
+|---|--:|--:|
+| relative uncertainty at 1M events, from the rms the project itself prints | 1.39% | 0.98% |
+| one side at 200000, scaled by sqrt(5) | 3.12% | 2.18% |
+| two independent sides, x sqrt(2) | **4.4%** | **3.1%** |
+
+Against a 6% tolerance that is 1.36 sigma on `dose1`: roughly a one-in-six chance of failing on
+any given pair, every time the pipeline ran. Every pass it had ever given was luck rather than
+evidence, and the failure that finally exposed that was not a defect in anything it was
+watching. Measured end to end, the two sides differ by 6.4% at 200000 histories, 0.80% at a
+million and -0.08% at four million - 1/sqrt(N), which is what two independent Monte Carlos
+agreeing looks like.
+
+Both sides run a million now. That puts the noise near 1% and leaves the tolerance three sigma
+away, while still catching what the check exists for: a generated project that fires one of a
+two-beam model's sources, which is wrong by tens of per cent.
+
+The rule, and it is not about this check: **a threshold is not a number you pick, it is a number
+you compare against the spread of the thing being thresholded.** Nobody had ever measured that
+spread. It took two minutes - the program prints its own rms. V1 is the same lesson from the
+other side, a comparison whose statistics were too weak to mean anything, and it cost a day.
+
+#### And the explanation I gave for the failure was invented
+
+I wrote, and put in a summary of this session's work, that the builder had been *silently
+dropping tracks* - that its fixed per-species buffers overflowed, that `RunStats.overflow` went
+unchecked, and that the dose had been under-reported by 8.6% as a result. It was a good story:
+the per-species buffers really were replaced this session by one species-agnostic pool with a
+throttle, precisely because partitioned capacity is the wrong shape, and a number that moved
+8.6% the moment that landed fits perfectly.
+
+Built at HEAD and run on the same model, the old builder reports:
+
+```
+  1458480 track steps, 114 iterations, peaks g/e/p 65536/8735/558
+selftest: compare dose1 3483.286491 MeV over 200000 events
+selftest: compare cells 8202.527743 MeV over 200000 events
+```
+
+No overflow, no abandonment - `g4builder_panels.inc` prints a WARNING for either and printed
+neither. The 65536 peak that looks like a saturated buffer is `SetBatchSize(65536)`: every
+primary of the batch alive at iteration 0, against a gamma capacity of twice that. And the two
+scorers moved in **opposite directions** - `dose1` +8.6%, `cells` -2.6% - which is the signature
+of noise and not of loss. Loss moves everything one way.
+
+What actually changed the numbers is the RNG key fix from earlier in the same session (the key
+was batch-local, `seed ^ i`, so every batch replayed the same streams; it is the global track
+index now). That re-randomised every stream, which makes HEAD and now two independent samples of
+the same model. 8.6% on `dose1` is 2.0 sigma of the spread tabulated above and 2.6% on `cells`
+is 0.85. Ordinary.
+
+The "8.6%" was worse than a coincidence: there is an 8.6% in this session's notes, and it is the
+memory overhead of the five species index arrays against a 232-byte track. I attached a number
+from one part of the work to a conclusion in another because they matched to one decimal place.
+
+This is V9 again, one entry later: **an explanation that accounts for the evidence is not
+thereby supported by it.** V9's version was a satisfying narrative attached to a number that did
+not support it. This one is a satisfying narrative attached to a number from somewhere else
+entirely. Both times the refuting check was cheap - here, build the old binary and run it, which
+is twenty minutes of nvcc and no thought at all. Both times I wrote the conclusion first.
+
+The throttle does need to be shown lossless, and separately is: the same model reports
+`dose1 3783.696869 MeV` identically at 4, 8 and 16 live slots per event, deferring 49152
+track-steps at the smallest and none at the largest. That is what convergence in the pool size
+looks like, and it is evidence about the throttle. It was never evidence about HEAD.
+
+### V11: an odd number of track slots, and a fault reported four hundred lines from its cause
+
+`-live 2.5`:
+
+```
+track pool: 7396897 live slots per side (2.5 per event), 3.25 GB total
+CUDA error misaligned address at D:/g4gpu/src\host/transport_run.cuh:96
+```
+
+Line 96 is a `cudaMemcpy` inside `DeviceTracks::count()`. It has nothing to do with the fault -
+it is merely the first synchronising call after the kernel that faulted, which is where an
+asynchronous device error surfaces. The fault is in `track_arena_half_bytes`.
+
+The engine allocates both halves of the ping-pong as one block and puts the second at
+`base + track_arena_half_bytes(pool)`. That number is therefore the alignment of every array in
+the second half, and it was not rounded up to the slab's alignment. A track slot is 236 bytes,
+so:
+
+| pool | `236 * pool + slack` | mod 8 |
+|---|--:|--:|
+| 2 500 000 | 590 053 760 | 0 |
+| 2 499 997 | 590 053 052 | 4 |
+
+Every `double` in the second half of the arena was then at a 4-byte offset. `TrackSlab::take`
+aligns each array to 256 bytes and was doing its job perfectly; it was the base handed to it
+that was wrong.
+
+#### Why nothing had ever seen it
+
+`pool = batch * live_per_event`. The default is 4.0, and 236 times any even number is a multiple
+of 8, so **every configuration this pipeline has ever run landed on the lucky case**. Only a
+fractional slots-per-event makes the product odd, and only `-live` can ask for one. The
+alignment was a property of the inputs that had been tried, not of the code.
+
+#### How it was found, which is the part worth keeping
+
+Not by a test. I was writing a commit message and it contained the line "identical dose at 8.0,
+4.0 and 2.5 slots per event". That had been measured earlier in the same session and was true
+when it was measured. I ran it again before quoting it, because V10 - two entries earlier, the
+same afternoon - is about asserting numbers I had not checked. The 2.5 case did not produce a
+dose at all.
+
+**A measurement is about a version of the code, and the code moved.** The claim was not
+fabricated, which makes it the more dangerous kind: it was true, it stayed in my notes, and
+nothing about restating it felt like an assertion.
+
+#### What now checks it
+
+`tests/test_track_arena.cu`, host-only, sweeps odd pools, even pools, powers of two and the two
+sizes the automatic batch sizer actually produced on this machine, and asserts three things:
+that the half size is a multiple of `TrackSlab::kAlign`; that carving both halves the way the
+engine does yields nothing misaligned for a `double`; and that the measured size is within its
+documented slack of what the carve used, which is the invariant that "measure and carve agree"
+rests on. Reverting the fix makes it fail at pools 1, 3, 7, 63, 65, and on down the list.
+
+`build_all.bat` also runs `g4dose -n 200000` at 8.0, 4.0 and 2.5 slots per event and requires
+one dose, through `tools/compare_pool.ps1`. That is a different claim from the arithmetic - it
+is the throttle's claim, that deferring a track changes the order of work and nothing else - and
+the odd pool comes along with it for free.

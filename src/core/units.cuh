@@ -13,6 +13,16 @@ template <typename T> __host__ __device__ constexpr T GeV() { return T(1e3); }
 // 1 barn = 1e-28 m^2 = 1e-22 mm^2
 template <typename T> __host__ __device__ constexpr T barn() { return T(1e-22); }
 
+// Time, and the speed that ties it to length. CLHEP has nanosecond as the unit of time and
+// derives c_light from the SI value; both are done the same way here rather than pasting
+// 299.792458, so that mm and ns remain the only places a length or a time is defined.
+// docs/RISK.md V8 is what a hand-typed physical constant cost last time.
+template <typename T> __host__ __device__ constexpr T ns() { return T(1); }
+template <typename T> __host__ __device__ constexpr T s()  { return T(1e9) * ns<T>(); }
+template <typename T> __host__ __device__ constexpr T c_light() {
+  return T(2.99792458e8) * m<T>() / s<T>();  // 299.792458 mm/ns
+}
+
 template <typename T> __host__ __device__ constexpr T pi()    { return T(3.14159265358979323846); }
 template <typename T> __host__ __device__ constexpr T twopi() { return T(6.28318530717958647692); }
 

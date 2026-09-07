@@ -10,13 +10,126 @@
 // unique within a buffer and the iteration disambiguates reuse across ping-pongs. That
 // gives every track a fresh independent stream each step for the cost of one int.
 #pragma once
+#include <cuda_runtime.h>
+
 #include "core/particle.cuh"
+#include "core/step_report.cuh"
+#include "core/units.cuh"
 #include "core/vec3.cuh"
 
 namespace g4gpu {
 
+/// Whether the G4Track block is carried on every track.
+///
+/// ON by default. It is not free and the number is known: the block - parent, three clocks,
+/// track length, vertex, creator process, weight, polarization, user data - is 136 of the 236
+/// bytes a slot costs, and a track is loaded and stored on every step of every iteration.
+/// Measured interleaved against a build without it, five runs each way with no overlap
+/// between the two sets, it costs 7.6% of throughput on B1 - about 2.30 to 2.13 million
+/// events a second - and is paid by every run whether a hook reads any of it or not.
+///
+/// It is on anyway, because the point of this port is to answer what Geant4 answers. A
+/// GetParentID() that does not work is a bigger defect than an 8% slower run.
+///
+/// A project that wants the speed back and does not need the accessors builds with
+/// -DG4GPU_FULL_TRACK_STATE=0; every accessor behind it then becomes a compile error naming
+/// this flag, rather than silently returning a stale value. TrackState::status and ::flags
+/// are outside the switch and always present - killing a track from a stepping action and
+/// knowing whether a step is the first in its volume are read by the kernel itself.
+///
+/// What the block is, and what it weighs: parent, three clocks, track length, vertex, creator
+/// process, weight, polarization, user data - 136 bytes, taking a slot from 100 to 236. It was
+/// 96 to 232 on the day the throughput was measured; the four bytes since are the species
+/// field the pooled scheduler added. A track is loaded and stored on every step of every
+/// iteration: 8.0% of throughput on B1, interleaved against a build without it, with no
+/// overlap between the two sets of runs.
+///
+/// The part of that number worth keeping in view is who pays it: every run, including every
+/// run whose stepping action never looks at any of it. That was the argument for defaulting it
+/// off, and it lost to the one above - a port exists to give Geant4's answers - but it is the
+/// argument to weigh again for anything added to TrackState later. Per-step state that only
+/// some hooks read does not have to be carried on the track: see the note further down about
+/// keying it by track id instead.
+///
+/// What is NOT behind this switch, and stays on always: TrackState::status and ::flags, 8
+/// bytes between them. Killing a track from a stepping action and knowing whether a step is
+/// the first in its volume are worth having in every build, and neither is an accessor onto
+/// stored history - they are read by the kernel itself.
+#ifndef G4GPU_FULL_TRACK_STATE
+#define G4GPU_FULL_TRACK_STATE 1
+#endif
+constexpr bool kFullTrackState = (G4GPU_FULL_TRACK_STATE != 0);
+
+/// The species that have a stepping kernel, as a dense index for the dispatch lists.
+///
+/// This is the ONE place a species list still exists, and it is now about dispatch rather
+/// than storage: a track can only be stepped by a kernel that was compiled for it, so the
+/// set of kernels is the set of species, and no arrangement of buffers changes that. What
+/// used to be here as well - five buffers, five capacities to guess, five branches in every
+/// router, a silent drop for anything not on the list - has gone. Tracks live in one pool
+/// and carry what they are.
+///
+/// Adding a species is now: an entry here, and a kernel instantiated for it. Nothing else.
+enum TrackSpeciesIndex : int {
+  kSpeciesGamma = 0,
+  kSpeciesElectron = 1,
+  kSpeciesPositron = 2,
+  kSpeciesProton = 3,
+  kSpeciesAlpha = 4,
+  kNumTrackSpecies = 5,
+};
+
+/// -1 for a particle no kernel steps. The caller decides what that means; nothing here
+/// quietly routes it somewhere plausible.
+__host__ __device__ inline int species_index(ParticleType t) {
+  switch (t) {
+    case ParticleType::kGamma:    return kSpeciesGamma;
+    case ParticleType::kElectron: return kSpeciesElectron;
+    case ParticleType::kPositron: return kSpeciesPositron;
+    case ParticleType::kProton:   return kSpeciesProton;
+    case ParticleType::kAlpha:    return kSpeciesAlpha;
+    default:                      return -1;
+  }
+}
+
+/// Bits in TrackState::flags.
+enum TrackFlag : unsigned int {
+  /// The previous step of this track ended on a boundary, so this step starts on one.
+  /// G4Step::IsFirstStepInVolume reads it.
+  kFirstStepInVolume = 1u << 0,
+  /// G4Track::IsBelowThreshold. Set by nothing in this transport yet; a stepping action may
+  /// set it, and it is then carried across steps like any other track state.
+  kBelowThreshold = 1u << 1,
+  /// G4Track::IsGoodForTracking. Same.
+  kGoodForTracking = 1u << 2,
+};
+
+/// One track in flight.
+///
+/// The first block is what transport needs. The second is G4Track state - provenance, timing,
+/// and the vertex the track was created at - which no physics here reads, but which
+/// G4VUserDeviceSteppingAction exposes through DeviceStep::GetTrack(). It is carried because
+/// the alternative is accessors that return zero, and a zero meaning "not implemented" is
+/// indistinguishable from a zero meaning zero.
+///
+/// It is not free: this struct is loaded and stored for every track on every step, so the
+/// second block costs bandwidth in every run whether or not a hook reads it. What that costs
+/// is measured rather than asserted - see docs/RESULT.md.
 template <typename real_t>
 struct TrackState {
+  /// What this track is.
+  ///
+  /// The pool holds every species together, so a track has to say which it is. It used to be
+  /// inferable from WHICH buffer a track sat in - five buffers, one per species - and that is
+  /// what tied the storage layout to the physics list: adding a neutron meant a sixth buffer,
+  /// a sixth capacity to guess, and a sixth branch in every router. Four bytes here buys all
+  /// of that back.
+  ///
+  /// Dispatch still runs one specialised kernel per species, because a warp whose threads take
+  /// different physics paths serialises through all of them. That needs each species to be
+  /// CONTIGUOUS when a kernel launches, which is what the index lists provide - not separate
+  /// storage, which is what it used to be conflated with.
+  ParticleType species;
   Vec3<real_t> pos;
   Vec3<real_t> dir;
   real_t ekin;
@@ -35,11 +148,116 @@ struct TrackState {
   real_t msc_tlimit;
   /// Frozen alongside it: Geant4 recomputes tlimitmin at the same points.
   real_t msc_tlimitmin;
+
+  // ---------------------------------------------------------------- G4Track state
+
+  /// G4Track::GetParentID. The parent's rng_key, or 0 for a primary - a key rather than
+  /// Geant4's small dense integer, for the same reason GetTrackID() is.
+  unsigned int parent_key;
+  /// G4Track::GetGlobalTime, ns. Time since the event began. A secondary inherits its
+  /// parent's value at the moment it was created.
+  real_t global_time;
+  /// G4Track::GetLocalTime, ns. Time since THIS track began, so a secondary starts at zero.
+  real_t local_time;
+  /// G4Track::GetProperTime, ns. Time in the particle's own rest frame: dt/gamma.
+  real_t proper_time;
+  /// G4Track::GetTrackLength, mm. The true path summed over every step so far.
+  real_t track_length;
+  /// G4Track::GetVertexPosition - where this track was created.
+  Vec3<real_t> vertex_pos;
+  /// G4Track::GetVertexMomentumDirection.
+  Vec3<real_t> vertex_dir;
+  /// G4Track::GetVertexKineticEnergy.
+  real_t vertex_ekin;
+  /// G4Track::GetLogicalVolumeAtVertex, as a volume index.
+  int vertex_volume;
+  /// G4Track::GetCreatorProcess - which process made this track. fNotDefined for a primary,
+  /// which is what Geant4 reports too, as a null pointer.
+  ProcessId creator_process;
+  /// G4Track::GetWeight. There is no variance reduction here so nothing changes it, but a
+  /// stepping action may, and it is then carried and inherited like any other track state.
+  real_t weight;
+  /// G4Track::GetPolarization. No process in this transport produces or consumes it - there
+  /// is no polarised Compton and there are no optical photons - so it is user-owned state: a
+  /// stepping action can set it and read it back on later steps.
+  Vec3<real_t> polarization;
+  /// G4Track::GetTrackStatus. A stepping action sets it; the kernel reads it back after the
+  /// hook returns, to decide whether to requeue the track.
+  TrackStatus status;
+  /// TrackFlag bits.
+  unsigned int flags;
+  /// The device answer to G4VUserTrackInformation. That is a pointer to a host object and
+  /// cannot exist here, but the capability - attach your own data to a track and get it back
+  /// on the next step - is meaningful, so what is offered is a POD slot. Nothing in the
+  /// engine reads or writes it.
+  unsigned int user_data;
+
+  /// Fills the G4Track block for a track that starts now.
+  ///
+  /// Used for primaries (parent 0, fNotDefined creator, whatever the gun's t0 is) and for
+  /// secondaries (the parent's key, clock and creating process). One function for both is the
+  /// point: a secondary that forgot to inherit its parent's clock is a bug no test of the
+  /// energy would ever see.
+  __host__ __device__ void begin(const Vec3<real_t>& where, const Vec3<real_t>& direction,
+                                 real_t kinetic, int vol, unsigned int parent,
+                                 ProcessId creator, real_t t_global, real_t w) {
+    status = TrackStatus::fAlive;
+    flags = 0u;
+    if (!kFullTrackState) { return; }
+    parent_key = parent;
+    global_time = t_global;
+    local_time = real_t(0);
+    proper_time = real_t(0);
+    track_length = real_t(0);
+    vertex_pos = where;
+    vertex_dir = direction;
+    vertex_ekin = kinetic;
+    vertex_volume = vol;
+    creator_process = creator;
+    weight = w;
+    polarization = Vec3<real_t>{0, 0, 0};
+    user_data = 0u;
+  }
+
+  /// Advances the three clocks and the path length over one step.
+  ///
+  /// Transcribed from G4Transportation::AlongStepDoIt, which is where Geant4 advances a
+  /// track's clocks, rather than derived from what looks reasonable:
+  ///
+  ///     initialVelocity = stepData.GetPreStepPoint()->GetVelocity();
+  ///     if (initialVelocity > 0.0) deltaTime = stepLength / initialVelocity;
+  ///     fCandidateEndGlobalTime = startTime + deltaTime;
+  ///     ProposeLocalTime(track.GetLocalTime() + deltaTime);
+  ///     deltaProperTime = deltaTime * (restMass / track.GetTotalEnergy());
+  ///
+  /// Three things in that would be easy to get wrong by guessing, and all three matter: the
+  /// velocity is the PRE-step one and not a mean over the step; `stepLength` is the true path
+  /// length, so multiple scattering is already accounted for; and the proper time is dt*m/E
+  /// against the pre-step energy, which for a massless particle is exactly zero rather than a
+  /// division by zero.
+  ///
+  /// The velocity itself is G4Track::GetVelocity - `c_light * fpDynamicParticle->GetBeta()`.
+  ///
+  /// @param length    mm, the true path length of the step
+  /// @param ekin_pre  MeV, the kinetic energy the track had ENTERING the step
+  /// @param mass      MeV, the particle's rest mass
+  __host__ __device__ void advance(real_t length, real_t ekin_pre, real_t mass) {
+    if (!kFullTrackState) { return; }
+    track_length += length;
+    const real_t velocity = units::c_light<real_t>() * dynamic_particle_beta(ekin_pre, mass);
+    if (velocity <= real_t(0)) { return; }
+    const real_t dt = length / velocity;
+    global_time += dt;
+    local_time += dt;
+    const real_t e_total = ekin_pre + mass;
+    if (e_total > real_t(0)) { proper_time += dt * (mass / e_total); }
+  }
 };
 
-/// 88 bytes per track in double precision: 9 reals, two ints, two uints.
+/// Structure-of-arrays storage for one species' tracks.
 template <typename real_t>
 struct TrackBuffer {
+  int* species;
   real_t* x;
   real_t* y;
   real_t* z;
@@ -53,11 +271,51 @@ struct TrackBuffer {
   unsigned int* step;
   real_t* msc_tlimit;
   real_t* msc_tlimitmin;
+  // G4Track state; see TrackState.
+  unsigned int* parent_key;
+  real_t* global_time;
+  real_t* local_time;
+  real_t* proper_time;
+  real_t* track_length;
+  real_t* vx;
+  real_t* vy;
+  real_t* vz;
+  real_t* vdx;
+  real_t* vdy;
+  real_t* vdz;
+  real_t* vertex_ekin;
+  int* vertex_volume;
+  int* creator_process;
+  real_t* weight;
+  real_t* polx;
+  real_t* poly;
+  real_t* polz;
+  int* status;
+  unsigned int* flags;
+  unsigned int* user_data;
+
   int capacity;
   int* count;      ///< device-resident append cursor
   int* overflow;   ///< tracks dropped because the buffer filled; never silent
 
+  /// Which EVENTS lost a track, so that only those need transporting again.
+  ///
+  /// A dropped track carries the id of the event it belongs to, and that is the whole
+  /// difference between redoing a million events and redoing three. Without it the only honest
+  /// response to an overflow is to discard the batch, because there is no way to tell which
+  /// events were short-changed - and discarding a batch to repair one shower is a poor trade.
+  ///
+  /// Shared by every buffer and owned by the engine, not carved from the slab: a re-carve would
+  /// walk over it, which is a mistake this file has already made once with the counters.
+  /// Null disables recording. If more events are lost than the list can hold, the count runs
+  /// past its capacity and the engine falls back to redoing the batch - the list being
+  /// incomplete is itself the signal.
+  int* dropped_event = nullptr;
+  int* dropped_count = nullptr;
+  int dropped_capacity = 0;
+
   __host__ __device__ void load(int i, TrackState<real_t>& t) const {
+    t.species = static_cast<ParticleType>(species[i]);
     t.pos = Vec3<real_t>{x[i], y[i], z[i]};
     t.dir = Vec3<real_t>{dx[i], dy[i], dz[i]};
     t.ekin = ekin[i];
@@ -67,14 +325,37 @@ struct TrackBuffer {
     t.step = step[i];
     t.msc_tlimit = msc_tlimit[i];
     t.msc_tlimitmin = msc_tlimitmin[i];
+    t.status = static_cast<TrackStatus>(status[i]);
+    t.flags = flags[i];
+    if (!kFullTrackState) { return; }
+    t.parent_key = parent_key[i];
+    t.global_time = global_time[i];
+    t.local_time = local_time[i];
+    t.proper_time = proper_time[i];
+    t.track_length = track_length[i];
+    t.vertex_pos = Vec3<real_t>{vx[i], vy[i], vz[i]};
+    t.vertex_dir = Vec3<real_t>{vdx[i], vdy[i], vdz[i]};
+    t.vertex_ekin = vertex_ekin[i];
+    t.vertex_volume = vertex_volume[i];
+    t.creator_process = static_cast<ProcessId>(creator_process[i]);
+    t.weight = weight[i];
+    t.polarization = Vec3<real_t>{polx[i], poly[i], polz[i]};
+    t.user_data = user_data[i];
   }
 
   __device__ int append(const TrackState<real_t>& t) {
     const int slot = atomicAdd(count, 1);
     if (slot >= capacity) {
       atomicAdd(overflow, 1);
+      if (dropped_event != nullptr) {
+        const int at = atomicAdd(dropped_count, 1);
+        // Past the end is not written, but the count still advances - the engine compares it
+        // against the capacity to know the list is a partial record rather than a complete one.
+        if (at < dropped_capacity) { dropped_event[at] = t.event; }
+      }
       return -1;
     }
+    species[slot] = static_cast<int>(t.species);
     x[slot] = t.pos.x;   y[slot] = t.pos.y;   z[slot] = t.pos.z;
     dx[slot] = t.dir.x;  dy[slot] = t.dir.y;  dz[slot] = t.dir.z;
     ekin[slot] = t.ekin;
@@ -84,21 +365,455 @@ struct TrackBuffer {
     step[slot] = t.step;
     msc_tlimit[slot] = t.msc_tlimit;
     msc_tlimitmin[slot] = t.msc_tlimitmin;
+    status[slot] = static_cast<int>(t.status);
+    flags[slot] = t.flags;
+    if (!kFullTrackState) { return slot; }
+    parent_key[slot] = t.parent_key;
+    global_time[slot] = t.global_time;
+    local_time[slot] = t.local_time;
+    proper_time[slot] = t.proper_time;
+    track_length[slot] = t.track_length;
+    vx[slot] = t.vertex_pos.x;   vy[slot] = t.vertex_pos.y;   vz[slot] = t.vertex_pos.z;
+    vdx[slot] = t.vertex_dir.x;  vdy[slot] = t.vertex_dir.y;  vdz[slot] = t.vertex_dir.z;
+    vertex_ekin[slot] = t.vertex_ekin;
+    vertex_volume[slot] = t.vertex_volume;
+    creator_process[slot] = static_cast<int>(t.creator_process);
+    weight[slot] = t.weight;
+    polx[slot] = t.polarization.x;
+    poly[slot] = t.polarization.y;
+    polz[slot] = t.polarization.z;
+    user_data[slot] = t.user_data;
     return slot;
   }
 };
 
-/// Adapter giving the physics models the push() signature they already expect, while
-/// routing each species into its own buffer.
+/// Allocates every array in a TrackBuffer, and frees them.
 ///
-/// One buffer per species, rather than a shared buffer with a type field, for two reasons:
-/// every thread in a kernel then runs identical physics (no type divergence within a warp),
-/// and the type need not be stored per track at all.
+/// These live next to the struct because the alternative was two copies of the list, and the
+/// second copy went stale the moment the G4Track block was added: b1_gpu_sched.cu had its own
+/// allocator, the fifteen new arrays stayed null in it, and load() dereferenced a null pointer
+/// on the first track of the first step. Nothing could have caught that but running it - which
+/// is exactly what a duplicated list buys you.
+///
+/// A field added to TrackBuffer now needs one edit, here, or it fails to compile rather than
+/// failing at run time in whichever caller was forgotten.
+/// Carves aligned sub-ranges out of one device allocation.
+///
+/// The species buffers used to be five independent cudaMalloc sets with capacities fixed in
+/// advance, which is why those capacities had to be guessed: memory handed to gammas could not
+/// be used by electrons however the shower actually turned out. Separate ALLOCATIONS were never
+/// what the kernels needed - what they need is for each species to occupy a contiguous RANGE,
+/// so that one thread per track runs identical physics with no type divergence in a warp. Those
+/// two things had simply been tied together.
+///
+/// A slab separates them. One allocation, ranges carved from it, warp coherence unchanged - and
+/// the split becomes a decision that can be revisited between iterations rather than a constant
+/// chosen before the run.
+///
+/// The alignment is CUDA's own: cudaMalloc returns 256-byte-aligned memory, and every sub-range
+/// here is aligned the same way, so a carved buffer's loads coalesce exactly as a separately
+/// allocated one's did. That matters - this refactor is required to leave the dose bit-identical
+/// and the throughput unmoved, and an alignment change would quietly break the second half.
+struct TrackSlab {
+  char* base = nullptr;
+  size_t used = 0;
+  size_t capacity = 0;
+  bool overflowed = false;
+
+  static constexpr size_t kAlign = 256;
+  static __host__ __device__ size_t align_up(size_t n) {
+    return (n + kAlign - 1) / kAlign * kAlign;
+  }
+
+  void* take(size_t n) {
+    const size_t at = used;
+    used += align_up(n);
+    if (used > capacity) {
+      overflowed = true;
+      return nullptr;
+    }
+    return base + at;
+  }
+};
+
+/// Allocates a TrackBuffer.
+///
+/// Three modes, one field list. `dry` non-null measures what would be allocated - including the
+/// alignment padding, so a measurement and a carve agree to the byte. `slab` non-null carves
+/// from a shared allocation. Neither means one cudaMalloc per array, which is what this did
+/// before the slab existed and what b1_gpu_sched.cu still does.
+template <typename real_t>
+inline cudaError_t allocate_track_buffer(TrackBuffer<real_t>& v, int capacity,
+                                         size_t* dry = nullptr, TrackSlab* slab = nullptr) {
+  v.capacity = capacity;
+  const size_t nr = sizeof(real_t) * capacity;
+  const size_t ni = sizeof(int) * capacity;
+  const size_t nu = sizeof(unsigned int) * capacity;
+  cudaError_t e = cudaSuccess;
+  auto get = [&](void** p, size_t n) {
+    if (dry != nullptr) {
+      *dry += TrackSlab::align_up(n);
+      return;
+    }
+    if (slab != nullptr) {
+      *p = slab->take(n);
+      if (*p == nullptr) { e = cudaErrorMemoryAllocation; }
+      return;
+    }
+    if (e == cudaSuccess) { e = cudaMalloc(p, n); }
+  };
+  get(reinterpret_cast<void**>(&v.species), ni);
+  get(reinterpret_cast<void**>(&v.x), nr);
+  get(reinterpret_cast<void**>(&v.y), nr);
+  get(reinterpret_cast<void**>(&v.z), nr);
+  get(reinterpret_cast<void**>(&v.dx), nr);
+  get(reinterpret_cast<void**>(&v.dy), nr);
+  get(reinterpret_cast<void**>(&v.dz), nr);
+  get(reinterpret_cast<void**>(&v.ekin), nr);
+  get(reinterpret_cast<void**>(&v.volume), ni);
+  get(reinterpret_cast<void**>(&v.event), ni);
+  get(reinterpret_cast<void**>(&v.rng_key), nu);
+  get(reinterpret_cast<void**>(&v.step), nu);
+  get(reinterpret_cast<void**>(&v.msc_tlimit), nr);
+  get(reinterpret_cast<void**>(&v.msc_tlimitmin), nr);
+  get(reinterpret_cast<void**>(&v.status), ni);
+  get(reinterpret_cast<void**>(&v.flags), nu);
+  if (!kFullTrackState) {
+    get(reinterpret_cast<void**>(&v.count), sizeof(int));
+    get(reinterpret_cast<void**>(&v.overflow), sizeof(int));
+    return e;
+  }
+  get(reinterpret_cast<void**>(&v.parent_key), nu);
+  get(reinterpret_cast<void**>(&v.global_time), nr);
+  get(reinterpret_cast<void**>(&v.local_time), nr);
+  get(reinterpret_cast<void**>(&v.proper_time), nr);
+  get(reinterpret_cast<void**>(&v.track_length), nr);
+  get(reinterpret_cast<void**>(&v.vx), nr);
+  get(reinterpret_cast<void**>(&v.vy), nr);
+  get(reinterpret_cast<void**>(&v.vz), nr);
+  get(reinterpret_cast<void**>(&v.vdx), nr);
+  get(reinterpret_cast<void**>(&v.vdy), nr);
+  get(reinterpret_cast<void**>(&v.vdz), nr);
+  get(reinterpret_cast<void**>(&v.vertex_ekin), nr);
+  get(reinterpret_cast<void**>(&v.vertex_volume), ni);
+  get(reinterpret_cast<void**>(&v.creator_process), ni);
+  get(reinterpret_cast<void**>(&v.weight), nr);
+  get(reinterpret_cast<void**>(&v.polx), nr);
+  get(reinterpret_cast<void**>(&v.poly), nr);
+  get(reinterpret_cast<void**>(&v.polz), nr);
+  get(reinterpret_cast<void**>(&v.user_data), nu);
+  get(reinterpret_cast<void**>(&v.count), sizeof(int));
+  get(reinterpret_cast<void**>(&v.overflow), sizeof(int));
+  return e;
+}
+
+/// Device bytes one track buffer of `capacity` slots occupies, measured by walking the
+/// allocator itself.
+template <typename real_t>
+inline size_t track_buffer_bytes(int capacity) {
+  TrackBuffer<real_t> probe{};
+  size_t bytes = 0;
+  allocate_track_buffer<real_t>(probe, capacity, &bytes);
+  return bytes;
+}
+
+/// How the track arena is divided between the species.
+///
+/// ONE definition, read by everything that needs to know the split: the engine's allocation,
+/// its automatic batch sizing, and the arena measurement. A second copy of these numbers is
+/// exactly the shape of bug this file has now hit three times, so there is not one.
+///
+/// The numbers themselves are a mixture of derivation and guesswork, and it is worth being
+/// clear which is which:
+///
+///   proton, alpha   1 per event, and this one is exact. Nothing in the EM physics CREATES a
+///                   hadron - they arrive only as primaries, and the delta rays they knock out
+///                   are electrons - so one slot per event is the most that can ever be live.
+///
+///   gamma 2, electron 4, positron 1/2   guesses, and measurement says they are the wrong
+///                   shape. A 500k-event B1 run peaks at 1.00 live gammas per event against 2
+///                   allocated, 0.90 electrons against 4, and 0.064 positrons against 1/2. The
+///                   electron allowance is the furthest out because it was reasoned from how
+///                   many electrons a shower MAKES rather than how many are alive at once -
+///                   an electron's range is short, so it deposits and dies within a step or
+///                   two, while a Compton-scattered gamma keeps flying.
+///
+/// What a buffer bounds is CONCURRENCY, not production: a track that dies is never written to
+/// the output buffer, so its slot is gone by the next iteration. Nothing here limits how many
+/// secondaries a step may create or how many tracks an event may produce over its life.
+struct SpeciesCapacities {
+  int gamma, electron, positron, proton, alpha;
+
+  /// In the order the engine allocates them, so a loop over this and the engine's carving
+  /// cannot drift apart.
+  int at(int i) const {
+    const int v[5] = {gamma, electron, positron, proton, alpha};
+    return v[i];
+  }
+  static constexpr int kSpecies = 5;
+};
+
+/// Divides a pool of `pool` live-track slots between the species, from how many of each are
+/// alive right now.
+///
+/// This replaces five capacities fixed before the run. Fixed capacities had to be guessed, and
+/// the guesses were wrong in a way measurement made obvious: a 500k-event B1 run peaked at 1.00
+/// live gammas per event against 2 allocated and 0.90 electrons against 4. Memory reserved for
+/// electrons could not be used by gammas however the shower actually turned out.
+///
+/// THE PREDICTION IS THE HARD PART, and it is a prediction: the slice a species gets for the
+/// step about to run is chosen from what that step will consume, which is not yet known. The
+/// counts going in are the best evidence available, so each species is given its current
+/// population times a growth allowance, and the remainder of the pool is shared out as a floor
+/// so that a species at zero can still appear - a shower that has not made its first positron
+/// yet must have somewhere to put one.
+///
+/// Getting it wrong drops tracks, which is a wrong ANSWER and not a slow run, so the growth
+/// allowance is deliberately loose and the engine announces any drop loudly. The alternative -
+/// tight slices and a silent shortfall - is the failure this project keeps writing up.
+struct LiveCounts {
+  int gamma, electron, positron, proton, alpha;
+  int at(int i) const {
+    const int v[5] = {gamma, electron, positron, proton, alpha};
+    return v[i];
+  }
+};
+
+inline SpeciesCapacities partition_pool(const LiveCounts& live, long long pool) {
+  // Room for a species to more than double in one step, which is the most this physics can do
+  // to one: a gamma pair-converting becomes two leptons, a positron annihilating becomes two
+  // gammas. Three is that with margin.
+  constexpr int kGrowth = 3;
+  // Every species keeps a floor even at zero population, so a species that appears for the
+  // first time has somewhere to land. An eighth of the pool each leaves three-eighths to
+  // distribute by evidence.
+  const long long floor_each = pool / 8;
+
+  long long want[5];
+  long long total_want = 0;
+  for (int i = 0; i < 5; ++i) {
+    want[i] = static_cast<long long>(live.at(i)) * kGrowth;
+    if (want[i] < floor_each) { want[i] = floor_each; }
+    total_want += want[i];
+  }
+
+  SpeciesCapacities c{};
+  int out[5];
+  if (total_want <= pool) {
+    // Everything asked for fits; hand the surplus to the species that asked for most, which is
+    // where an underestimate is most likely to matter.
+    long long spare = pool - total_want;
+    int biggest = 0;
+    for (int i = 1; i < 5; ++i) {
+      if (want[i] > want[biggest]) { biggest = i; }
+    }
+    for (int i = 0; i < 5; ++i) { out[i] = static_cast<int>(want[i]); }
+    out[biggest] += static_cast<int>(spare);
+  } else {
+    // Oversubscribed: scale everything down in proportion. This is where a drop becomes
+    // possible, and why the pool has a floor of its own - see SetLiveTracksPerEvent.
+    for (int i = 0; i < 5; ++i) {
+      out[i] = static_cast<int>(want[i] * pool / total_want);
+    }
+  }
+  c.gamma = out[0];
+  c.electron = out[1];
+  c.positron = out[2];
+  c.proton = out[3];
+  c.alpha = out[4];
+  return c;
+}
+
+inline SpeciesCapacities species_capacities(long long batch) {
+  SpeciesCapacities c;
+  c.gamma = static_cast<int>(batch * 2);
+  c.electron = static_cast<int>(batch * 4);
+  c.positron = static_cast<int>(batch / 2 + 1024);
+  c.proton = static_cast<int>(batch + 1024);
+  c.alpha = static_cast<int>(batch + 1024);
+  return c;
+}
+
+/// Total live slots a batch is allowed, across every species and both sides of the ping-pong.
+inline long long total_track_slots(long long batch) {
+  const SpeciesCapacities c = species_capacities(batch);
+  long long n = 0;
+  for (int i = 0; i < SpeciesCapacities::kSpecies; ++i) { n += 2 * c.at(i); }
+  return n;
+}
+
+/// Device bytes ONE more track slot costs.
+///
+/// The difference between two capacities rather than the size at capacity 1, because a
+/// buffer also allocates its count and overflow counters - eight bytes that do not scale
+/// with capacity. Reading them as part of a slot over-counted every slot by 8 of 236 bytes,
+/// which made the automatic batch about 3.5% smaller than it needed to be. Conservative, so
+/// nothing broke; wrong, so it is subtracted here rather than left as a fudge factor.
+template <typename real_t>
+inline size_t track_bytes_per_slot() {
+  // Measured at a LARGE capacity, and this matters. Taking the difference between one slot
+  // and two returns very nearly zero: every array is aligned up to 256 bytes, so an eight
+  // byte array and a sixteen byte array occupy the same 256 and the difference vanishes.
+  // That is not a rounding error, it is the whole quantity - and it under-sized the track
+  // arena until a re-carve ran out of room mid-run.
+  //
+  // At 65536 slots every array is an exact multiple of the alignment, so align_up is the
+  // identity and the difference is exactly per_slot * 65536.
+  constexpr int kN = 65536;
+  return (track_buffer_bytes<real_t>(2 * kN) - track_buffer_bytes<real_t>(kN)) / kN;
+}
+
+/// Device bytes one half of the arena needs to hold `pool` live-track slots, however they end
+/// up divided between the species.
+///
+/// Per-slot cost times the pool, plus each buffer's fixed counters and enough alignment slack
+/// for five buffers' worth of arrays. Generous on the slack because the division moves between
+/// iterations and a carve that did not fit would be a much worse failure than a few unused
+/// kilobytes.
+///
+/// ROUNDED UP TO kAlign, and that is not tidiness. The engine allocates both halves as one
+/// block and puts the second at `base + arena_half_bytes`, so this number is the alignment of
+/// every array in the second half. per_slot is 236 bytes, so an ODD pool made it 4 mod 8 and
+/// every double in the second half was misaligned - a device-side "misaligned address" fault
+/// from whichever kernel touched it first, surfacing at the next cudaMemcpy with no hint of
+/// where it came from.
+///
+/// An odd pool is not exotic: it is what `batch * live_per_event` gives whenever the product
+/// is not whole, so `-live 2.5` reached it and the default `-live 4` never could. The failure
+/// was invisible in every configuration the pipeline ran.
+template <typename real_t>
+inline size_t track_arena_half_bytes(long long pool) {
+  const size_t per_slot = track_bytes_per_slot<real_t>();
+  const size_t fixed = track_buffer_bytes<real_t>(0);
+  return TrackSlab::align_up(per_slot * static_cast<size_t>(pool) + 5 * fixed
+                             + 5 * 40 * TrackSlab::kAlign);
+}
+
+/// Device bytes the track arena needs for a batch of `batch` events.
+///
+/// Measured by dry-running the very allocations the engine performs, alignment padding and
+/// per-buffer counters included, so the number that decides the batch and the number that is
+/// then allocated are produced by the same code. An arithmetic estimate beside it would be a
+/// second source of truth, and this file has paid for those already.
+template <typename real_t>
+inline size_t track_memory_for_batch(long long batch) {
+  const SpeciesCapacities c = species_capacities(batch);
+  size_t need = 0;
+  TrackBuffer<real_t> probe{};
+  for (int half = 0; half < 2; ++half) {
+    for (int i = 0; i < SpeciesCapacities::kSpecies; ++i) {
+      allocate_track_buffer<real_t>(probe, c.at(i), &need);
+    }
+  }
+  return need;
+}
+
+template <typename real_t>
+inline void free_track_buffer(TrackBuffer<real_t>& v) {
+  cudaFree(v.species);
+  cudaFree(v.x); cudaFree(v.y); cudaFree(v.z);
+  cudaFree(v.dx); cudaFree(v.dy); cudaFree(v.dz);
+  cudaFree(v.ekin); cudaFree(v.volume); cudaFree(v.event);
+  cudaFree(v.rng_key); cudaFree(v.step);
+  cudaFree(v.msc_tlimit); cudaFree(v.msc_tlimitmin);
+  cudaFree(v.parent_key); cudaFree(v.global_time); cudaFree(v.local_time);
+  cudaFree(v.proper_time); cudaFree(v.track_length);
+  cudaFree(v.vx); cudaFree(v.vy); cudaFree(v.vz);
+  cudaFree(v.vdx); cudaFree(v.vdy); cudaFree(v.vdz);
+  cudaFree(v.vertex_ekin); cudaFree(v.vertex_volume); cudaFree(v.creator_process);
+  cudaFree(v.weight); cudaFree(v.polx); cudaFree(v.poly); cudaFree(v.polz);
+  cudaFree(v.status); cudaFree(v.flags); cudaFree(v.user_data);
+  cudaFree(v.count); cudaFree(v.overflow);
+  v = TrackBuffer<real_t>{};
+}
+
+/// Fills the G4Track block of one slot for a track that is starting there.
+///
+/// The seeding kernels write TrackBuffer arrays directly rather than through a TrackState, so
+/// this is the shared version of what TrackState::begin does - for the same reason the
+/// allocator above is shared.
+template <typename real_t>
+__host__ __device__ inline void seed_track_slot(TrackBuffer<real_t>& v, int slot,
+                                                const Vec3<real_t>& pos,
+                                                const Vec3<real_t>& dir, real_t ekin, int vol,
+                                                real_t t0) {
+  v.status[slot] = static_cast<int>(TrackStatus::fAlive);
+  // A primary begins its life inside a volume, so its first step is the first in that volume.
+  v.flags[slot] = kFirstStepInVolume;
+  if (!kFullTrackState) { return; }
+  v.parent_key[slot] = 0u;
+  v.global_time[slot] = t0;
+  v.local_time[slot] = real_t(0);
+  v.proper_time[slot] = real_t(0);
+  v.track_length[slot] = real_t(0);
+  v.vx[slot] = pos.x;   v.vy[slot] = pos.y;   v.vz[slot] = pos.z;
+  v.vdx[slot] = dir.x;  v.vdy[slot] = dir.y;  v.vdz[slot] = dir.z;
+  v.vertex_ekin[slot] = ekin;
+  v.vertex_volume[slot] = vol;
+  v.creator_process[slot] = static_cast<int>(ProcessId::fNotDefined);
+  v.weight[slot] = real_t(1);
+  v.polx[slot] = real_t(0);
+  v.poly[slot] = real_t(0);
+  v.polz[slot] = real_t(0);
+  v.user_data[slot] = 0u;
+}
+
+/// Where the secondaries created during a step are recorded, so that
+/// G4Step::GetSecondaryInCurrentStep() can hand back the tracks themselves.
+///
+/// THERE IS NO PER-STEP LIMIT, which is the whole design constraint. The obvious
+/// implementation - a fixed array on the emitter - puts a cap on how many secondaries one step
+/// may make, and any number chosen for that cap is a claim about physics that has not happened
+/// yet. Today nothing here makes more than three; a hadronic inelastic interaction makes
+/// dozens, and the cap would be discovered by someone losing data.
+///
+/// So each secondary instead takes one slot from a shared arena and points at the previous
+/// slot from the same step. A step's secondaries are a backward-linked chain, and a step can
+/// have as many as it likes. What is bounded is the arena as a whole - the total across every
+/// track in flight in one kernel launch - which is a resource, sized once and reported when
+/// exhausted, rather than a statement about what a process is allowed to do.
+///
+/// A slot holds four bytes of payload, not a copy of the track: the species buffer the
+/// secondary landed in, and its index there. Reading a secondary therefore reads the real
+/// track out of the real buffer - it IS the G4Track, the way Geant4's `const G4Track*` is -
+/// and costs nothing at all for a hook that never asks.
+struct SecondaryArena {
+  /// Encoded (buffer id, slot) for each recorded secondary.
+  unsigned int* entry = nullptr;
+  /// Index of the previous secondary of the SAME step, or -1. This is the chain.
+  int* prev = nullptr;
+  /// Bump cursor, reset once per kernel launch.
+  int* cursor = nullptr;
+  /// Secondaries that did not fit. Never silent.
+  int* overflow = nullptr;
+  int capacity = 0;
+
+  __host__ __device__ static unsigned int encode(int buffer_id, int slot) {
+    return (static_cast<unsigned int>(buffer_id) << 30) | static_cast<unsigned int>(slot);
+  }
+  __host__ __device__ static int buffer_of(unsigned int e) { return static_cast<int>(e >> 30); }
+  __host__ __device__ static int slot_of(unsigned int e) {
+    return static_cast<int>(e & 0x3FFFFFFFu);
+  }
+};
+
+/// Adapter giving the physics models the push() signature they already expect.
+///
+/// ONE POOL, NOT ONE BUFFER PER SPECIES. This used to route each secondary into its own
+/// species' buffer with a switch, and the switch had a `default: return -1` at the bottom -
+/// a silent drop for any particle the transport had no buffer for. The comment above it said
+/// such a case "should fail to compile rather than be routed somewhere plausible", which is
+/// what was wanted but not what the code did: it was a runtime discard waiting for the first
+/// process that made a neutron.
+///
+/// There is nothing to route now. A track carries its species, the pool takes anything, and a
+/// process that starts producing a new particle needs no change here at all. Which kernel
+/// eventually steps it is decided later, by the index lists, and that is a dispatch question
+/// rather than a storage one.
 template <typename real_t>
 struct BufferEmitter {
-  TrackBuffer<real_t> gamma_out;
-  TrackBuffer<real_t> electron_out;
-  TrackBuffer<real_t> positron_out;
+  /// Where every secondary goes, whatever it is.
+  TrackBuffer<real_t> out;
   Vec3<real_t> pos;
   int volume;
   int event;
@@ -109,24 +824,49 @@ struct BufferEmitter {
   /// one step of one track, so it is a deterministic child index - not a shared atomic.
   unsigned int child_count;
 
+  /// The parent's clock and weight, so a secondary starts where its parent is rather than at
+  /// zero. Set once in the kernel, alongside the buffer.
+  real_t parent_time;
+  real_t parent_weight;
+  /// Where to record each secondary, and the last slot this step took. A null arena disables
+  /// recording; `last_secondary` is then never anything but -1.
+  SecondaryArena arena;
+  int last_secondary = -1;
+  /// The step in progress, so push() can record which process created the secondary. Points at
+  /// the caller's StepReport, which outlives every push within the step.
+  const StepReport<real_t>* report;
+
   __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin,
                       int /*event_id*/) {
-    TrackState<real_t> t{pos, dir, ekin, volume, event, 0u, 0u, real_t(0), real_t(0)};
+    TrackState<real_t> t{};
+    t.species = type;
+    t.pos = pos;
+    t.dir = dir;
+    t.ekin = ekin;
+    t.volume = volume;
+    t.event = event;
+    t.msc_tlimit = real_t(0);
+    t.msc_tlimitmin = real_t(0);
     t.rng_key = child_rng_key(parent_key, parent_step, child_count++);
     t.step = 0u;
-    switch (type) {
-      case ParticleType::kGamma:    return gamma_out.append(t);
-      case ParticleType::kElectron: return electron_out.append(t);
-      case ParticleType::kPositron: return positron_out.append(t);
-      // No hadron case, and that is a statement about the physics rather than an omission:
-      // nothing in this transport *creates* a proton or an alpha. They arrive only as
-      // primaries, through seed_from_primaries, and the delta rays they knock out are
-      // electrons. A hadron reaching here would mean a process was added that makes one -
-      // a nuclear interaction, say - and it should fail to compile rather than be routed
-      // somewhere plausible.
-      default:                      return -1;
+    t.begin(pos, dir, ekin, volume, parent_key,
+            (report != nullptr) ? report->process : ProcessId::fNotDefined, parent_time,
+            parent_weight);
+    const int slot = out.append(t);
+    if (slot < 0) { return slot; }
+    if (arena.entry != nullptr) {
+      const int at = atomicAdd(arena.cursor, 1);
+      if (at < arena.capacity) {
+        arena.entry[at] = SecondaryArena::encode(0, slot);
+        arena.prev[at] = last_secondary;
+        last_secondary = at;
+      } else {
+        atomicAdd(arena.overflow, 1);
+      }
     }
+    return slot;
   }
 };
 
 }  // namespace g4gpu
+

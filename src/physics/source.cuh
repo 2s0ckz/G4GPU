@@ -71,6 +71,10 @@ struct Primary {
   Vec3<real_t> dir;
   real_t ekin;
   ParticleType particle;
+  /// G4PrimaryVertex::GetT0 - the time the vertex occurs at, ns. It becomes the track's global
+  /// time, so a stepping action reading GetGlobalTime() sees the gun's clock rather than always
+  /// zero. Defaulted, so a generator that does not set it still compiles and still behaves.
+  real_t t0 = 0;
 };
 
 template <typename real_t>

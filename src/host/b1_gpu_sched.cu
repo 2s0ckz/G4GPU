@@ -64,23 +64,7 @@ struct DeviceBuffer {
   TrackBuffer<real_t> view{};
 
   void alloc(int capacity) {
-    view.capacity = capacity;
-    const size_t nr = sizeof(real_t) * capacity;
-    CUDA_CHECK(cudaMalloc(&view.x, nr));
-    CUDA_CHECK(cudaMalloc(&view.y, nr));
-    CUDA_CHECK(cudaMalloc(&view.z, nr));
-    CUDA_CHECK(cudaMalloc(&view.dx, nr));
-    CUDA_CHECK(cudaMalloc(&view.dy, nr));
-    CUDA_CHECK(cudaMalloc(&view.dz, nr));
-    CUDA_CHECK(cudaMalloc(&view.ekin, nr));
-    CUDA_CHECK(cudaMalloc(&view.volume, sizeof(int) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.event, sizeof(int) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.rng_key, sizeof(unsigned int) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.msc_tlimit, sizeof(real_t) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.msc_tlimitmin, sizeof(real_t) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.step, sizeof(unsigned int) * capacity));
-    CUDA_CHECK(cudaMalloc(&view.count, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&view.overflow, sizeof(int)));
+    CUDA_CHECK(allocate_track_buffer(view, capacity));
     reset();
     CUDA_CHECK(cudaMemset(view.overflow, 0, sizeof(int)));
   }
@@ -95,16 +79,53 @@ struct DeviceBuffer {
     CUDA_CHECK(cudaMemcpy(&c, view.overflow, sizeof(int), cudaMemcpyDeviceToHost));
     return c;
   }
-  void free_all() {
-    cudaFree(view.x); cudaFree(view.y); cudaFree(view.z);
-    cudaFree(view.dx); cudaFree(view.dy); cudaFree(view.dz);
-    cudaFree(view.ekin); cudaFree(view.volume); cudaFree(view.event);
-    cudaFree(view.rng_key); cudaFree(view.step);
-    cudaFree(view.count); cudaFree(view.overflow);
-  }
+  void free_all() { free_track_buffer(view); }
 };
 
 // ---------------------------------------------------------------- kernels
+
+/// This driver's own secondary emitter, routing into its own three buffers.
+///
+/// The engine's BufferEmitter now writes into a single species-agnostic pool, which is the
+/// right thing there and the wrong thing here: this program exists to be an INDEPENDENT
+/// implementation of the same physics, and a cross-check that shares the thing being checked
+/// is not a cross-check. So it keeps its three buffers and does its own routing, and the two
+/// schedulers agree on the dose or they do not.
+///
+/// The steppers take any type with this shape - they are templated on the emitter - which is
+/// what makes keeping a second one cheap.
+struct SchedEmitter {
+  TrackBuffer<real_t> gamma_out;
+  TrackBuffer<real_t> electron_out;
+  TrackBuffer<real_t> positron_out;
+  Vec3<real_t> pos;
+  int volume;
+  int event;
+  unsigned int parent_key;
+  unsigned int parent_step;
+  unsigned int child_count;
+
+  __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin, int) {
+    TrackState<real_t> t{};
+    t.species = type;
+    t.pos = pos;
+    t.dir = dir;
+    t.ekin = ekin;
+    t.volume = volume;
+    t.event = event;
+    t.msc_tlimit = real_t(0);
+    t.msc_tlimitmin = real_t(0);
+    t.rng_key = child_rng_key(parent_key, parent_step, child_count++);
+    t.step = 0u;
+    t.begin(pos, dir, ekin, volume, parent_key, ProcessId::fNotDefined, real_t(0), real_t(1));
+    switch (type) {
+      case ParticleType::kGamma:    return gamma_out.append(t);
+      case ParticleType::kElectron: return electron_out.append(t);
+      case ParticleType::kPositron: return positron_out.append(t);
+      default:                      return -1;
+    }
+  }
+};
 
 /// Seeds one primary photon per event directly into the gamma buffer. Slot == local event
 /// index, so no atomics are needed here.
@@ -122,9 +143,13 @@ __global__ void seed_primaries(TrackBuffer<real_t> gamma, geom::Geometry<real_t>
   gamma.volume[i] = geom::locate(geometry, pos);
   gamma.event[i] = i;  // local index within the batch, used to index the dose array
   gamma.rng_key[i] = static_cast<unsigned int>(event_base + i);  // globally unique
+  gamma.species[i] = static_cast<int>(ParticleType::kGamma);
   gamma.step[i] = 0u;
   gamma.msc_tlimit[i] = real_t(0);  // stale: first step recomputes it
   gamma.msc_tlimitmin[i] = real_t(0);
+  // The G4Track block. Shared with the engine's seeding kernel rather than copied, because
+  // this file having its own copy of the buffer's field list is what broke it.
+  seed_track_slot(gamma, i, pos, Vec3<real_t>{0, 0, 1}, e0, gamma.volume[i], real_t(0));
   if (i == 0) { *gamma.count = n; }
 }
 
@@ -140,11 +165,12 @@ __global__ void step_gamma_kernel(Scene<real_t> scene, TrackBuffer<real_t> in,
 
   // Deterministic: rng_key is carried by the track, not derived from its buffer slot.
   Philox<real_t> rng(p.rng_key, p.step, 0u);
-  BufferEmitter<real_t> em{gamma_out, electron_out, positron_out, p.pos, p.volume,
-                           p.event,     p.rng_key,     p.step,        0u};
+  SchedEmitter em{gamma_out, electron_out, positron_out, p.pos, p.volume,
+                  p.event,    p.rng_key,     p.step,       0u};
 
   real_t edep = 0;
-  const bool alive = step_gamma(scene, p, rng, em, edep);
+  StepReport<real_t> srep;
+  const bool alive = step_gamma(scene, p, rng, em, edep, srep);
   ++p.step;
   if (edep != real_t(0)) { atomicAdd(&edep_per_event[p.event], static_cast<double>(edep)); }
   if (alive) { gamma_out.append(p); }
@@ -162,11 +188,12 @@ __global__ void step_lepton_kernel(Scene<real_t> scene, TrackBuffer<real_t> in,
   in.load(i, p);
 
   Philox<real_t> rng(p.rng_key, p.step, 0x5A5Au);  // no p.event: it is batch-local
-  BufferEmitter<real_t> em{gamma_out, electron_out, positron_out, p.pos, p.volume,
-                           p.event,     p.rng_key,     p.step,        0u};
+  SchedEmitter em{gamma_out, electron_out, positron_out, p.pos, p.volume,
+                  p.event,    p.rng_key,     p.step,       0u};
 
   real_t edep = 0;
-  const bool alive = step_lepton(scene, p, kIsPositron, rng, em, edep);
+  StepReport<real_t> srep;
+  const bool alive = step_lepton(scene, p, kIsPositron, rng, em, edep, srep);
   ++p.step;
   if (edep != real_t(0)) { atomicAdd(&edep_per_event[p.event], static_cast<double>(edep)); }
   if (alive) {

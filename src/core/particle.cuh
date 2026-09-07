@@ -2,6 +2,21 @@
 #include "core/units.cuh"
 namespace g4gpu {
 
+/// beta = v/c, exactly as G4DynamicParticle::ComputeBeta computes it - including its
+/// shortcut to exactly 1 for a massless particle and above 1000 rest masses.
+///
+/// Defined once because it is now read from two unrelated places: G4Track::GetVelocity,
+/// which sets the time of flight over a step, and G4IonFluctuations, which needs beta^2.
+/// Writing `kinetic*(kinetic+2m)/E^2` in one of them - algebraically the same thing - would
+/// not be bit-identical to this form, and would put a 1e-16 wobble between two numbers
+/// Geant4 keeps exactly equal. docs/RISK.md V8 is what a duplicated constant cost before.
+template <typename real_t>
+__host__ __device__ inline real_t dynamic_particle_beta(real_t kinetic, real_t mass) {
+  if (mass <= real_t(0) || kinetic >= real_t(1000) * mass) { return real_t(1); }
+  const real_t t = kinetic / mass;
+  return sqrt(t * (t + real_t(2))) / (t + real_t(1));
+}
+
 /// Every particle G4EmStandardPhysics registers EM processes for.
 /// The first three are what example B1 produces; the rest exist because the physics list
 /// covers them (via G4EmBuilder::ConstructCharged), and their models are transcribed for

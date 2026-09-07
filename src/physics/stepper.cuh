@@ -5,6 +5,7 @@
 // secondary stack and the loop-carried state that drove register pressure to 108 in the
 // thread-per-event kernel.
 #pragma once
+#include "core/step_report.cuh"
 #include "core/track_buffer.cuh"
 #include "data/materials.cuh"
 #include "geometry/navigator.cuh"
@@ -28,21 +29,29 @@ namespace g4gpu {
 
 /// Advances one photon by a single step.
 /// @param edep energy deposited in the scoring volume by this step, MeV
+/// @param rep what the step did, beyond depositing energy: the true path length, the process
+///        that ended it, the material, the safety. See core/step_report.cuh. Every field on it
+///        is a value this function already computes; nothing here is calculated for its sake.
 /// @return true if the photon is still alive and should be requeued
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p, Rng& rng,
-                                  Emitter& em, real_t& edep,
+                                  Emitter& em, real_t& edep, StepReport<real_t>& rep,
                                   vis::TrajectoryBuffer traj = vis::no_capture()) {
   edep = real_t(0);
+  rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld) { return false; }
 
   if (p.ekin < em::kPhotonAbsorbCut<real_t>()) {
+    rep.material = geom::material_at(s.geometry, p.volume, p.pos);
+    rep.status = StepStatus::fStopAndKill;
+    rep.process = ProcessId::fBelowTrackingCut;
     if (s.geometry.volumes[p.volume].score_index >= 0) { edep = p.ekin; }
     return false;
   }
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
+  rep.material = mat;
   const auto xs =
       em::gamma_macroscopic_xs(s.materials[mat], p.ekin,
                                s.processes.photoelectric ? s.photoelectric : nullptr,
@@ -58,12 +67,21 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 
   // Streaming to the boundary counts as one step; the photon is requeued.
   if (s_int >= d_boundary) {
+    rep.true_length = d_boundary + geom::kPushDistance<real_t>();
+    rep.status = StepStatus::fGeomBoundary;
+    rep.process = ProcessId::fTransportation;
     p.pos = p.pos + (d_boundary + geom::kPushDistance<real_t>()) * p.dir;
     traj.add(pos_before, p.pos, ParticleType::kGamma, p.event);
     p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
     return p.volume != geom::kOutsideWorld;
   }
 
+  // A discrete process fired, so the step ended on physics rather than on geometry. Which one
+  // is recorded in each branch below rather than from `proc` here, because a branch can be
+  // skipped when its data table is absent and the one that actually ran is what a stepping
+  // action must be told about.
+  rep.true_length = s_int;
+  rep.status = StepStatus::fPostStepDoItProc;
   p.pos = p.pos + s_int * p.dir;
   traj.add(pos_before, p.pos, ParticleType::kGamma, p.event);
   em.pos = p.pos;
@@ -73,6 +91,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   const auto proc = em::select_gamma_process(xs, rng.uniform());
 
   if (proc == em::GammaProcess::kCompton) {
+    rep.process = ProcessId::fCompton;
     const auto r = em::sample_klein_nishina<real_t>(
         p.ekin, p.dir, rng, em, p.event, em::kElectronTrackingCut<real_t>(), real_t(1e-6));
     if (s.geometry.volumes[p.volume].score_index >= 0) { edep = r.local_deposit; }
@@ -83,6 +102,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   }
 
   if (proc == em::GammaProcess::kRayleigh && s.rayleigh != nullptr) {
+    rep.process = ProcessId::fRayleigh;
     // Coherent: the photon is redirected, no energy transferred, nothing deposited.
     // The scattering element is chosen by Rayleigh cross section, as SelectRandomAtom does.
     const data::Material<real_t>& mm = s.materials[mat];
@@ -99,6 +119,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   }
 
   if (proc == em::GammaProcess::kPhotoelectric && s.photoelectric != nullptr) {
+    rep.process = ProcessId::fPhotoelectric;
     // Pick the absorbing element weighted by its photoelectric cross section, as
     // G4VEmModel::SelectRandomAtom does.
     const data::Material<real_t>& mm = s.materials[mat];
@@ -120,6 +141,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 
   // Target atom chosen by pair cross section, as SelectTargetAtom does.
   {
+    rep.process = ProcessId::fGammaConversion;
     const data::Material<real_t>& mmp = s.materials[mat];
     const real_t tgt = rng.uniform() * xs.pair;
     real_t accp = real_t(0);
@@ -145,9 +167,10 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 /// tracking cut emits its two annihilation photons before dying.
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p, bool is_positron,
-                                   Rng& rng, Emitter& em, real_t& edep,
+                                   Rng& rng, Emitter& em, real_t& edep, StepReport<real_t>& rep,
                                    vis::TrajectoryBuffer traj = vis::no_capture()) {
   edep = real_t(0);
+  rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld) { return false; }
 
@@ -161,6 +184,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
   // pointless work - it cost ~32 of the 71 steps per event in the FP64 build.
   const real_t kMinUsefulRange = real_t(1e-2);  // mm
   const int mat0 = geom::material_at(s.geometry, p.volume, p.pos);
+  rep.material = mat0;
   const bool no_range_left = (s.range_table->lookup(mat0, p.ekin) < kMinUsefulRange);
 
   const bool below_cut = (p.ekin < em::kElectronTrackingCut<real_t>()) || no_range_left;
@@ -207,6 +231,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const em::UrbanCoeffs<real_t>& uc = s.msc->coeffs[mat];
     const real_t lambda0 = s.msc->lambda_at(mat, is_positron, p.ekin);
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
+    rep.safety = safety;
     const real_t t_msc = em::urban_step_limit(uc, lambda0, p.ekin, range, safety, is_positron,
                                              rng, p.msc_tlimit, p.msc_tlimitmin);
     // With MSC off, the step is not limited by scattering and no deflection is applied. The
@@ -234,6 +259,10 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 
     // ...and the energy loss and scattering act on the true length that corresponds to it.
     const real_t step_len = em::urban_true_path(geom_step, t_step, msc_state);
+    // The true path, not the chord: MSC deflects within the step, so the displacement
+    // |pos_after - pos_before| is shorter than the distance the electron actually ran and a
+    // LET computed from it would be biased high. This is what G4Step::GetStepLength returns.
+    rep.true_length = step_len;
 
     // A discrete process fires only if it was the limiting true length and geometry did not
     // cut in first.
@@ -242,6 +271,28 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const bool emits_brem =
         !hits_boundary && !annihilates && (d_brem <= t_step) && (d_brem <= d_delta);
     const bool emits_delta = !hits_boundary && !annihilates && !emits_brem && (d_delta <= t_step);
+
+    // The same competition, read back out as G4StepPoint::GetProcessDefinedStep would report
+    // it. When nothing discrete won, the step was defined along its length by whichever limit
+    // was tightest - the continuous-loss limit or multiple scattering - which is exactly the
+    // distinction Geant4 draws between fAlongStepDoItProc attributed to eIoni and to msc.
+    if (hits_boundary) {
+      rep.status = StepStatus::fGeomBoundary;
+      rep.process = ProcessId::fTransportation;
+    } else if (annihilates) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fAnnihilation;
+    } else if (emits_brem) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fBremsstrahlung;
+    } else if (emits_delta) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fIonisation;
+    } else {
+      rep.status = StepStatus::fAlongStepDoItProc;
+      rep.process = (t_msc_eff < max_step && t_msc_eff < range) ? ProcessId::fMultipleScattering
+                                                                : ProcessId::fIonisation;
+    }
 
     real_t e_after = s.range_table->energy_from_range(mat, range - step_len);
     // Second guard: the step must strictly reduce the energy. If the inverse range lookup
@@ -405,6 +456,12 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
   }
 
   // Dying: deposit whatever is left, then annihilate if it is a positron.
+  //
+  // Reached both by a track that was already below its cut on entry and by one that fell below
+  // it during the step, so the process that defined the step is left alone if the transport
+  // above already determined one.
+  rep.status = StepStatus::fStopAndKill;
+  if (rep.process == ProcessId::fNotDefined) { rep.process = ProcessId::fBelowTrackingCut; }
   if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
   if (is_positron) {
     const auto a = em::sample_annihilation_at_rest<real_t>(rng);
@@ -468,8 +525,10 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
                                    ParticleType type, Rng& rng, Emitter& em, real_t& edep,
+                                   StepReport<real_t>& rep,
                                    vis::TrajectoryBuffer traj = vis::no_capture()) {
   edep = real_t(0);
+  rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld || s.hadron_range == nullptr) { return false; }
 
@@ -477,6 +536,7 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
+  rep.material = mat;
   const real_t range = s.hadron_range->lookup(sp, mat, p.ekin);
 
   // The same two termination guards step_lepton needs, for the same reason: without them a
@@ -539,6 +599,7 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     st.lambda_eff = em::wentzel_lambda(mm, type, p.ekin, cut, kCosThetaLim);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
+    rep.safety = safety;
     const real_t t_msc =
         s.processes.multiple_scattering
             ? em::wv_step_limit(mm, pd, type, p.ekin, range, st.lambda_eff, st.cos_tet_max_nuc,
@@ -589,10 +650,26 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
       step_len =
           em::wv_true_path(st, geom_step, e_end, lambda_eff_end, cos_tet_max_end, recompute);
     }
+    // See the note in step_lepton: the true path, which is what the energy loss below is
+    // computed against and what G4Step::GetStepLength reports.
+    rep.true_length = step_len;
 
     // A discrete process fires only if it was the limiting true length and geometry did not
     // cut in first.
     const bool emits_delta = !hits_boundary && (d_delta <= t_step);
+
+    // Read back out as G4StepPoint::GetProcessDefinedStep would report it. See the same block
+    // in step_lepton.
+    if (hits_boundary) {
+      rep.status = StepStatus::fGeomBoundary;
+      rep.process = ProcessId::fTransportation;
+    } else if (emits_delta) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fIonisation;
+    } else {
+      rep.status = StepStatus::fAlongStepDoItProc;
+      rep.process = ProcessId::fIonisation;
+    }
 
     // ---- continuous loss, verbatim from G4VEnergyLossProcess::AlongStepDoIt.
     //
@@ -673,6 +750,8 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
       if (nl > real_t(0)) {
         e_after = fmax(e_after - nl, real_t(0));
         loss = e_before - e_after;
+        // G4Step::GetNonIonizingEnergyDeposit. Part of edep, not additional to it.
+        rep.non_ionizing = nl;
       }
     }
 
@@ -713,6 +792,8 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
 
   // Dying: whatever is left is deposited here. A stopped proton in this transport does not
   // capture on a nucleus - there is no hadronic physics - so there is nothing else to do.
+  rep.status = StepStatus::fStopAndKill;
+  if (rep.process == ProcessId::fNotDefined) { rep.process = ProcessId::fBelowTrackingCut; }
   if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
   return false;
 }

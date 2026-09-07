@@ -33,6 +33,43 @@
 #include "g4/G4VModularPhysicsList.hh"
 #include "host/transport_run.cuh"
 
+/// The step hook the Geant4-shaped API runs on, and how a project chooses its own.
+///
+/// A StepHook is a device functor called once per real step of every track. It is the only way
+/// to see a real step here: G4UserSteppingAction and G4VPrimitiveScorer::Accept are handed a
+/// per-event aggregate instead, and G4Step.hh explains why. Write one by deriving from
+/// G4VUserDeviceSteppingAction, which is the Geant4-shaped way in; core/step_hook.cuh is the
+/// machinery underneath, and its memory note matters more than anything here, because the
+/// decision that determines whether a step-level analysis scales is made in the hook.
+///
+/// The default is StepTap, which copies steps into a capped buffer and stays disabled by its
+/// own null pointer until a caller fills it in. It costs the stock kernels one predicated load
+/// per step and nothing else.
+///
+/// A PROJECT CHOOSES ITS OWN BY DEFINING G4STEP_HOOK, and does not edit this file or rebuild
+/// g4gpu. That is the arrangement Geant4 has - the library is built once, a project compiles
+/// against it - and it is what this macro is for. In one .cu of the project:
+///
+///     #include "MySteppingAction.hh"                 // your class
+///     #define G4STEP_HOOK MySteppingAction           // before G4RunManager.hh
+///     #include "g4/G4RunManager.hh"
+///     #include "host/transport_run_impl.cuh"         // the kernels, in YOUR translation unit
+///     namespace g4gpu::host {
+///       template class TransportEngine<double, MySteppingAction>;
+///     }
+///
+/// or equivalently with -DG4STEP_HOOK=MySteppingAction on the command line. The explicit
+/// instantiation is the part that cannot be avoided: a hook is device code, so a new hook type
+/// is a new kernel, and something has to compile it. What the macro buys is that the something
+/// is the project rather than the engine.
+///
+/// One .cu, one instantiation - see the note at the top of transport_run_impl.cuh for what
+/// happens if you do it in two.
+#ifndef G4STEP_HOOK
+#define G4STEP_HOOK g4gpu::StepTap<G4double>
+#endif
+using G4StepHook = G4STEP_HOOK;
+
 class G4RunManager {
  public:
   G4RunManager() { Instance() = this; }
@@ -93,6 +130,18 @@ class G4RunManager {
 
   /// How many events go to the device at once. Larger keeps the GPU fuller; the cost is
   /// memory, since track buffers are multiples of it.
+  /// Events per batch. 0 - the default - lets the engine size it from the memory the device
+  /// actually has free; see TransportEngine::Upload. Set a positive number to choose it
+  /// yourself, which is honoured even if it will not fit, with a warning.
+  ///
+  /// After Initialize(), this reads back whatever was actually chosen rather than the 0 that
+  /// asked for automatic - so a caller can check it, and code that needs one batch to hold a
+  /// whole run can compare against a real number.
+  /// The share of free device memory the track buffers may take. See
+  /// TransportEngine::SetMemoryFraction. Set before Initialize().
+  void SetMemoryFraction(G4double f) { engine_.SetMemoryFraction(f); }
+  G4double GetMemoryFraction() const { return engine_.GetMemoryFraction(); }
+
   void SetBatchSize(G4int n) { batch_ = n; }
   G4int GetBatchSize() const { return batch_; }
 
@@ -133,7 +182,11 @@ class G4RunManager {
   const G4Run* GetCurrentRun() const { return &run_; }
   const g4gpu::host::RunStats& GetLastRunStats() const { return last_stats_; }
   const g4gpu::g4::FlatScene& GetScene() const { return scene_; }
-  g4gpu::host::TransportEngine<G4double>& GetEngine() { return engine_; }
+  g4gpu::host::TransportEngine<G4double, G4StepHook>& GetEngine() { return engine_; }
+
+  /// The per-step hook. Set it before BeamOn; see G4StepHook above.
+  void SetStepHook(const G4StepHook& h) { engine_.SetStepHook(h); }
+  G4StepHook& GetStepHook() { return engine_.GetStepHook(); }
 
   /// The mass of a scored volume, kg, for converting energy deposit to dose.
   ///
@@ -316,7 +369,7 @@ class G4RunManager {
   std::unique_ptr<G4UserTrackingAction> tracking_action_;
   std::unique_ptr<G4UserStackingAction> stacking_action_;
   g4gpu::g4::FlatScene scene_;
-  g4gpu::host::TransportEngine<G4double> engine_;
+  g4gpu::host::TransportEngine<G4double, G4StepHook> engine_;
   g4gpu::host::RunStats last_stats_;
   G4Run run_;
   G4ParticleGun* gun_ = nullptr;
@@ -330,7 +383,7 @@ class G4RunManager {
   std::vector<G4PVPlacement*> slot_pv_;
   std::vector<G4Material*> slot_mat_;
   G4double range_cut_mm_ = 0.7;
-  G4int batch_ = 1048576;
+  G4int batch_ = 0;  // 0 = size it from device memory
   G4int verbose_ = 0;
   G4int print_progress_ = 0;
   unsigned int seed_ = 0xF00Du;
@@ -393,6 +446,7 @@ inline void G4RunManager::Initialize() {
   }
   engine_.SetProcesses(processes_);
   engine_.Upload(scene_, batch_);
+  batch_ = engine_.ChosenBatch();
   initialised_ = true;
 }
 

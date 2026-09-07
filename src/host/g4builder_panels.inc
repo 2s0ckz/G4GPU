@@ -1399,7 +1399,27 @@ static void SelftestCheckCustomScorer(App& a) {
 /// that used one beam instead of two could pass - see RISK.md V1 for the last time a number
 /// too small to be a measurement cost a day.
 static void SelftestRunForComparison(App& a) {
-  constexpr int kEvents = 200000;
+  // G4GPU_SELFTEST_EVENTS raises the statistics. The comparison against the generated
+  // project is between two INDEPENDENT Monte Carlos of the same model, so the two numbers
+  // approach each other as 1/sqrt(N) and no faster - which means the only way to tell a
+  // real disagreement from an unlucky sample is to run more of them and watch.
+  // A million, not the 200000 this used to run.
+  //
+  // The comparison is between two INDEPENDENT Monte Carlos, so its noise floor is set by
+  // the statistics and nothing else. Measured on this model: the builder and the project
+  // differ by 6.4% at 200000 histories, 0.80% at a million and -0.08% at four million -
+  // textbook 1/sqrt(N). The check they feed has a 6% threshold, and at 200000 the spread
+  // between two independent sides is 4.4% on dose1 - so the threshold sat 1.36 sigma out,
+  // and every pass it had ever given was luck rather than evidence.
+  //
+  // A million puts the noise near 1%, so the 6% threshold has real headroom while still
+  // catching what it is for - a generated project that fires one of two beams, which is
+  // wrong by tens of percent.
+  int kEvents = 1000000;
+  if (const char* env = std::getenv("G4GPU_SELFTEST_EVENTS")) {
+    const int v = std::atoi(env);
+    if (v > 0) { kEvents = v; }
+  }
   RunFromGui(a, kEvents);
   const auto& scorers = G4SDManager::GetSDMpointer()->Scorers();
   for (std::size_t i = 0; i < a.last_scores.size() && i < scorers.size(); ++i) {

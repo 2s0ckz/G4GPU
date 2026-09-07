@@ -71,9 +71,9 @@ template <typename real_t> __host__ __device__ constexpr real_t kIonFlucMinLoss(
 /// wobble between two numbers Geant4 keeps equal.
 template <typename real_t>
 __host__ __device__ inline real_t ion_beta2(real_t kinetic, real_t mass) {
-  if (mass <= real_t(0) || kinetic >= real_t(1000) * mass) { return real_t(1); }
-  const real_t t = kinetic / mass;
-  const real_t beta = sqrt(t * (t + real_t(2))) / (t + real_t(1));
+  // The beta itself now lives in core/particle.cuh, because G4Track::GetVelocity needs the
+  // same one. Squaring it here keeps the arithmetic identical to what this function always did.
+  const real_t beta = dynamic_particle_beta(kinetic, mass);
   return beta * beta;
 }
 
