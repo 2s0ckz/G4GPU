@@ -63,10 +63,6 @@ bool ReadMatVoxels(const std::string& path, VoxelData& out);
 bool ReadMesh(const std::string& path, std::vector<float>& triangles, std::string& note);
 bool ReadStl(const std::string& path, std::vector<float>& triangles, std::string& note);
 
-/// Turns a voxel array into material classes on `solid`, ready for the user to assign
-/// materials. Discrete: one class per distinct value, capped. Continuous: HU bands.
-void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& solid, std::string& note);
-
 // ---------------------------------------------------------------- implementation
 
 namespace detail {
@@ -81,6 +77,17 @@ inline bool EndsWith(const std::string& s, const char* suffix) {
     }
   }
   return true;
+}
+
+/// The last component of a path, for showing a chosen file in a dialog where the full path
+/// would not fit and its directory is not what the user is checking.
+inline std::string BaseName(const std::string& p) {
+  const std::size_t a = p.find_last_of('/');
+  const std::size_t b = p.find_last_of('\\');
+  std::size_t at = std::string::npos;
+  if (a != std::string::npos) { at = a; }
+  if (b != std::string::npos && (at == std::string::npos || b > at)) { at = b; }
+  return (at == std::string::npos) ? p : p.substr(at + 1);
 }
 
 }  // namespace detail
@@ -343,6 +350,133 @@ inline bool ReadStl(const std::string& path, std::vector<float>& tri, std::strin
   return ReadMesh(path, tri, note);
 }
 
+// ---------------------------------------------------------------- colormaps
+
+/// One stop of a colormap: a position in 0-1 and the colour there.
+struct ColourStop {
+  double t;
+  unsigned char r, g, b;
+};
+
+/// The colormaps offered at import, in the order the dialog lists them.
+///
+/// Held as a handful of stops with linear interpolation between them rather than as 256-entry
+/// tables: nine stops reproduce the shape of these maps to within a couple of levels, which
+/// is finer than the eye resolves in a phantom, and a 256-entry table per map is eight
+/// kilobytes of hand-typed numbers with no way to check any one of them.
+///
+/// The first entry is the hue sweep this file has always used, kept and kept FIRST so that an
+/// import which does not touch the menu comes out exactly as it did before. It is the best of
+/// them for telling one organ from its neighbour - adjacent classes land far apart on the
+/// colour circle - which is not what the perceptual maps are built for. Those represent a
+/// CONTINUUM, and they are here because a phantom's indices are often ordered (outwards from
+/// the skin, or by tissue density) and reading it as a continuum is then the clearer picture.
+enum class Colormap : int {
+  kHueSweep = 0, kViridis, kPlasma, kInferno, kMagma, kTurbo, kJet, kGray, kCount
+};
+
+inline const char* const* ColormapNames() {
+  static const char* const kNames[] = {"distinct hues", "viridis", "plasma", "inferno",
+                                       "magma",         "turbo",   "jet",    "gray"};
+  return kNames;
+}
+
+/// The stops of @p m, or null for the hue sweep, which is computed rather than tabulated.
+inline const ColourStop* ColormapStops(Colormap m, int& n) {
+  static const ColourStop kViridis[] = {
+      {0.000, 68, 1, 84},    {0.125, 71, 44, 122},  {0.250, 59, 81, 139},
+      {0.375, 44, 113, 142}, {0.500, 33, 144, 140}, {0.625, 39, 173, 129},
+      {0.750, 92, 200, 99},  {0.875, 170, 220, 50}, {1.000, 253, 231, 37}};
+  static const ColourStop kPlasma[] = {
+      {0.000, 13, 8, 135},   {0.125, 75, 3, 161},   {0.250, 125, 3, 168},
+      {0.375, 168, 34, 150}, {0.500, 203, 70, 121}, {0.625, 229, 107, 93},
+      {0.750, 248, 148, 65}, {0.875, 253, 195, 40}, {1.000, 240, 249, 33}};
+  static const ColourStop kInferno[] = {
+      {0.000, 0, 0, 4},      {0.143, 31, 12, 72},   {0.286, 85, 15, 109},
+      {0.429, 136, 34, 106}, {0.571, 186, 54, 85},  {0.714, 227, 89, 51},
+      {0.857, 249, 142, 9},  {1.000, 252, 255, 164}};
+  static const ColourStop kMagma[] = {
+      {0.000, 0, 0, 4},      {0.143, 28, 16, 68},   {0.286, 79, 18, 123},
+      {0.429, 129, 37, 129}, {0.571, 181, 54, 122}, {0.714, 229, 80, 100},
+      {0.857, 251, 135, 97}, {1.000, 252, 253, 191}};
+  static const ColourStop kTurbo[] = {
+      {0.000, 48, 18, 59},   {0.125, 65, 69, 171},  {0.250, 57, 131, 228},
+      {0.375, 27, 184, 203}, {0.500, 54, 220, 140}, {0.625, 140, 244, 64},
+      {0.750, 215, 227, 37}, {0.875, 254, 168, 49}, {1.000, 122, 4, 3}};
+  // Jet's stops are NOT evenly spaced, and that is what gives it the flat cyan and yellow
+  // plateaus it is known and criticised for, so they are written where they actually are.
+  static const ColourStop kJet[] = {
+      {0.000, 0, 0, 128},   {0.125, 0, 0, 255}, {0.375, 0, 255, 255},
+      {0.625, 255, 255, 0}, {0.875, 255, 0, 0}, {1.000, 128, 0, 0}};
+  static const ColourStop kGray[] = {{0.000, 0, 0, 0}, {1.000, 255, 255, 255}};
+
+  switch (m) {
+    case Colormap::kViridis: n = 9; return kViridis;
+    case Colormap::kPlasma:  n = 9; return kPlasma;
+    case Colormap::kInferno: n = 8; return kInferno;
+    case Colormap::kMagma:   n = 8; return kMagma;
+    case Colormap::kTurbo:   n = 9; return kTurbo;
+    case Colormap::kJet:     n = 6; return kJet;
+    case Colormap::kGray:    n = 2; return kGray;
+    default:                 n = 0; return nullptr;
+  }
+}
+
+/// The colour of @p m at @p t in 0-1, as three components in 0-1.
+inline void SampleColormap(Colormap m, double t, float& r, float& g, float& b) {
+  if (t < 0.0) { t = 0.0; }
+  if (t > 1.0) { t = 1.0; }
+  if (m == Colormap::kHueSweep) {
+    // The hue circle, swept ALMOST once. A saturated ramp rather than a full HSV sweep, so
+    // that no class comes out near-black or near-white - the two the eye cannot place in a
+    // phantom.
+    //
+    // 330 degrees and not 360, because the circle closes: 360 is the same red as 0, so the
+    // lowest and highest index would come out identical. The version of this that indexed by
+    // POSITION in the class list avoided it by accident - the last of N classes landed at
+    // 360*(N-1)/N, one step short - and indexing by value instead put a class exactly at the
+    // end and closed the loop. The test that caught it is section 13 of
+    // tests/test_voxel_import.cu, which asks whether any map returns to a colour it has left.
+    const double hh = (t * 330.0) / 60.0;
+    const int i = static_cast<int>(hh) % 6;
+    const double fr = hh - static_cast<int>(hh);
+    const double p = 0.35, qv = 1.0 - 0.65 * fr, tt = 0.35 + 0.65 * fr;
+    switch (i) {
+      case 0: r = 1.0f; g = static_cast<float>(tt); b = static_cast<float>(p); break;
+      case 1: r = static_cast<float>(qv); g = 1.0f; b = static_cast<float>(p); break;
+      case 2: r = static_cast<float>(p); g = 1.0f; b = static_cast<float>(tt); break;
+      case 3: r = static_cast<float>(p); g = static_cast<float>(qv); b = 1.0f; break;
+      case 4: r = static_cast<float>(tt); g = static_cast<float>(p); b = 1.0f; break;
+      default: r = 1.0f; g = static_cast<float>(p); b = static_cast<float>(qv); break;
+    }
+    return;
+  }
+  int n = 0;
+  const ColourStop* st = ColormapStops(m, n);
+  if (st == nullptr || n <= 0) {
+    r = 0.7f;
+    g = 0.7f;
+    b = 0.7f;
+    return;
+  }
+  if (t <= st[0].t || n == 1) {
+    r = st[0].r / 255.0f;
+    g = st[0].g / 255.0f;
+    b = st[0].b / 255.0f;
+    return;
+  }
+  for (int k = 1; k < n; ++k) {
+    if (t <= st[k].t || k == n - 1) {
+      const double span = st[k].t - st[k - 1].t;
+      const double f = (span > 0) ? (t - st[k - 1].t) / span : 0.0;
+      r = static_cast<float>((st[k - 1].r + (st[k].r - st[k - 1].r) * f) / 255.0);
+      g = static_cast<float>((st[k - 1].g + (st[k].g - st[k - 1].g) * f) / 255.0);
+      b = static_cast<float>((st[k - 1].b + (st[k].b - st[k - 1].b) * f) / 255.0);
+      return;
+    }
+  }
+}
+
 /// What reading a colour table did, for the log.
 struct ColourTableResult {
   int rows = 0;        ///< data rows parsed
@@ -537,7 +671,14 @@ inline ColourTableResult ReadVoxelColourTable(const std::string& path, Solid& s,
   return r;
 }
 
-inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::string& note) {
+/// Turns a voxel array into material classes on @p s, ready for the user to assign materials.
+/// Discrete: one class per distinct value, capped. Continuous: HU bands.
+///
+/// @param cmap which colormap the classes are coloured from. The default is the hue sweep,
+///        which is what this did before there was a choice, so an import that does not ask
+///        for a map comes out as it always did.
+inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::string& note,
+                           Colormap cmap = Colormap::kHueSweep) {
   s.voxel_kind = kind;
   s.voxel_classes.clear();
   char buf[256];
@@ -615,20 +756,9 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
       char lbl[32];
       std::snprintf(lbl, sizeof lbl, "value %g", q);
       c.label = lbl;
-      // A distinguishable colour per class, spread round the hue circle.
-      const double h = 360.0 * s.voxel_classes.size() / std::max<std::size_t>(1, seen.size());
-      const double hh = h / 60.0;
-      const int i = static_cast<int>(hh) % 6;
-      const double fr = hh - static_cast<int>(hh);
-      const double p = 0.35, qv = 1.0 - 0.65 * fr, t = 0.35 + 0.65 * fr;
-      switch (i) {
-        case 0: c.r = 1.0f; c.g = static_cast<float>(t); c.b = static_cast<float>(p); break;
-        case 1: c.r = static_cast<float>(qv); c.g = 1.0f; c.b = static_cast<float>(p); break;
-        case 2: c.r = static_cast<float>(p); c.g = 1.0f; c.b = static_cast<float>(t); break;
-        case 3: c.r = static_cast<float>(p); c.g = static_cast<float>(qv); c.b = 1.0f; break;
-        case 4: c.r = static_cast<float>(t); c.g = static_cast<float>(p); c.b = 1.0f; break;
-        default: c.r = 1.0f; c.g = static_cast<float>(p); c.b = static_cast<float>(qv); break;
-      }
+      // The colour is filled in after this loop, not here: where a class lands in the
+      // colormap depends on the RANGE of the values, and the last value is not known until
+      // the loop has finished.
       // Index 0 invisible, and everything else nearly so.
       //
       // In every segmentation convention 0 is "nothing here" - air, background, outside the
@@ -647,9 +777,31 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
       c.opacity = (c.value == 0.0) ? 0.0f : 0.1f;
       s.voxel_classes.push_back(c);
     }
+
+    // A COLOUR PER CLASS, THE MAP STRETCHED OVER THE RANGE OF THE VALUES.
+    //
+    // The position in the map is (value - lowest) / (highest - lowest), so the map is fitted
+    // to the indices that are actually present rather than being sampled out of a fixed 256
+    // and rather than being cycled once it runs out. Neither of those two happens here: no
+    // class repeats another's colour, because no two classes have the same value.
+    //
+    // By VALUE and not by position in the list, which is what "the range of the index values"
+    // means and which has a use: two phantoms labelled by the same convention come out with
+    // the same colours whether or not both contain every structure. The cost is that a
+    // sparse numbering - three classes at 0,1,2 and two at 700,701 - gives each cluster
+    // nearly one colour. A colour table is the answer for a phantom numbered like that, and
+    // it is chosen in the same dialog.
+    {
+      const double span = dhi - dlo;
+      for (VoxelClass& c : s.voxel_classes) {
+        const double t = (span > 0) ? (c.value - dlo) / span : 0.0;
+        SampleColormap(cmap, t, c.r, c.g, c.b);
+      }
+    }
     std::snprintf(buf, sizeof buf,
-                  "%d distinct values, one material class each%s",
+                  "%d distinct values, one material class each, coloured by %s%s",
                   static_cast<int>(s.voxel_classes.size()),
+                  ColormapNames()[static_cast<int>(cmap)],
                   (dlo <= 0.0 && dhi >= 0.0) ? "; index 0 hidden" : "");
     note = buf;
     return;

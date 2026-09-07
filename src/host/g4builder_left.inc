@@ -13,7 +13,8 @@
 // section is the longer of the two and reads better next to the scorers it sits beside in the
 // other sidebar. A forward declaration rather than a reorder: the left sidebar needs solids
 // and the right needs scorers, so one of the two orders has to be broken either way.
-static int DrawSolidsSection(App& a, const ui::Rect& panel, int y);
+static int DrawSolidsList(App& a, const ui::Rect& panel, int y);
+static int DrawSolidForm(App& a, const ui::Rect& panel, int y);
 static int DrawScorersSection(App& a, const ui::Rect& panel, int y);
 
 /// The NIST material names, for the autocomplete on the material form.
@@ -128,7 +129,6 @@ static int DrawElementsSection(App& a, const ui::Rect& panel, int y) {
 
   // Isotopes as well as elements: the same record with an A the table would not have given
   // it, which is how Geant4's G4Isotope differs from G4Element too.
-  y = ui::SectionHeader(c, panel, y, "ELEMENTS / ISOTOPES");
   for (std::size_t i = 0; i < a.model.elements.size(); ++i) {
     const Element& e = a.model.elements[i];
     const int key = 100000 + static_cast<int>(i);
@@ -223,7 +223,6 @@ static int DrawMaterialsSection(App& a, const ui::Rect& panel, int y) {
   const int row = lh + 5;
   SyncMaterialDraft(a);
 
-  y = ui::SectionHeader(c, panel, y, "MATERIALS");
   for (std::size_t i = 0; i < a.model.materials.size(); ++i) {
     const Material& m = a.model.materials[i];
     const int key = 200000 + static_cast<int>(i);
@@ -418,27 +417,24 @@ static void DrawLeftPanel(App& a) {
   const ui::Rect br{panel.x + 8, panel.y + panel.h - row - 8, panel.w - 16, row + 3};
   const ui::Rect inner{panel.x, panel.y, panel.w, panel.h - row - 14};
 
-  // Three scroll boxes rather than one, for the same reason as the right panel: a model with
-  // forty materials used to bury the scorers below them. See ui::DivideSections.
-  const int want[3] = {a.elements_scroll.content_h, a.materials_scroll.content_h,
-                       a.scorers_scroll.content_h};
-  int h[3] = {0, 0, 0};
-  ui::DivideSections(inner.h, row * 5, want, h, 3);
-
-  const ui::Rect r_el{inner.x, inner.y, inner.w, h[0]};
-  int y = a.elements_scroll.Begin(c, r_el, row * 3) + 8;
-  y = DrawElementsSection(a, panel, y);
-  a.elements_scroll.End(c, r_el, y);
-
-  const ui::Rect r_mat{inner.x, r_el.y + h[0], inner.w, h[1]};
-  int y2 = a.materials_scroll.Begin(c, r_mat, row * 3) + 4;
-  y2 = DrawMaterialsSection(a, panel, y2);
-  a.materials_scroll.End(c, r_mat, y2);
-
-  const ui::Rect r_sc{inner.x, r_mat.y + h[1], inner.w, h[2]};
-  int y3 = a.scorers_scroll.Begin(c, r_sc, row * 3) + 4;
-  y3 = DrawScorersSection(a, panel, y3);
-  a.scorers_scroll.End(c, r_sc, y3);
+  // A THIRD EACH, always, for the reason the right panel is halves: a panel whose sections
+  // move as the model grows is one where nothing is ever in the same place twice. Each third
+  // keeps its own scrollbar, so a model with forty materials is scrolled rather than given
+  // the whole panel and burying the scorers below it.
+  const int third = inner.h / 3;
+  const int hs[3] = {third, third, inner.h - 2 * third};
+  static const char* const kTitle[3] = {"ELEMENTS / ISOTOPES", "MATERIALS", "SCORERS"};
+  ui::ScrollArea* const sc[3] = {&a.elements_scroll, &a.materials_scroll, &a.scorers_scroll};
+  int at = inner.y;
+  for (int k = 0; k < 3; ++k) {
+    const ui::Rect body = ui::FrozenTitle(c, {inner.x, at, inner.w, hs[k]}, kTitle[k]);
+    int yk = sc[k]->Begin(c, body, row * 3, 8110 + k) + 2;
+    yk = (k == 0) ? DrawElementsSection(a, panel, yk)
+                  : (k == 1) ? DrawMaterialsSection(a, panel, yk)
+                             : DrawScorersSection(a, panel, yk);
+    sc[k]->End(c, body, yk);
+    at += hs[k];
+  }
 
   if (ui::Button(c, 890, br, "Physics options")) { a.popup = Popup::kPhysics; }
 }

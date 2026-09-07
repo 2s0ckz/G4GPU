@@ -10,15 +10,20 @@ static void SyncSourceDraft(App& a) {
     a.draft_source = builder::Source{};
     a.draft_source.name = "Source" + std::to_string(a.model.sources.size() + 1);
   }
+  // Seeded in whatever unit each row is being read in, not in the base unit. See
+  // ui::UnitField: a field showing a millimetre count under a label saying cm is the one way
+  // this can lie, and the next edit would scale it again.
   const builder::Source& s = a.draft_source;
-  a.src_field[0].Init(s.energy_MeV);
-  a.src_field[1].Init(s.pos[0]);
-  a.src_field[2].Init(s.pos[1]);
-  a.src_field[3].Init(s.pos[2]);
-  a.src_field[4].Init(s.half_x);
-  a.src_field[5].Init(s.half_y);
-  a.src_field[6].Init(s.radius);
-  a.src_field[7].Init(s.angular_spread_deg);
+  const ui::UnitTable& len = ui::LengthUnitTable();
+  a.src_field[0].Init(ui::InUnit(s.energy_MeV, a.src_unit[0], ui::EnergyUnitTable()));
+  a.src_field[1].Init(ui::InUnit(s.pos[0], a.src_unit[1], len));
+  a.src_field[2].Init(ui::InUnit(s.pos[1], a.src_unit[2], len));
+  a.src_field[3].Init(ui::InUnit(s.pos[2], a.src_unit[3], len));
+  a.src_field[4].Init(ui::InUnit(s.half_x, a.src_unit[4], len));
+  a.src_field[5].Init(ui::InUnit(s.half_y, a.src_unit[5], len));
+  a.src_field[6].Init(ui::InUnit(s.radius, a.src_unit[6], len));
+  a.src_field[7].Init(
+      ui::InUnit(s.angular_spread_deg, a.src_unit[7], ui::AngleUnitTable()));
   a.src_activity.Init(s.activity);
   a.src_weight.Init(s.weight);
   a.src_name_buf.Reset();
@@ -39,14 +44,13 @@ static const std::vector<const char*>& ParticleNames() {
 
 // ---------------------------------------------------------------- sources
 
-static int DrawSourcesSection(App& a, const ui::Rect& panel, int y) {
+static int DrawSourcesList(App& a, const ui::Rect& panel, int y) {
   ui::Context& c = a.uic;
   const int lh = a.font.glyph_h;
   const int row = lh + 5;
   const int w = panel.w;
   SyncSourceDraft(a);
 
-  y = ui::SectionHeader(c, panel, y, "SOURCES");
   static const char* kKindName[5] = {"beam", "point", "shell", "volume", "radio"};
 
   // The share each enabled source contributes, so a two-beam run is legible before it is run.
@@ -92,7 +96,17 @@ static int DrawSourcesSection(App& a, const ui::Rect& panel, int y) {
                   ui::theme::kTextDim);
     y += lh + 3;
   }
-  y += 4;
+  return y + 4;
+}
+
+// ---------------------------------------------------------------- the source form
+
+static int DrawSourceForm(App& a, const ui::Rect& panel, int y) {
+  ui::Context& c = a.uic;
+  const int lh = a.font.glyph_h;
+  const int row = lh + 5;
+  const int w = panel.w;
+  SyncSourceDraft(a);
 
   const int sbw = (w - 36) / 4;
   if (ui::Button(c, 680, {panel.x + 8, y, sbw, row + 2}, "Add")) {
@@ -167,11 +181,13 @@ static int DrawSourcesSection(App& a, const ui::Rect& panel, int y) {
       y += lh + 2;
     }
   }
+  // The unit menus sit where the unit labels were. See ui::UnitField.
+  const int uw = 56;
+  auto unit_rect = [&](int yy) { return ui::Rect{vx + vw + 6, yy, uw, row}; };
+
   c.canvas.Text(panel.x + 8, y + 3, "energy", ui::theme::kTextDim);
-  if (ui::NumberInput(c, 711, {vx, y, vw, row}, a.src_field[0])) {
-    src.energy_MeV = a.src_field[0].value;
-  }
-  c.canvas.Text(vx + vw + 6, y + 3, "MeV", ui::theme::kTextDim);
+  ui::UnitField(c, 711, {vx, y, vw, row}, unit_rect(y), a.src_field[0], src.energy_MeV,
+                a.src_unit[0], ui::EnergyUnitTable());
   y += row + 2;
   c.canvas.Text(panel.x + 8, y + 3, "weight", ui::theme::kTextDim);
   if (ui::NumberInput(c, 712, {vx, y, vw, row}, a.src_weight)) {
@@ -183,23 +199,21 @@ static int DrawSourcesSection(App& a, const ui::Rect& panel, int y) {
   const char* pl[3] = {"pos x", "pos y", "pos z"};
   for (int k = 0; k < 3; ++k) {
     c.canvas.Text(panel.x + 8, y + 3, pl[k], ui::theme::kTextDim);
-    if (ui::NumberInput(c, 720 + k, {vx, y, vw, row}, a.src_field[1 + k])) {
-      src.pos[k] = a.src_field[1 + k].value;
-    }
-    c.canvas.Text(vx + vw + 6, y + 3, "mm", ui::theme::kTextDim);
+    ui::UnitField(c, 720 + k, {vx, y, vw, row}, unit_rect(y), a.src_field[1 + k], src.pos[k],
+                  a.src_unit[1 + k], ui::LengthUnitTable());
     y += row + 1;
   }
 
   if (src.kind == SourceKind::kBeam || src.kind == SourceKind::kVolume) {
+    // These two had no unit beside them at all - the only two fields in either form that did
+    // not say what they were in. They are lengths, like every other half extent here.
     c.canvas.Text(panel.x + 8, y + 3, "half x", ui::theme::kTextDim);
-    if (ui::NumberInput(c, 730, {vx, y, vw, row}, a.src_field[4])) {
-      src.half_x = a.src_field[4].value;
-    }
+    ui::UnitField(c, 730, {vx, y, vw, row}, unit_rect(y), a.src_field[4], src.half_x,
+                  a.src_unit[4], ui::LengthUnitTable());
     y += row + 1;
     c.canvas.Text(panel.x + 8, y + 3, "half y", ui::theme::kTextDim);
-    if (ui::NumberInput(c, 731, {vx, y, vw, row}, a.src_field[5])) {
-      src.half_y = a.src_field[5].value;
-    }
+    ui::UnitField(c, 731, {vx, y, vw, row}, unit_rect(y), a.src_field[5], src.half_y,
+                  a.src_unit[5], ui::LengthUnitTable());
     y += row + 2;
     if (src.kind == SourceKind::kBeam) {
       bool ell = (src.profile == BeamProfile::kElliptical);
@@ -211,18 +225,14 @@ static int DrawSourcesSection(App& a, const ui::Rect& panel, int y) {
   }
   if (src.kind == SourceKind::kPoint) {
     c.canvas.Text(panel.x + 8, y + 3, "spread", ui::theme::kTextDim);
-    if (ui::NumberInput(c, 740, {vx, y, vw, row}, a.src_field[7])) {
-      src.angular_spread_deg = a.src_field[7].value;
-    }
-    c.canvas.Text(vx + vw + 6, y + 3, "deg", ui::theme::kTextDim);
+    ui::UnitField(c, 740, {vx, y, vw, row}, unit_rect(y), a.src_field[7],
+                  src.angular_spread_deg, a.src_unit[7], ui::AngleUnitTable());
     y += row + 2;
   }
   if (src.kind == SourceKind::kIsotropicShell) {
     c.canvas.Text(panel.x + 8, y + 3, "radius", ui::theme::kTextDim);
-    if (ui::NumberInput(c, 741, {vx, y, vw, row}, a.src_field[6])) {
-      src.radius = a.src_field[6].value;
-    }
-    c.canvas.Text(vx + vw + 6, y + 3, "mm", ui::theme::kTextDim);
+    ui::UnitField(c, 741, {vx, y, vw, row}, unit_rect(y), a.src_field[6], src.radius,
+                  a.src_unit[6], ui::LengthUnitTable());
     y += row + 2;
   }
   if (src.kind == SourceKind::kRadioactive) {
@@ -271,20 +281,39 @@ static void DrawRightPanel(App& a) {
                        a.height - kMenuH - kStatusH};
   ui::Panel(c, panel);
 
-  // A scroll box per section rather than one for the panel. See ui::DivideSections.
-  const int want[2] = {a.solids_scroll.content_h, a.sources_scroll.content_h};
-  int h[2] = {0, 0};
-  ui::DivideSections(panel.h - 8, row * 5, want, h, 2);
+  // HALF EACH, always, rather than shared out by what each section asked for.
+  //
+  // The share-by-demand rule (ui::DivideSections) put SOURCES wherever the solid list
+  // happened to end, so the panel's furniture moved every time a solid was added and the
+  // sources form was somewhere different each time you went looking for it. A fixed split
+  // costs the solid list some room it could have used and buys back a panel whose layout is
+  // the same on every model - and both halves scroll, so nothing is unreachable.
+  const int avail = panel.h - 8;
+  const int half = avail / 2;
 
-  const ui::Rect r_solids{panel.x, panel.y + 4, panel.w, h[0]};
-  int y = a.solids_scroll.Begin(c, r_solids, row * 3) + 8;
-  y = DrawSolidsSection(a, panel, y);
+  // Each half is a frozen title, then the list, then the selection's form.
+  ui::Rect body = ui::FrozenTitle(c, {panel.x, panel.y + 4, panel.w, half}, "SOLIDS");
+  ui::Rect r_solids, r_solid_form;
+  ui::SplitListForm(body, a.solids_scroll.content_h, a.solid_form_scroll.content_h, r_solids,
+                    r_solid_form);
+  int y = a.solids_scroll.Begin(c, r_solids, row * 3, 8100);
+  y = DrawSolidsList(a, panel, y);
   a.solids_scroll.End(c, r_solids, y);
+  int yf = a.solid_form_scroll.Begin(c, r_solid_form, row * 3, 8101);
+  yf = DrawSolidForm(a, panel, yf);
+  a.solid_form_scroll.End(c, r_solid_form, yf);
 
-  const ui::Rect r_sources{panel.x, r_solids.y + h[0], panel.w, h[1]};
-  int y2 = a.sources_scroll.Begin(c, r_sources, row * 3) + 4;
-  y2 = DrawSourcesSection(a, panel, y2);
+  ui::Rect body2 = ui::FrozenTitle(
+      c, {panel.x, panel.y + 4 + half, panel.w, avail - half}, "SOURCES");
+  ui::Rect r_sources, r_source_form;
+  ui::SplitListForm(body2, a.sources_scroll.content_h, a.source_form_scroll.content_h,
+                    r_sources, r_source_form);
+  int y2 = a.sources_scroll.Begin(c, r_sources, row * 3, 8102);
+  y2 = DrawSourcesList(a, panel, y2);
   a.sources_scroll.End(c, r_sources, y2);
+  int yf2 = a.source_form_scroll.Begin(c, r_source_form, row * 3, 8103);
+  yf2 = DrawSourceForm(a, panel, yf2);
+  a.source_form_scroll.End(c, r_source_form, yf2);
 }
 
 // ---------------------------------------------------------------- the bottom panel

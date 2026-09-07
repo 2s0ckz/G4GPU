@@ -288,8 +288,10 @@ struct App {
   ui::ScrollArea scorers_scroll;
   ui::ScrollArea solids_scroll;
   ui::ScrollArea sources_scroll;
-  ui::ScrollArea bottom_solids_scroll;
-  ui::ScrollArea bottom_scorers_scroll;
+  /// The selected item's form, scrolled separately from the list it was selected in - see
+  /// ui::SplitListForm for why the two cannot share one.
+  ui::ScrollArea solid_form_scroll;
+  ui::ScrollArea source_form_scroll;
   ui::ScrollArea pick_scroll;
 
   /// What the picker pop-up is choosing, and for which solid or material.
@@ -314,6 +316,20 @@ struct App {
   /// one's defaults.
   int world_shape = 0;             ///< index into the dialog's shape list, not a Shape
   int world_unit = 1;              ///< index into kLengthUnits; 1 is mm
+
+  // Which unit each field of the two forms is being read in. View state, not the document:
+  // the model is in mm, degrees and MeV whatever these say, so a saved project does not
+  // depend on them and reopening it in different units changes nothing but the display.
+  //
+  // Held per ROW and across selections, not reset with the selection, because someone
+  // working in cm is working in cm for the whole session and would otherwise have it undone
+  // by every click in the list. Row k of the shape parameters means the same kind of
+  // quantity for every shape - ShapeParams says which - so the choice still applies.
+  int p_unit[12] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  int pos_unit[3] = {1, 1, 1};
+  int rot_unit[3] = {0, 0, 0};
+  /// Parallel to src_field: energy, pos xyz, half x, half y, radius, spread.
+  int src_unit[8] = {2, 1, 1, 1, 1, 1, 1, 0};
   ui::NumberField world_dim[3];
   bool world_dialog_seeded = false;
 
@@ -329,6 +345,16 @@ struct App {
   int vox_meaning = 0;             ///< 0 material indices, 1 physical properties
   bool vox_guess_dims = true;
   bool vox_dialog_seeded = false;
+  /// What the import dialog has been told so far. CHOOSING A FILE NO LONGER IMPORTS IT: the
+  /// dialog collects the voxel file, a colour table if there is one, and every parameter,
+  /// and the Import button does the work. Before this, picking the file ran the import
+  /// immediately, which meant the cell size and the type had to be right BEFORE the file
+  /// browser was opened - and getting them wrong meant deleting the solid and starting over.
+  std::string vox_file;
+  std::string vox_ctbl;
+  /// Index into builder::ColormapNames(). Only used when vox_ctbl is empty; a table that
+  /// names the colours outranks a map that guesses them.
+  int vox_colormap = 0;
 
   ui::Font font;
   ui::Context uic;
@@ -1042,7 +1068,7 @@ int main(int argc, char** argv) {
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 44;
+      selftest_frames = 48;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1189,6 +1215,12 @@ int main(int argc, char** argv) {
         a.popup = Popup::kNone;
         SeedVoxelDialog(a);
         a.vox_guess_dims = false;   // so the cell fields are live rather than greyed
+        // A chosen file and a chosen table, so the photograph shows those rows as a user
+        // sees them rather than as three empty prompts - and shows the Import button
+        // enabled, which is the state the dialog exists to reach. Nothing is read: these are
+        // strings the dialog displays, and Import is not pressed.
+        a.vox_file = "D:/phantom/adult_male_1mm.raw";
+        a.vox_ctbl = "D:/phantom/icrp110_colours.txt";
         a.popup = Popup::kImportVoxel;
       }
       if (frame == 25) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_voxel.png"); }
@@ -1336,6 +1368,25 @@ int main(int argc, char** argv) {
       }
       if (frame == 43) {
         SaveFramePng(a, "D:/g4gpu/out/g4builder_colour_table_button.png");
+      }
+      // The colormap list, open. It is the longest dropdown in any of these dialogs, so it
+      // is the one most likely to run off the bottom of the pop-up that owns it - the defect
+      // class of docs/RISK.md V14. The colour table is cleared first, because the menu is
+      // drawn inert while a table overrides it and an inert menu does not open.
+      if (frame == 44) {
+        SeedVoxelDialog(a);
+        a.vox_guess_dims = false;
+        a.vox_file = "D:/phantom/adult_male_1mm.raw";
+        a.vox_ctbl.clear();
+        a.popup = Popup::kImportVoxel;
+      }
+      if (frame == 45) { a.uic.open_select = 1280; }
+      if (frame == 46) {
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_voxel_cmap.png");
+        a.uic.open_select = 0;
+        a.popup = Popup::kNone;
+        a.vox_file.clear();
+        a.vox_dialog_seeded = false;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

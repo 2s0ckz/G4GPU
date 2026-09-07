@@ -8,13 +8,11 @@
 // it, the way SOURCES is structured. Two separate panels meant looking in one place to pick a
 // thing and another to change it.
 
-static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
+static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
   ui::Context& c = a.uic;
   const int lh = a.font.glyph_h;
   const int row = lh + 5;
   const int w = panel.w;
-
-  y = ui::SectionHeader(c, panel, y, "SOLIDS");
   for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
     Solid& s = a.model.solids[i];
     const std::string mat =
@@ -53,7 +51,22 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
         continue;
       }
     }
-    const ui::Rect row_r{rr.x + arrow_w, rr.y, rr.w - arrow_w, row};
+    // Visibility gets a column of its own, left of the swatch, for the same reason the
+    // disclosure triangle does: a hit region carved out of the row would fight the row's own
+    // click, and the columns have to line up down a list where only some rows have children.
+    //
+    // The flag already existed and was reachable only by opening the colour dialog, which is
+    // three clicks to answer "what is behind this shell" and three more to put it back.
+    const int eye_w = lh + 4;
+    if (!editing) {
+      const ui::Rect er{rr.x + arrow_w, rr.y, eye_w, row};
+      if (ui::EyeToggle(c, 470 + static_cast<int>(i), er, s.visible)) {
+        s.visible = !s.visible;
+        a.model.Touch();
+        a.scene_dirty = true;
+      }
+    }
+    const ui::Rect row_r{rr.x + arrow_w + eye_w, rr.y, rr.w - arrow_w - eye_w, row};
 
     const int hit = ui::ListRowRenamable(c, 400 + static_cast<int>(i), row_r,
                                          Fmt("%-12s %s", s.name.c_str(), mat.c_str()),
@@ -110,7 +123,18 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
                                     : Fmt("%-4.0f..%-4.0f %s", vc.value, vc.value_max,
                                           vmat.c_str());
       const int id = 4000 + static_cast<int>(i) * 100 + static_cast<int>(k);
-      const ui::Rect vrow{panel.x + 8 + arrow_w + 12, y, w - 32 - arrow_w, row};
+      // A class gets an eye too. It is the same question one level down - what is behind the
+      // skin - and on a segmentation it is the only practical way to look inside one, since
+      // there may be two hundred classes and the answer is usually "hide all but three".
+      const ui::Rect cer{panel.x + 8 + arrow_w + 12, y, eye_w, row};
+      if (ui::EyeToggle(c, 4700 + static_cast<int>(i) * 100 + static_cast<int>(k), cer,
+                        vc.visible)) {
+        s.voxel_classes[k].visible = !s.voxel_classes[k].visible;
+        a.model.Touch();
+        a.scene_dirty = true;
+      }
+      const ui::Rect vrow{panel.x + 8 + arrow_w + 12 + eye_w, y, w - 32 - arrow_w - eye_w,
+                          row};
       // The swatch takes the click, the rest of the row assigns a material. Tested before the
       // row is drawn but acted on after, so the row still draws its hover and its swatch on
       // the frame the swatch is clicked.
@@ -133,9 +157,17 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
       y += row;
     }
   }
-  y += 6;
+  return y + 6;
+}
 
-  // ---- the selected solid's properties, in the same section
+// ---------------------------------------------------------------- the selected solid's form
+
+static int DrawSolidForm(App& a, const ui::Rect& panel, int y) {
+  ui::Context& c = a.uic;
+  const int lh = a.font.glyph_h;
+  const int row = lh + 5;
+  const int w = panel.w;
+
   if (a.sel_solid < 0 || a.sel_solid >= static_cast<int>(a.model.solids.size())) {
     c.canvas.Text(panel.x + 8, y, "click a solid in the view or the list above",
                   ui::theme::kTextDim);
@@ -144,10 +176,18 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
 
   Solid& s = a.model.solids[a.sel_solid];
   if (a.pfield_for != a.sel_solid) {
-    for (int k = 0; k < 12; ++k) { a.pfield[k].Init(s.p[k]); }
+    // Seeded IN THE CHOSEN UNIT. Seeding the base value into a field labelled cm is the one
+    // way this arrangement can lie: the number would be right for mm and wrong for what it
+    // says beside it, and the first edit would then multiply it again.
+    int nps = 0;
+    const ShapeParam* sps = ShapeParams(s.shape, nps);
+    for (int k = 0; k < 12; ++k) {
+      const ui::UnitTable& u = ui::UnitsFor((k < nps) ? sps[k].unit : "");
+      a.pfield[k].Init(ui::InUnit(s.p[k], a.p_unit[k], u));
+    }
     for (int k = 0; k < 3; ++k) {
-      a.pos_field[k].Init(s.pos[k]);
-      a.rot_field[k].Init(s.rot[k]);
+      a.pos_field[k].Init(ui::InUnit(s.pos[k], a.pos_unit[k], ui::LengthUnitTable()));
+      a.rot_field[k].Init(ui::InUnit(s.rot[k], a.rot_unit[k], ui::AngleUnitTable()));
     }
     a.opacity_field.Init(s.opacity * 100.0, "%.0f");   // shown as a percentage
     a.pfield_for = a.sel_solid;
@@ -160,16 +200,29 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
 
   const int vx = panel.x + 8 + 92;          // where the value fields start
   const int vw = 76;
+  // The unit menu takes the space the unit LABEL used to occupy, which is why the fields did
+  // not have to move: the label was already telling you the unit, and now it lets you change
+  // it. A menu narrower than this clips "mrad".
+  const int uw = 56;
+  auto unit_rect = [&](int yy) { return ui::Rect{vx + vw + 6, yy, uw, row}; };
   int np = 0;
   const ShapeParam* sp = ShapeParams(s.shape, np);
   for (int k = 0; k < np; ++k) {
     c.canvas.Text(panel.x + 8, y + 3, sp[k].label, ui::theme::kTextDim);
-    if (ui::NumberInput(c, 600 + k, {vx, y, vw, row}, a.pfield[k])) {
-      s.p[k] = a.pfield[k].value;
+    const ui::UnitTable& u = ui::UnitsFor(sp[k].unit);
+    if (u.n <= 0) {
+      // A bare number - a segment count, a fraction. The label still says what it is.
+      if (ui::NumberInput(c, 600 + k, {vx, y, vw, row}, a.pfield[k])) {
+        s.p[k] = a.pfield[k].value;
+        a.model.Touch();
+        a.scene_dirty = true;
+      }
+      c.canvas.Text(vx + vw + 6, y + 3, sp[k].unit, ui::theme::kTextDim);
+    } else if (ui::UnitField(c, 600 + k, {vx, y, vw, row}, unit_rect(y), a.pfield[k], s.p[k],
+                             a.p_unit[k], u)) {
       a.model.Touch();
       a.scene_dirty = true;
     }
-    c.canvas.Text(vx + vw + 6, y + 3, sp[k].unit, ui::theme::kTextDim);
     y += row + 1;
   }
   y += 3;
@@ -177,22 +230,20 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
   const char* axis[3] = {"x", "y", "z"};
   for (int k = 0; k < 3; ++k) {
     c.canvas.Text(panel.x + 8, y + 3, Fmt("pos %s", axis[k]), ui::theme::kTextDim);
-    if (ui::NumberInput(c, 620 + k, {vx, y, vw, row}, a.pos_field[k])) {
-      s.pos[k] = a.pos_field[k].value;
+    if (ui::UnitField(c, 620 + k, {vx, y, vw, row}, unit_rect(y), a.pos_field[k], s.pos[k],
+                      a.pos_unit[k], ui::LengthUnitTable())) {
       a.model.Touch();
       a.scene_dirty = true;
     }
-    c.canvas.Text(vx + vw + 6, y + 3, "mm", ui::theme::kTextDim);
     y += row + 1;
   }
   for (int k = 0; k < 3; ++k) {
     c.canvas.Text(panel.x + 8, y + 3, Fmt("rot %s", axis[k]), ui::theme::kTextDim);
-    if (ui::NumberInput(c, 630 + k, {vx, y, vw, row}, a.rot_field[k])) {
-      s.rot[k] = a.rot_field[k].value;
+    if (ui::UnitField(c, 630 + k, {vx, y, vw, row}, unit_rect(y), a.rot_field[k], s.rot[k],
+                      a.rot_unit[k], ui::AngleUnitTable())) {
       a.model.Touch();
       a.scene_dirty = true;
     }
-    c.canvas.Text(vx + vw + 6, y + 3, "deg", ui::theme::kTextDim);
     y += row + 1;
   }
   y += 3;
@@ -266,30 +317,26 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
                    anchored ? ui::theme::kAccent : ui::theme::kTextDim, bw2 - 4);
   y += row + 5;
 
-  // A colour table, for a phantom with more classes than anyone will click through.
-  //
-  // A segmentation arrives with its classes grey and the importer's default opacity, which is
-  // enough to see the shape of and useless for telling one organ from another. Assigning 261
-  // colours through the picker is not a thing a person does, and every segmentation that has
-  // 261 classes came with a table naming them - so read the table.
+  // The colour table lives in the import dialog, not here: it is one of the things you decide
+  // about a file as you read it, alongside the cell size and the colormap, and a second copy
+  // of the control in the solid's panel is a second place to look for it. See
+  // DrawImportVoxelPopup.
   if (s.shape == Shape::kVoxelGrid && !s.voxel_classes.empty()) {
-    if (ui::Button(c, 413, {panel.x + 8, y, bw2, row + 2}, "Color table")) {
-      const std::string p = FileDialog(
-          a, "Color table\0*.txt;*.csv;*.ctbl;*.lut\0All files\0*.*\0", false, nullptr);
-      if (!p.empty()) {
-        std::string note;
-        const ColourTableResult res = ReadVoxelColourTable(p, s, note);
-        Log((res.ok ? "color table: " : "color table not applied: ") + note);
-        if (res.ok) {
-          // The class colours are baked into the solid pool when the scene is flattened, so
-          // the picture only changes on a rebuild - the same path a colour picked by hand
-          // takes.
-          a.model.Touch();
-          a.scene_dirty = true;
-        }
-      }
+    // One material for every class at once.
+    //
+    // A segmentation's classes nearly all want the same material - soft tissue - with a
+    // handful of exceptions, so the shortest route to a phantom that transports is to set
+    // them all and then correct the bone. Two hundred rows through the picker is not that
+    // route, and the alternative people actually take is to give up and use one box of
+    // water.
+    if (ui::Button(c, 414, {panel.x + 8, y, bw2, row + 2}, "Material for all")) {
+      a.popup = Popup::kPick;
+      a.pick_kind = PickKind::kMaterialForVoxelClass;
+      a.pick_target = a.sel_solid;
+      a.pick_target2 = -1;   // every class, not one of them
     }
-    c.canvas.TextFit(panel.x + 14 + bw2, y + 4, "index r g b a per row",
+    c.canvas.TextFit(panel.x + 14 + bw2, y + 4,
+                     Fmt("all %d classes", static_cast<int>(s.voxel_classes.size())),
                      ui::theme::kTextDim, bw2 - 4);
     y += row + 5;
   }
@@ -304,7 +351,6 @@ static int DrawScorersSection(App& a, const ui::Rect& panel, int y) {
   const int row = lh + 5;
   const int w = panel.w;
 
-  y = ui::SectionHeader(c, panel, y, "SCORERS");
   for (std::size_t i = 0; i < a.model.scorers.size(); ++i) {
     const Scorer& sc = a.model.scorers[i];
     const int key = 300000 + static_cast<int>(i);

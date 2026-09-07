@@ -70,6 +70,48 @@ control the mouse is over, which has focus, what is in a text field - and expres
 as straight-line code keeps its layout and its behaviour in one place. There is no widget tree
 to keep in sync with the model.
 
+### The builder's panels
+
+`g4builder` puts five lists in two sidebars, and how their heights are decided is a policy
+worth writing down because it has been wrong twice.
+
+One scroll area per sidebar fails on the case that matters: a segmented phantom puts a few
+hundred rows in SOLIDS, and reaching SOURCES then means scrolling past an organ list. So each
+section scrolls in its own box. The heights were then shared out in proportion to what each
+section asked for (`ui::DivideSections`, since removed), which put SOURCES wherever the solid
+list happened to end - so the panel's furniture moved every time a solid was added.
+
+They are **fixed** now: two halves on the right, three thirds on the left above the physics
+button. That leaves space unused on a small model, which is the cost of a layout that is the
+same on every model, and both halves scroll so nothing is unreachable.
+
+Within a section, `ui::FrozenTitle` keeps the heading out of the scroll area - a heading that
+scrolls away stops being one exactly when the list is long enough to need it - and
+`ui::SplitListForm` divides what is left between the list and the selected item's form. The
+list takes what it needs and the form takes the rest, capped so the form is always owed what
+it asked for or half the section, whichever is less. See docs/RISK.md V18 for the two ways
+that split was got wrong first.
+
+### Scrollbars, and units
+
+A scroll area's bar is nine pixels wide, in the panel's own right margin. It does not reserve
+width from the content, because a bar that did would change the content's layout, which
+changes the content height, which decides whether there is a bar at all - two layouts on
+alternate frames.
+
+The drag is handled in `ScrollArea::Begin`, before the content is drawn, rather than in `End`
+beside the painting: a click is claimed by the first widget that tests for it, and by `End`
+every row in the list has already had its turn. Both ends work from `BarRects`, so the thumb
+is painted where the drag picks it up.
+
+Every numeric field with a unit has a menu in place of its unit label (`ui::UnitField`). The
+model is always in mm, degrees and MeV - Geant4's own units - and the menu is a factor applied
+on the way in and out, so **changing the unit re-displays the same quantity**: 50 mm becomes
+5 cm and back to 50 mm. The other reading, keeping the number and changing what it means,
+would move the geometry every time the menu was touched and would do it silently. Which
+family a field offers is keyed off the unit string `builder::ShapeParams` already carries, so
+every shape's fields get the right menu without a second table to keep in step.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's

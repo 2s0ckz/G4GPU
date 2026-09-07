@@ -370,13 +370,13 @@ rem voxel_open is the voxel dialog with one of its dropdowns open. It is here be
 rem dropdown declared inside a pop-up was painted at the panel layer and then covered by the
 rem pop-up that owned it, so it did not appear at all - the one GUI defect in docs/RISK.md V14
 rem that no check reading numbers could ever have seen.
-for %%D in (world voxel voxel_open anchor physics vis class_color) do (
+for %%D in (world voxel voxel_open voxel_cmap anchor physics vis class_color) do (
   if not exist "%~dp0out\g4builder_dlg_%%D.png" (
     echo FATAL: the builder selftest did not capture the %%D dialog.
     exit /b 1
   )
 )
-echo the seven dialogs were captured
+echo the eight dialogs were captured
 rem The custom-scorer flag must not change the number a scorer reports until the generated
 rem file is edited. It is not free: a filtered scorer's total is accumulated event by event on
 rem the host through Accept(), while a stock one's comes from the device array. The selftest

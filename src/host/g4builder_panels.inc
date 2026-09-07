@@ -440,6 +440,11 @@ struct VoxelImportOptions {
   /// What the numbers mean. Only kIndices imports; see VoxelMeaning in model.hh.
   VoxelMeaning meaning = VoxelMeaning::kIndices;
   double res_mm[3] = {1, 1, 1};       ///< cell size along each axis
+  /// Which colormap the classes get, when no table names them.
+  Colormap colormap = Colormap::kHueSweep;
+  /// A colour table to apply after classifying, or empty. Applied after and not instead,
+  /// because the classes have to exist before a row can name one.
+  std::string colour_table;
 };
 
 /// Re-reads the raw values of every imported voxel volume, so they can be reclassified.
@@ -693,8 +698,17 @@ static bool ImportFile(App& a, const std::string& path,
           res[0], res[1], res[2], 2 * s.p[0], 2 * s.p[1], 2 * s.p[2]));
   s.voxel_values = v.value;
   std::string note;
-  ClassifyVoxels(v, kind, s, note);
+  ClassifyVoxels(v, kind, s, note,
+                 (opt != nullptr) ? opt->colormap : Colormap::kHueSweep);
   Log("  " + note);
+  // The table last, over the top of whatever the colormap chose: a row that names a class can
+  // only be matched once the class exists, and a table that covers some of them should leave
+  // the rest distinguishable rather than grey.
+  if (opt != nullptr && !opt->colour_table.empty()) {
+    std::string cnote;
+    const ColourTableResult cres = ReadVoxelColourTable(opt->colour_table, s, cnote);
+    Log((cres.ok ? "  color table: " : "  color table not applied: ") + cnote);
+  }
   Log("  assign a material to each class in the list to transport it");
 
   a.sel_solid = a.model.AddSolid(s);
@@ -1140,7 +1154,7 @@ static void DrawImportVoxelPopup(App& a) {
   const int row = lh + 6;
   if (!a.vox_dialog_seeded) { SeedVoxelDialog(a); }
 
-  const ui::Rect r = PopupFrame(a, 560, 11 * lh + 9 * row + 26, "Import a voxel volume");
+  const ui::Rect r = PopupFrame(a, 620, 12 * lh + 13 * row + 26, "Import a voxel volume");
   int y = r.y;
 
   y += c.canvas.TextWrapped(
@@ -1220,37 +1234,89 @@ static void DrawImportVoxelPopup(App& a) {
                    ui::theme::kWarn, r.w - 28);
   y += lh + 10;
 
-  // Disabled rather than hidden for physical properties: hiding it would make the dialog look
-  // as though the choice above had no consequence, and the consequence is the whole point.
+  // ---- the colours, when no table says what they are
+  //
+  // A colour table names each class; a colormap only spreads the classes out so they can be
+  // told apart. So the table wins where there is one, and the menu says so rather than being
+  // silently ignored - a control that still looks live after it has stopped mattering is
+  // worse than one that is greyed out.
+  const bool have_ctbl = !a.vox_ctbl.empty();
+  c.canvas.Text(r.x + 14, y + 3, "colours", ui::theme::kTextDim);
+  ui::Select(c, 1280, {r.x + 76, y, 140, row}, a.vox_colormap, ColormapNames(),
+             static_cast<int>(Colormap::kCount), !have_ctbl);
+  c.canvas.TextFit(r.x + 224, y + 3,
+                   have_ctbl ? "the colour table below overrides this"
+                             : "fitted to the range of the values",
+                   have_ctbl ? ui::theme::kAccent : ui::theme::kTextDim, r.w - 238);
+  y += row + 6;
+
+  // ---- the two files
+  //
+  // Chosen, not loaded. See App::vox_file.
   const bool can_import = (a.vox_meaning == 0);
-  if (ui::Button(c, 1210, {r.x + 14, y, 210, row + 2}, "Choose a voxel file", can_import)) {
+  if (ui::Button(c, 1210, {r.x + 14, y, 150, row + 2}, "Voxel file...", can_import)) {
     const std::string p = FileDialog(
         a, "Voxel data\0*.raw;*.bin;*.mat\0Raw\0*.raw;*.bin\0MATLAB\0*.mat\0All files\0*.*\0",
         false, nullptr);
-    if (!p.empty()) {
-      VoxelImportOptions opt;
-      opt.have_dims = !a.vox_guess_dims;
-      opt.nx = static_cast<int>(a.vox_n[0].value + 0.5);
-      opt.ny = static_cast<int>(a.vox_n[1].value + 0.5);
-      opt.nz = static_cast<int>(a.vox_n[2].value + 0.5);
-      opt.have_type = (a.vox_type > 0);
-      opt.type = kVoxelTypeIds[a.vox_type & 7];
-      opt.meaning = (a.vox_meaning == 1) ? VoxelMeaning::kProperties
-                                         : VoxelMeaning::kIndices;
-      const double u = LengthUnitMm(a.vox_res_unit);
-      for (int k = 0; k < 3; ++k) { opt.res_mm[k] = a.vox_res[k].value * u; }
-      Log("import requested: " + p);
-      if (!ImportFile(a, p, &opt)) { Log("  import failed; see the message above"); }
-      a.vox_dialog_seeded = false;
-      a.popup = Popup::kNone;
-    }
+    if (!p.empty()) { a.vox_file = p; }
   }
+  c.canvas.TextFit(r.x + 172, y + 6,
+                   a.vox_file.empty() ? std::string("no file chosen yet")
+                                      : detail::BaseName(a.vox_file),
+                   a.vox_file.empty() ? ui::theme::kTextDim : ui::theme::kAccent,
+                   r.w - 200);
+  y += row + 4;
+
+  if (ui::Button(c, 1212, {r.x + 14, y, 150, row + 2}, "Colour table...")) {
+    const std::string p = FileDialog(
+        a, "Color table\0*.txt;*.csv;*.ctbl;*.lut\0All files\0*.*\0", false, nullptr);
+    if (!p.empty()) { a.vox_ctbl = p; }
+  }
+  if (have_ctbl) {
+    c.canvas.TextFit(r.x + 172, y + 6, detail::BaseName(a.vox_ctbl), ui::theme::kAccent,
+                     r.w - 240);
+    if (ui::Button(c, 1213, {r.x + r.w - 60, y, 46, row + 2}, "clear")) { a.vox_ctbl.clear(); }
+  } else {
+    c.canvas.TextFit(r.x + 172, y + 6, "optional - one row per class: index r g b a",
+                     ui::theme::kTextDim, r.w - 200);
+  }
+  y += row + 8;
+
   if (!can_import) {
-    c.canvas.TextFit(r.x + 232, y + 6, "physical properties are not implemented",
-                     ui::theme::kError, r.w - 340);
+    c.canvas.TextFit(r.x + 14, y + 6, "physical properties are not implemented",
+                     ui::theme::kError, r.w - 220);
+  }
+  // ---- and the button that actually does it
+  //
+  // Enabled only once there is a file. Everything above it can be changed as many times as
+  // the user likes first, which is the point of the change: the cell size, the type and the
+  // colours are all decisions about a file you cannot see until it is read, and reading it
+  // was previously the thing that made them unchangeable.
+  const bool ready = can_import && !a.vox_file.empty();
+  if (ui::Button(c, 1214, {r.x + r.w - 190, y, 82, row + 2}, "Import", ready)) {
+    VoxelImportOptions opt;
+    opt.have_dims = !a.vox_guess_dims;
+    opt.nx = static_cast<int>(a.vox_n[0].value + 0.5);
+    opt.ny = static_cast<int>(a.vox_n[1].value + 0.5);
+    opt.nz = static_cast<int>(a.vox_n[2].value + 0.5);
+    opt.have_type = (a.vox_type > 0);
+    opt.type = kVoxelTypeIds[a.vox_type & 7];
+    opt.meaning = (a.vox_meaning == 1) ? VoxelMeaning::kProperties : VoxelMeaning::kIndices;
+    const double u = LengthUnitMm(a.vox_res_unit);
+    for (int k = 0; k < 3; ++k) { opt.res_mm[k] = a.vox_res[k].value * u; }
+    opt.colormap = static_cast<Colormap>(a.vox_colormap);
+    opt.colour_table = a.vox_ctbl;
+    Log("import requested: " + a.vox_file);
+    if (!ImportFile(a, a.vox_file, &opt)) { Log("  import failed; see the message above"); }
+    a.vox_dialog_seeded = false;
+    a.vox_file.clear();
+    a.vox_ctbl.clear();
+    a.popup = Popup::kNone;
   }
   if (ui::Button(c, 1211, {r.x + r.w - 96, y, 82, row + 2}, "Cancel")) {
     a.vox_dialog_seeded = false;
+    a.vox_file.clear();
+    a.vox_ctbl.clear();
     a.popup = Popup::kNone;
   }
 }

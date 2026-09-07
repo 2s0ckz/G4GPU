@@ -320,6 +320,151 @@ int main() {
     std::remove(p.c_str());
   }
 
+  // ---- 13. THE COLORMAPS DO NOT REVISIT A COLOUR THEY HAVE LEFT.
+  //
+  // Which is what "should not repeat" asks for, and it is worth being precise about, because
+  // the first version of this test asked for something stronger and impossible: that 300
+  // classes get 300 distinct colours. Gray has 256 colours in it. A one-dimensional map
+  // sampled 300 times MUST give some neighbouring pair the same eight-bit value, and the
+  // perceptual maps are built to vary smoothly, which is the same thing said approvingly.
+  //
+  // The property that matters is that a colour is not reused at a DISTANT position - that the
+  // map is not cycled once it runs out, so class 1 and class 257 cannot come out the same.
+  // Collapsing runs of equal neighbours and then looking for any repeat states exactly that:
+  // a map may dwell, and may not return.
+  {
+    const int kSamples = 1000;
+    for (int m = 0; m < static_cast<int>(Colormap::kCount); ++m) {
+      std::vector<unsigned int> seq;
+      for (int i = 0; i < kSamples; ++i) {
+        float r = 0, g = 0, b = 0;
+        SampleColormap(static_cast<Colormap>(m), static_cast<double>(i) / (kSamples - 1),
+                       r, g, b);
+        const unsigned int packed =
+            (static_cast<unsigned int>(r * 255 + 0.5f) << 16)
+            | (static_cast<unsigned int>(g * 255 + 0.5f) << 8)
+            | static_cast<unsigned int>(b * 255 + 0.5f);
+        if (seq.empty() || seq.back() != packed) { seq.push_back(packed); }
+      }
+      bool revisits = false;
+      for (std::size_t i = 0; i < seq.size(); ++i) {
+        for (std::size_t j = i + 1; j < seq.size(); ++j) {
+          if (seq[i] == seq[j]) { revisits = true; }
+        }
+      }
+      char what[96];
+      std::snprintf(what, sizeof what, "%s never returns to a colour it has left",
+                    ColormapNames()[m]);
+      Check(!revisits, what);
+      std::snprintf(what, sizeof what, "%s actually varies", ColormapNames()[m]);
+      Check(seq.size() > 100, what);
+    }
+  }
+
+  // ---- 13b. And a phantom's classes are spread over the whole map rather than crowded into
+  //           part of it, which is the other half of "resized based on the range".
+  {
+    const int kN = 300;
+    for (int m = 0; m < static_cast<int>(Colormap::kCount); ++m) {
+      Solid s;
+      std::string note;
+      ClassifyVoxels(Indexed(kN, 2), VoxelKind::kDiscrete, s, note,
+                     static_cast<Colormap>(m));
+      if (s.voxel_classes.size() != static_cast<std::size_t>(kN)) {
+        Check(false, "the colormap sweep imported all its classes");
+        continue;
+      }
+      // How many DIFFERENT colours 300 classes came out with. Anything much below 200 would
+      // mean the map was being sampled from a short table or squeezed into part of itself.
+      std::vector<unsigned int> seen;
+      for (const VoxelClass& c : s.voxel_classes) {
+        const unsigned int packed = (static_cast<unsigned int>(c.r * 255 + 0.5f) << 16)
+                                    | (static_cast<unsigned int>(c.g * 255 + 0.5f) << 8)
+                                    | static_cast<unsigned int>(c.b * 255 + 0.5f);
+        bool have = false;
+        for (unsigned int q : seen) {
+          if (q == packed) { have = true; }
+        }
+        if (!have) { seen.push_back(packed); }
+      }
+      char what[110];
+      std::snprintf(what, sizeof what, "%s gives 300 classes at least 200 distinct colours"
+                                       " (got %d)",
+                    ColormapNames()[m], static_cast<int>(seen.size()));
+      Check(seen.size() >= 200, what);
+    }
+  }
+
+  // ---- 14. Fitted to the RANGE of the values, which is what makes it not repeat: the first
+  //          class is at one end of the map and the last at the other, whatever the values are.
+  {
+    Solid s;
+    std::string note;
+    VoxelData v;
+    v.nx = 4; v.ny = 1; v.nz = 1;
+    // Deliberately not 0..3: the map is stretched over 10..40, not over the list positions.
+    v.value = {10.0f, 20.0f, 30.0f, 40.0f};
+    ClassifyVoxels(v, VoxelKind::kDiscrete, s, note, Colormap::kViridis);
+    Check(s.voxel_classes.size() == 4, "four values, four classes");
+    if (s.voxel_classes.size() == 4) {
+      // Viridis runs dark purple to yellow. Its endpoints are the two values a reader can
+      // check against any published copy of the map, which is why they are the ones asserted.
+      float r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
+      SampleColormap(Colormap::kViridis, 0.0, r0, g0, b0);
+      SampleColormap(Colormap::kViridis, 1.0, r1, g1, b1);
+      Check(s.voxel_classes[0].r == r0 && s.voxel_classes[0].b == b0,
+            "the lowest value sits at the bottom of the map");
+      Check(s.voxel_classes[3].r == r1 && s.voxel_classes[3].g == g1,
+            "and the highest at the top");
+      Check(static_cast<int>(r0 * 255 + 0.5) == 68 && static_cast<int>(b0 * 255 + 0.5) == 84,
+            "viridis starts at its documented dark purple");
+      Check(static_cast<int>(r1 * 255 + 0.5) == 253 && static_cast<int>(g1 * 255 + 0.5) == 231,
+            "and ends at its documented yellow");
+    }
+  }
+
+  // ---- 15. A colormap is monotone in position: sampling it is interpolation between stops,
+  //          so a t between two stops has to land between their colours. This is what catches
+  //          a stop table entered out of order, which no eye check on a phantom would.
+  {
+    bool ok = true;
+    for (int m = 1; m < static_cast<int>(Colormap::kCount); ++m) {   // 0 is the hue sweep
+      int n = 0;
+      const ColourStop* st = ColormapStops(static_cast<Colormap>(m), n);
+      if (st == nullptr || n < 2) {
+        ok = false;
+        continue;
+      }
+      for (int k = 1; k < n; ++k) {
+        if (!(st[k].t > st[k - 1].t)) { ok = false; }
+      }
+      if (st[0].t != 0.0 || st[n - 1].t != 1.0) { ok = false; }
+      // The midpoint of each interval lies between its ends, componentwise.
+      for (int k = 1; k < n; ++k) {
+        const double mid = 0.5 * (st[k - 1].t + st[k].t);
+        float r = 0, g = 0, b = 0;
+        SampleColormap(static_cast<Colormap>(m), mid, r, g, b);
+        const int ri = static_cast<int>(r * 255 + 0.5);
+        const int lo = (st[k - 1].r < st[k].r) ? st[k - 1].r : st[k].r;
+        const int hi = (st[k - 1].r < st[k].r) ? st[k].r : st[k - 1].r;
+        if (ri < lo - 1 || ri > hi + 1) { ok = false; }
+      }
+    }
+    Check(ok, "every map's stops ascend, span 0 to 1, and interpolate between themselves");
+  }
+
+  // ---- 16. Out of range is clamped rather than wrapped, which is the other way a map could
+  //          come to repeat itself.
+  {
+    float ra = 0, ga = 0, ba = 0, rb = 0, gb = 0, bb = 0;
+    SampleColormap(Colormap::kTurbo, -3.0, ra, ga, ba);
+    SampleColormap(Colormap::kTurbo, 0.0, rb, gb, bb);
+    Check(ra == rb && ga == gb && ba == bb, "below zero clamps to the bottom of the map");
+    SampleColormap(Colormap::kTurbo, 7.5, ra, ga, ba);
+    SampleColormap(Colormap::kTurbo, 1.0, rb, gb, bb);
+    Check(ra == rb && ga == gb && ba == bb, "and above one to the top, rather than wrapping");
+  }
+
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "PASSED", g_fails);
   return g_fails ? 1 : 0;
 }

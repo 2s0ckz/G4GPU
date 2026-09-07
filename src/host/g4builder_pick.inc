@@ -97,13 +97,25 @@ static void DrawPickPopup(App& a) {
                              ? Fmt("%-18s %.4g g/cm3", m.name.c_str(), m.density)
                              : Fmt("%-18s %s", m.name.c_str(), m.nist_name.c_str()));
       }
-      const int k = DrawPickList(a, "Material for this voxel class", labels,
-                                 "no materials yet - add one on the left", a.pick_scroll,
-                                 2300);
+      // pick_target2 of -1 means every class, the same sentinel popup_target2 uses for "the
+      // solid's own colour rather than one of its classes". The title says which, because a
+      // picker that looks identical for one class and for two hundred is one you will use
+      // wrongly once.
+      const bool all = (a.pick_target2 < 0);
+      const int k = DrawPickList(a, all ? "Material for EVERY voxel class"
+                                        : "Material for this voxel class",
+                                 labels, "no materials yet - add one on the left",
+                                 a.pick_scroll, 2300);
       if (k >= 0 && a.pick_target >= 0
           && a.pick_target < static_cast<int>(a.model.solids.size())) {
         Solid& s = a.model.solids[a.pick_target];
-        if (a.pick_target2 >= 0 && a.pick_target2 < static_cast<int>(s.voxel_classes.size())) {
+        if (all) {
+          for (VoxelClass& vc : s.voxel_classes) { vc.material = k; }
+          a.model.Touch();
+          a.scene_dirty = true;
+          Log(Fmt("%s: all %d classes are now %s", s.name.c_str(),
+                  static_cast<int>(s.voxel_classes.size()), a.model.materials[k].name.c_str()));
+        } else if (a.pick_target2 < static_cast<int>(s.voxel_classes.size())) {
           s.voxel_classes[a.pick_target2].material = k;
           a.model.Touch();
           a.scene_dirty = true;

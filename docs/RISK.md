@@ -2557,3 +2557,65 @@ result. That is luck about timing, not method: V10 in this register is a thresho
 same way, from impression rather than from the thing it measures, and that one did produce a
 false failure at 1.93 sigma. An expected value in a test is a prediction, and a prediction
 worth asserting is one worth deriving.
+
+### V18: an assertion stronger than the request, and the regression hiding behind it
+
+Two findings from one test, in the order they came out, because the second was only reachable
+once the first was corrected.
+
+#### 300 classes cannot have 300 distinct greys
+
+The request for importable colormaps said they "should not repeat". The test written for it
+asserted that a 300-class phantom comes out with 300 distinct colours, for every map. It
+failed on gray, viridis and plasma.
+
+Gray has 256 colours in it. A one-dimensional map sampled 300 times MUST give some
+neighbouring pair the same eight-bit value; there is no implementation that does otherwise,
+and the perceptual maps fail it for the same reason said approvingly - they are built to vary
+smoothly, and smooth means neighbours are close.
+
+So the assertion was impossible, not the code wrong. What "does not repeat" can mean, and what
+the request was actually about, is that the map is not CYCLED once it runs out - that class 1
+and class 257 cannot come out identical. Stated exactly: the map never returns to a colour it
+has left. Collapsing runs of equal neighbours and then looking for any repeat says precisely
+that, and every map passes it.
+
+The general shape of the mistake: an assertion that sounds like the requirement, is stronger
+than the requirement, and is unsatisfiable. It fails on correct code, and the tempting repair
+is to weaken it until the code passes - which is how a test ends up asserting nothing. The
+repair here was to work out what property was being asked for.
+
+#### And underneath it, a real regression
+
+The corrected test then failed on one map: the hue sweep, which is the default and the one
+this file has always used.
+
+Colouring by POSITION in the class list, which is what the code did before, put the last of N
+classes at 360*(N-1)/N degrees - one step short of the circle. Colouring by the VALUE, which
+is what "resized based on the range of the voxel index values" asks for, puts the highest
+class at exactly 360 degrees. 360 is the same red as 0. So the lowest and highest index in
+every segmentation came out identical.
+
+The old code was not right about this on purpose; it was right by accident, and the accident
+did not survive a change to the parameterisation. The sweep is 330 degrees now, which leaves
+the ends visibly apart whatever N is.
+
+Worth noting what would NOT have found it: the phantom looks correct. Two classes out of two
+hundred sharing a colour, at opposite ends of the index range and so rarely adjacent in space,
+is not something anyone sees. It took an assertion about the map itself.
+
+#### The three-row list, for completeness
+
+Not a test finding - a photograph found this one. The first version of ui::SplitListForm gave
+the selected item's form whatever it asked for and left the list a floor of three rows. A
+voxel volume's form is a dozen fields and six buttons, so an eleven-solid list came out three
+rows tall.
+
+The floor is half the section now. It is the same lesson the section heights taught and this
+register already records: a floor measured in rows guessed at the point of writing does not
+scale with the panel, and a floor that is a SHARE does.
+
+The same photograph showed the other half of it: the form was anchored to the bottom of its
+section, so a two-source list had a band of nothing between it and its form. The form begins
+under the last row now, and both properties are asserted in tests/test_ui_layout.cu rather
+than left to the next screenshot.

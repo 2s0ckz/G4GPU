@@ -497,67 +497,6 @@ struct Context {
 
 // ---------------------------------------------------------------- scrolling
 
-/// Divides `avail` pixels between `n` stacked sections, from what each asked for.
-///
-/// One scroll area per panel is the obvious arrangement and it fails on the case that matters:
-/// a segmented phantom puts a few hundred rows in SOLIDS, and everything below it - SOURCES,
-/// its buttons - is then several hundred rows down a single scrollbar. Reaching a source means
-/// scrolling past an organ list. Each section scrolling in its own box fixes that, and then
-/// the question is how tall each box should be.
-///
-/// From what each wanted LAST frame, which is what ScrollArea::content_h already records. A
-/// section that fits takes exactly its own height and shows no scrollbar; only when the total
-/// exceeds the panel is anything divided, and then each keeps a floor of `min_h` and the
-/// surplus is shared in proportion to what was asked for.
-///
-/// A fixed share - half each, a third each - is wrong in both directions at once: it leaves
-/// half the panel blank for a model with three solids, and still cramps a 261-class
-/// segmentation when the section under it holds one row. Neither is a case worth being wrong
-/// about, and the information to be right was already being measured.
-inline void DivideSections(int avail, int min_h, const int* want, int* out, int n) {
-  if (n <= 0) { return; }
-  long long total = 0;
-  for (int i = 0; i < n; ++i) {
-    out[i] = (want[i] > min_h) ? want[i] : min_h;
-    total += out[i];
-  }
-  if (total <= avail) { return; }   // everything fits; nothing to divide
-
-  // The floor is a SHARE of the panel and not a fixed number of rows, and that is the
-  // difference between usable and technically-present. Sharing the surplus in proportion to
-  // what was asked for gives a greedy section nearly all of it: 261 voxel classes against a
-  // two-row source list works out at about 780 pixels to 120, which leaves SOURCES six rows
-  // to hold a header, a list, four buttons and eight fields. Reachable, and no use.
-  //
-  // Half a fair share (avail/2n) keeps a squeezed section big enough to work in while still
-  // giving the big list most of the panel - the same case comes out about 670 to 230 - and it
-  // scales with the panel rather than with a row height guessed here.
-  if (min_h < avail / (2 * n)) { min_h = avail / (2 * n); }
-  for (int i = 0; i < n; ++i) {
-    if (out[i] < min_h) { out[i] = min_h; }
-  }
-  const int floor_total = min_h * n;
-  if (avail <= floor_total) {
-    // Not even the floors fit. Equal shares, and each section's own scrollbar does the rest -
-    // which is the honest answer for a panel dragged narrower than its contents.
-    for (int i = 0; i < n; ++i) { out[i] = avail / n; }
-    out[n - 1] = avail - (avail / n) * (n - 1);
-    return;
-  }
-  const int spare = avail - floor_total;
-  long long asked = 0;
-  for (int i = 0; i < n; ++i) { asked += out[i] - min_h; }
-  int used = 0;
-  for (int i = 0; i < n; ++i) {
-    const int extra =
-        (asked > 0) ? static_cast<int>(static_cast<long long>(spare) * (out[i] - min_h) / asked)
-                    : 0;
-    out[i] = min_h + extra;
-    used += out[i];
-  }
-  out[n - 1] += avail - used;   // the rounding remainder, so the sections fill exactly
-}
-
 /// A scrollable region.
 ///
 /// Immediate-mode scrolling without a retained layout: the caller draws at `y - offset`, the
@@ -567,19 +506,81 @@ inline void DivideSections(int avail, int min_h, const int* want, int* out, int 
 ///
 /// The offset is clamped every frame, so a list that shrinks - a delete - pulls the view back
 /// up instead of leaving it scrolled past the end.
+/// Width of a scroll area's bar, and of the strip along its right edge that grabs it.
+///
+/// It sits in the panel's own right margin rather than taking width from the content: a bar
+/// that reserved width would change the content's layout, which changes the content height,
+/// which decides whether there is a bar at all - an oscillation between two layouts on
+/// alternate frames. Every section here already leaves eight pixels at the right, so the bar
+/// has somewhere to be.
+inline constexpr int kScrollBarW = 9;
+
 struct ScrollArea {
   int offset = 0;      ///< pixels scrolled down
   int content_h = 0;   ///< height the content wanted last frame
   int view_h = 0;
 
-  /// Clips to @p r, handles the wheel when the cursor is inside it, and returns the y to
-  /// start drawing at.
-  int Begin(Context& ctx, const Rect& r, int step) {
+  /// The bar's track, and the thumb inside it. Empty when there is nothing to scroll.
+  ///
+  /// Both Begin (which drags it) and End (which draws it) need this, and from the SAME
+  /// numbers: a thumb drawn anywhere other than where the drag picks it up is a control that
+  /// jumps out from under the cursor.
+  void BarRects(const Rect& r, Rect& track, Rect& thumb) const {
+    track = Rect{0, 0, 0, 0};
+    thumb = track;
+    if (content_h <= r.h || r.h <= 0) { return; }
+    track = Rect{r.x + r.w - kScrollBarW, r.y, kScrollBarW, r.h};
+    int th = (r.h * r.h) / content_h;
+    if (th < 16) { th = 16; }            // still grabbable at the far end of a long list
+    if (th > r.h) { th = r.h; }
+    const int max_off = content_h - r.h;
+    const int ty = r.y + ((r.h - th) * offset) / (max_off > 0 ? max_off : 1);
+    thumb = Rect{track.x + 1, ty, kScrollBarW - 2, th};
+  }
+
+  /// Clips to @p r, handles the wheel and a drag of the bar, and returns the y to start
+  /// drawing at.
+  ///
+  /// The bar is handled HERE, before the content is drawn, and not in End: a click is claimed
+  /// by the first widget that tests for it, and by End every row in the list has already had
+  /// its turn. Both work from the previous frame's content height, which is the only one
+  /// there is until the content has been drawn - and which is what the wheel clamp below has
+  /// always used.
+  int Begin(Context& ctx, const Rect& r, int step, int id = 0) {
     view_h = r.h;
     const int max_off = (content_h > r.h) ? (content_h - r.h) : 0;
     if (ctx.Hovering(r) && ctx.in != nullptr && ctx.in->wheel != 0) {
       offset -= ctx.in->wheel * step;
       ctx.in->wheel = 0;  // consumed: the camera must not also zoom
+    }
+    id_ = id;
+    if (id != 0 && ctx.in != nullptr && max_off > 0) {
+      Rect track, thumb;
+      BarRects(r, track, thumb);
+      const bool on_track = track.Contains(ctx.in->mouse_x, ctx.in->mouse_y);
+      if (on_track) { ctx.hot = id; }
+      if (on_track && ctx.in->left_pressed && ctx.active == 0) {
+        ctx.active = id;
+        // Grabbing the thumb keeps the point under the cursor; clicking the empty track
+        // jumps the thumb to the cursor and drags from its middle, which is what a click on
+        // a track that is mostly empty is asking for.
+        grab_dy_ = thumb.Contains(ctx.in->mouse_x, ctx.in->mouse_y)
+                       ? (ctx.in->mouse_y - thumb.y)
+                       : (thumb.h / 2);
+        ctx.in->left_pressed = false;   // consumed, so no row underneath also takes it
+      }
+      if (ctx.active == id) {
+        if (ctx.in->left_down) {
+          Rect t2, th2;
+          BarRects(r, t2, th2);
+          const int span = r.h - th2.h;
+          const int want = ctx.in->mouse_y - grab_dy_ - r.y;
+          offset = (span > 0) ? static_cast<int>(static_cast<long long>(want) * max_off / span)
+                              : 0;
+        } else {
+          ctx.active = 0;
+        }
+      }
     }
     if (offset > max_off) { offset = max_off; }
     if (offset < 0) { offset = 0; }
@@ -601,22 +602,25 @@ struct ScrollArea {
   void End(Context& ctx, const Rect& r, int y_end) {
     content_h = y_end + offset - top_;
     ctx.canvas.clip = saved_clip_;
-    if (content_h > r.h) {
-      // A one-pixel-wide track with a proportional thumb: enough to say "there is more", and
-      // it does not steal width from a 300-pixel panel.
-      const int track_h = r.h;
-      const int thumb_h = (r.h * track_h) / content_h;
-      const int max_off = content_h - r.h;
-      const int thumb_y = r.y + ((track_h - thumb_h) * offset) / (max_off > 0 ? max_off : 1);
-      ctx.canvas.FillRect({r.x + r.w - 3, r.y, 2, r.h}, theme::kBorder);
-      ctx.canvas.FillRect({r.x + r.w - 3, thumb_y, 2, thumb_h > 8 ? thumb_h : 8},
-                          theme::kAccent);
+    // Drawn from the height just measured, so the bar matches the content on the frame it is
+    // drawn on. Begin dragged it from the previous frame's height, which is a frame stale in
+    // the middle of a drag and invisible at any scroll speed a hand produces.
+    Rect track, thumb;
+    BarRects(r, track, thumb);
+    if (track.h > 0) {
+      const bool lit = (ctx.active == id_ && id_ != 0)
+                       || (ctx.in != nullptr
+                           && track.Contains(ctx.in->mouse_x, ctx.in->mouse_y));
+      ctx.canvas.FillRect(track, theme::kField);
+      ctx.canvas.FillRect(thumb, lit ? theme::kAccent : theme::kBorder);
     }
   }
 
  private:
   Rect saved_clip_{};
   int top_ = 0;
+  int id_ = 0;
+  int grab_dy_ = 0;   ///< where in the thumb the drag was picked up
 };
 
 // ---------------------------------------------------------------- widgets
@@ -632,6 +636,54 @@ inline void Label(Context& ctx, int x, int y, const std::string& s,
 }
 
 /// A section heading with a rule under it. Returns the y below the rule.
+/// Draws a section's title where it will not scroll, and returns the rect left underneath.
+///
+/// The title used to be the first thing inside the scroll area, so scrolling a long list took
+/// the word SOLIDS off the top of the panel with it and left a column of rows belonging to
+/// nothing. A heading that scrolls away is a heading that stops being one exactly when the
+/// list is long enough to need it.
+inline Rect FrozenTitle(Context& ctx, const Rect& area, const std::string& title) {
+  ctx.canvas.Text(area.x + 8, area.y, title, theme::kTextDim);
+  const int line_y = area.y + ctx.canvas.font->glyph_h + 3;
+  ctx.canvas.HLine(area.x + 8, area.x + area.w - 8, line_y, theme::kBorder);
+  const int used = line_y + 6 - area.y;
+  return Rect{area.x, line_y + 6, area.w, (area.h > used) ? area.h - used : 0};
+}
+
+/// Splits @p area into a list above and the selected item's form below.
+///
+/// The form is not part of the list: scrolling down a hundred solids to see the hundredth
+/// used to scroll its fields off the bottom, so the two things you need at once could not
+/// both be on screen. They get separate scroll areas.
+///
+/// THE LIST TAKES WHAT IT NEEDS AND THE FORM TAKES THE REST, so the form always begins
+/// immediately under the last row rather than at a fixed height - a fixed split leaves a band
+/// of nothing between a two-source list and its form. The list is capped so a long one cannot
+/// crowd the form out: the cap leaves the form whatever it asked for, or half the section,
+/// whichever is less.
+///
+/// Half, and not a count of rows: the first version of this left the list a floor of three
+/// rows, and a solid form is a dozen fields and six buttons, so an eleven-solid list came out
+/// three rows tall. A floor that is a SHARE of the space scales with the panel instead of
+/// with a row height guessed here - the same lesson the section heights taught.
+///
+/// Neither height can feed back on the other: a form is a fixed set of rows for a given shape
+/// and a list a fixed set of rows for a given model, so neither reflows when its space
+/// changes. That is what makes it safe to size them from what they asked for last frame.
+///
+/// @p want_list, @p want_form  content heights from the previous frame.
+inline void SplitListForm(const Rect& area, int want_list, int want_form, Rect& list,
+                          Rect& form) {
+  int keep = (want_form > 0) ? want_form : 0;   // what the form needs
+  const int share = area.h / 2;
+  if (keep > share) { keep = share; }           // but never more than half
+  int lh = (want_list > 0) ? want_list : 0;
+  if (lh > area.h - keep) { lh = area.h - keep; }
+  if (lh < 0) { lh = 0; }
+  list = Rect{area.x, area.y, area.w, lh};
+  form = Rect{area.x, area.y + lh, area.w, area.h - lh};
+}
+
 inline int SectionHeader(Context& ctx, const Rect& area, int y, const std::string& title) {
   ctx.canvas.Text(area.x + 8, y, title, theme::kTextDim);
   const int line_y = y + ctx.canvas.font->glyph_h + 3;
@@ -1108,6 +1160,104 @@ inline bool Slider(Context& ctx, int id, const Rect& r, double lo, double hi, do
 /// `{row.x + 6, ..., lh - 2, lh - 2}` by hand to make its swatch a hit target, and the voxel
 /// class rows below it did not - so clicking a class's colour opened the material picker,
 /// which is the bug this exists to stop recurring. One definition, three users.
+/// A visibility toggle, drawn as an eye. Returns true on the frame it was clicked.
+///
+/// DRAWN, not typed. The font here is an atlas of the 95 printable ASCII characters (see
+/// Font::kFirst), so U+1F441 and every other pictograph is not available to it at any size -
+/// it would come out as whatever glyph 0x1F441 minus 32 happens to land on, which is nothing.
+/// Two triangles and a pupil is the whole icon.
+///
+/// Hidden keeps the outline and loses the pupil, with a line through it: an empty column
+/// reads as "this row has no control" rather than "this row is switched off", and the two
+/// have to be told apart at a glance down a list of a hundred.
+/// A family of units one quantity can be quoted in, and what one of each is in the base unit.
+///
+/// THE MODEL IS ALWAYS IN THE BASE UNIT - mm, degrees, MeV, which are Geant4's own - and a
+/// unit here is a factor applied on the way in and out of a field. That matters because the
+/// numbers a person has are not all in one unit: a CT resolution is quoted in mm, a phantom
+/// in cm, a room in m, and a diagnostic beam in keV where a therapy beam is in MeV.
+/// Converting by hand is where factor-of-ten mistakes come from.
+struct UnitTable {
+  const char* const* names = nullptr;
+  const double* factors = nullptr;   ///< one of names[i] is factors[i] base units
+  int n = 0;
+  int base = 0;                      ///< index of the base unit, the default a field opens in
+};
+
+inline const UnitTable& LengthUnitTable() {
+  static const char* const kNames[] = {"um", "mm", "cm", "m"};
+  static const double kFactors[] = {0.001, 1.0, 10.0, 1000.0};
+  static const UnitTable t{kNames, kFactors, 4, 1};
+  return t;
+}
+inline const UnitTable& AngleUnitTable() {
+  static const char* const kNames[] = {"deg", "rad", "mrad"};
+  // 1 rad in degrees, written out rather than derived from a pi constant: it is exact to
+  // more digits than a double carries, and this way there is one place to read it from.
+  static const double kFactors[] = {1.0, 57.29577951308232, 0.05729577951308232};
+  static const UnitTable t{kNames, kFactors, 3, 0};
+  return t;
+}
+inline const UnitTable& EnergyUnitTable() {
+  static const char* const kNames[] = {"eV", "keV", "MeV", "GeV", "TeV"};
+  static const double kFactors[] = {1e-6, 1e-3, 1.0, 1e3, 1e6};
+  static const UnitTable t{kNames, kFactors, 5, 2};
+  return t;
+}
+
+/// The family a quantity quoted in @p base belongs to, or an empty table for a bare number.
+///
+/// Keyed off the unit string a parameter table already carries, so every shape's fields get
+/// the right menu without a second table to keep in step with builder::ShapeParams - which
+/// is the kind of hand-copied duplication docs/RISK.md has entries about. A unit this does
+/// not know - "share", or the empty string on a count - gets no menu, which is right: there
+/// is nothing to convert a fraction into.
+inline const UnitTable& UnitsFor(const char* base) {
+  static const UnitTable kNone{};
+  if (base == nullptr) { return kNone; }
+  if (std::strcmp(base, "mm") == 0) { return LengthUnitTable(); }
+  if (std::strcmp(base, "deg") == 0) { return AngleUnitTable(); }
+  if (std::strcmp(base, "MeV") == 0) { return EnergyUnitTable(); }
+  return kNone;
+}
+
+inline double InUnit(double base_value, int unit_idx, const UnitTable& u) {
+  if (u.n <= 0) { return base_value; }
+  const int i = (unit_idx >= 0 && unit_idx < u.n) ? unit_idx : u.base;
+  return base_value / u.factors[i];
+}
+
+inline bool EyeToggle(Context& ctx, int id, const Rect& r, bool on) {
+  const bool hover = ctx.Hovering(r);
+  if (hover) { ctx.hot = id; }
+  const bool clicked = hover && ctx.in != nullptr && ctx.in->left_pressed;
+  const int s = ctx.canvas.GlyphH() - 3;
+  const int x0 = r.x + (r.w - s) / 2;
+  const int y0 = r.y + (r.h - s) / 2;
+  const int cx = x0 + s / 2;
+  const int cy = y0 + s / 2;
+  const Color line = on ? (hover ? theme::kText : theme::kAccent)
+                        : (hover ? theme::kTextDim : theme::kBorder);
+  // The lens: two triangles meeting at the corners, which is a rhombus and reads as an eye
+  // once there is a pupil in it.
+  if (on) {
+    ctx.canvas.FillTriangle(x0, cy, cx, y0, x0 + s, cy, line);
+    ctx.canvas.FillTriangle(x0, cy, cx, y0 + s, x0 + s, cy, line);
+    // The pupil, in the panel's own colour, so it is a hole rather than a dot of paint.
+    ctx.canvas.FillRect({cx - 1, cy - 1, 3, 3}, theme::kPanel);
+  } else {
+    // Outline only. Drawn as the same rhombus with a smaller one cut out of it, because
+    // there is no triangle-stroke primitive and a two-pixel-thick outline at this size is
+    // what a stroke would look like anyway.
+    ctx.canvas.FillTriangle(x0, cy, cx, y0, x0 + s, cy, line);
+    ctx.canvas.FillTriangle(x0, cy, cx, y0 + s, x0 + s, cy, line);
+    ctx.canvas.FillTriangle(x0 + 2, cy, cx, y0 + 2, x0 + s - 2, cy, theme::kPanel);
+    ctx.canvas.FillTriangle(x0 + 2, cy, cx, y0 + s - 2, x0 + s - 2, cy, theme::kPanel);
+    ctx.canvas.HLine(x0, x0 + s, cy, line);
+  }
+  return clicked;
+}
+
 inline Rect ListRowSwatchRect(const Context& ctx, const Rect& r) {
   const int s = ctx.canvas.GlyphH() - 2;
   return Rect{r.x + 6, r.y + (r.h - s) / 2, s, s};
@@ -1433,8 +1583,20 @@ struct MenuBar {
 /// lands with the list closing, so there is nothing to see.
 ///
 /// @return true when the value changed
+/// @param enabled false draws the current value greyed and ignores clicks. For a menu whose
+///        choice has stopped mattering - one overridden by something else the dialog was
+///        given - which has to look inert rather than merely be inert.
 inline bool Select(Context& ctx, int id, const Rect& r, int& value, const char* const* opts,
-                   int count) {
+                   int count, bool enabled = true) {
+  if (!enabled) {
+    ctx.canvas.FillRect(r, theme::kField);
+    ctx.canvas.StrokeRect(r, theme::kBorder);
+    if (value >= 0 && value < count) {
+      ctx.canvas.TextFit(r.x + 6, r.y + (r.h - ctx.canvas.GlyphH()) / 2, opts[value],
+                         theme::kBorder, r.w - 12);
+    }
+    return false;
+  }
   const bool hover = ctx.Hovering(r);
   if (hover) { ctx.hot = id; }
   const bool open = (ctx.open_select == id);
@@ -1505,6 +1667,39 @@ struct LayerScope {
 /// dropdown declared inside a pop-up from being painted at the panel layer and then covered by
 /// the pop-up that owns it - which is what happened for the whole life of the voxel import
 /// dialog - and equally keeps a panel's dropdown from floating over a pop-up in front of it.
+/// A number field with a unit menu beside it. Returns true when the VALUE changed.
+///
+/// @p base is the quantity in the base unit, which is what the model stores; the field shows
+/// it divided by the chosen unit's factor.
+///
+/// CHANGING THE UNIT RE-DISPLAYS THE SAME QUANTITY rather than reinterpreting the number, so
+/// mm to cm turns 50 into 5 and back into 50. The other reading - keep the number, change
+/// what it means - moves the geometry every time the menu is touched, and does it silently,
+/// which is the worst way for a control to be destructive.
+///
+/// @p unit_idx is held by the caller and outlives the selection, so someone working in cm
+/// goes on working in cm as they click from one solid to the next.
+inline bool UnitField(Context& ctx, int id, const Rect& fr, const Rect& ur, NumberField& f,
+                      double& base, int& unit_idx, const UnitTable& u) {
+  if (u.n <= 0) {
+    if (NumberInput(ctx, id, fr, f)) {
+      base = f.value;
+      return true;
+    }
+    return false;
+  }
+  if (unit_idx < 0 || unit_idx >= u.n) { unit_idx = u.base; }
+  if (Select(ctx, id + 40000, ur, unit_idx, u.names, u.n)) {
+    f.Init(base / u.factors[unit_idx]);   // the same quantity, said differently
+  }
+  if (NumberInput(ctx, id, fr, f)) {
+    base = f.value * u.factors[unit_idx];
+    return true;
+  }
+  return false;
+}
+
+/// What @p base_value shows as in the unit at @p unit_idx. For seeding a field.
 inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
   if (ctx.open_select == 0 || ctx.select_opts == nullptr || ctx.select_count <= 0) { return; }
   if (ctx.select_layer != layer) { return; }

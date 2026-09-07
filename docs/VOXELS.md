@@ -88,13 +88,54 @@ Two consequences of compositing front to back:
   to 96%, so the interior reads through and the outline still reads as a surface.
 
 Both are defaults, in `ClassifyVoxels`; the class list in the SOLIDS panel edits them per
-class.
+class. The eye beside each row toggles a class off entirely, which is the practical way to
+look inside a segmentation with two hundred of them - hide all but the three you want.
+**Material for all** assigns one material to every class at once, which is how a phantom whose
+classes are nearly all soft tissue gets set up before the exceptions are corrected.
+
+### Importing one
+
+**Insert > Voxel volume** collects everything about the file and reads nothing until **Import**
+is pressed. That ordering matters: a raw file carries no shape, no type and no voxel size, so
+those are answers the dialog has to ask for - and while choosing the file WAS the import, they
+had to be right before the file browser opened, and getting one wrong meant deleting the solid
+and starting again.
+
+The dialog holds the voxel file, an optional colour table, the cell shape and type, what the
+values mean, the voxel size, and which colormap to use.
+
+### Colormaps
+
+Without a colour table, the classes are coloured from a map, stretched over the range of the
+values: a class at value `v` sits at `(v - lowest) / (highest - lowest)` along it. So the map
+is fitted to the indices actually present rather than sampled out of a fixed 256, and it is
+never cycled - no class repeats another's colour, because no two classes share a value.
+
+By VALUE and not by position in the list, which is what "the range of the index values" means
+and which has a use: two phantoms labelled by the same convention come out with the same
+colours whether or not both contain every structure. The cost is that a sparse numbering -
+three classes at 0, 1, 2 and two more at 700, 701 - gives each cluster nearly one colour. A
+colour table is the answer for a phantom numbered like that.
+
+`distinct hues` is the default and is what the importer did before there was a choice: the hue
+circle swept once, which puts adjacent classes far apart and is the best of them for telling
+one organ from its neighbour. The seven others - viridis, plasma, inferno, magma, turbo, jet,
+gray - represent a *continuum*, and they are there because a phantom's indices are often
+ordered (outwards from the skin, or by tissue density) and reading it as a continuum is then
+the clearer picture. They are held as a handful of stops with linear interpolation
+(`ColormapStops`), not as 256-entry tables: nine stops reproduce the shape of these maps to
+within a couple of levels, and a 256-entry table has no way to check any one of its numbers.
+
+The sweep is 330 degrees, not 360, because the circle closes and 360 is the same red as 0.
+See docs/RISK.md V18 for how that was found.
 
 ### The colour table
 
 A real segmentation has dozens or hundreds of classes and arrives with a table naming them.
-**Colour table** in the solid's panel reads one, and `ReadVoxelColourTable`
-(`src/builder/import.hh`) is the parser. One row per class:
+**Colour table...** in the import dialog reads one, and `ReadVoxelColourTable`
+(`src/builder/import.hh`) is the parser. It is applied *after* classifying, over the top of
+whatever the colormap chose, so a table covering some of the classes leaves the rest
+distinguishable rather than grey. One row per class:
 
 ```
 # comment; ; and // also start one
