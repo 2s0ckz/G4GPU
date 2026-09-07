@@ -71,7 +71,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
     rep.status = StepStatus::fGeomBoundary;
     rep.process = ProcessId::fTransportation;
     p.pos = p.pos + (d_boundary + geom::kPushDistance<real_t>()) * p.dir;
-    traj.add(pos_before, p.pos, ParticleType::kGamma, p.event);
+    traj.add(pos_before, p.pos, ParticleType::kGamma, p.event, p.rng_key);
     p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
     return p.volume != geom::kOutsideWorld;
   }
@@ -83,7 +83,7 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   rep.true_length = s_int;
   rep.status = StepStatus::fPostStepDoItProc;
   p.pos = p.pos + s_int * p.dir;
-  traj.add(pos_before, p.pos, ParticleType::kGamma, p.event);
+  traj.add(pos_before, p.pos, ParticleType::kGamma, p.event, p.rng_key);
   em.pos = p.pos;
   em.volume = p.volume;
   em.event = p.event;
@@ -350,9 +350,6 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
       p.msc_tlimit = real_t(0);  // stepStatus == fGeomBoundary: refresh rangeinit and fr
     }
-    traj.add(pos_before, p.pos,
-             is_positron ? ParticleType::kPositron : ParticleType::kElectron, p.event);
-
     // Multiple scattering: deflection plus the correlated lateral displacement.
     // Geant4 skips the displacement when the step ends at the range limit, when it is
     // shorter than geomMin, or when the track is far enough from any boundary that a
@@ -385,6 +382,27 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
         }
       }
     }
+
+    // AFTER the displacement, and this is load-bearing rather than tidy.
+    //
+    // The step ends where MSC leaves the track, not where the straight-line advance put it.
+    // Recorded before the displacement, every segment ended at a point the track then left
+    // sideways, and the next step began from the displaced position - so consecutive segments
+    // of one track did not share an endpoint and a charged trajectory drew as a row of
+    // disconnected dashes with a gap of |displacement| between them. Visible in the viewer as
+    // exactly that, and reported as such.
+    //
+    // The transport was never wrong: the displacement is applied to the track state and the
+    // next step proceeds from there. It was the RECORD that drew a line to a place the track
+    // did not end. Which is worse than cosmetic, because the viewer exists to make a transport
+    // bug visible - docs/RISK.md R1, G5, G6 are all things a picture found - and a picture with
+    // a built-in discontinuity is one nobody can read a real discontinuity out of.
+    //
+    // Geant4 draws a step as a straight line between its two step points, and the post-step
+    // point is post-AlongStepDoIt, so this is also what Geant4 draws.
+    traj.add(pos_before, p.pos,
+             is_positron ? ParticleType::kPositron : ParticleType::kElectron, p.event,
+             p.rng_key);
 
     // In-flight annihilation consumes the positron: two photons, no track survives.
     if (annihilates) {
@@ -763,7 +781,7 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
       p.pos = p.pos + geom::kPushDistance<real_t>() * p.dir;
       p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
     }
-    traj.add(pos_before, p.pos, type, p.event);
+    traj.add(pos_before, p.pos, type, p.event, p.rng_key);
 
     // ---- the scattering itself. lat_displacement is false for every heavy particle, so the
     // returned displacement is zero and there is nothing to apply.

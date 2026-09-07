@@ -2182,3 +2182,53 @@ against the spread of the thing being thresholded". Knowing it did not help. Wha
 helped is a habit: **when writing a threshold, parse the uncertainty that is already in front of
 you, or go and measure it - never type a round number.** A round number in a comparison is a
 defect on sight, in the same way a hand-typed physical constant is (V8, V9).
+
+### V13: a trajectory that ended where the track did not
+
+Reported from the viewer: charged tracks draw as rows of disconnected dashes while gammas draw
+as continuous lines. `step_lepton` did this:
+
+```cpp
+p.pos = p.pos + geom_step * p.dir;      // advance along the direction
+traj.add(pos_before, p.pos, ...);       // record the segment
+... msc sampling ...
+p.pos = p.pos + d;                      // the MSC lateral displacement
+```
+
+The segment was recorded, and then multiple scattering moved `p.pos` sideways. The next step
+began from the displaced position, so segment N ended at **A** and segment N+1 started at
+**A + d** - a gap of exactly the lateral displacement, on every charged step.
+
+**The transport was never wrong.** The displacement is applied to the track state and the next
+step proceeds from there; the dose, the step count and the agreement with Geant4 are all
+untouched by the fix. What was wrong was the *record*: it drew a line to a place the track did
+not end. Gammas were unaffected because they have no MSC, and hadrons because
+`kHadronLateralDisplacement` is false for heavy particles - which is why the one visibly broken
+thing was the one particle species that scatters.
+
+Recording after the displacement fixes it, and is also what Geant4 draws: a step is a straight
+line between its two step points, and the post-step point is post-`AlongStepDoIt`.
+
+#### Why this is not merely cosmetic
+
+The viewer exists to make transport bugs visible, and it has done it repeatedly - R1 was a
+ray-marcher re-finding a surface, G5 a normal that could only point 26 ways, G6 two volumes on
+one layer. Every one of those was found by looking at a picture and noticing something
+discontinuous.
+
+A picture with a built-in discontinuity is one nobody can read a real discontinuity out of. The
+defect was not in what the transport computed; it was in the instrument used to check the
+transport, which is the worse place for it to be.
+
+#### What it says about where tests were pointed
+
+Every check in the pipeline reads a number: a dose, a step count, a sigma, a ratio. Not one of
+them reads the geometry of a trajectory, so a systematic error in the recorded path was invisible
+to all of them and stayed that way until somebody looked at the screen. The suite is well
+defended against wrong numbers and undefended against wrong pictures.
+
+`kind` and the two endpoints were all a segment carried, so segments could not even be grouped
+into tracks - which is why this went unchecked rather than merely unchecked-for. A track id now
+rides with each segment so the chaining can be asserted: for one track, every segment's start
+must be another segment's end, exactly, since consecutive segments share a `float` converted from
+the same `double`.

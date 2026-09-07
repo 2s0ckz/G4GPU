@@ -31,6 +31,7 @@
 #include "g4/G4Step.hh"
 #include "g4/G4UserActions.hh"
 #include "g4/G4VModularPhysicsList.hh"
+#include "g4/Randomize.hh"  // the constructor seeds the host engine from seed_ too
 #include "host/transport_run.cuh"
 
 /// The step hook the Geant4-shaped API runs on, and how a project chooses its own.
@@ -72,7 +73,22 @@ using G4StepHook = G4STEP_HOOK;
 
 class G4RunManager {
  public:
-  G4RunManager() { Instance() = this; }
+  /// Seeds BOTH random streams from seed_, so the state a process starts in is the state
+  /// SetRandomSeed(seed_) would put it in - which is what makes "give me that run again"
+  /// expressible at all.
+  ///
+  /// It was not, until it was asked for. CLHEP's engine began on its own default seed and the
+  /// device stream on this class's, two unrelated numbers from unrelated code, so no argument
+  /// to SetRandomSeed or /random/setSeeds could reproduce a freshly started process: the
+  /// showers would replay and the primaries would not.
+  ///
+  /// Here rather than in Initialize() because a project that wants its own host seed writes
+  /// G4Random::setTheSeed() in main() after constructing the run manager, as Geant4's examples
+  /// do, and last writer wins. Doing it in Initialize() would silently outrank that.
+  G4RunManager() {
+    Instance() = this;
+    G4Random::setTheSeed(static_cast<long>(seed_));
+  }
   ~G4RunManager() { engine_.Free(); }
 
   static G4RunManager*& Instance() {
@@ -157,12 +173,18 @@ class G4RunManager {
   /// size - which means a freshly started process replays, and a second BeamOn within one
   /// process does not. That is Geant4's behaviour and the reason for stream_pos_ below.
   ///
-  /// Setting the seed restarts the stream, as /random/setSeeds does: the position goes back to
-  /// zero, so `SetRandomSeed(s)` twice in one process gives the same run twice. Without that a
-  /// caller could not ask for a specific run at all.
+  /// Setting the seed restarts BOTH streams, as /random/setSeeds does and as reseeding
+  /// Geant4's one engine does: the host engine that draws the primaries is reseeded, and the
+  /// device position goes back to zero. So `SetRandomSeed(s)` twice in one process gives the
+  /// same run twice, and `SetRandomSeed(GetRandomSeed())` returns a process to its start.
+  ///
+  /// Both, because half of it is worse than neither. Reseeding the showers and not the
+  /// primaries gives a run that repeats one and not the other, which is neither a repeat nor
+  /// an independent sample, and nothing in the output says which.
   void SetRandomSeed(unsigned int s) {
     seed_ = s;
     stream_pos_ = 0;
+    G4Random::setTheSeed(static_cast<long>(s));
   }
   unsigned int GetRandomSeed() const { return seed_; }
   /// How far into the seed's stream the next run will start. Advances by one per primary.

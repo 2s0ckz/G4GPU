@@ -60,6 +60,13 @@ rem because it compiles the transport kernels for its own hook type - which is t
 rem of the arrangement and is measured in docs/RESULT.md rather than hidden.
 set TESTS_PROJECT=test_custom_hook
 
+rem Tests that run a real scene through the STOCK engine: they link out\transport_run.obj
+rem rather than instantiating their own kernels, so they build in seconds where
+rem TESTS_PROJECT takes minutes. test_trajectory needs a real shower because what it checks -
+rem that a track's recorded segments join up - is a property of a path, and a synthetic step
+rem has no path.
+set TESTS_SCENE=test_trajectory
+
 echo --- drivers ---
 rem /IMPLIB keeps the import library and its .exp out of the project root. They are a
 rem link-time artefact of an exe that exports symbols, not something anyone runs.
@@ -82,8 +89,12 @@ for %%T in (%TESTS_PROJECT%) do (
   %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
     -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
 )
+for %%T in (%TESTS_SCENE%) do (
+  %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
+    "%~dp0out\transport_run.obj" -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
+)
 rem From here on they are just tests - run and counted with the rest.
-set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT%
+set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT% %TESTS_SCENE%
 echo BUILD OK
 if "%MODE%"=="build" exit /b 0
 

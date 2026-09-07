@@ -975,17 +975,7 @@ int main(int argc, char** argv) {
   }
 
   {
-    a.traj.capacity = 2 << 20;
-    const size_t nb = sizeof(float) * a.traj.capacity;
-    CUDA_CHECK(cudaMalloc(&a.traj.x0, nb)); CUDA_CHECK(cudaMalloc(&a.traj.y0, nb));
-    CUDA_CHECK(cudaMalloc(&a.traj.z0, nb)); CUDA_CHECK(cudaMalloc(&a.traj.x1, nb));
-    CUDA_CHECK(cudaMalloc(&a.traj.y1, nb)); CUDA_CHECK(cudaMalloc(&a.traj.z1, nb));
-    CUDA_CHECK(cudaMalloc(&a.traj.kind, a.traj.capacity));
-    CUDA_CHECK(cudaMalloc(&a.traj.count, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&a.traj.dropped, sizeof(int)));
-    CUDA_CHECK(cudaMemset(a.traj.count, 0, sizeof(int)));
-    CUDA_CHECK(cudaMemset(a.traj.dropped, 0, sizeof(int)));
-    a.traj.max_event = 100;
+    CUDA_CHECK(vis::allocate_trajectory(a.traj, 2 << 20, /*max_event=*/100));
   }
 
   a.events_field.Init(1000, "%.0f");
