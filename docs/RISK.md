@@ -2099,3 +2099,30 @@ rests on. Reverting the fix makes it fail at pools 1, 3, 7, 63, 65, and on down 
 one dose, through `tools/compare_pool.ps1`. That is a different claim from the arithmetic - it
 is the throttle's claim, that deferring a track changes the order of work and nothing else - and
 the odd pool comes along with it for free.
+
+#### Amendment to V11: the fix, and the second fix the first one needed
+
+`track_arena_half_bytes` is exact now rather than estimated. `track_buffer_bytes` already
+dry-runs the same allocator the carve walks, so the arena size is that number and there is no
+per-slot arithmetic and no slack term to be misaligned. Every array is taken with `align_up`, so
+a sum of them is a multiple of `kAlign` by construction: the fault V11 is about cannot recur by
+arithmetic, only by someone reintroducing an estimate, and `tests/test_track_arena.cu` asserts
+`half == used` exactly so that would fail immediately.
+
+Which would have been a clean improvement, except that being exact very nearly bought silence.
+A capacity is an `int` everywhere - `TrackBuffer`, `allocate_track_buffer`, the carve. The
+estimate computed `per_slot * pool` in `size_t`, so a pool too large for an `int` came out
+enormous and the memory check refused the run. An **exact** measurement of a *truncated*
+capacity agrees perfectly with an equally truncated carve, and the run proceeds with a pool that
+is not the one it was asked for and nothing anywhere disagreeing.
+
+So the function saturates: a pool over `INT_MAX` reports an impossible size, which makes the
+batch sizer's bisection walk down instead of up, and `Upload` refuses an explicitly-set batch
+that lands there rather than truncating it. Neither is reachable today - the sizer bisects to at
+most 4194304 events, and 4194304 x 4 slots is a fifth of `INT_MAX` - which is exactly why it is
+worth writing down: the guard exists for the configuration nobody has tried yet, and its absence
+would have shown up as a wrong answer rather than as a failure.
+
+The general form, and it applies beyond sizing: **a more accurate number is only an improvement
+where it does not remove a disagreement that was doing work.** The estimate's inaccuracy was
+load-bearing at the top of its range. Replacing it meant replacing that too.

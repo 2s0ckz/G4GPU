@@ -40,19 +40,6 @@ struct DeviceTracks {
   TrackBuffer<real_t> view{};
   bool slab_backed_ = false;
 
-  /// Re-points the arrays at a new range of the same slab, with a new capacity.
-  ///
-  /// The count and overflow counters are deliberately NOT re-carved: overflow accumulates over
-  /// the whole run and would be lost every time the split moved, which would turn a dropped
-  /// track from an announced failure into a silent one.
-  void recarve(int capacity, TrackSlab* slab) {
-    int* keep_count = view.count;
-    int* keep_overflow = view.overflow;
-    G4GPU_CUDA_CHECK(allocate_track_buffer(view, capacity, nullptr, slab));
-    view.count = keep_count;
-    view.overflow = keep_overflow;
-  }
-
   /// With `slab`, the arrays are carved from a shared allocation and this object owns none of
   /// them; free_all() then only clears the view. Without one it allocates as it always did,
   /// which is what b1_gpu_sched.cu still does.
@@ -62,13 +49,17 @@ struct DeviceTracks {
     if (slab_backed_) {
       // The two counters get their own allocations and never live in the slab.
       //
-      // A re-carve lays the arrays out from the slab's offset zero again, so anything
-      // carved after them is written straight over by track data on the next partition.
-      // The counters are exactly that: recarve() preserves the POINTERS, which then aimed
-      // at memory now holding positions and energies. The count read back was garbage, the
-      // next launch sized itself from it, and the kernel walked off the end of the buffer.
-      // Found by forcing an overflow on purpose - it cannot happen while the pool is
-      // generous, which is every run that does not go looking for it.
+      // Kept that way on the strength of what it cost when they did not. The arena used to be
+      // re-divided between the species mid-run, and a re-carve lays the arrays out from the
+      // slab's offset zero again - so the counters, carved after the arrays, were written
+      // straight over by track data on the next division while the pointers to them survived.
+      // The count read back was garbage, the next launch sized itself from it, and the kernel
+      // walked off the end of the buffer. Found by forcing an overflow on purpose; it could
+      // not happen while the pool was generous, which was every run that did not go looking.
+      //
+      // There is no re-division any more - one pool, carved once per side - so the hazard is
+      // gone with it. Two eight-byte allocations outside the slab is still the right answer
+      // for a value whose whole job is to survive whatever happens to the arrays.
       G4GPU_CUDA_CHECK(cudaMalloc(&view.count, sizeof(int)));
       G4GPU_CUDA_CHECK(cudaMalloc(&view.overflow, sizeof(int)));
     }

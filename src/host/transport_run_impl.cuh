@@ -644,10 +644,10 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
 
     // ---- how big a batch, and who decided.
     //
-    // The multipliers below are the ones total_track_slots() in core/track_buffer.cuh counts,
-    // and the automatic sizing uses that function - so the number of slots a batch needs is
-    // stated in exactly one place. If a species' allowance changes, it changes there and the
-    // sizing follows.
+    // A batch needs pool_ = batch * live_per_event slots on each side of the ping-pong, and
+    // track_arena_half_bytes() in core/track_buffer.cuh turns that into bytes by dry-running
+    // the same allocator the carve then walks. One function, so the number that picks the
+    // batch and the number that is consumed cannot disagree.
     {
       size_t free_b = 0, total_b = 0;
       const cudaError_t mem_err = cudaMemGetInfo(&free_b, &total_b);
@@ -719,10 +719,11 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
       }
     }
 
-    // Two pools, one per side of the ping-pong, each divided between the species afresh on
-    // every iteration from what is actually alive. See partition_pool in track_buffer.cuh.
+    // One pool per side of the ping-pong, and no division of it at all: a track carries its
+    // own species, so storage does not need to know what is in it. Which kernel steps a track
+    // is settled later and separately, by the index lists - dispatch, not storage.
     //
-    // What this replaces: five capacities fixed before the run - gamma 2 per event, electron 4,
+    // What that replaced: five capacities fixed before the run - gamma 2 per event, electron 4,
     // positron 1/2, proton 1, alpha 1, doubled for the ping-pong, 17 slots an event in total.
     // They had to be guessed, and measurement showed the guesses wrong in shape as well as
     // size: B1 peaks at 1.00 live gammas an event against 2 reserved and 0.90 electrons against
@@ -730,8 +731,7 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // Compton-scattered gamma keeps flying. Memory set aside for electrons could not be used by
     // gammas however the shower actually went.
     //
-    // The initial division here is even and arbitrary; seeding fills one species and the first
-    // iteration re-divides from the real counts.
+    // A pool has no shape to get wrong, so there is nothing here to seed it with.
     {
       // G4GPU_LIVE_PER_EVENT overrides the pool for any program, flag or no flag. It exists to
       // answer one question - is this answer converged in the pool size - which cannot be
@@ -742,6 +742,16 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
         if (v >= 1.0) { live_per_event_ = v; }
       }
       pool_ = static_cast<long long>(batch_ * live_per_event_);
+      // A capacity is an int the whole way down. The automatic sizer cannot ask for more than
+      // this - it bisects to at most 4194304 events - but a caller who sets both a batch and a
+      // live-track count can, and the arithmetic that follows would truncate rather than fail.
+      if (pool_ > 2147483647LL) {
+        std::printf("\nFATAL: a pool of %lld live track slots (%d events x %.1f) does not fit\n"
+                    "       an int, and a track buffer's capacity is an int the whole way\n"
+                    "       down. Lower -batch or -live.\n",
+                    pool_, batch_, live_per_event_);
+        std::exit(2);
+      }
       arena_half_ = track_arena_half_bytes<real_t>(pool_);
       G4GPU_CUDA_CHECK(cudaMalloc(&d_track_arena_, arena_half_ * 2));
       G4GPU_CUDA_CHECK(cudaMalloc(&d_unknown_, sizeof(int)));

@@ -517,131 +517,6 @@ inline size_t track_buffer_bytes(int capacity) {
   return bytes;
 }
 
-/// How the track arena is divided between the species.
-///
-/// ONE definition, read by everything that needs to know the split: the engine's allocation,
-/// its automatic batch sizing, and the arena measurement. A second copy of these numbers is
-/// exactly the shape of bug this file has now hit three times, so there is not one.
-///
-/// The numbers themselves are a mixture of derivation and guesswork, and it is worth being
-/// clear which is which:
-///
-///   proton, alpha   1 per event, and this one is exact. Nothing in the EM physics CREATES a
-///                   hadron - they arrive only as primaries, and the delta rays they knock out
-///                   are electrons - so one slot per event is the most that can ever be live.
-///
-///   gamma 2, electron 4, positron 1/2   guesses, and measurement says they are the wrong
-///                   shape. A 500k-event B1 run peaks at 1.00 live gammas per event against 2
-///                   allocated, 0.90 electrons against 4, and 0.064 positrons against 1/2. The
-///                   electron allowance is the furthest out because it was reasoned from how
-///                   many electrons a shower MAKES rather than how many are alive at once -
-///                   an electron's range is short, so it deposits and dies within a step or
-///                   two, while a Compton-scattered gamma keeps flying.
-///
-/// What a buffer bounds is CONCURRENCY, not production: a track that dies is never written to
-/// the output buffer, so its slot is gone by the next iteration. Nothing here limits how many
-/// secondaries a step may create or how many tracks an event may produce over its life.
-struct SpeciesCapacities {
-  int gamma, electron, positron, proton, alpha;
-
-  /// In the order the engine allocates them, so a loop over this and the engine's carving
-  /// cannot drift apart.
-  int at(int i) const {
-    const int v[5] = {gamma, electron, positron, proton, alpha};
-    return v[i];
-  }
-  static constexpr int kSpecies = 5;
-};
-
-/// Divides a pool of `pool` live-track slots between the species, from how many of each are
-/// alive right now.
-///
-/// This replaces five capacities fixed before the run. Fixed capacities had to be guessed, and
-/// the guesses were wrong in a way measurement made obvious: a 500k-event B1 run peaked at 1.00
-/// live gammas per event against 2 allocated and 0.90 electrons against 4. Memory reserved for
-/// electrons could not be used by gammas however the shower actually turned out.
-///
-/// THE PREDICTION IS THE HARD PART, and it is a prediction: the slice a species gets for the
-/// step about to run is chosen from what that step will consume, which is not yet known. The
-/// counts going in are the best evidence available, so each species is given its current
-/// population times a growth allowance, and the remainder of the pool is shared out as a floor
-/// so that a species at zero can still appear - a shower that has not made its first positron
-/// yet must have somewhere to put one.
-///
-/// Getting it wrong drops tracks, which is a wrong ANSWER and not a slow run, so the growth
-/// allowance is deliberately loose and the engine announces any drop loudly. The alternative -
-/// tight slices and a silent shortfall - is the failure this project keeps writing up.
-struct LiveCounts {
-  int gamma, electron, positron, proton, alpha;
-  int at(int i) const {
-    const int v[5] = {gamma, electron, positron, proton, alpha};
-    return v[i];
-  }
-};
-
-inline SpeciesCapacities partition_pool(const LiveCounts& live, long long pool) {
-  // Room for a species to more than double in one step, which is the most this physics can do
-  // to one: a gamma pair-converting becomes two leptons, a positron annihilating becomes two
-  // gammas. Three is that with margin.
-  constexpr int kGrowth = 3;
-  // Every species keeps a floor even at zero population, so a species that appears for the
-  // first time has somewhere to land. An eighth of the pool each leaves three-eighths to
-  // distribute by evidence.
-  const long long floor_each = pool / 8;
-
-  long long want[5];
-  long long total_want = 0;
-  for (int i = 0; i < 5; ++i) {
-    want[i] = static_cast<long long>(live.at(i)) * kGrowth;
-    if (want[i] < floor_each) { want[i] = floor_each; }
-    total_want += want[i];
-  }
-
-  SpeciesCapacities c{};
-  int out[5];
-  if (total_want <= pool) {
-    // Everything asked for fits; hand the surplus to the species that asked for most, which is
-    // where an underestimate is most likely to matter.
-    long long spare = pool - total_want;
-    int biggest = 0;
-    for (int i = 1; i < 5; ++i) {
-      if (want[i] > want[biggest]) { biggest = i; }
-    }
-    for (int i = 0; i < 5; ++i) { out[i] = static_cast<int>(want[i]); }
-    out[biggest] += static_cast<int>(spare);
-  } else {
-    // Oversubscribed: scale everything down in proportion. This is where a drop becomes
-    // possible, and why the pool has a floor of its own - see SetLiveTracksPerEvent.
-    for (int i = 0; i < 5; ++i) {
-      out[i] = static_cast<int>(want[i] * pool / total_want);
-    }
-  }
-  c.gamma = out[0];
-  c.electron = out[1];
-  c.positron = out[2];
-  c.proton = out[3];
-  c.alpha = out[4];
-  return c;
-}
-
-inline SpeciesCapacities species_capacities(long long batch) {
-  SpeciesCapacities c;
-  c.gamma = static_cast<int>(batch * 2);
-  c.electron = static_cast<int>(batch * 4);
-  c.positron = static_cast<int>(batch / 2 + 1024);
-  c.proton = static_cast<int>(batch + 1024);
-  c.alpha = static_cast<int>(batch + 1024);
-  return c;
-}
-
-/// Total live slots a batch is allowed, across every species and both sides of the ping-pong.
-inline long long total_track_slots(long long batch) {
-  const SpeciesCapacities c = species_capacities(batch);
-  long long n = 0;
-  for (int i = 0; i < SpeciesCapacities::kSpecies; ++i) { n += 2 * c.at(i); }
-  return n;
-}
-
 /// Device bytes ONE more track slot costs.
 ///
 /// The difference between two capacities rather than the size at capacity 1, because a
@@ -663,49 +538,42 @@ inline size_t track_bytes_per_slot() {
   return (track_buffer_bytes<real_t>(2 * kN) - track_buffer_bytes<real_t>(kN)) / kN;
 }
 
-/// Device bytes one half of the arena needs to hold `pool` live-track slots, however they end
-/// up divided between the species.
+/// Device bytes one half of the arena needs to hold `pool` live-track slots.
 ///
-/// Per-slot cost times the pool, plus each buffer's fixed counters and enough alignment slack
-/// for five buffers' worth of arrays. Generous on the slack because the division moves between
-/// iterations and a carve that did not fit would be a much worse failure than a few unused
-/// kilobytes.
+/// EXACT, not estimated: it dry-runs the same allocator the carve then walks, so the number
+/// that sizes the arena and the number that is consumed out of it are produced by the same
+/// code and agree to the byte. It used to be per-slot times the pool plus a slack term sized
+/// for five buffers, which is what the arena held before one pool replaced them; with one
+/// buffer per half there is nothing left to be slack about.
 ///
-/// ROUNDED UP TO kAlign, and that is not tidiness. The engine allocates both halves as one
-/// block and puts the second at `base + arena_half_bytes`, so this number is the alignment of
-/// every array in the second half. per_slot is 236 bytes, so an ODD pool made it 4 mod 8 and
-/// every double in the second half was misaligned - a device-side "misaligned address" fault
-/// from whichever kernel touched it first, surfacing at the next cudaMemcpy with no hint of
-/// where it came from.
+/// That also makes the alignment structural rather than lucky. Every array is taken with
+/// align_up, so a sum of them is already a multiple of kAlign - which matters because the
+/// engine allocates both halves as one block and puts the second at `base + this`, making it
+/// the alignment of every array in the second half. The estimate it replaces was
+/// `236 * pool + slack`, and 236 is not a multiple of 8, so an ODD pool put the whole second
+/// half at 4 mod 8 and every double in it was misaligned: a device-side "misaligned address"
+/// from whichever kernel touched it first, reported at the next cudaMemcpy with no hint of
+/// where it came from. An odd pool is not exotic - `batch * live_per_event` gives one whenever
+/// the product is not whole, so `-live 2.5` reached it and the default `-live 4` never could.
+/// The align_up below is now belt and braces; tests/test_track_arena.cu asserts both that it
+/// holds and that this equals what a carve consumes. See docs/RISK.md V11.
 ///
-/// An odd pool is not exotic: it is what `batch * live_per_event` gives whenever the product
-/// is not whole, so `-live 2.5` reached it and the default `-live 4` never could. The failure
-/// was invisible in every configuration the pipeline ran.
+/// A pool larger than an int can hold reports an impossible size rather than a truncated one.
+/// A capacity is an int everywhere - in TrackBuffer, in allocate_track_buffer, in the carve
+/// this measures - so the honest answer for a pool that does not fit one is "this does not
+/// fit", and the batch sizer bisecting on this number then walks down until it does.
+///
+/// Saturating rather than truncating is the whole point. The estimate this replaced computed
+/// `per_slot * pool` in size_t, so an over-large pool came out enormous and memory refused it;
+/// an exact measurement of a TRUNCATED capacity would instead agree with an equally truncated
+/// carve, and the run would proceed quietly with a pool that is not the one it was asked for.
+/// Being exact is only an improvement where it does not buy silence.
 template <typename real_t>
 inline size_t track_arena_half_bytes(long long pool) {
-  const size_t per_slot = track_bytes_per_slot<real_t>();
-  const size_t fixed = track_buffer_bytes<real_t>(0);
-  return TrackSlab::align_up(per_slot * static_cast<size_t>(pool) + 5 * fixed
-                             + 5 * 40 * TrackSlab::kAlign);
-}
-
-/// Device bytes the track arena needs for a batch of `batch` events.
-///
-/// Measured by dry-running the very allocations the engine performs, alignment padding and
-/// per-buffer counters included, so the number that decides the batch and the number that is
-/// then allocated are produced by the same code. An arithmetic estimate beside it would be a
-/// second source of truth, and this file has paid for those already.
-template <typename real_t>
-inline size_t track_memory_for_batch(long long batch) {
-  const SpeciesCapacities c = species_capacities(batch);
-  size_t need = 0;
-  TrackBuffer<real_t> probe{};
-  for (int half = 0; half < 2; ++half) {
-    for (int i = 0; i < SpeciesCapacities::kSpecies; ++i) {
-      allocate_track_buffer<real_t>(probe, c.at(i), &need);
-    }
+  if (pool < 0 || pool > static_cast<long long>(2147483647)) {
+    return static_cast<size_t>(-1) / 4;  // /4 so that doubling it cannot wrap
   }
-  return need;
+  return TrackSlab::align_up(track_buffer_bytes<real_t>(static_cast<int>(pool)));
 }
 
 template <typename real_t>

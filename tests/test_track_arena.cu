@@ -118,11 +118,13 @@ int main() {
     Check(hi.worst_align >= alignof(double), "every array in the second half is aligned for a "
           "double", pool);
 
-    // 3. The measurement must not be wildly generous either - a batch sizer that over-measures
-    //    by a factor makes every run smaller than it needs to be. Slack of a few tens of
-    //    kilobytes is deliberate (see track_arena_half_bytes); a multiple is a defect.
-    Check(half <= lo.used + 5 * 40 * TrackSlab::kAlign + 5 * 512 + TrackSlab::kAlign,
-          "the measured half is within its documented slack of what the carve used", pool);
+    // 3. EXACTLY what the carve consumes, not merely enough for it. track_arena_half_bytes
+    //    dry-runs the same allocator, so there is no estimate to be loose or tight - and this
+    //    is the assertion that keeps it that way. The version this replaced was per-slot times
+    //    the pool plus a slack term, and it was the estimate, not the carve, that put the
+    //    second half on a 4-byte boundary. An over-measure is not harmless either: the batch
+    //    sizer bisects on this number, so slack is events that never ran.
+    Check(half == lo.used, "the measured half is exactly what the carve consumes", pool);
   }
 
   // A float build carves the same shape with narrower reals, and its per-slot cost is odd in a
@@ -134,6 +136,20 @@ int main() {
     Check(hi.fit, "float: the second half's carve fits", pool);
     Check(hi.worst_align >= alignof(float), "float: every array in the second half is aligned",
           pool);
+  }
+
+  // A pool too large for an int must report an impossible size, not a truncated one - the
+  // batch sizer bisects on this number, so saturating makes it walk down, while truncating
+  // would make a 4-billion-slot pool look like a small one and let the run proceed with a
+  // buffer nothing asked for. The doubling the sizer does must not wrap either.
+  {
+    const long long too_big = 2147483648LL;  // INT_MAX + 1
+    const size_t half = track_arena_half_bytes<double>(too_big);
+    Check(half > (size_t(1) << 40), "a pool larger than an int reports an impossible size",
+          too_big);
+    Check(half * 2 > half, "and doubling that size does not wrap", too_big);
+    Check(track_arena_half_bytes<double>(2147483647LL) < half,
+          "while the largest pool that does fit reports an ordinary one", 2147483647LL);
   }
 
   // track_bytes_per_slot is measured by differencing two capacities, and the reason it is
