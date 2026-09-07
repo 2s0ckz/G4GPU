@@ -490,8 +490,24 @@ struct Context {
     }
   }
 
+  /// Is the cursor over @p r, AND is @p r somewhere the caller may draw?
+  ///
+  /// THE CLIP IS PART OF THE HIT TEST. Without the second half, a widget scrolled out of its
+  /// section is invisible and still clickable: the canvas refuses to paint it, nothing on
+  /// screen suggests it is there, and it goes on claiming the cursor at the coordinates it
+  /// would have occupied. The section below then has a layer of dead buttons floating over
+  /// it - which is how clicking in SOURCES came to open the material picker belonging to a
+  /// solid scrolled off the bottom of SOLIDS.
+  ///
+  /// It belongs here rather than in each widget because every widget asks this question and
+  /// there is no widget for which the answer should differ. Clicking what you cannot see is
+  /// never right.
+  ///
+  /// Note for anyone adding a widget: test with THIS, not with `rect.Contains(mouse)`. The
+  /// bare Contains is the version without the clip, and it is wrong in exactly the way above.
   bool Hovering(const Rect& r) const {
-    return in != nullptr && r.Contains(in->mouse_x, in->mouse_y);
+    return in != nullptr && r.Contains(in->mouse_x, in->mouse_y)
+           && canvas.clip.Contains(in->mouse_x, in->mouse_y);
   }
 };
 

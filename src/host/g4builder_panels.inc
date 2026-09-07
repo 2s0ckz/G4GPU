@@ -966,7 +966,7 @@ static void DrawColorPopup(App& a) {
       const ui::Rect sw{gx + q * cell, gy + r * cell, cell - 2, cell - 2};
       c.canvas.FillRect(sw, ui::rgb(static_cast<int>(rr * 255), static_cast<int>(gg * 255),
                                     static_cast<int>(bb * 255)));
-      if (sw.Contains(a.input.mouse_x, a.input.mouse_y)) {
+      if (c.Hovering(sw)) {
         c.canvas.StrokeRect(sw, ui::theme::kText);
         if (a.input.left_pressed) {
           *pr = static_cast<float>(rr);
@@ -1067,7 +1067,7 @@ static void DrawInsertPopup(App& a) {
   c.canvas.Text(box.x + 10, box.y + 8, "insert a primitive", ui::theme::kText);
   int y = box.y + 8 + a.font.glyph_h + 6;
   for (int i = 0; i < n; ++i) {
-    if (ui::ListRow(c, 1000 + i, {box.x + 6, y, box.w - 12, row}, ShapeName(all[i]), false)) {
+    if (ui::ListRow(c, kIdPickRow + i, {box.x + 6, y, box.w - 12, row}, ShapeName(all[i]), false)) {
       InsertPrimitive(a, all[i]);
       a.popup = Popup::kNone;
     }

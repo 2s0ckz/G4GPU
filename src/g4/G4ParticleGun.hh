@@ -118,9 +118,21 @@ class G4ParticleGun {
   ///
   /// Clears any angular distribution, for the reason SetParticlePosition clears the spatial
   /// one: in Geant4 this is the direction, and code that says so must mean it.
+  /// A zero direction falls back to +z rather than being stored.
+  ///
+  /// G4ThreeVector::unit() returns (0,0,0) for a zero vector - it guards the division, so
+  /// there is no NaN - and a track with a zero direction is its own kind of broken: it has a
+  /// position and an energy and goes nowhere, so it is transported, deposits nothing, and
+  /// makes a run quietly report less dose than it should.
+  ///
+  /// +z is Geant4's own default direction, so falling back to it is the least surprising
+  /// thing available. The guard is here rather than in the builder's form because a direction
+  /// also arrives from a loaded project file and from user code calling this directly, and
+  /// only one of those three paths has a dialog to complain in.
   void SetParticleMomentumDirection(const G4ThreeVector& d) {
     const G4ThreeVector u = d.unit();
-    src_.dir = g4gpu::Vec3<G4double>{u.x(), u.y(), u.z()};
+    src_.dir = (u.mag2() > 0) ? g4gpu::Vec3<G4double>{u.x(), u.y(), u.z()}
+                              : g4gpu::Vec3<G4double>{0, 0, 1};
     src_.angular = g4gpu::AngularShape::kUnidirectional;
   }
   void SetNumberOfParticles(G4int n) { n_particle_ = n; }

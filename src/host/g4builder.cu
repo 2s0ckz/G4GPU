@@ -83,6 +83,43 @@ struct SameLayerOverlap {
 
 /// What a picker pop-up is choosing. Defined here rather than in g4builder_pick.inc because
 /// App holds one.
+/// Widget id bases for the lists that grow with the model.
+///
+/// EVERY WIDGET IS AN INTEGER, and two widgets sharing one share ctx.hot, ctx.active and
+/// ctx.focus - so a rename focuses the wrong row, and a drag is picked up by a control the
+/// cursor is nowhere near. A base plus an index is the natural scheme and it fails silently
+/// the moment a list is long enough to reach the next base:
+///
+///   * `400 + i` for the solid rows ran into the 410 "Assign material" button at ELEVEN
+///     solids, which is a model anyone builds in an afternoon;
+///   * `690 + i` for the source rows ran into the 700 kind buttons at eleven sources;
+///   * `200 + i` and `300 + i` did the same to the element and scorer controls at ten;
+///   * and the voxel classes were laid out as `4000 + solid*100 + class` while the importer
+///     caps classes at 4096, so any phantom past a hundred classes collided with itself.
+///
+/// Nothing about any of that announces itself. The widget still draws, still highlights, and
+/// misbehaves only in the bookkeeping - which is why it survived this long.
+///
+/// So the growing lists get a block each, a million apart, and the fixed controls keep the
+/// low numbers they have always had. A million is not tight: it is room for a million solids
+/// against 4096 classes each, and the arithmetic is checked in tests/test_ui_layout.cu.
+enum : int {
+  kIdElementRow = 1000000,
+  kIdMaterialRow = 2000000,
+  kIdScorerRow = 3000000,
+  kIdSolidRow = 4000000,
+  kIdSolidEye = 5000000,
+  /// + solid * kIdClassStride + class. The stride is the importer's class cap, so a solid's
+  /// classes cannot reach into the next solid's block however many of them it has.
+  kIdClassRow = 6000000,
+  kIdClassEye = 7000000,
+  kIdSourceRow = 8000000,
+  kIdPickRow = 9000000,
+  /// One block per solid inside kIdClassRow and kIdClassEye. Equal to the importer's
+  /// kMaxClasses; tests/test_ui_layout.cu checks the two have not drifted apart.
+  kIdClassStride = 4096,
+};
+
 enum class PickKind {
   kNone, kMaterialForSolid, kScorerForSolid, kElementForMaterial, kMaterialForVoxelClass,
   kAnchorForSolid
@@ -234,7 +271,8 @@ struct App {
   ui::NumberField rot_field[3];
   int pfield_for = -2;
 
-  ui::NumberField src_field[8];
+  /// energy, pos xyz, half x, half y, radius, spread, then dir xyz.
+  ui::NumberField src_field[11];
   ui::NumberField src_activity;
   std::string src_name;
   int src_name_for = -2;
@@ -291,6 +329,13 @@ struct App {
   /// The selected item's form, scrolled separately from the list it was selected in - see
   /// ui::SplitListForm for why the two cannot share one.
   ui::ScrollArea solid_form_scroll;
+  /// Which widget the SOLIDS half had claimed by the time it finished drawing, for the
+  /// selftest. Zero when the cursor is not over anything in that half.
+  ///
+  /// Reading ctx.hot at the END of the frame does not answer this: hot is whatever tested
+  /// last, and the SOURCES half draws after SOLIDS, so a source row overwrites a ghost from
+  /// above it. That is what made the first version of the check pass with the bug present.
+  int hot_after_solids = 0;
   ui::ScrollArea source_form_scroll;
   ui::ScrollArea pick_scroll;
 
@@ -328,8 +373,9 @@ struct App {
   int p_unit[12] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
   int pos_unit[3] = {1, 1, 1};
   int rot_unit[3] = {0, 0, 0};
-  /// Parallel to src_field: energy, pos xyz, half x, half y, radius, spread.
-  int src_unit[8] = {2, 1, 1, 1, 1, 1, 1, 0};
+  /// Parallel to src_field. The three direction components have no unit - a direction is a
+  /// ratio - so their entries are never read.
+  int src_unit[11] = {2, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0};
   ui::NumberField world_dim[3];
   bool world_dialog_seeded = false;
 
@@ -1068,7 +1114,7 @@ int main(int argc, char** argv) {
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 48;
+      selftest_frames = 50;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1387,6 +1433,46 @@ int main(int argc, char** argv) {
         a.popup = Popup::kNone;
         a.vox_file.clear();
         a.vox_dialog_seeded = false;
+      }
+      // A WIDGET SCROLLED OUT OF ITS SECTION MUST NOT CLAIM THE CURSOR.
+      //
+      // The solid form is taller than the half it lives in - a voxel volume's is a dozen
+      // fields and six buttons - so its tail is clipped away below the section's bottom edge.
+      // Those buttons kept their rectangles, and their rectangles lie over the SOURCES
+      // section underneath, so hovering a source lit up a button that was not on screen and
+      // clicking one opened the material picker belonging to it.
+      //
+      // Checked through ctx.hot rather than by clicking: hot is set by whichever widget the
+      // cursor is over, which is the thing that was wrong, and reading it costs no side
+      // effect. Begin clears it at the top of each frame, so frame 48 sees what frame 47's
+      // draw decided. Solid-form widgets are ids 400 to 659; the sources section starts at
+      // 680, so the two ranges say which section answered.
+      if (frame == 47) {
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (!a.model.solids[i].voxel_classes.empty()) {
+            a.sel_solid = static_cast<int>(i);
+            a.pfield_for = -2;
+            break;
+          }
+        }
+        a.solid_form_scroll.offset = 0;   // so the tail of the form is below the fold
+        // Into the SOURCES half, a little below where the solid form is cut off.
+        a.input.mouse_x = a.width - a.right_w / 2;
+        a.input.mouse_y = kMenuH + (a.height - kMenuH - kStatusH) / 2 + 40;
+      }
+      if (frame == 48) {
+        // Sampled where the SOLIDS half finished, not at the end of the frame.
+        const int hot = a.hot_after_solids;
+        if (hot != 0) {
+          std::printf("selftest: FAILED - widget %d in the SOLIDS half claimed the cursor at "
+                      "(%d,%d), which is in SOURCES\n",
+                      hot, a.input.mouse_x, a.input.mouse_y);
+        } else {
+          std::printf("selftest: nothing scrolled out of SOLIDS claims the cursor over "
+                      "SOURCES\n");
+        }
+        a.input.mouse_x = 0;
+        a.input.mouse_y = 0;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

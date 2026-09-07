@@ -24,6 +24,11 @@ static void SyncSourceDraft(App& a) {
   a.src_field[6].Init(ui::InUnit(s.radius, a.src_unit[6], len));
   a.src_field[7].Init(
       ui::InUnit(s.angular_spread_deg, a.src_unit[7], ui::AngleUnitTable()));
+  // A direction is a ratio, so no unit and no conversion. Shown to three decimals because a
+  // normalised one usually is not a whole number - a gantry at 30 degrees is 0.5, 0, 0.866 -
+  // and "%g" would round 0.866 to 0.866 but 0.8660254 to 0.866025, which changes width every
+  // time the angle does.
+  for (int k = 0; k < 3; ++k) { a.src_field[8 + k].Init(s.dir[k], "%.3f"); }
   a.src_activity.Init(s.activity);
   a.src_weight.Init(s.weight);
   a.src_name_buf.Reset();
@@ -68,14 +73,14 @@ static int DrawSourcesList(App& a, const ui::Rect& panel, int y) {
     const std::string label = Fmt("%s %-9s %-6s %s", share.c_str(), s.name.c_str(),
                                   kKindName[static_cast<int>(s.kind)], s.particle.c_str());
     const int hit =
-        ui::ListRowRenamable(c, 690 + static_cast<int>(i), {panel.x + 8, y, w - 20, row},
+        ui::ListRowRenamable(c, kIdSourceRow + static_cast<int>(i), {panel.x + 8, y, w - 20, row},
                              label, a.sel_source == static_cast<int>(i), editing, buf);
     if (hit == 1) {
       if (a.sel_source == static_cast<int>(i)) {
         a.rename_target = key;
         a.rename_buf.Reset();
         a.rename_buf.For(key, s.name);
-        c.FocusText(690 + static_cast<int>(i));
+        c.FocusText(kIdSourceRow + static_cast<int>(i));
       } else {
         a.sel_source = static_cast<int>(i);
         a.draft_for_source = -2;
@@ -204,6 +209,46 @@ static int DrawSourceForm(App& a, const ui::Rect& panel, int y) {
     y += row + 1;
   }
 
+  // WHICH WAY IT FIRES.
+  //
+  // Source::dir has always been in the model, has always been read by build_scene, and has
+  // always been written to a saved project and emitted as /gun/direction - the only thing
+  // missing was any way to set it. A beam could be moved anywhere and only ever fired along
+  // +z, which for a gantry angle, a lateral field or an opposed pair is the whole question.
+  //
+  // Not shown for an isotropic shell, which has no direction: ConfigureFor overrides the
+  // angular shape for that kind, so a control there would be one that visibly does nothing.
+  if (src.kind != SourceKind::kIsotropicShell) {
+    const char* dl[3] = {"dir x", "dir y", "dir z"};
+    for (int k = 0; k < 3; ++k) {
+      c.canvas.Text(panel.x + 8, y + 3, dl[k], ui::theme::kTextDim);
+      if (ui::NumberInput(c, 760 + k, {vx, y, vw, row}, a.src_field[8 + k])) {
+        src.dir[k] = a.src_field[8 + k].value;
+      }
+      y += row + 1;
+    }
+    // What it means, and what it will be normalised to. The gun takes a unit vector, so
+    // 0,0,2 and 0,0,1 are the same beam, and saying so saves the user wondering whether the
+    // magnitude is a momentum.
+    //
+    // REPORTED, NOT CORRECTED. Rewriting src.dir from inside the draw would leave the fields
+    // showing the number the user typed and the model holding a different one, and it would
+    // do it on a frame where nothing was edited. The fallback for a zero direction lives in
+    // G4ParticleGun::SetParticleMomentumDirection, which is on the path from a loaded project
+    // as well as from this form.
+    const double dx = src.dir[0], dy = src.dir[1], dz = src.dir[2];
+    const double mag = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (mag < 1e-12) {
+      c.canvas.TextFit(panel.x + 8, y + 2, "zero is not a direction - a run will fire along +z",
+                       ui::theme::kWarn, w - 20);
+    } else {
+      c.canvas.TextFit(panel.x + 8, y + 2,
+                       Fmt("unit %.3f %.3f %.3f", dx / mag, dy / mag, dz / mag),
+                       ui::theme::kTextDim, w - 20);
+    }
+    y += lh + 4;
+  }
+
   if (src.kind == SourceKind::kBeam || src.kind == SourceKind::kVolume) {
     // These two had no unit beside them at all - the only two fields in either form that did
     // not say what they were in. They are lengths, like every other half extent here.
@@ -302,6 +347,8 @@ static void DrawRightPanel(App& a) {
   int yf = a.solid_form_scroll.Begin(c, r_solid_form, row * 3, 8101);
   yf = DrawSolidForm(a, panel, yf);
   a.solid_form_scroll.End(c, r_solid_form, yf);
+  // Everything the SOLIDS half could claim has now had its turn. See App::hot_after_solids.
+  a.hot_after_solids = c.hot;
 
   ui::Rect body2 = ui::FrozenTitle(
       c, {panel.x, panel.y + 4 + half, panel.w, avail - half}, "SOURCES");

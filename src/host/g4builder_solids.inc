@@ -41,7 +41,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     const int arrow_w = 14;
     if (has_children && !editing) {
       const ui::Rect ar{rr.x, rr.y, arrow_w, row};
-      const bool over = ar.Contains(a.input.mouse_x, a.input.mouse_y);
+      const bool over = c.Hovering(ar);
       c.canvas.Text(ar.x + 3, rr.y + (row - lh) / 2, s.ui_expanded ? "-" : "+",
                     over ? ui::theme::kText : ui::theme::kTextDim);
       if (over && a.input.left_pressed) {
@@ -60,7 +60,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     const int eye_w = lh + 4;
     if (!editing) {
       const ui::Rect er{rr.x + arrow_w, rr.y, eye_w, row};
-      if (ui::EyeToggle(c, 470 + static_cast<int>(i), er, s.visible)) {
+      if (ui::EyeToggle(c, kIdSolidEye + static_cast<int>(i), er, s.visible)) {
         s.visible = !s.visible;
         a.model.Touch();
         a.scene_dirty = true;
@@ -68,7 +68,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     }
     const ui::Rect row_r{rr.x + arrow_w + eye_w, rr.y, rr.w - arrow_w - eye_w, row};
 
-    const int hit = ui::ListRowRenamable(c, 400 + static_cast<int>(i), row_r,
+    const int hit = ui::ListRowRenamable(c, kIdSolidRow + static_cast<int>(i), row_r,
                                          Fmt("%-12s %s", s.name.c_str(), mat.c_str()),
                                          a.sel_solid == static_cast<int>(i), editing, buf, sw);
     if (hit == 1) {
@@ -76,7 +76,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
         a.rename_target = key;
         a.rename_buf.Reset();
         a.rename_buf.For(key, s.name);
-        c.FocusText(400 + static_cast<int>(i));
+        c.FocusText(kIdSolidRow + static_cast<int>(i));
       } else {
         a.sel_solid = static_cast<int>(i);
         a.pfield_for = -2;
@@ -96,7 +96,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       // tell two boxes apart in the view, and it used to be reachable only by selecting the
       // solid first and finding the Color button.
       const ui::Rect swr = ui::ListRowSwatchRect(c, row_r);
-      if (swr.Contains(a.input.mouse_x, a.input.mouse_y) && a.input.left_pressed) {
+      if (c.Hovering(swr) && a.input.left_pressed) {
         a.popup = Popup::kColor;
         a.popup_target = static_cast<int>(i);
         a.popup_target2 = -1;   // this solid's own colour, not one of its classes
@@ -122,13 +122,15 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
                                     ? Fmt("%-9g %s", vc.value, vmat.c_str())
                                     : Fmt("%-4.0f..%-4.0f %s", vc.value, vc.value_max,
                                           vmat.c_str());
-      const int id = 4000 + static_cast<int>(i) * 100 + static_cast<int>(k);
+      const int id =
+          kIdClassRow + static_cast<int>(i) * kIdClassStride + static_cast<int>(k);
       // A class gets an eye too. It is the same question one level down - what is behind the
       // skin - and on a segmentation it is the only practical way to look inside one, since
       // there may be two hundred classes and the answer is usually "hide all but three".
       const ui::Rect cer{panel.x + 8 + arrow_w + 12, y, eye_w, row};
-      if (ui::EyeToggle(c, 4700 + static_cast<int>(i) * 100 + static_cast<int>(k), cer,
-                        vc.visible)) {
+      if (ui::EyeToggle(c, kIdClassEye + static_cast<int>(i) * kIdClassStride
+                               + static_cast<int>(k),
+                        cer, vc.visible)) {
         s.voxel_classes[k].visible = !s.voxel_classes[k].visible;
         a.model.Touch();
         a.scene_dirty = true;
@@ -138,8 +140,7 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       // The swatch takes the click, the rest of the row assigns a material. Tested before the
       // row is drawn but acted on after, so the row still draws its hover and its swatch on
       // the frame the swatch is clicked.
-      const bool on_swatch =
-          ui::ListRowSwatchRect(c, vrow).Contains(a.input.mouse_x, a.input.mouse_y);
+      const bool on_swatch = c.Hovering(ui::ListRowSwatchRect(c, vrow));
       if (ui::ListRow(c, id, vrow, label, false, vsw)) {
         if (on_swatch) {
           a.popup = Popup::kColor;
@@ -360,14 +361,14 @@ static int DrawScorersSection(App& a, const ui::Rect& panel, int y) {
                                   ScoreName(sc.quantity),
                                   static_cast<int>(sc.solids.size()));
     const int hit =
-        ui::ListRowRenamable(c, 900 + static_cast<int>(i), {panel.x + 8, y, w - 20, row},
+        ui::ListRowRenamable(c, kIdScorerRow + static_cast<int>(i), {panel.x + 8, y, w - 20, row},
                              label, a.sel_scorer == static_cast<int>(i), editing, buf);
     if (hit == 1) {
       if (a.sel_scorer == static_cast<int>(i)) {
         a.rename_target = key;
         a.rename_buf.Reset();
         a.rename_buf.For(key, sc.name);
-        c.FocusText(900 + static_cast<int>(i));
+        c.FocusText(kIdScorerRow + static_cast<int>(i));
       } else {
         a.sel_scorer = static_cast<int>(i);
         a.rename_target = -1;

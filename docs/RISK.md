@@ -2619,3 +2619,95 @@ The same photograph showed the other half of it: the form was anchored to the bo
 section, so a two-source list had a band of nothing between it and its form. The form begins
 under the last row now, and both properties are asserted in tests/test_ui_layout.cu rather
 than left to the next screenshot.
+
+### V19: two ways a widget can be somewhere it is not
+
+Reported as one bug - "when the solids list becomes scrollable, clicking in the sources panel
+opens a material picker" - with the observation that it might be systemic. It was, and it was
+two unrelated systemic faults sitting on top of each other, both of which had been there for
+some time and neither of which announces itself.
+
+#### A widget you cannot see is still clickable
+
+`ui::Context::Hovering` is what every widget in this UI asks to find out whether the cursor is
+on it. It answered from the widget's rectangle alone. The canvas clip - the thing that stops a
+scrolled-away row from being PAINTED - had no say in whether it could be CLICKED.
+
+So the tail of the solid form, which is taller than the half of the panel it lives in, was
+clipped away below the section's bottom edge and kept its rectangles. Those rectangles lie
+over the SOURCES section underneath. Hovering a source lit a button that was not on screen;
+clicking one opened the material picker belonging to a solid scrolled out of view.
+
+The fix is one line - the clip is part of the hit test - and it is one line rather than a
+change in every widget because there is no widget for which "clickable but invisible" is
+correct. Four call sites were hit-testing with a bare `rect.Contains(mouse)` and bypassing
+`Hovering` altogether; those now go through it.
+
+What makes this class of bug survive: the two halves of "is this widget here" were written in
+different places and neither is obviously incomplete on its own. `Hovering` reads like a
+complete answer to its own question. The clip reads like a drawing concern. Nothing in either
+says the other exists.
+
+#### And the widget ids collide
+
+Chasing the first turned up a second. Widgets are identified by an integer, and the lists that
+grow with the model were numbered `base + index`, with the bases ten or a hundred apart:
+
+```
+solid rows   400 + i      "Assign material" button   410      -> collides at 11 solids
+source rows  690 + i      kind buttons               700      -> collides at 11 sources
+element rows 200 + i      element controls           210..215 -> collides at 10 elements
+material     300 + i      material controls          310..320 -> collides at 10 materials
+voxel classes  4000 + solid*100 + class,  importer cap 4096   -> collides WITH ITSELF at 101
+```
+
+The last one is the worst and is a direct consequence of a change made earlier in this
+register: raising the class cap from 64 to 4096 (V14) made the stride of 100 wrong, and the
+261-class segmentations the program was changed to accept are all past it. Widening a limit
+somewhere else invalidated an assumption nothing recorded.
+
+A shared id does NOT draw wrong. Both widgets still paint, still highlight, still fire on
+their own rectangle - `hot` is recomputed per widget from its own geometry. What is shared is
+`ctx.hot`, `ctx.active` and `ctx.focus`, so a rename types into the wrong row and a drag is
+picked up by a control the cursor is nowhere near. That is a description nobody connects to
+numbering.
+
+The blocks are a million apart now, with the class stride equal to the importer's class cap.
+`tests/test_ui_layout.cu` enumerates the ids of a 200-solid, 4096-class-each model plus five
+thousand of everything else and looks for a repeat - and asserts that the OLD stride does
+collide, so the test cannot pass by being vacuous.
+
+#### Why it surfaced now
+
+The ghost the selftest actually catches is widget 40630 - the unit dropdown for `rot x`. Those
+dropdowns were added one commit earlier. Each one made the solid form a little taller, and a
+taller form pushes more of its tail below the fold, so a defect that had always been there
+became something you hit by clicking a source.
+
+Which is the ordinary way a latent fault is found: not by anyone looking for it, but by an
+unrelated change making its precondition common. Worth noting because the instinct on being
+handed "this broke after your change" is to look at the change.
+
+#### What was checked, and how
+
+The one-line fix is falsified by reverting it: three assertions in tests/test_ui_layout.cu
+fail, at the section boundary and past it.
+
+The selftest checks the whole path: the cursor goes into the SOURCES half with the solid form
+scrolled so its tail is clipped, and the check reads back which widget claimed it.
+
+THE FIRST VERSION OF THAT CHECK PASSED WITH THE BUG PRESENT. It read `ctx.hot` at the end of
+the frame, and `hot` is whatever tested LAST - the SOURCES half draws after SOLIDS, so the
+source row under the cursor overwrote the ghost that had claimed it a moment earlier. The
+check was measuring the right quantity at the wrong time, and a check that reports success on
+broken code is worse than none, because it is now evidence.
+
+It was caught by building the broken version deliberately and confirming the check failed on
+it - which is the only thing that distinguishes a passing test from a test that cannot fail.
+The fix is to sample `hot` where it means what the check needs: `App::hot_after_solids`,
+recorded the moment the SOLIDS half finishes drawing. Zero there means nothing in that half
+claimed the cursor. Broken, it reads 40630.
+
+Reading `hot` rather than clicking is still deliberate: it is exactly the state that was
+wrong, and reading it has no side effect, where a simulated click on whatever lies under those
+coordinates might add or delete a source.

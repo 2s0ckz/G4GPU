@@ -112,6 +112,27 @@ would move the geometry every time the menu was touched and would do it silently
 family a field offers is keyed off the unit string `builder::ShapeParams` already carries, so
 every shape's fields get the right menu without a second table to keep in step.
 
+### Two rules for anyone adding a widget
+
+**Hit-test with `Context::Hovering`, never with `rect.Contains(mouse)`.** `Hovering` requires
+the cursor to be inside the canvas clip as well as inside the widget, and that second half is
+what keeps a control scrolled out of its section from going on claiming clicks over whatever
+is drawn below it. The bare `Contains` is the version without it. See docs/RISK.md V19.
+
+**Take an id from the table in `g4builder.cu`, not from the next free number.** Anything
+indexed by a model list - one id per solid, per class, per source - needs a block of its own;
+the fixed controls use the low numbers. Two widgets sharing an id still draw and still fire
+correctly on their own rectangles, so the symptom is not "the wrong button" but a rename
+typing into the wrong row, and nothing about that points at numbering.
+
+### The source form
+
+A source's direction is three fields, shown for every kind except the isotropic shell, which
+overrides the angular shape and so would have a control that visibly does nothing. The gun
+normalises, so 0,0,2 and 0,0,1 are the same beam and the form shows the unit vector it will
+become. A zero direction falls back to +z in `G4ParticleGun::SetParticleMomentumDirection`
+rather than in the form, because a direction also arrives from a loaded project file.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's

@@ -135,7 +135,7 @@ static int DrawElementsSection(App& a, const ui::Rect& panel, int y) {
     const bool editing = (a.rename_target == key);
     std::string& buf = a.rename_buf.For(key, e.symbol);
     const int hit = ui::ListRowRenamable(
-        c, 200 + static_cast<int>(i), {panel.x + 8, y, panel.w - 20, row},
+        c, kIdElementRow + static_cast<int>(i), {panel.x + 8, y, panel.w - 20, row},
         Fmt("%-4s Z=%-4g A=%g", e.symbol.c_str(), e.z, e.a),
         a.sel_element == static_cast<int>(i), editing, buf);
     if (hit == 1) {
@@ -145,7 +145,7 @@ static int DrawElementsSection(App& a, const ui::Rect& panel, int y) {
         a.rename_target = key;
         a.rename_buf.Reset();
         a.rename_buf.For(key, e.symbol);
-        c.FocusText(200 + static_cast<int>(i));
+        c.FocusText(kIdElementRow + static_cast<int>(i));
       } else {
         a.sel_element = static_cast<int>(i);
         a.rename_target = -1;
@@ -232,14 +232,14 @@ static int DrawMaterialsSection(App& a, const ui::Rect& panel, int y) {
                                   ? Fmt("%-14s %.4g g/cm3", m.name.c_str(), m.density)
                                   : Fmt("%-14s %s", m.name.c_str(), m.nist_name.c_str());
     const int hit =
-        ui::ListRowRenamable(c, 300 + static_cast<int>(i), {panel.x + 8, y, panel.w - 20, row},
+        ui::ListRowRenamable(c, kIdMaterialRow + static_cast<int>(i), {panel.x + 8, y, panel.w - 20, row},
                              label, a.sel_material == static_cast<int>(i), editing, buf);
     if (hit == 1) {
       if (a.sel_material == static_cast<int>(i)) {
         a.rename_target = key;
         a.rename_buf.Reset();
         a.rename_buf.For(key, m.name);
-        c.FocusText(300 + static_cast<int>(i));
+        c.FocusText(kIdMaterialRow + static_cast<int>(i));
       } else {
         a.sel_material = static_cast<int>(i);
         a.rename_target = -1;

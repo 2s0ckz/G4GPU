@@ -21,8 +21,12 @@
 //     short list and its form is what a fixed split produced - and the form must always be
 //     owed what it asked for, up to half the section;
 //   * the thumb must stay inside its track at every scroll offset, and must reach both ends -
-//     a thumb that stops short cannot scroll to the bottom by dragging.
+//     a thumb that stops short cannot scroll to the bottom by dragging;
+//   * and a widget clipped out of its section must not be clickable, which is a property of
+//     Context::Hovering rather than of any widget - see section 8.
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 #include "render/ui.h"
 
@@ -198,6 +202,191 @@ int main() {
     sa.BarRects(r, track, thumb);
     Check(thumb.y + thumb.h == r.y + r.h,
           "and the floored thumb still reaches the bottom rather than stopping short");
+  }
+
+  // ---- 8. A WIDGET YOU CANNOT SEE MUST NOT BE CLICKABLE.
+  //
+  // Every widget in this UI asks Context::Hovering whether the cursor is on it. Hovering used
+  // to answer from the widget's rectangle alone, and the canvas clip - which is what stops a
+  // scrolled-away row from being painted - had no say in it. So a button scrolled out of the
+  // bottom of SOLIDS was invisible and still live, floating over the SOURCES section below,
+  // and clicking a source opened the material picker for a solid that was not on screen.
+  //
+  // The fix is one line in Hovering, and it is one line rather than a change in every widget
+  // because there is no widget for which "clickable but not visible" is right.
+  {
+    ui::Input in;
+    ui::Context ctx;
+    ctx.in = &in;
+
+    // A section 200 tall, and a button 40 pixels below its bottom edge - what the last button
+    // of a scrolled list looks like once the list is long enough to push it out.
+    const ui::Rect section{1200, 100, 300, 200};
+    const ui::Rect button{1210, 340, 200, 24};
+
+    ctx.canvas.clip = ui::Rect{0, 0, 1600, 900};   // no clipping: the widget is live
+    in.mouse_x = 1250;
+    in.mouse_y = 350;
+    Check(ctx.Hovering(button), "with no clip the cursor is on the button");
+
+    ctx.canvas.clip = section;                     // the section's box, as ScrollArea sets it
+    Check(!ctx.Hovering(button),
+          "clipped out of its section, the same button is not hovered");
+
+    // And the row that IS visible in that section still is, so the fix has not made the
+    // clipping over-eager.
+    const ui::Rect visible_row{1210, 150, 200, 24};
+    in.mouse_x = 1250;
+    in.mouse_y = 160;
+    Check(ctx.Hovering(visible_row), "a row inside the section is still hovered");
+
+    // The boundary itself: the last pixel row of the section is inside, the first below is
+    // not. Off by one here is a one-pixel strip of dead or live widget along every section
+    // edge in the program.
+    in.mouse_y = 299;
+    Check(ctx.Hovering(ui::Rect{1210, 290, 200, 24}), "the last pixel of the section counts");
+    in.mouse_y = 300;
+    Check(!ctx.Hovering(ui::Rect{1210, 290, 200, 24}),
+          "and the first pixel past it does not");
+
+    // A null input is not hovering anything, which is what a headless frame looks like.
+    ctx.in = nullptr;
+    Check(!ctx.Hovering(visible_row), "with no input nothing is hovered");
+  }
+
+  // ---- 9. The same thing through a real ScrollArea, since that is what sets the clip.
+  //
+  // Begin narrows the clip to the section and returns the y to draw at; End puts the clip
+  // back. A widget drawn between them at a y past the section's bottom is exactly the case
+  // above, and this checks the two agree rather than assuming they do.
+  {
+    ui::Input in;
+    ui::Context ctx;
+    ctx.in = &in;
+    ctx.canvas.clip = ui::Rect{0, 0, 1600, 900};
+
+    ui::ScrollArea sa;
+    const ui::Rect section{1200, 100, 300, 200};
+    sa.content_h = 900;      // a long list, so there is something to scroll
+    sa.offset = 0;
+
+    const int y0 = sa.Begin(ctx, section, 30, 9001);
+    // Two rows: one inside the section, one well past its bottom.
+    const ui::Rect inside{1210, y0 + 10, 200, 24};
+    const ui::Rect below{1210, y0 + 400, 200, 24};
+    in.mouse_x = 1250;
+    in.mouse_y = inside.y + 5;
+    const bool hit_inside = ctx.Hovering(inside);
+    in.mouse_y = below.y + 5;
+    const bool hit_below = ctx.Hovering(below);
+    sa.End(ctx, section, y0 + 900);
+
+    Check(hit_inside, "inside the scroll area, a visible row is hovered");
+    Check(!hit_below, "and a row past the bottom of it is not");
+
+    // End restored the clip, so a widget drawn after the section - the next section, or a
+    // pop-up - is live again at those same coordinates.
+    in.mouse_y = below.y + 5;
+    Check(ctx.Hovering(below), "once the scroll area ends the clip is back and it is live");
+  }
+
+  // ---- 10. NO TWO WIDGETS MAY SHARE AN ID.
+  //
+  // The builder identifies each widget by an integer, and the lists that grow with the model
+  // are numbered `base + index`. That scheme fails silently once a list reaches the next
+  // base, and it had failed in four places at once:
+  //
+  //   * the solid rows started at 400 and the "Assign material" button was 410, so an
+  //     eleven-solid model gave row 10 the button's id;
+  //   * the source rows started at 690 against kind buttons at 700, the same at eleven;
+  //   * elements at 200 and materials at 300 collided with their own controls at ten;
+  //   * and the voxel classes were `4000 + solid*100 + class` while the importer caps
+  //     classes at 4096 - so a phantom past a hundred classes collided WITH ITSELF, and the
+  //     261-class segmentations this program was changed to accept are all past it.
+  //
+  // A shared id does not draw wrong. It shares ctx.hot, ctx.active and ctx.focus, so a rename
+  // types into the wrong row and a drag is picked up by a control the cursor is nowhere near.
+  // Nothing about that points at numbering.
+  //
+  // The blocks are a million apart now. This checks the arithmetic rather than the layout: it
+  // enumerates the ids a large model would produce and looks for any repeat.
+  {
+    // The bases, copied from the enum in g4builder.cu. Copied deliberately: a test that
+    // included the header would be asserting that a value equals itself. If the enum moves,
+    // this fails and someone reads both.
+    const int kElementRow = 1000000;
+    const int kMaterialRow = 2000000;
+    const int kScorerRow = 3000000;
+    const int kSolidRow = 4000000;
+    const int kSolidEye = 5000000;
+    const int kClassRow = 6000000;
+    const int kClassEye = 7000000;
+    const int kSourceRow = 8000000;
+    const int kPickRow = 9000000;
+    const int kClassStride = 4096;
+    // The importer's cap, from builder/import.hh. The stride must be at least this or a
+    // solid's classes run into the next solid's block.
+    const int kMaxClasses = 4096;
+    Check(kClassStride >= kMaxClasses,
+          "the class id stride is at least the importer's class cap");
+
+    // A model far larger than anything anyone builds: 200 solids, each with a full 4096
+    // classes, plus long lists of everything else.
+    const int kSolids = 200;
+    const int kClasses = 4096;
+    const int kOthers = 5000;
+
+    std::vector<long long> ids;
+    ids.reserve(static_cast<std::size_t>(kSolids) * (kClasses * 2 + 2) + 4 * kOthers);
+    for (int i = 0; i < kOthers; ++i) {
+      ids.push_back(kElementRow + i);
+      ids.push_back(kMaterialRow + i);
+      ids.push_back(kScorerRow + i);
+      ids.push_back(kSourceRow + i);
+      ids.push_back(kPickRow + i);
+    }
+    for (int i = 0; i < kSolids; ++i) {
+      ids.push_back(kSolidRow + i);
+      ids.push_back(kSolidEye + i);
+      for (int k = 0; k < kClasses; ++k) {
+        ids.push_back(kClassRow + static_cast<long long>(i) * kClassStride + k);
+        ids.push_back(kClassEye + static_cast<long long>(i) * kClassStride + k);
+      }
+    }
+    // Every fixed control in the builder is below 50000 - the highest literal is the import
+    // dialog's 1280 - so the blocks must all start above that and nothing may reach down.
+    long long lowest = ids[0];
+    for (long long q : ids) {
+      if (q < lowest) { lowest = q; }
+    }
+    Check(lowest >= 50000, "no growing list reaches down into the fixed control numbers");
+
+    std::sort(ids.begin(), ids.end());
+    bool dup = false;
+    long long first_dup = 0;
+    for (std::size_t i = 1; i < ids.size(); ++i) {
+      if (ids[i] == ids[i - 1] && !dup) {
+        dup = true;
+        first_dup = ids[i];
+      }
+    }
+    if (dup) {
+      std::printf("  first repeated id: %lld\n", first_dup);
+    }
+    Check(!dup, "200 solids of 4096 classes and 5000 of everything else share no id");
+
+    // And the case that actually broke: the old scheme, checked to be sure this test would
+    // have caught it rather than passing either way.
+    std::vector<long long> old;
+    for (int i = 0; i < 3; ++i) {
+      for (int k = 0; k < 200; ++k) { old.push_back(4000 + i * 100 + k); }
+    }
+    std::sort(old.begin(), old.end());
+    bool old_dup = false;
+    for (std::size_t i = 1; i < old.size(); ++i) {
+      if (old[i] == old[i - 1]) { old_dup = true; }
+    }
+    Check(old_dup, "the old stride of 100 does collide at 200 classes, as claimed");
   }
 
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "PASSED", g_fails);
