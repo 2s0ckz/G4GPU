@@ -1,0 +1,9 @@
+# Two runs in one session, for tools/check_run_sequence.ps1.
+#
+# Geant4 gives two different answers here and the same pair every time the program starts.
+# Both halves are checked: that the second run is a different sample, and that a fresh process
+# replays the pair. run_sequence_one.mac runs 40000 in one go, which must equal these two
+# summed - the sharp form of "the random stream carries on".
+/run/initialize
+/run/beamOn 20000
+/run/beamOn 20000

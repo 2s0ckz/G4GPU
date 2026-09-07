@@ -15,12 +15,24 @@
 // G4RunManager::SetRandomSeed.
 //
 // So a fully reproducible run needs both: this engine seeded for the primaries, and the run's
-// seed for the showers. That is what Geant4 users expect from /random/setSeeds, and it is why
-// two successive /run/beamOn calls in one session give different answers - the host stream
-// carries on where the last run left it, exactly as it does in Geant4. The viewer's "accumulate
-// across runs" depends on that: when the primaries came from a device stream keyed only on the
-// run's seed, two runs of the same size were *identical*, and accumulating them multiplied one
-// run's result instead of reducing its variance.
+// seed for the showers. /random/setSeeds sets both from one number - see G4UImanager, including
+// what it cannot do.
+//
+// **Both streams carry on across runs within a process**, which is why two successive
+// /run/beamOn calls give different answers and a freshly started program replays them. This
+// engine does it by being a static constructed once per process; the device does it through
+// G4RunManager::stream_pos_, a position in the seed's stream that advances by one per primary.
+//
+// The second half was missing for a while and the first half hid it. Every track's shower was
+// keyed on (seed, index-within-run), so a second run fired different primaries into IDENTICAL
+// showers - two runs that differed, were not independent, and whose difference came entirely
+// from the beam spot. A generator drawing no random numbers repeated its run bit for bit. B1
+// has a random beam spot, so nothing in the suite could see it. See docs/RISK.md V12.
+//
+// The viewer's "accumulate across runs" is the feature that depends on this, and it is where an
+// earlier version of the same mistake was found: when the primaries came from a device stream
+// keyed only on the run's seed, two runs of the same size were *identical*, and accumulating
+// them multiplied one run's result instead of reducing its variance.
 #pragma once
 #include <cstdio>
 #include <random>

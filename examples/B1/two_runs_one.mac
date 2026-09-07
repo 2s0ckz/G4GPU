@@ -1,0 +1,3 @@
+# The 40000-event counterpart to two_runs.mac. Two runs of 20000 must sum to this.
+/run/initialize
+/run/beamOn 40000

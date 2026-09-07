@@ -57,10 +57,22 @@ namespace g4gpu::host {
 /// event may start a gamma and the next an electron - a generator is free to do that - so each
 /// species' buffer is appended to. One atomicAdd per event against a whole shower's transport
 /// is not a cost worth designing around.
+/// Where in the seed's random stream a batch starts: the run's own offset plus the batch's.
+///
+/// Wraps at 2^32, which is 4.3e9 primaries into a process's life and is the same wrap the key
+/// arithmetic has always had. Folded into one function because a repair pass has to use the
+/// same base as the attempt it repairs - re-transporting an event with a different key would
+/// give it a different shower, and the dose would depend on whether a batch had to be
+/// repaired.
+inline unsigned int key_base_for(long long stream_pos, int batch_base) {
+  return static_cast<unsigned int>(static_cast<unsigned long long>(stream_pos)
+                                   + static_cast<unsigned long long>(batch_base));
+}
+
 template <typename real_t>
 __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
                                     geom::Geometry<real_t> geometry,
-                                    const Primary<real_t>* prim, int n, int event_base,
+                                    const Primary<real_t>* prim, int n, unsigned int key_base,
                                     unsigned int seed, const int* only = nullptr) {
   const int t = blockIdx.x * blockDim.x + threadIdx.x;
   if (t >= n) { return; }
@@ -82,16 +94,30 @@ __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
     return;
   }
 
-  // The per-track RNG key still comes from the event index and the run's seed, so the shower
-  // a primary produces is reproducible for a given seed even though the primary itself was
-  // generated on the host from Geant4's engine.
-  // The GLOBAL event index, not the batch-local one. With the batch-local index every batch
-  // replayed the same set of random streams - event 0 of the second batch drew exactly what
-  // event 0 of the first had - so a 2M-event run in two batches was two correlated halves
-  // rather than 2M independent showers. It went unseen because the batch was a fixed
-  // 1048576 and nothing ever varied it; automatic sizing changed the batch, B1 moved from
-  // 0.019 to 0.450 sigma against Geant4, and this was underneath.
-  const unsigned int key = seed ^ static_cast<unsigned int>(event_base + i);
+  // The per-track RNG key comes from the run's seed and the primary's position in the random
+  // stream, so the shower a primary produces is reproducible for a given seed even though the
+  // primary itself was generated on the host from Geant4's engine.
+  //
+  // key_base is a position in the WHOLE stream, not in this batch and not in this run. Two
+  // things fold into it and both were bugs before they were folded in:
+  //
+  //   the batch offset   With the batch-local index every batch replayed the same set of
+  //                      streams - event 0 of the second batch drew exactly what event 0 of
+  //                      the first had - so a 2M-event run in two batches was two correlated
+  //                      halves rather than 2M independent showers. Unseen because the batch
+  //                      was a fixed 1048576 and nothing varied it; automatic sizing changed
+  //                      the batch and B1 moved from 0.019 to 0.450 sigma against Geant4.
+  //
+  //   the run offset     Without it, the second BeamOn of a process drew the same streams as
+  //                      the first. B1 still differed between the two, because its gun draws
+  //                      two host random numbers per event and the host engine carries on -
+  //                      so the primaries differed while every shower repeated. A generator
+  //                      that draws nothing repeated exactly. See G4RunManager::stream_pos_.
+  //
+  // Note `event[slot] = i` below: the SCORING index stays batch-local, because it indexes the
+  // per-event score array. Only the key is global. Conflating the two is what made the first
+  // of those two bugs invisible.
+  const unsigned int key = seed ^ (key_base + static_cast<unsigned int>(i));
   buf->x[slot] = p.pos.x;   buf->y[slot] = p.pos.y;   buf->z[slot] = p.pos.z;
   buf->dx[slot] = p.dir.x;  buf->dy[slot] = p.dir.y;  buf->dz[slot] = p.dir.z;
   buf->ekin[slot] = p.ekin;
@@ -843,7 +869,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                                          unsigned int seed,
                                          std::vector<double>& score_sum,
                                          std::vector<double>& score_sum_sq,
-                                         vis::TrajectoryBuffer traj, EventSink* sink) {
+                                         vis::TrajectoryBuffer traj, EventSink* sink,
+                                         long long stream_pos) {
     score_sum.assign(n_scorers_, 0.0);
     score_sum_sq.assign(n_scorers_, 0.0);
     // Zeroed per run, not per batch: this accumulates the whole run's deposit per cell.
@@ -955,7 +982,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         std::exit(3);
       }
       seed_from_primaries<real_t><<<(n_batch + threads_ - 1) / threads_, threads_>>>(
-          tracks_[cur].view, geom_, d_primaries_, n_batch, base, seed);
+          tracks_[cur].view, geom_, d_primaries_, n_batch, key_base_for(stream_pos, base),
+          seed);
       G4GPU_CUDA_CHECK(cudaGetLastError());
 
       // Bounded so a non-terminating track shows up as an explicit abandonment rather than a
@@ -1040,7 +1068,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 
           tracks_[cur].reset();
           seed_from_primaries<real_t><<<(n_repair + threads_ - 1) / threads_, threads_>>>(
-              tracks_[cur].view, geom_, d_primaries_, n_repair, base, seed, d_dropped_);
+              tracks_[cur].view, geom_, d_primaries_, n_repair,
+              key_base_for(stream_pos, base), seed, d_dropped_);
           G4GPU_CUDA_CHECK(cudaGetLastError());
           continue;  // drain again, this time carrying only the repaired events
         }
@@ -1234,7 +1263,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     // AllowDroppedTracks() exists for the case where somebody genuinely wants best-effort
     // transport and has decided the shortfall is acceptable. It has to be asked for.
     if (st.overflow > 0) {
-      std::printf("\n*** %lld TRACKS WERE DROPPED ***\n\n"
+      std::printf("\n*** %d TRACKS WERE DROPPED ***\n\n"
                   "    A species buffer had no room, so those particles stopped being\n"
                   "    transported. Their energy was never deposited, so the dose from this\n"
                   "    run is TOO LOW - it is not a measurement.\n\n"

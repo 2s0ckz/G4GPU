@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include "g4/G4RunManager.hh"
+#include "g4/Randomize.hh"  // /random/setSeeds reseeds the host engine as well as the device one
 
 class G4UImanager {
  public:
@@ -163,6 +164,41 @@ inline G4int G4UImanager::ApplyCommand(const G4String& command_in) {
     rm->BeamOn(n);
     return 0;
   }
+  // ------------------------------------------------------------------ /random
+  //
+  // Restarts both random streams, which is what Geant4's one engine does when reseeded and
+  // what a macro that wants a particular run again is asking for. Both, because this port has
+  // two: CLHEP's engine on the host draws the primaries, and a counter-based device stream
+  // keyed on (seed, position) draws the showers. Reseeding one and not the other would give a
+  // run that is half a repeat, which is worse than either.
+  //
+  // Geant4 takes two integers and its engines use both; here the FIRST seeds both streams and
+  // the second is accepted and ignored, because one number is what there is to set and
+  // inventing a mix of the two would make the command's effect impossible to predict.
+  //
+  // WHAT THIS DOES NOT DO: return you to the state the process started in. Nothing can, and
+  // that is worth knowing before relying on it. A freshly started process has the host engine
+  // on CLHEP's own default seed and the device stream on G4RunManager's, which are different
+  // numbers picked by different code; `/random/setSeeds n` puts BOTH on n, which is a
+  // perfectly reproducible state and not that one. So a macro that reseeds mid-session repeats
+  // itself exactly on the next process, which is what reproducibility means here - but it does
+  // not reproduce the run it would have got without the command.
+  if (head == "/random/setSeeds" || head == "/random/setSeed") {
+    if (tok.size() < 2) { Echo("usage: /random/setSeeds <n> [<n>]"); return 1; }
+    const long s1 = std::atol(tok[1].c_str());
+    G4Random::setTheSeed(s1);
+    if (rm != nullptr) { rm->SetRandomSeed(static_cast<unsigned int>(s1)); }
+    return 0;
+  }
+  if (head == "/random/resetEngineFrom" || head == "/random/saveThisRun"
+      || head == "/random/saveThisEvent" || head == "/random/setSavingFlag"
+      || head == "/random/setDirectoryName") {
+    // Accepted and ignored: there is no engine state file to write or read. A run here is
+    // reproducible from its seed and its position in the stream, both of which are integers
+    // the run manager already holds - see G4RunManager::SetRandomSeed.
+    return 0;
+  }
+
   if (head == "/run/setCut") {
     if (rm == nullptr) { Echo("no run manager"); return 1; }
     G4double f = 1.0;

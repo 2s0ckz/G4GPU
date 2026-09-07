@@ -2126,3 +2126,59 @@ would have shown up as a wrong answer rather than as a failure.
 The general form, and it applies beyond sizing: **a more accurate number is only an improvement
 where it does not remove a disagreement that was doing work.** The estimate's inaccuracy was
 load-bearing at the top of its range. Replacing it meant replacing that too.
+
+### V12: two runs in one process that were not two samples
+
+Geant4's behaviour, and what a user relies on without thinking about it: run `B1.exe` twice and
+you get the same number, because that is what makes a result quotable. Issue two `/run/beamOn`
+in one session and you get two different numbers within noise, because that is what makes the
+second run worth doing.
+
+This port had the first and only half of the second. Every track's shower was drawn from a
+counter-based stream keyed on `(seed, index within the run)`, and the seed never changed between
+runs - so run two used **exactly the same shower streams as run one**. What differed was the
+primaries: CLHEP's engine is a static constructed once per process, so B1's two random draws per
+event carried on and the second run fired a different beam spot into an identical shower.
+
+Two things follow, and the second is worse than the first:
+
+- A generator that draws no host random numbers **repeated its run bit for bit.** Proved by
+  neutralising B1's two `G4UniformRand()` calls: 1.38967 nanoGy, twice, identical.
+- Even with a random beam spot the two runs were not independent samples. Run two's event *i*
+  reused run one's event *i* shower. Averaging them reduces less variance than averaging two
+  real samples, and nothing says so.
+
+`G4RunManager::stream_pos_` fixes it: a position in the seed's stream, zero at construction,
+advanced by one per primary, folded into the key alongside the batch offset. So the streams carry
+on across runs exactly as CLHEP's do on the host, and a fresh process starts at zero and replays.
+
+#### Why B1 could not see it
+
+B1's gun draws two random numbers per event. That was enough to make its second run differ,
+which is what anyone looking would have checked, and it made the port's behaviour look correct
+while resting entirely on the generator. **A test that passes because of the test program's
+incidental properties is not testing the port.** The same blind spot covers any port behaviour
+that a randomised primary can mask.
+
+`tools/check_run_sequence.ps1` now asserts four things rather than one: that two runs in a
+process differ, that they differ only within statistics, that a second process replays both
+exactly, and that two runs of N sum to one run of 2N. The last is the sharp one - an offset that
+jumped too far would still differ and still replay, and would silently skip part of the stream.
+It comes out at 1.2e-6 relative, which is the printed precision of the number being compared.
+
+#### And the threshold on the second of those, which I got wrong first
+
+I wrote "differs by more than 5%" for the within-statistics check. B1 at 20000 events has a 2.1%
+standard error, so two runs are 2.9% apart on average: the check would have failed about one run
+in twenty for no reason, and the first time I ran it against the real B1 it did - 5.71%, which is
+1.93 sigma and entirely ordinary.
+
+That is V10, two entries earlier, in a check written *because of* V10, by the person who wrote
+V10, on the same day. The number was available: the run prints its own rms on the same line as
+the dose the check was already parsing. It reads the rms now and the threshold is four sigma.
+
+The lesson V10 states is "a threshold is not a number you pick, it is a number you compare
+against the spread of the thing being thresholded". Knowing it did not help. What would have
+helped is a habit: **when writing a threshold, parse the uncertainty that is already in front of
+you, or go and measure it - never type a round number.** A round number in a comparison is a
+defect on sight, in the same way a hand-typed physical constant is (V8, V9).

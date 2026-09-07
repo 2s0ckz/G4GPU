@@ -504,6 +504,48 @@ and 16 slots per event, deferring 49152 track-steps at the smallest and none at 
 2.5 earns its place twice over. It is the only pool in this pipeline that is an ODD number, and
 an odd pool used to fault - see docs/RISK.md V11.
 
+## Two runs in one process, and the same two every time
+
+Geant4's semantics, which a user relies on without stating: the program run twice gives the same
+answer, and two runs inside one program give different answers within noise. Both are checked by
+`tools/check_run_sequence.ps1`, on example B1 through `two_runs.mac`:
+
+```
+two runs in one process: 832.457 +/- 17.168 then 880.011 +/- 17.724 pGy
+they differ by 47.554 pGy = 1.93 sigma, which must be noise and not physics
+a second process replays both runs exactly
+two runs of N summed 1,712.468 pGy against 1,712.470 for one run of 2N (rel 1.17E-006)
+```
+
+Four assertions, not one, because three of them can hold while the mechanism is wrong:
+
+1. **The runs differ.** Without this a second run is not a second sample.
+2. **They differ only within statistics.** 1.93 sigma against the rms each run reports. A run
+   that differs by tens of sigma is a geometry that moved or a scorer that did not reset, not a
+   new sample - and the threshold is in sigma rather than per cent precisely because the first
+   version of this check used 5% against a spread of 2.9% and failed on its first real run.
+3. **A fresh process replays both.** Exactly, not within noise.
+4. **Two runs of N are one run of 2N.** This is the sharp one. An offset that jumped too far
+   would still differ and still replay - it would just skip part of the stream, making each run
+   a different sample from the one it would have been as part of a longer run. 1.2e-6 is the
+   printed precision of the number being compared, not the agreement.
+
+The mechanism is two streams that both carry on. CLHEP's engine on the host draws the primaries
+and is a static constructed once per process. The device draws the showers from a counter-based
+stream keyed on `(seed, position)`, where the position is `G4RunManager::stream_pos_` - zero at
+construction, advanced by one per primary.
+
+The device half was missing until this was checked, and the host half hid it: run two fired
+different primaries into identical showers, and a generator drawing no random numbers repeated
+its run bit for bit. docs/RISK.md V12 has the measurement that proved it and why B1 could not.
+
+**What no seed can do** is return a process to the state it started in. The host engine begins on
+CLHEP's default seed and the device stream on `G4RunManager`'s, which are unrelated numbers from
+unrelated code; `/random/setSeeds n` puts both on `n`, which is a reproducible state and not that
+one. Unifying them would make the program's start expressible and would move every number on this
+page by a fraction of a sigma, since it changes which primaries B1 fires. Not done, and listed
+here rather than left to be discovered.
+
 ## What is still on the table
 
 See docs/ROADMAP.md, which lists what is unfinished in the order it matters. In brief: mesh

@@ -150,11 +150,25 @@ class G4RunManager {
   void SetProcesses(const g4gpu::ProcessFlags& f) { processes_ = f; }
   const g4gpu::ProcessFlags& GetProcesses() const { return processes_; }
 
-  /// The counter-based key every track's random stream is derived from. Two runs with
-  /// different seeds are independent samples; two runs with the same seed are identical, down
-  /// to the last bit, whatever the batch size. See g4/Randomize.hh.
-  void SetRandomSeed(unsigned int s) { seed_ = s; }
+  /// The counter-based key every track's random stream is derived from.
+  ///
+  /// Two runs with different seeds are independent samples. Two runs with the same seed AND at
+  /// the same position in the stream are identical down to the last bit, whatever the batch
+  /// size - which means a freshly started process replays, and a second BeamOn within one
+  /// process does not. That is Geant4's behaviour and the reason for stream_pos_ below.
+  ///
+  /// Setting the seed restarts the stream, as /random/setSeeds does: the position goes back to
+  /// zero, so `SetRandomSeed(s)` twice in one process gives the same run twice. Without that a
+  /// caller could not ask for a specific run at all.
+  void SetRandomSeed(unsigned int s) {
+    seed_ = s;
+    stream_pos_ = 0;
+  }
   unsigned int GetRandomSeed() const { return seed_; }
+  /// How far into the seed's stream the next run will start. Advances by one per primary.
+  /// Exposed so a test can assert that it moved, which is the observable behind "two runs in
+  /// one process are not the same run".
+  long long GetRandomStreamPosition() const { return stream_pos_; }
 
   /// Accepted for source compatibility. There is no per-event seed file to write: a run is
   /// reproducible from its seed and event index alone.
@@ -387,6 +401,20 @@ class G4RunManager {
   G4int verbose_ = 0;
   G4int print_progress_ = 0;
   unsigned int seed_ = 0xF00Du;
+  /// Where the next run starts in the seed's random stream, in primaries.
+  ///
+  /// Zero at construction, so a process that runs N events gets the same N events every time
+  /// it starts - which is what makes a result quotable. Advanced by every run, so the second
+  /// run of a process is a different sample of the same physics rather than the first one
+  /// again.
+  ///
+  /// This is the device half of a behaviour whose host half was already there: CLHEP's engine
+  /// is constructed once per process with a fixed seed and carries on across runs, so B1's two
+  /// random draws per event already made its second run differ. What it did NOT change was the
+  /// shower - every track's Philox stream was keyed on (seed, index-within-run), so run two
+  /// fired different primaries into identical showers, and a generator that drew nothing
+  /// repeated the run exactly. Both halves carry on now.
+  long long stream_pos_ = 0;
   g4gpu::ProcessFlags processes_{};
   G4bool initialised_ = false;
   G4double* d_spec_e_ = nullptr;
@@ -557,8 +585,13 @@ inline g4gpu::host::RunStats G4RunManager::RunEvents(G4int n_events, std::vector
     UploadSpectrum(s);
   }
 
+  // stream_pos_, and then advanced by what this run consumed. This is the whole of what makes
+  // a second BeamOn in one process an independent sample rather than a repeat: the device
+  // streams carry on from where the last run left them, exactly as CLHEP's engine does for the
+  // primaries on the host. See the note on stream_pos_.
   stats = engine_.BeamOn(static_cast<int>(primaries_.size()), primaries_.data(), seed_, sums,
-                         sums_sq, traj, sink.get());
+                         sums_sq, traj, sink.get(), stream_pos_);
+  stream_pos_ += static_cast<long long>(primaries_.size());
   const std::vector<double>& v = engine_.voxel_scores();
   if (!v.empty()) { run_voxel_scores_ = v; }
 

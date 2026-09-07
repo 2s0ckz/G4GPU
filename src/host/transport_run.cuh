@@ -275,10 +275,14 @@ class TransportEngine {
   /// @p seed keys the per-track RNG, so a given seed reproduces a run's showers.
   /// A non-empty @p traj captures trajectory segments for the first `traj.max_event` events.
   /// A non-null @p sink is called once per event with that event's scores.
+  /// @param stream_pos where in the seed's random stream this run's first primary sits. Zero
+  ///        replays the start of the stream, which is what a freshly started process wants;
+  ///        G4RunManager advances it by one per primary so that a second BeamOn in the same
+  ///        process is an independent sample rather than a repeat of the first.
   RunStats BeamOn(int n_events, const Primary<real_t>* primaries, unsigned int seed,
                   std::vector<double>& score_sum, std::vector<double>& score_sum_sq,
                   vis::TrajectoryBuffer traj = vis::TrajectoryBuffer{},
-                  EventSink* sink = nullptr);
+                  EventSink* sink = nullptr, long long stream_pos = 0);
 
   void Free();
 

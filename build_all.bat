@@ -226,6 +226,36 @@ for %%L in (8.0 4.0 2.5) do (
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_pool.ps1" ^
   -Prefix "%TEMP%\g4gpu_pool_" -Labels "8.0,4.0,2.5" || exit /b 1
+
+echo.
+echo --- a second run in one process is a second sample, and a new process replays ---
+rem Geant4's behaviour, and two claims rather than one: B1.exe run twice gives the same
+rem answer, while two /run/beamOn in one session give different answers within noise. A port
+rem with only the first cannot offer a second sample; a port with only the second cannot be
+rem checked against a reference. Three runs of the same program, because the sharp form of the
+rem claim is that two runs of 20000 sum to one run of 40000 - an offset that jumped too far
+rem would still differ and still replay, and would silently skip part of the stream.
+pushd "%~dp0examples\B1"
+"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_seq_a.txt" 2>&1 || (
+  echo FATAL: two_runs.mac failed.
+  type "%TEMP%\g4gpu_seq_a.txt"
+  popd
+  exit /b 1
+)
+"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_seq_b.txt" 2>&1 || (
+  echo FATAL: two_runs.mac failed on its second process.
+  popd
+  exit /b 1
+)
+"%~dp0examples\B1\exampleB1.exe" two_runs_one.mac > "%TEMP%\g4gpu_seq_one.txt" 2>&1 || (
+  echo FATAL: two_runs_one.mac failed.
+  popd
+  exit /b 1
+)
+popd
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\check_run_sequence.ps1" ^
+  -TwoRunLog "%TEMP%\g4gpu_seq_a.txt" -RepeatLog "%TEMP%\g4gpu_seq_b.txt" ^
+  -SingleLog "%TEMP%\g4gpu_seq_one.txt" || exit /b 1
 echo.
 echo --- viewer selftest ---
 rem An interactive window cannot be tested by clicking, so the viewer drives its own camera
