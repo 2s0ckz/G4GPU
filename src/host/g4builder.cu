@@ -181,6 +181,9 @@ struct App {
   vis::VolumeStyle* d_styles = nullptr;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
+  /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
+  /// current ViewRect every frame; see AllocViewportSurface for what went wrong without it.
+  int fb_w = 0, fb_h = 0;
   std::vector<unsigned int> host_rgba;
   int n_segments = 0;
   geom::Volume<real_t>* d_vols = nullptr;
@@ -662,13 +665,31 @@ static void DrawGizmo(App& a) {
 
 // ---------------------------------------------------------------- rendering
 
-static void AllocSurface(App& a) {
-  if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
-  if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
+/// Reallocates the device framebuffer for the current viewport size.
+///
+/// The viewport is the window MINUS the panels, so it changes when a splitter is dragged and
+/// not only when the window is resized - and that was the bug. This ran on `a.resized` alone,
+/// so dragging a side panel narrower made the viewport wider than the buffer allocated for it
+/// and render_geometry wrote past the end of a.d_fb: a device heap corruption a few frames
+/// into the drag, reported as the builder crashing when a side panel is resized.
+///
+/// The bottom splitter has always had the same defect and it takes dragging DOWNWARD to
+/// trigger, which is why only the side ones were seen to crash. Keyed on the size actually
+/// allocated rather than on any flag, so nothing has to remember to set one.
+static void AllocViewportSurface(App& a) {
   const ui::Rect v = ViewRect(a);
   const int w = std::max(1, v.w), h = std::max(1, v.h);
+  if (a.d_fb != nullptr && w == a.fb_w && h == a.fb_h) { return; }
+  if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
+  if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
   CUDA_CHECK(cudaMalloc(&a.d_fb, sizeof(unsigned long long) * w * h));
   CUDA_CHECK(cudaMalloc(&a.d_rgba, sizeof(unsigned int) * w * h));
+  a.fb_w = w;
+  a.fb_h = h;
+}
+
+static void AllocSurface(App& a) {
+  AllocViewportSurface(a);
   a.host_rgba.assign(static_cast<size_t>(a.width) * a.height, ui::theme::kPanel);
 
   if (a.tex == 0) { glGenTextures(1, &a.tex); }
@@ -710,6 +731,9 @@ static vis::Palette CurrentPalette(const App& a) {
 
 static void DrawFrame(App& a) {
   if (a.resized) { AllocSurface(a); }
+  // Every frame, because a splitter drag resizes the viewport without resizing the window.
+  // It returns immediately when the size has not moved, so this costs a comparison.
+  AllocViewportSurface(a);
   if (a.scene_dirty) { RebuildScene(a); }
 
   const ui::Rect v = ViewRect(a);
@@ -1090,6 +1114,25 @@ int main(int argc, char** argv) {
       }
       if (frame == 33) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_vis.png"); }
       if (frame == 34) { a.popup = Popup::kNone; }
+
+      // Splitter drags, which used to corrupt the device heap.
+      //
+      // The viewport is the window minus the panels, so moving a splitter resizes it. The
+      // framebuffer was reallocated on window resize only, so widening the viewport by
+      // dragging a side panel narrower made every kernel write past the end of it - the
+      // builder crashed a few frames into the drag. See AllocViewportSurface.
+      //
+      // Each of these frames renders at a viewport size the previous frame did not have, in
+      // both directions and on all three splitters, which is what a drag is. The check is
+      // that the process is still here afterwards and CUDA has not reported anything: the
+      // kernels are launched by DrawFrame and its CUDA_CHECK follows the synchronise.
+      if (frame == 35) { a.left_w = kPanelMin; }
+      if (frame == 36) { a.left_w = 460; a.right_w = kPanelMin; }
+      if (frame == 37) { a.right_w = 420; a.bottom_h = kBottomMin; }
+      if (frame == 38) {
+        a.bottom_h = 200;
+        std::printf("selftest: the viewport survived being resized by every splitter\n");
+      }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);
         for (size_t i = 0; i < static_cast<size_t>(a.width) * a.height; ++i) {
