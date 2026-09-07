@@ -2382,13 +2382,60 @@ It is a direct-address map now, which the importer's own requirement makes possi
 whole numbers over a modest range, so the map is an array indexed by value. The continuous case
 keeps the scan - nine bands, nine comparisons.
 
-#### What is not fixed
+#### The second DDA, and what closed it
 
-There are now **two DDAs** over a voxel grid: `VoxelWalk`, and `voxel_step` which answers the
-transport's question of how far to the next material change. They should be one, with
-`voxel_step` written over the walk. This codebase has been bitten twice by a duplicated
-*constant* (V8, V9) and a duplicated traversal is the same defect with more surface area.
+For one change there were **two DDAs** over a voxel grid: `VoxelWalk`, and `voxel_step` which
+answers the transport's question of how far to the next material change. That was deliberate,
+and it was recorded here rather than left to be discovered - a duplicated traversal is the
+defect this codebase has been bitten by twice in a duplicated *constant* (V8, V9), with more
+surface area to get wrong. The note also named its own re-entry condition: `voxel_step` decides
+where tracks stop, so the rewrite belonged in a change whose evidence is the physics comparisons
+rather than a screenshot.
 
-It was not done in this change deliberately: `voxel_step` decides where tracks stop, so rewriting
-it belongs in a change whose evidence is the physics comparisons rather than a screenshot. The
-duplication is recorded here rather than left to be discovered.
+**It is now one traversal.** `voxel_step` calls `VoxelWalk::Start` and `Next` and keeps only
+what is its own question: the material comparison, the `every_cell` mode, the step-budget bound,
+and the guard against returning a zero-length step for a boundary the track is already standing
+on. Seventy-four lines of setup and advance arithmetic went away; the DDA now exists once.
+
+The guard stays in `voxel_step` rather than moving into the walk. A zero-width cell is still a
+cell the ray passes through, which is what the renderer wants from the walk, and the guard is
+about what counts as a *step*. That is the zero-length step V1 records as real and reachable
+only with `every_cell` - not the cause of V1's own symptom, which was the run size.
+
+#### Why a green pipeline is not the whole of the evidence
+
+`build_all.bat` says the physics still agrees, and it is the thing that decides. Green, on the
+run that landed this: 47 of 47 tests; B1 against Geant4 at 1.25 sigma of 3; the mesh comparison
+at 0.01 sigma with the step count moved by **-0.0%**, which is the sharpest single number here
+because an altered traversal shows up as a different number of steps before it shows up as a
+different dose; per-voxel scoring at **174 cells hit, summing to the volume total to 6.9e-16**;
+the builder and the generated project at **0.00%** on both scorers, `cells` included, which is
+what would move if a cell's material assignment had changed; proton R80 at -0.015 mm.
+`tests/test_voxels.exe` still puts the slab boundaries at exactly -10, +20 and +50 mm and still
+conserves the chord to 1.7e-13 mm.
+
+All necessary - and all of it would also pass a rewrite that differed only in a direction this
+scene never probes. B1 and the builder's 8x8x8 phantom produce a particular set of grid
+geometries, entry points and directions; "the dose is unchanged" is evidence about those, and
+a traversal is a function over all of them.
+
+So the refactor was also checked *as a refactor*, against a verbatim copy of the function it
+replaced: **561,720** (grid, q, d, `every_cell`) cases over six grids - checkerboard, slabs,
+homogeneous, runs, a single cell - with isotropic, axis-aligned and degenerate directions, and
+points exactly on cell boundaries as well as a hair either side. The returned distance was
+compared bit-for-bit and the reported material by value. **Zero differences.** 203,646 of the
+`every_cell` calls returned a finite step and 868 cases reached the zero-length-step guard's own
+case, so the two things most easily got wrong were exercised rather than hoped for.
+
+**And the equivalence check was itself checked.** "Zero differences" is worth nothing from a
+harness that cannot produce one. Weakening the guard from `kTolerance` to `0` in the new code
+makes the same harness report 424 mismatches; that negative control is the reason the zero is
+quotable. A comparison against a reference implementation only becomes evidence once you have
+watched it fail. The harness was then deleted rather than kept: what it asserts is "this refactor
+changed nothing", which stops being a meaningful claim the moment the old copy is gone.
+
+**Generalization.** A refactor's own claim is *equivalence*, and the pipeline does not test
+equivalence - it tests the answer on one scene. Both are needed, and they fail in different
+directions: the pipeline catches a rewrite that is wrong where it matters, the A/B catches a
+rewrite that is wrong where this scene happens not to look. Deleting the reference copy is part
+of the job, because a second implementation kept "for comparison" is just the duplication again.

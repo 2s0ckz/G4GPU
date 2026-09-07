@@ -93,18 +93,17 @@ __host__ __device__ inline int voxel_material_at(const VoxelStore<real_t>& vs,
 
 /// A cell-by-cell walk along a ray, as an iterator.
 ///
-/// Amanatides-Woo, the same traversal voxel_step() below performs, exposed differently: that
-/// one answers the transport's question - how far to the next material change - and this one
-/// hands back every cell and THE AXIS IT WAS ENTERED BY. The axis is the face normal, and a
-/// renderer without it composites a phantom into uniform fog: no face is lit differently from
-/// any other, so there is no shape to see. Which is the whole point of drawing it.
+/// Amanatides-Woo: one division per axis at entry, then one comparison and one addition per
+/// cell. Hands back every cell and THE AXIS IT WAS ENTERED BY. The axis is the face normal,
+/// and a renderer without it composites a phantom into uniform fog: no face is lit differently
+/// from any other, so there is no shape to see. Which is the whole point of drawing it.
 ///
-/// The two traversals ought to be one, with voxel_step written over this. They are not, and
-/// this note is here rather than absent because a second copy of a DDA is exactly the kind of
-/// duplication this codebase has been bitten by before - see docs/RISK.md on hand-copied
-/// constants. The reason for not doing it in the same change is that voxel_step is transport:
-/// it decides where tracks stop, and rewriting it belongs in a change whose checks are the
-/// physics ones rather than a picture.
+/// voxel_step() below asks the transport's question - how far to the next material change -
+/// and is written over this walk rather than repeating the traversal. For a while it was a
+/// second hand-written copy of the DDA, which is the duplication this codebase has been bitten
+/// by twice in a *constant* (docs/RISK.md V8, V9) with more surface area to get wrong. The
+/// rewrite waited for a change whose evidence is the physics comparisons rather than a picture,
+/// because voxel_step decides where tracks stop. See docs/RISK.md V15.
 template <typename real_t>
 struct VoxelWalk {
   int ijk[3];
@@ -184,71 +183,43 @@ __host__ __device__ inline real_t voxel_step(const VoxelStore<real_t>& vs,
   out_material = -1;
   if (vs.material == nullptr) { return kInfinity<real_t>(); }
 
-  int ijk[3];
-  voxel_cell_of(g, q, ijk);
-  const int here = g.index(ijk[0], ijk[1], ijk[2]);
+  VoxelWalk<real_t> walk;
+  if (!walk.Start(g, q, d)) { return kInfinity<real_t>(); }
+  const int here = walk.Index(g);
   if (here < 0 || here >= vs.count) { return kInfinity<real_t>(); }
   short mat0 = vs.material[here];
-
-  // Amanatides-Woo setup: for each axis, the parameter of the next cell boundary and the
-  // parameter step between boundaries.
-  const real_t p[3] = {q.x, q.y, q.z};
-  const real_t dir[3] = {d.x, d.y, d.z};
-  real_t t_next[3];
-  real_t t_delta[3];
-  int step[3];
-  for (int k = 0; k < 3; ++k) {
-    if (fabs(dir[k]) < kTolerance<real_t>()) {
-      step[k] = 0;
-      t_next[k] = kInfinity<real_t>();
-      t_delta[k] = kInfinity<real_t>();
-      continue;
-    }
-    step[k] = (dir[k] > real_t(0)) ? 1 : -1;
-    // Boundary of the current cell in the direction of travel.
-    const real_t edge = -g.half[k] + g.cell[k] * static_cast<real_t>(
-                                          ijk[k] + ((step[k] > 0) ? 1 : 0));
-    t_next[k] = (edge - p[k]) / dir[k];
-    if (t_next[k] < real_t(0)) { t_next[k] = real_t(0); }
-    t_delta[k] = g.cell[k] / fabs(dir[k]);
-  }
 
   // A CT is mostly homogeneous, so this walks a long way through identical cells. The bound is
   // the diagonal cell count, which is what a ray crossing the whole grid touches; without it a
   // degenerate direction could loop.
   const int max_steps = 2 * (g.n[0] + g.n[1] + g.n[2]) + 8;
   for (int iter = 0; iter < max_steps; ++iter) {
-    // Advance along whichever axis reaches its boundary first.
-    int axis = 0;
-    if (t_next[1] < t_next[axis]) { axis = 1; }
-    if (t_next[2] < t_next[axis]) { axis = 2; }
-    if (t_next[axis] >= kInfinity<real_t>()) { return kInfinity<real_t>(); }
+    // Next() is false both for a direction with no boundary left to reach and for a step that
+    // leaves the grid: either way the box exit governs, and the caller already knows that
+    // distance.
+    if (!walk.Next(g)) { return kInfinity<real_t>(); }
 
-    const real_t t = t_next[axis];
-    ijk[axis] += step[axis];
-    if (ijk[axis] < 0 || ijk[axis] >= g.n[axis]) {
-      // Left the grid: the box exit governs, and the caller already knows that distance.
-      return kInfinity<real_t>();
-    }
-    t_next[axis] += t_delta[axis];
-
-    const int idx = g.index(ijk[0], ijk[1], ijk[2]);
+    const int idx = walk.Index(g);
     if (idx < 0 || idx >= vs.count) { return kInfinity<real_t>(); }
     const short mat = vs.material[idx];
     if (every_cell || mat != mat0) {
-      // A boundary the track is already standing on is not a step. The setup clamps a
-      // negative t_next to zero, which is right for "the boundary is behind you" - but with
-      // every_cell the very next thing the walk does is return it, and a zero-length step
-      // makes no progress: the track is re-proposed at the same point, burns through the step
-      // budget and is killed. That zeroed every score in the scene, not only the voxel one,
-      // because the tracks died before reaching anything.
+      // A boundary the track is already standing on is not a step. Start() clamps a negative
+      // t_next to zero, which is right for "the boundary is behind you" - but with every_cell
+      // the very next thing the walk does is return it, and a zero-length step makes no
+      // progress: the track is re-proposed at the same point, burns through the step budget
+      // and is killed. That zeroed every score in the scene, not only the voxel one, because
+      // the tracks died before reaching anything.
       //
       // Only reachable with every_cell. Waiting for the material to change gave the walk
       // several cells to get past the boundary it started on, which is why the material-change
       // path never showed this.
-      if (t > kTolerance<real_t>()) {
+      //
+      // The guard is voxel_step's and not the walk's: a zero-width cell is still a cell the
+      // ray passes through, which is what the renderer wants, and this is only about what
+      // counts as a step.
+      if (walk.t > kTolerance<real_t>()) {
         out_material = mat;
-        return t;
+        return walk.t;
       }
       mat0 = mat;  // treat the zero-width cell as where we started, and keep walking
     }
