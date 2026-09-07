@@ -418,11 +418,27 @@ static void DrawLeftPanel(App& a) {
   const ui::Rect br{panel.x + 8, panel.y + panel.h - row - 8, panel.w - 16, row + 3};
   const ui::Rect inner{panel.x, panel.y, panel.w, panel.h - row - 14};
 
-  int y = a.left_scroll.Begin(c, inner, row * 3) + 8;
+  // Three scroll boxes rather than one, for the same reason as the right panel: a model with
+  // forty materials used to bury the scorers below them. See ui::DivideSections.
+  const int want[3] = {a.elements_scroll.content_h, a.materials_scroll.content_h,
+                       a.scorers_scroll.content_h};
+  int h[3] = {0, 0, 0};
+  ui::DivideSections(inner.h, row * 5, want, h, 3);
+
+  const ui::Rect r_el{inner.x, inner.y, inner.w, h[0]};
+  int y = a.elements_scroll.Begin(c, r_el, row * 3) + 8;
   y = DrawElementsSection(a, panel, y);
-  y = DrawMaterialsSection(a, panel, y);
-  y = DrawScorersSection(a, panel, y);
-  a.left_scroll.End(c, inner, y);
+  a.elements_scroll.End(c, r_el, y);
+
+  const ui::Rect r_mat{inner.x, r_el.y + h[0], inner.w, h[1]};
+  int y2 = a.materials_scroll.Begin(c, r_mat, row * 3) + 4;
+  y2 = DrawMaterialsSection(a, panel, y2);
+  a.materials_scroll.End(c, r_mat, y2);
+
+  const ui::Rect r_sc{inner.x, r_mat.y + h[1], inner.w, h[2]};
+  int y3 = a.scorers_scroll.Begin(c, r_sc, row * 3) + 4;
+  y3 = DrawScorersSection(a, panel, y3);
+  a.scorers_scroll.End(c, r_sc, y3);
 
   if (ui::Button(c, 890, br, "Physics options")) { a.popup = Popup::kPhysics; }
 }

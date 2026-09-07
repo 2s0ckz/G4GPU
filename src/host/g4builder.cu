@@ -148,6 +148,12 @@ struct App {
   int bottom_h = kBottomHDefault;
   /// Which splitter is being dragged: 0 none, 1 left, 2 right, 3 bottom.
   int dragging_split = 0;
+  /// Which splitter the pointer is on or dragging: 1 left, 2 right, 3 bottom, 0 none.
+  ///
+  /// Read by WM_SETCURSOR, which is a different thread of control from the frame that
+  /// computes it - hence a field rather than a local. One frame of lag on a cursor shape is
+  /// not perceptible.
+  int split_hot = 0;
   bool running = true;
   bool resized = true;
 
@@ -169,6 +175,10 @@ struct App {
   Drag drag;
   Popup popup = Popup::kNone;
   int popup_target = -1;
+  /// Which voxel class the colour popup is editing, or -1 for the solid's own colour. Every
+  /// place that opens the popup sets BOTH, because a stale index here would silently retarget
+  /// the dialog at whatever class was edited last.
+  int popup_target2 = -1;
 
   // scene mirror: rebuilt whenever the model changes
   bool scene_dirty = true;
@@ -262,8 +272,13 @@ struct App {
 
   // Panel scrolling. A model with a dozen materials overflowed the left panel and the rows
   // that fell off the bottom were simply not drawn.
-  ui::ScrollArea left_scroll;
-  ui::ScrollArea right_scroll;
+  /// One per SECTION, not one per panel. A single scroll area per sidebar put every section
+  /// on one scrollbar, so a few hundred voxel classes in SOLIDS pushed SOURCES out of reach.
+  ui::ScrollArea elements_scroll;
+  ui::ScrollArea materials_scroll;
+  ui::ScrollArea scorers_scroll;
+  ui::ScrollArea solids_scroll;
+  ui::ScrollArea sources_scroll;
   ui::ScrollArea bottom_solids_scroll;
   ui::ScrollArea bottom_scorers_scroll;
   ui::ScrollArea pick_scroll;
@@ -405,12 +420,22 @@ static void UpdateSplitters(App& a) {
   if (vh < 120) { a.bottom_h = a.height - kMenuH - kStatusH - 120; }
   if (a.bottom_h < kBottomMin) { a.bottom_h = kBottomMin; }
 
-  // A visible handle on each splitter, brighter while it is grabbed or hovered. Without it
-  // the fact that the panels *can* be resized is invisible.
+  // The splitters, as a plain border line, and the affordance is the CURSOR.
+  //
+  // This used to tint the edge blue on hover, which says "something happens here" without
+  // saying what: every other blue thing in this GUI is a selection or a focused field. A
+  // left-right arrow on a vertical edge is what every application on the machine uses and
+  // needs no explaining. WM_SETCURSOR reads split_hot; see WndProc.
+  //
+  // Hot includes being DRAGGED and not only hovered, because the pointer leaves the splitter
+  // as soon as the drag starts moving it and the cursor must not flick back to an arrow
+  // half-way through.
+  a.split_hot = 0;
   auto handle = [&](const ui::Rect& s, int which) {
-    const bool hot = (a.dragging_split == which)
-                     || s.Contains(a.input.mouse_x, a.input.mouse_y);
-    c.canvas.FillRect(s, hot ? ui::theme::kAccent : ui::theme::kBorder);
+    if (a.dragging_split == which || s.Contains(a.input.mouse_x, a.input.mouse_y)) {
+      a.split_hot = which;
+    }
+    c.canvas.FillRect(s, ui::theme::kBorder);
   };
   handle(LeftSplitRect(a), 1);
   handle(RightSplitRect(a), 2);
@@ -624,12 +649,36 @@ static void DrawGizmo(App& a) {
       a.uic.canvas.Put(cx + static_cast<int>(dx * i) + 1, cy + static_cast<int>(dy * i),
                        axis_col[ax]);
     }
-    // The handle.
-    const ui::Rect grab{hx - 6, hy - 6, 13, 13};
+    // The handle: an arrowhead pointing the way the axis goes.
+    //
+    // It was a square, which says "grab me" and says nothing about which direction dragging
+    // moves the solid - the one thing the handle exists to communicate, and the one thing a
+    // square cannot. The head is built from the axis's own screen direction (dx, dy) and the
+    // perpendicular to it, so it turns with the view rather than pointing at a fixed corner.
+    //
+    // Drawn from a little behind the shaft's end to a little past it, so the arrow reads as
+    // the end of the shaft rather than as a separate triangle floating near it.
+    const double perp_x = -dy, perp_y = dx;
+    const double head_half = 7.0;      // base half-width, pixels
+    const double base_at = kGizmoLen - 6.0;
+    const double tip_at = kGizmoLen + 9.0;
+    const int tipx = cx + static_cast<int>(dx * tip_at);
+    const int tipy = cy + static_cast<int>(dy * tip_at);
+    const int bx = cx + static_cast<int>(dx * base_at);
+    const int by = cy + static_cast<int>(dy * base_at);
+    const ui::Rect grab{hx - 8, hy - 8, 17, 17};
     const bool hover = grab.Contains(a.input.mouse_x, a.input.mouse_y);
-    a.uic.canvas.FillRect(grab, hover ? ui::theme::kAccentHot : axis_col[ax]);
-    a.uic.canvas.StrokeRect(grab, ui::rgb(20, 20, 24));
-    a.uic.canvas.Text(hx + 9, hy - 7, axis_name[ax], axis_col[ax]);
+    const ui::Color head_col = hover ? ui::theme::kAccentHot : axis_col[ax];
+    a.uic.canvas.FillTriangle(tipx, tipy,
+                              bx + static_cast<int>(perp_x * head_half),
+                              by + static_cast<int>(perp_y * head_half),
+                              bx - static_cast<int>(perp_x * head_half),
+                              by - static_cast<int>(perp_y * head_half), head_col);
+    // The label sits beyond the tip rather than beside the old square, so it does not land on
+    // top of the head for an axis pointing up and to the left.
+    a.uic.canvas.Text(cx + static_cast<int>(dx * (tip_at + 6)) - 3,
+                      cy + static_cast<int>(dy * (tip_at + 6)) - 7, axis_name[ax],
+                      axis_col[ax]);
 
     if (hover && a.input.left_pressed && !a.drag.active) {
       a.drag.active = true;
@@ -838,6 +887,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
       a.running = false;
       return 0;
+    // A resize cursor over a splitter.
+    //
+    // Handled here and not once at startup because the window class carries IDC_ARROW, and
+    // Windows re-applies the class cursor on every mouse move unless WM_SETCURSOR says
+    // otherwise. Returning TRUE is what stops that; falling through to DefWindowProc is what
+    // restores the arrow everywhere else, so there is no state to put back.
+    case WM_SETCURSOR:
+      if (LOWORD(lp) == HTCLIENT) {
+        if (a.split_hot == 1 || a.split_hot == 2) {
+          SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+          return TRUE;
+        }
+        if (a.split_hot == 3) {
+          SetCursor(LoadCursor(nullptr, IDC_SIZENS));
+          return TRUE;
+        }
+      }
+      break;
     case WM_SIZE: {
       const int w = LOWORD(lp), h = HIWORD(lp);
       if (w > 0 && h > 0 && (w != a.width || h != a.height)) {
@@ -938,7 +1005,7 @@ int main(int argc, char** argv) {
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 40;
+      selftest_frames = 44;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1132,6 +1199,33 @@ int main(int argc, char** argv) {
       if (frame == 38) {
         a.bottom_h = 200;
         std::printf("selftest: the viewport survived being resized by every splitter\n");
+      }
+
+      // The colour dialog aimed at ONE VOXEL CLASS rather than at a whole solid.
+      //
+      // Clicking a class's colour swatch used to open the material picker - the swatch had no
+      // hit region of its own, so the click belonged to the row. The dialog it opens now is
+      // the same dialog, retargeted by popup_target2, and this photographs it: the title has
+      // to name the class's index, the fields have to show the class's colour, and the
+      // wireframe checkbox has to be absent because a class has no surface of its own.
+      if (frame == 39) {
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (!a.model.solids[i].voxel_classes.empty()) {
+            a.popup = Popup::kColor;
+            a.popup_target = static_cast<int>(i);
+            a.popup_target2 = 0;
+            a.opacity_field.Init(a.model.solids[i].voxel_classes[0].opacity * 100.0, "%.0f");
+            break;
+          }
+        }
+        if (a.popup != Popup::kColor) {
+          std::printf("selftest: FAILED - no voxel volume had classes to colour\n");
+        }
+      }
+      if (frame == 40) {
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_class_color.png");
+        a.popup = Popup::kNone;
+        a.popup_target2 = -1;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

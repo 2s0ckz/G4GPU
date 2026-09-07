@@ -271,10 +271,20 @@ static void DrawRightPanel(App& a) {
                        a.height - kMenuH - kStatusH};
   ui::Panel(c, panel);
 
-  int y = a.right_scroll.Begin(c, panel, row * 3) + 8;
+  // A scroll box per section rather than one for the panel. See ui::DivideSections.
+  const int want[2] = {a.solids_scroll.content_h, a.sources_scroll.content_h};
+  int h[2] = {0, 0};
+  ui::DivideSections(panel.h - 8, row * 5, want, h, 2);
+
+  const ui::Rect r_solids{panel.x, panel.y + 4, panel.w, h[0]};
+  int y = a.solids_scroll.Begin(c, r_solids, row * 3) + 8;
   y = DrawSolidsSection(a, panel, y);
-  y = DrawSourcesSection(a, panel, y);
-  a.right_scroll.End(c, panel, y);
+  a.solids_scroll.End(c, r_solids, y);
+
+  const ui::Rect r_sources{panel.x, r_solids.y + h[0], panel.w, h[1]};
+  int y2 = a.sources_scroll.Begin(c, r_sources, row * 3) + 4;
+  y2 = DrawSourcesSection(a, panel, y2);
+  a.sources_scroll.End(c, r_sources, y2);
 }
 
 // ---------------------------------------------------------------- the bottom panel

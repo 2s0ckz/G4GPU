@@ -228,6 +228,48 @@ struct Canvas {
     }
   }
 
+  /// A filled triangle, for the one shape this GUI needs that is not a rectangle: an arrowhead.
+  ///
+  /// Scanline between the two edges that span each row, every pixel through Put so the clip
+  /// and the alpha blend are the same as everything else. Small enough to be worth having in
+  /// preference to approximating an arrow out of shrinking rectangles, which is what a
+  /// rectangle-only canvas pushes you towards and which does not read as an arrow at all.
+  void FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, Color c) {
+    // Sort the three by y, so the sweep is top to bottom with one apex above and one below.
+    if (y1 < y0) { int t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+    if (y2 < y0) { int t = x0; x0 = x2; x2 = t; t = y0; y0 = y2; y2 = t; }
+    if (y2 < y1) { int t = x1; x1 = x2; x2 = t; t = y1; y1 = y2; y2 = t; }
+    if (y2 == y0) {
+      // Degenerate: a horizontal line. Drawing it is closer to the intent than drawing
+      // nothing, and it is what an arrow seen exactly edge-on should look like.
+      int lo = (x0 < x1) ? x0 : x1;
+      int hi = (x0 > x1) ? x0 : x1;
+      if (x2 < lo) { lo = x2; }
+      if (x2 > hi) { hi = x2; }
+      HLine(lo, hi + 1, y0, c);
+      return;
+    }
+    for (int y = y0; y <= y2; ++y) {
+      // The long edge from the top vertex to the bottom one spans every row; the other side
+      // is whichever of the two short edges this row falls in.
+      const float t_long = static_cast<float>(y - y0) / static_cast<float>(y2 - y0);
+      const float xa = x0 + (x2 - x0) * t_long;
+      float xb;
+      if (y < y1) {
+        xb = (y1 == y0) ? static_cast<float>(x1)
+                        : x0 + (x1 - x0) * (static_cast<float>(y - y0)
+                                            / static_cast<float>(y1 - y0));
+      } else {
+        xb = (y2 == y1) ? static_cast<float>(x1)
+                        : x1 + (x2 - x1) * (static_cast<float>(y - y1)
+                                            / static_cast<float>(y2 - y1));
+      }
+      int lo = static_cast<int>(xa < xb ? xa : xb);
+      int hi = static_cast<int>(xa > xb ? xa : xb);
+      HLine(lo, hi + 1, y, c);
+    }
+  }
+
   void HLine(int x0, int x1, int y, Color c) {
     for (int x = x0; x < x1; ++x) { Put(x, y, c); }
   }
@@ -454,6 +496,67 @@ struct Context {
 };
 
 // ---------------------------------------------------------------- scrolling
+
+/// Divides `avail` pixels between `n` stacked sections, from what each asked for.
+///
+/// One scroll area per panel is the obvious arrangement and it fails on the case that matters:
+/// a segmented phantom puts a few hundred rows in SOLIDS, and everything below it - SOURCES,
+/// its buttons - is then several hundred rows down a single scrollbar. Reaching a source means
+/// scrolling past an organ list. Each section scrolling in its own box fixes that, and then
+/// the question is how tall each box should be.
+///
+/// From what each wanted LAST frame, which is what ScrollArea::content_h already records. A
+/// section that fits takes exactly its own height and shows no scrollbar; only when the total
+/// exceeds the panel is anything divided, and then each keeps a floor of `min_h` and the
+/// surplus is shared in proportion to what was asked for.
+///
+/// A fixed share - half each, a third each - is wrong in both directions at once: it leaves
+/// half the panel blank for a model with three solids, and still cramps a 261-class
+/// segmentation when the section under it holds one row. Neither is a case worth being wrong
+/// about, and the information to be right was already being measured.
+inline void DivideSections(int avail, int min_h, const int* want, int* out, int n) {
+  if (n <= 0) { return; }
+  long long total = 0;
+  for (int i = 0; i < n; ++i) {
+    out[i] = (want[i] > min_h) ? want[i] : min_h;
+    total += out[i];
+  }
+  if (total <= avail) { return; }   // everything fits; nothing to divide
+
+  // The floor is a SHARE of the panel and not a fixed number of rows, and that is the
+  // difference between usable and technically-present. Sharing the surplus in proportion to
+  // what was asked for gives a greedy section nearly all of it: 261 voxel classes against a
+  // two-row source list works out at about 780 pixels to 120, which leaves SOURCES six rows
+  // to hold a header, a list, four buttons and eight fields. Reachable, and no use.
+  //
+  // Half a fair share (avail/2n) keeps a squeezed section big enough to work in while still
+  // giving the big list most of the panel - the same case comes out about 670 to 230 - and it
+  // scales with the panel rather than with a row height guessed here.
+  if (min_h < avail / (2 * n)) { min_h = avail / (2 * n); }
+  for (int i = 0; i < n; ++i) {
+    if (out[i] < min_h) { out[i] = min_h; }
+  }
+  const int floor_total = min_h * n;
+  if (avail <= floor_total) {
+    // Not even the floors fit. Equal shares, and each section's own scrollbar does the rest -
+    // which is the honest answer for a panel dragged narrower than its contents.
+    for (int i = 0; i < n; ++i) { out[i] = avail / n; }
+    out[n - 1] = avail - (avail / n) * (n - 1);
+    return;
+  }
+  const int spare = avail - floor_total;
+  long long asked = 0;
+  for (int i = 0; i < n; ++i) { asked += out[i] - min_h; }
+  int used = 0;
+  for (int i = 0; i < n; ++i) {
+    const int extra =
+        (asked > 0) ? static_cast<int>(static_cast<long long>(spare) * (out[i] - min_h) / asked)
+                    : 0;
+    out[i] = min_h + extra;
+    used += out[i];
+  }
+  out[n - 1] += avail - used;   // the rounding remainder, so the sections fill exactly
+}
 
 /// A scrollable region.
 ///
@@ -999,6 +1102,17 @@ inline bool Slider(Context& ctx, int id, const Rect& r, double lo, double hi, do
 }
 
 /// A selectable row, for the element / material / solid lists. Returns true when clicked.
+/// Where ListRow draws its swatch, for a caller that wants the swatch to be clickable.
+///
+/// Here rather than in each caller because it was in each caller: the solids list computed
+/// `{row.x + 6, ..., lh - 2, lh - 2}` by hand to make its swatch a hit target, and the voxel
+/// class rows below it did not - so clicking a class's colour opened the material picker,
+/// which is the bug this exists to stop recurring. One definition, three users.
+inline Rect ListRowSwatchRect(const Context& ctx, const Rect& r) {
+  const int s = ctx.canvas.GlyphH() - 2;
+  return Rect{r.x + 6, r.y + (r.h - s) / 2, s, s};
+}
+
 inline bool ListRow(Context& ctx, int id, const Rect& r, const std::string& label,
                     bool selected, Color swatch = 0) {
   const bool hover = ctx.Hovering(r);
@@ -1011,11 +1125,10 @@ inline bool ListRow(Context& ctx, int id, const Rect& r, const std::string& labe
   }
   int x = r.x + 6;
   if (swatch != 0) {
-    const int s = ctx.canvas.font->glyph_h - 2;
-    const Rect sw{x, r.y + (r.h - s) / 2, s, s};
+    const Rect sw = ListRowSwatchRect(ctx, r);
     ctx.canvas.FillRect(sw, swatch);
     ctx.canvas.StrokeRect(sw, theme::kBorder);
-    x += s + 8;
+    x += sw.w + 8;
   }
   ctx.canvas.Text(x, r.y + (r.h - ctx.canvas.font->glyph_h) / 2, label,
                   selected ? theme::kText : theme::kTextDim);

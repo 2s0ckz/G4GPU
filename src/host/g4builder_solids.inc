@@ -82,10 +82,11 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
       // Every solid has one now, not only a voxel class - the colour is the fastest way to
       // tell two boxes apart in the view, and it used to be reachable only by selecting the
       // solid first and finding the Color button.
-      const ui::Rect swr{row_r.x + 6, y + (row - lh + 2) / 2, lh - 2, lh - 2};
+      const ui::Rect swr = ui::ListRowSwatchRect(c, row_r);
       if (swr.Contains(a.input.mouse_x, a.input.mouse_y) && a.input.left_pressed) {
         a.popup = Popup::kColor;
         a.popup_target = static_cast<int>(i);
+        a.popup_target2 = -1;   // this solid's own colour, not one of its classes
         a.opacity_field.Init(s.opacity * 100.0, "%.0f");   // shown as a percentage
       }
     }
@@ -109,13 +110,25 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
                                     : Fmt("%-4.0f..%-4.0f %s", vc.value, vc.value_max,
                                           vmat.c_str());
       const int id = 4000 + static_cast<int>(i) * 100 + static_cast<int>(k);
-      if (ui::ListRow(c, id, {panel.x + 8 + arrow_w + 12, y, w - 32 - arrow_w, row}, label,
-                      false, vsw)) {
-        // A picker here too, so the row does not depend on a selection made elsewhere.
-        a.popup = Popup::kPick;
-        a.pick_kind = PickKind::kMaterialForVoxelClass;
-        a.pick_target = static_cast<int>(i);
-        a.pick_target2 = static_cast<int>(k);
+      const ui::Rect vrow{panel.x + 8 + arrow_w + 12, y, w - 32 - arrow_w, row};
+      // The swatch takes the click, the rest of the row assigns a material. Tested before the
+      // row is drawn but acted on after, so the row still draws its hover and its swatch on
+      // the frame the swatch is clicked.
+      const bool on_swatch =
+          ui::ListRowSwatchRect(c, vrow).Contains(a.input.mouse_x, a.input.mouse_y);
+      if (ui::ListRow(c, id, vrow, label, false, vsw)) {
+        if (on_swatch) {
+          a.popup = Popup::kColor;
+          a.popup_target = static_cast<int>(i);
+          a.popup_target2 = static_cast<int>(k);
+          a.opacity_field.Init(vc.opacity * 100.0, "%.0f");
+        } else {
+          // A picker here too, so the row does not depend on a selection made elsewhere.
+          a.popup = Popup::kPick;
+          a.pick_kind = PickKind::kMaterialForVoxelClass;
+          a.pick_target = static_cast<int>(i);
+          a.pick_target2 = static_cast<int>(k);
+        }
       }
       y += row;
     }
@@ -211,6 +224,7 @@ static int DrawSolidsSection(App& a, const ui::Rect& panel, int y) {
   if (ui::Button(c, 641, {panel.x + 12 + bw3, y, bw3, row + 2}, "Color")) {
     a.popup = Popup::kColor;
     a.popup_target = a.sel_solid;
+    a.popup_target2 = -1;
     a.opacity_field.Init(s.opacity * 100.0, "%.0f");   // shown as a percentage
   }
   if (ui::Button(c, 642, {panel.x + 16 + 2 * bw3, y, bw3, row + 2}, "Delete",

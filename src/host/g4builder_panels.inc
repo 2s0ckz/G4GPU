@@ -889,13 +889,42 @@ static void DrawColorPopup(App& a) {
     a.popup = Popup::kNone;
     return;
   }
-  Solid& s = a.model.solids[a.popup_target];
+  Solid& sol = a.model.solids[a.popup_target];
+
+  // The popup edits a solid's colour, or ONE VOXEL CLASS's within that solid when
+  // popup_target2 names a class. Same grid, same fields, same preview - only where the four
+  // numbers live differs, so it is four pointers rather than a second copy of the dialog.
+  float* pr = &sol.r;
+  float* pg = &sol.g;
+  float* pb = &sol.b;
+  float* po = &sol.opacity;
+  bool* pvis = &sol.visible;
+  bool* pwf = &sol.wireframe;   ///< null for a class, which has no wireframe of its own
+  std::string title = "color for " + sol.name;
+  // Zero opacity is meaningful for a class and not for a solid. Index 0 of a segmentation is
+  // background and is hidden on import, so a class has to be able to reach 0 and come back;
+  // a whole solid at 0 is indistinguishable from a deleted one, which is why that keeps its
+  // floor of 5%.
+  double min_opacity = 5.0;
+  if (a.popup_target2 >= 0
+      && a.popup_target2 < static_cast<int>(sol.voxel_classes.size())) {
+    VoxelClass& vc = sol.voxel_classes[static_cast<std::size_t>(a.popup_target2)];
+    pr = &vc.r;
+    pg = &vc.g;
+    pb = &vc.b;
+    po = &vc.opacity;
+    pvis = &vc.visible;
+    pwf = nullptr;
+    title = Fmt("color for %s, index %g", sol.name.c_str(), vc.value);
+    min_opacity = 0.0;
+  }
+
   const int cell = 22;
   const int cols = 12, rows = 6;
   const ui::Rect box{a.width / 2 - (cols * cell) / 2 - 10, a.height / 2 - 140,
                      cols * cell + 20, rows * cell + 150};
   ui::Panel(c, box);
-  c.canvas.Text(box.x + 10, box.y + 8, "color for " + s.name, ui::theme::kText);
+  c.canvas.Text(box.x + 10, box.y + 8, title, ui::theme::kText);
 
   const int gx = box.x + 10, gy = box.y + 8 + a.font.glyph_h + 8;
   for (int r = 0; r < rows; ++r) {
@@ -926,9 +955,9 @@ static void DrawColorPopup(App& a) {
       if (sw.Contains(a.input.mouse_x, a.input.mouse_y)) {
         c.canvas.StrokeRect(sw, ui::theme::kText);
         if (a.input.left_pressed) {
-          s.r = static_cast<float>(rr);
-          s.g = static_cast<float>(gg);
-          s.b = static_cast<float>(bb);
+          *pr = static_cast<float>(rr);
+          *pg = static_cast<float>(gg);
+          *pb = static_cast<float>(bb);
           a.model.Touch();
           a.scene_dirty = true;
           a.popup = Popup::kNone;
@@ -942,11 +971,11 @@ static void DrawColorPopup(App& a) {
   // The exact colour, as numbers. The swatch grid above is for picking one quickly; this is
   // for entering the one you were given, or matching another volume's.
   {
-    float rgb[3] = {s.r, s.g, s.b};
+    float rgb[3] = {*pr, *pg, *pb};
     if (ColorFields(a, 906, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "colour", rgb)) {
-      s.r = rgb[0];
-      s.g = rgb[1];
-      s.b = rgb[2];
+      *pr = rgb[0];
+      *pg = rgb[1];
+      *pb = rgb[2];
       a.model.Touch();
       a.scene_dirty = true;
     }
@@ -959,14 +988,15 @@ static void DrawColorPopup(App& a) {
   {
     if (ui::NumberInput(c, 903, {box.x + 74, y, 60, a.font.glyph_h + 4}, a.opacity_field)) {
       double v = a.opacity_field.value;
-      if (v < 5) { v = 5; }      // fully transparent is indistinguishable from deleted
+      if (v < min_opacity) { v = min_opacity; }
       if (v > 100) { v = 100; }
       a.opacity_field.Init(v, "%.0f");
-      s.opacity = static_cast<float>(v / 100.0);
+      *po = static_cast<float>(v / 100.0);
       a.model.Touch();
       a.scene_dirty = true;
     }
-    c.canvas.Text(box.x + 140, y + 3, "%  (5 to 100)", ui::theme::kTextDim);
+    c.canvas.Text(box.x + 140, y + 3, Fmt("%%  (%.0f to 100)", min_opacity),
+                  ui::theme::kTextDim);
   }
   y += a.font.glyph_h + 10;
   // The preview: the solid's color at its opacity, over a light and a dark square.
@@ -974,28 +1004,34 @@ static void DrawColorPopup(App& a) {
     const int pw = 60, ph = a.font.glyph_h + 6;
     c.canvas.FillRect({box.x + 10, y, pw / 2, ph}, ui::rgb(70, 74, 82));
     c.canvas.FillRect({box.x + 10 + pw / 2, y, pw / 2, ph}, ui::rgb(20, 22, 25));
-    const int al = static_cast<int>(s.opacity * 255);
+    const int al = static_cast<int>(*po * 255);
     c.canvas.FillRect({box.x + 10, y, pw, ph},
-                      ui::rgba(static_cast<int>(s.r * 255), static_cast<int>(s.g * 255),
-                               static_cast<int>(s.b * 255), al));
+                      ui::rgba(static_cast<int>(*pr * 255), static_cast<int>(*pg * 255),
+                               static_cast<int>(*pb * 255), al));
     c.canvas.StrokeRect({box.x + 10, y, pw, ph}, ui::theme::kBorder);
     c.canvas.Text(box.x + 80, y + 3, "over dark and light", ui::theme::kTextDim);
   }
   y += a.font.glyph_h + 12;
-  bool vis = s.visible;
+  bool vis = *pvis;
   if (ui::Checkbox(c, 900, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "visible", vis)) {
-    s.visible = vis;
+    *pvis = vis;
     a.model.Touch();
     a.scene_dirty = true;
   }
   y += a.font.glyph_h + 8;
-  bool wf = s.wireframe;
-  if (ui::Checkbox(c, 901, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "wireframe", wf)) {
-    s.wireframe = wf;
-    a.model.Touch();
-    a.scene_dirty = true;
+  // Wireframe belongs to a solid and not to a class: a class is a set of cells inside one
+  // grid, and there is no surface of its own to draw as lines. Omitted rather than shown
+  // inert, because a checkbox that does nothing is a worse answer than no checkbox.
+  if (pwf != nullptr) {
+    bool wf = *pwf;
+    if (ui::Checkbox(c, 901, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "wireframe",
+                     wf)) {
+      *pwf = wf;
+      a.model.Touch();
+      a.scene_dirty = true;
+    }
+    y += a.font.glyph_h + 8;
   }
-  y += a.font.glyph_h + 8;
   if (ui::Button(c, 902, {box.x + box.w - 80, y, 70, a.font.glyph_h + 6}, "Close")) {
     a.popup = Popup::kNone;
   }
