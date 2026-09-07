@@ -11,9 +11,15 @@
 
 namespace g4gpu::vis {
 
-/// Geant4 default trajectory colouring, by charge: negative red, neutral green,
-/// positive blue.
-enum TrackKind : unsigned char { kKindGamma = 0, kKindElectron = 1, kKindPositron = 2 };
+/// Geant4's default trajectory colouring, which is G4TrajectoryDrawByCharge: negative red,
+/// neutral green, positive blue.
+///
+/// BY CHARGE, and the names say so now. They used to be kKindGamma/kKindElectron/kKindPositron
+/// and the mapping was a switch on the species with `default: kKindGamma` at the bottom - so
+/// every proton and every alpha, both positive, were recorded as the neutral class and drew
+/// green. A colour rule stated by species cannot help but be wrong about the species nobody
+/// listed. Stated by charge, there is nothing to list. See docs/RISK.md V14.
+enum TrackKind : unsigned char { kKindNeutral = 0, kKindNegative = 1, kKindPositive = 2 };
 
 struct TrajectoryBuffer {
   float* x0;
@@ -54,11 +60,12 @@ struct TrajectoryBuffer {
     y1[slot] = static_cast<float>(b.y);
     z1[slot] = static_cast<float>(b.z);
     track[slot] = track_id;
-    switch (type) {
-      case ParticleType::kElectron: kind[slot] = kKindElectron; break;
-      case ParticleType::kPositron: kind[slot] = kKindPositron; break;
-      default:                      kind[slot] = kKindGamma;    break;
-    }
+    // The charge comes from particle_def, the same table the physics reads, so the colour of
+    // a track and the charge it is transported with cannot disagree - and a species added to
+    // that table is coloured correctly the day it is added, with nothing to update here.
+    const real_t q = particle_def<real_t>(type).charge;
+    kind[slot] = (q < real_t(0)) ? kKindNegative
+                                 : ((q > real_t(0)) ? kKindPositive : kKindNeutral);
   }
 };
 

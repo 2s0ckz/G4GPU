@@ -329,11 +329,13 @@ __device__ inline void draw_line(unsigned long long* fb, const Camera& cam, cons
 ///
 /// Passed to the kernels rather than baked in, so the GUI's Visualisation attributes window
 /// can change them. The defaults are what the viewer has always used.
+/// Trajectory colours, by charge, as Geant4's default trajectory model draws them: negative
+/// red, neutral green, positive blue. There is no fourth class - every particle has a charge -
+/// which is why the `other` colour this used to carry is gone.
 struct Palette {
-  unsigned int gamma = 0x3CDC5Au;     ///< 0xRRGGBB
-  unsigned int electron = 0xFF3C3Cu;
-  unsigned int positron = 0x5082FFu;
-  unsigned int other = 0xD9D980u;
+  unsigned int neutral = 0x3CDC5Au;   ///< 0xRRGGBB - green
+  unsigned int negative = 0xFF3C3Cu;  ///< red
+  unsigned int positive = 0x5082FFu;  ///< blue
   /// The background gradient runs from `bg_top` at the top of the image to `bg_bottom`.
   unsigned int bg_top = 0x0C0E16u;
   unsigned int bg_bottom = 0x202638u;
@@ -349,10 +351,9 @@ __global__ void render_trajectories(TrajectoryBuffer traj, int n, Camera cam,
   const Vec3f b{traj.x1[i], traj.y1[i], traj.z1[i]};
   unsigned int rgb;
   switch (traj.kind[i]) {
-    case kKindElectron: rgb = pal.electron; break;
-    case kKindPositron: rgb = pal.positron; break;
-    case kKindGamma:    rgb = pal.gamma;    break;
-    default:            rgb = pal.other;    break;
+    case kKindNegative: rgb = pal.negative; break;
+    case kKindPositive: rgb = pal.positive; break;
+    default:            rgb = pal.neutral;  break;
   }
   draw_line(fb, cam, a, b, rgb, thickness, depth_scale);
 }

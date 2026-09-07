@@ -2232,3 +2232,104 @@ into tracks - which is why this went unchecked rather than merely unchecked-for.
 rides with each segment so the chaining can be asserted: for one track, every segment's start
 must be another segment's end, exactly, since consecutive segments share a `float` converted from
 the same `double`.
+
+### V14: three GUI defects, all of them a rule stated in the wrong terms
+
+Reported from using the builder. Different symptoms, one shape.
+
+#### A dropdown inside a pop-up rendered behind the pop-up
+
+`DrawOpenSelect` painted the open list once a frame, after the panels, because a Select cannot
+draw its own list - everything the panel draws afterwards would cover it. The frame said so:
+
+```
+// After every panel, so an open dropdown list is not painted over by whatever the panel
+// drew below it - and before the menu bar and the pop-ups, which are further forward still.
+```
+
+Both halves are right for a dropdown declared in a panel. For one declared *inside* a pop-up -
+the voxel import dialog has one - "before the pop-ups" is exactly wrong: the list was painted at
+the panel layer and the pop-up that owned it then painted over it.
+
+The rule is not "after the panels", it is **after everything at the widget's own layer**. A
+Select now records `Context::layer` when it opens and `DrawOpenSelect(ctx, layer)` draws only its
+own; the frame calls it once per layer. `LayerScope` sets and restores the layer, because the
+failure from forgetting to put it back is a dropdown that renders behind something occasionally.
+
+#### More than 64 material indices "looked continuous"
+
+`ClassifyVoxels` stopped at 64 distinct values and refused:
+
+```
+more than 64 distinct values: this looks continuous, not segmented.
+  Re-import as continuous (HU) if it is a CT.
+```
+
+A segmented phantom can have as many organs as it likes; 200 is an ordinary ICRP model. The
+count carries no information about what the values mean, and the user had *already answered*
+that question - `kDiscrete` is set because they chose "material indices". The code overrode an
+explicit answer with an inference, and its suggested remedy would have banded indices as if they
+were densities.
+
+What does distinguish an index volume is that indices are **integers**. That is the test now;
+the count is only a resource limit, at 4096, and says so. The scan became a direct-address
+bitmap over the integer range, because the linear search this had cost 64 comparisons a voxel at
+the old cap and would have cost 4096 at the new one - over 1e8 voxels that is not a slower
+import, it is one that never finishes.
+
+Nothing had ever tested this function, though it is pure host arithmetic over a vector.
+`tests/test_voxel_import.cu` now covers it, and fails at 200 indices with the cap put back.
+
+#### Track colours were by species, so the species nobody listed were wrong
+
+Geant4's default trajectory model is `G4TrajectoryDrawByCharge`: negative red, neutral green,
+positive blue. This port had an enum named `kKindGamma`/`kKindElectron`/`kKindPositron`, and:
+
+```cpp
+case ParticleType::kElectron: kind[slot] = kKindElectron; break;
+case ParticleType::kPositron: kind[slot] = kKindPositron; break;
+default:                      kind[slot] = kKindGamma;    break;
+```
+
+Every proton and every alpha - both positive - fell to `default` and drew as the neutral class.
+And the builder's own defaults had electron on light blue and positron on orange, so in the GUI
+a negative particle drew in the positive colour and a positive one in no convention at all.
+
+Both are the same mistake: **a rule about charge, restated in terms of species.** Restated in
+terms of charge there is nothing to enumerate and nothing to forget - the class comes from
+`particle_def(t).charge`, the same table the physics reads, so a species added to that table is
+coloured correctly the day it is added. The enum, the palette and the GUI labels all say charge
+now, because the species names are what made "electron = light blue" look unremarkable.
+
+#### The shape they share
+
+Each of the three was a rule expressed in the wrong vocabulary: draw order as "after the panels"
+rather than "after my layer"; segmentation as "few values" rather than "whole numbers"; colour as
+"which particle" rather than "what charge". In each case the wrong vocabulary was *right for the
+cases in front of the author* and silently wrong for the first case outside them - a pop-up with
+a dropdown, a phantom with 200 organs, a beam of protons.
+
+None of the three could have been caught by any check here, because all three are about what
+appears on a screen and the suite reads numbers. Two of them are testable anyway and now are;
+the draw order is not, and is guarded by a comment and a scope guard instead.
+
+#### Amendment to V14: the dropdown is now photographed, and a second bug in the same widget
+
+The layering fix could not be asserted by anything in the suite - it is a question about what is
+in front of what on a screen - so the builder's selftest now holds the voxel dialog up with one
+of its dropdowns **open** and photographs it, as `out/g4builder_dlg_voxel_open.png`.
+`build_all.bat` requires the file to exist, alongside the five dialog captures that were already
+there for the same reason: a dialog whose text runs past its frame looks correct to every check
+that reads a number.
+
+It is a photograph and not an assertion, and the difference matters. It fails only if the
+capture stops happening; a list drawn behind the pop-up again would produce a picture that looks
+like the closed one, and catching that needs somebody to look. That is still worth having -
+before this there was no artifact in which the bug was even visible.
+
+Opening a list by id alone turned up the second defect. `Select` recorded its rectangle **only
+on the frame the list opened**, so a panel that scrolls, a splitter that moves or a window that
+resizes while a list is open left the list pinned to where the button used to be. Nobody had
+reported it, because it needs a dropdown open across a layout change; it is the same class of
+error as the layering - state captured once when it needed to be refreshed - and the same edit
+fixes both, since the geometry is now re-recorded every frame the list is drawn open.

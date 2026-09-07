@@ -121,9 +121,10 @@ int main() {
   // against starts leaves exactly one unmatched start (the origin) and one unmatched end (where
   // the track stopped). Anything else is a discontinuity.
   //
-  // Counted per KIND as well as in total, because the bug this is for hit exactly one of them:
-  // gammas have no multiple scattering and hadrons apply no lateral displacement, so a check
-  // that only looked at the total would have been dominated by the species that were fine.
+  // Counted per CHARGE CLASS as well as in total, because the bug this is for hit exactly one
+  // of them: neutral tracks have no multiple scattering and heavy charged ones apply no
+  // lateral displacement, so a check reading only the total would have been dominated by the
+  // classes that were fine.
   long long broken[3] = {0, 0, 0};
   long long total[3] = {0, 0, 0};
   long long worst_gap_track = 0;
@@ -145,13 +146,13 @@ int main() {
     }
   }
 
-  const char* name[3] = {"gamma", "electron", "positron"};
+  const char* name[3] = {"neutral", "negative", "positive"};
   std::printf("  %d segments over %zu tracks, %d dropped\n", n, paths.size(), dropped);
   for (int k = 0; k < 3; ++k) {
     std::printf("    %-9s %lld tracks, %lld with a break\n", name[k], total[k], broken[k]);
   }
 
-  Check(total[1] > 100, "the run produced electrons to check, not just gammas");
+  Check(total[1] > 100, "the run produced negative tracks to check, not just neutral ones");
   for (int k = 0; k < 3; ++k) {
     if (broken[k] != 0) {
       std::printf("  FAIL: %lld of %lld %s tracks are recorded as disconnected pieces.\n"

@@ -348,29 +348,71 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
   char buf[256];
 
   if (kind == VoxelKind::kDiscrete) {
-    // Distinct values, capped: a file that turns out to be continuous would otherwise produce
-    // tens of thousands of classes and an unusable list.
-    constexpr int kMaxClasses = 64;
-    std::vector<float> seen;
+    // The distinct values, each becoming one material class.
+    //
+    // MANY CLASSES IS NOT EVIDENCE OF A CONTINUOUS FILE. This used to stop at 64 and refuse
+    // with "this looks continuous, not segmented", which is an inference the data does not
+    // support and which contradicts the answer the user has already given: kDiscrete is set
+    // because they said these are material indices. A segmented phantom with a hundred
+    // organs, or an ICRP mesh model, or any lookup table with more entries than 64, was
+    // rejected out of hand and the suggested remedy - re-import as Hounsfield units - would
+    // have banded indices as if they were densities.
+    //
+    // What DOES distinguish an index volume is the values themselves: indices are integers.
+    // So integrality is what is required here, and the count is only a resource limit.
+    //
+    // The scan is a direct-address bitmap over the integer range rather than the linear
+    // search this had. At 64 classes a linear search costs 64 comparisons a voxel and nobody
+    // noticed; raising the cap to 4096 would have made it 4096 comparisons over as many as
+    // 1e8 voxels, which is not a slower import, it is one that never finishes.
+    constexpr int kMaxClasses = 4096;
+    double dlo = 1e300, dhi = -1e300;
+    bool integral = true;
     for (float x : v.value) {
-      bool have = false;
-      for (float q : seen) {
-        if (q == x) { have = true; break; }
-      }
-      if (!have) {
-        seen.push_back(x);
-        if (static_cast<int>(seen.size()) > kMaxClasses) { break; }
-      }
+      if (x < dlo) { dlo = x; }
+      if (x > dhi) { dhi = x; }
+      if (x != std::floor(x)) { integral = false; }
     }
-    if (static_cast<int>(seen.size()) > kMaxClasses) {
+    if (v.value.empty()) {
+      note = "the file holds no voxels";
+      return;
+    }
+    if (!integral) {
       std::snprintf(buf, sizeof buf,
-                    "more than %d distinct values: this looks continuous, not segmented.\n"
-                    "  Re-import as continuous (HU) if it is a CT.",
-                    kMaxClasses);
+                    "these values are not whole numbers, so they are not material indices.\n"
+                    "  Re-import as continuous (HU) if it is a CT or a density map.");
       note = buf;
       return;
     }
-    std::sort(seen.begin(), seen.end());
+    // Room for the bitmap, not room for the list: a range of a few million costs a few
+    // hundred kilobytes and is worth spending to find out how many classes there really are.
+    const double span = dhi - dlo + 1.0;
+    if (span > 1.0e7) {
+      std::snprintf(buf, sizeof buf,
+                    "material indices from %g to %g span more than 10 million values.\n"
+                    "  That is a range no index table has; re-import as continuous (HU).",
+                    dlo, dhi);
+      note = buf;
+      return;
+    }
+    const long long lo_i = static_cast<long long>(dlo);
+    std::vector<bool> present(static_cast<std::size_t>(span), false);
+    for (float x : v.value) {
+      present[static_cast<std::size_t>(static_cast<long long>(x) - lo_i)] = true;
+    }
+    std::vector<float> seen;
+    for (std::size_t i = 0; i < present.size(); ++i) {
+      if (present[i]) { seen.push_back(static_cast<float>(lo_i + static_cast<long long>(i))); }
+    }
+    if (static_cast<int>(seen.size()) > kMaxClasses) {
+      std::snprintf(buf, sizeof buf,
+                    "%d distinct indices, and the limit is %d - not because this looks\n"
+                    "  continuous but because a list that long cannot be assigned by hand.",
+                    static_cast<int>(seen.size()), kMaxClasses);
+      note = buf;
+      return;
+    }
+    // Already ascending: the bitmap was walked in order.
     for (float q : seen) {
       VoxelClass c;
       c.value = q;
@@ -392,10 +434,23 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
         case 4: c.r = static_cast<float>(t); c.g = static_cast<float>(p); c.b = 1.0f; break;
         default: c.r = 1.0f; c.g = static_cast<float>(p); c.b = static_cast<float>(qv); break;
       }
+      // Index 0 starts invisible.
+      //
+      // In every segmentation convention 0 is "nothing here" - air, background, outside the
+      // patient - and it is also the most common value in the file, so a phantom imported
+      // opaque is a solid block with the anatomy hidden inside it. Opening it means finding
+      // the class list and turning one slider down before anything can be seen at all.
+      //
+      // Opacity, not `visible`: the class stays in the list, keeps its material assignment,
+      // and is transported exactly as before. Only the picture changes, and one drag puts it
+      // back.
+      if (c.value == 0.0) { c.opacity = 0.0f; }
       s.voxel_classes.push_back(c);
     }
-    std::snprintf(buf, sizeof buf, "%d distinct values, one material class each",
-                  static_cast<int>(s.voxel_classes.size()));
+    std::snprintf(buf, sizeof buf,
+                  "%d distinct values, one material class each%s",
+                  static_cast<int>(s.voxel_classes.size()),
+                  (dlo <= 0.0 && dhi >= 0.0) ? "; index 0 hidden" : "");
     note = buf;
     return;
   }

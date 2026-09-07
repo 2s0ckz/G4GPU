@@ -104,12 +104,18 @@ enum class Popup {
 /// background color would be worse than one that reopened with the default.
 struct VisAttributes {
   float bg[3] = {0.055f, 0.06f, 0.075f};
-  /// Track colors by species. The renderer colors a trajectory by what made it, which is
-  /// the one thing a picture of a shower has to show.
-  float gamma[3] = {0.35f, 0.85f, 0.45f};
-  float electron[3] = {0.45f, 0.65f, 1.0f};
-  float positron[3] = {1.0f, 0.55f, 0.35f};
-  float other[3] = {0.85f, 0.85f, 0.5f};
+  /// Track colours by CHARGE, which is what Geant4's default trajectory model draws: negative
+  /// red, neutral green, positive blue. Anyone who has read a Geant4 picture knows that
+  /// convention, and a viewer that uses a different one silently misreports every track.
+  ///
+  /// These were wrong. The fields were named by species and the values had electron on light
+  /// blue and positron on orange - so an electron drew as a positive particle's colour and a
+  /// positron as nothing in the convention at all. Renamed as well as recoloured, because the
+  /// species names are what made it plausible: nothing about "electron = light blue" looks
+  /// wrong until you notice that electron means negative and negative means red.
+  float neutral[3] = {0.235f, 0.863f, 0.353f};   ///< green
+  float negative[3] = {1.0f, 0.235f, 0.235f};    ///< red
+  float positive[3] = {0.314f, 0.510f, 1.0f};    ///< blue
   bool show_axes = true;
   bool show_wireframe = true;
   bool show_solids = true;
@@ -691,10 +697,9 @@ static vis::Palette CurrentPalette(const App& a) {
            | static_cast<unsigned int>(b);
   };
   vis::Palette p;
-  p.gamma = pack(v.gamma);
-  p.electron = pack(v.electron);
-  p.positron = pack(v.positron);
-  p.other = pack(v.other);
+  p.neutral = pack(v.neutral);
+  p.negative = pack(v.negative);
+  p.positive = pack(v.positive);
   const VisAttributes def{};
   if (v.bg[0] != def.bg[0] || v.bg[1] != def.bg[1] || v.bg[2] != def.bg[2]) {
     p.bg_top = pack(v.bg);
@@ -746,11 +751,20 @@ static void DrawFrame(App& a) {
   DrawRightPanel(a);
   DrawBottomPanel(a);
   DrawStatusBar(a);
-  // After every panel, so an open dropdown list is not painted over by whatever the panel
-  // drew below it - and before the menu bar and the pop-ups, which are further forward still.
-  ui::DrawOpenSelect(a.uic);
-  DrawMenuBar(a);  // last, so its dropdown covers everything
-  DrawPopup(a);
+  // Once per layer, each immediately after that layer is drawn.
+  //
+  // A dropdown has to be painted after everything at its own layer - the panel that declared
+  // it goes on drawing below it - and behind anything in front of that layer. One call after
+  // the panels did the first and got the second wrong for pop-ups: a Select declared inside a
+  // pop-up (the voxel import dialog has one) was painted here and then covered by the pop-up
+  // itself, which is the bug this pair of calls fixes. See ui::DrawOpenSelect.
+  ui::DrawOpenSelect(a.uic, ui::Context::kLayerPanel);
+  DrawMenuBar(a);  // its own dropdown is drawn by DrawMenuBar and covers the panels
+  {
+    ui::LayerScope pop(a.uic, ui::Context::kLayerPopup);
+    DrawPopup(a);
+    ui::DrawOpenSelect(a.uic, ui::Context::kLayerPopup);
+  }
 
   // The Delete key, after the panels: DeleteTarget looks at ui::Context::focus, which is only
   // meaningful once this frame's widgets have run. It deletes whatever is selected - solid,
@@ -1050,21 +1064,32 @@ int main(int argc, char** argv) {
         a.popup = Popup::kImportVoxel;
       }
       if (frame == 25) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_voxel.png"); }
-      if (frame == 26) {
+      // The same dialog with one of its dropdowns OPEN, which is a picture worth having on
+      // its own account: a list declared inside a pop-up used to be painted at the panel
+      // layer and then covered by the pop-up that owned it, so it simply did not appear. See
+      // docs/RISK.md V14.
+      //
+      // Nothing here asserts it - this is a photograph, and the check is that somebody looks
+      // at it. Opening by id alone works because ui::Select refreshes its own geometry every
+      // frame it is drawn open.
+      if (frame == 26) { a.uic.open_select = 1270; }  // "values" in DrawImportVoxelPopup
+      if (frame == 27) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_voxel_open.png"); }
+      if (frame == 28) {
+        a.uic.open_select = 0;
         a.popup = Popup::kPick;
         a.pick_kind = PickKind::kAnchorForSolid;
         a.pick_target = a.sel_solid > 0 ? a.sel_solid : 1;
       }
-      if (frame == 27) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_anchor.png"); }
-      if (frame == 28) {
+      if (frame == 29) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_anchor.png"); }
+      if (frame == 30) {
         a.popup = Popup::kPhysics;
       }
-      if (frame == 29) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_physics.png"); }
-      if (frame == 30) {
+      if (frame == 31) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_physics.png"); }
+      if (frame == 32) {
         a.popup = Popup::kVisAttributes;
       }
-      if (frame == 31) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_vis.png"); }
-      if (frame == 32) { a.popup = Popup::kNone; }
+      if (frame == 33) { SaveFramePng(a, "D:/g4gpu/out/g4builder_dlg_vis.png"); }
+      if (frame == 34) { a.popup = Popup::kNone; }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);
         for (size_t i = 0; i < static_cast<size_t>(a.width) * a.height; ++i) {

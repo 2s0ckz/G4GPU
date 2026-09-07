@@ -393,10 +393,25 @@ struct Context {
   int text_dragging = 0;  ///< field whose selection the mouse is currently extending
   int text_scroll = 0;    ///< pixels the focused field's text is scrolled left
 
+  /// Which stack of things is being drawn: panels behind, then the menu bar, then pop-ups.
+  ///
+  /// It exists for one reason - an open dropdown has to be painted after everything at its
+  /// OWN layer and before anything in front of it, and the widget that opened it is long
+  /// finished by then. A single "draw the open list after the panels" was right for a
+  /// dropdown in a panel and wrong for one inside a pop-up: the pop-up painted straight over
+  /// its own open list. See DrawOpenSelect.
+  ///
+  /// Set with LayerScope around each stack rather than assigned by hand, because the failure
+  /// from forgetting to put it back is a dropdown that renders behind something once every
+  /// few frames, which is a miserable thing to chase.
+  enum Layer : int { kLayerPanel = 0, kLayerMenu = 1, kLayerPopup = 2 };
+  int layer = kLayerPanel;
+
   // The open dropdown, if any. See Select() and DrawOpenSelect() at the foot of this file:
-  // the list has to be painted after every panel, so what is open has to outlive the widget
-  // that declared it.
+  // the list has to be painted after everything at its own layer, so what is open has to
+  // outlive the widget that declared it.
   int open_select = 0;                        ///< id of the Select whose list is open, or 0
+  int select_layer = kLayerPanel;             ///< the layer that Select was declared at
   Rect select_rect{};                         ///< where that Select's button was
   const char* const* select_opts = nullptr;   ///< its options; static literals, so no copy
   int select_count = 0;
@@ -1311,6 +1326,18 @@ inline bool Select(Context& ctx, int id, const Rect& r, int& value, const char* 
   if (hover) { ctx.hot = id; }
   const bool open = (ctx.open_select == id);
 
+  // While open, the geometry is refreshed EVERY frame rather than kept from the frame the
+  // list was opened on. A panel that scrolls, a splitter that moves or a window that resizes
+  // moves the button, and a list pinned to where the button used to be is worse than one that
+  // never opened. It also means a caller can open a list by id alone - the selftest does, to
+  // photograph one inside a pop-up - without having to know its rectangle.
+  if (open) {
+    ctx.select_layer = ctx.layer;
+    ctx.select_rect = r;
+    ctx.select_opts = opts;
+    ctx.select_count = count;
+  }
+
   if (open && ctx.select_picked >= 0) {
     const int picked = ctx.select_picked;
     ctx.select_picked = -1;
@@ -1326,6 +1353,7 @@ inline bool Select(Context& ctx, int id, const Rect& r, int& value, const char* 
       ctx.open_select = 0;
     } else {
       ctx.open_select = id;
+      ctx.select_layer = ctx.layer;
       ctx.select_rect = r;
       ctx.select_opts = opts;
       ctx.select_count = count;
@@ -1346,9 +1374,27 @@ inline bool Select(Context& ctx, int id, const Rect& r, int& value, const char* 
   return false;
 }
 
-/// Paints and hit-tests the open dropdown's list. Call once per frame, after every panel.
-inline void DrawOpenSelect(Context& ctx) {
+/// Sets Context::layer for a scope and puts it back, so a return or an early exit inside a
+/// pop-up cannot leave the layer raised for whatever draws next.
+struct LayerScope {
+  Context& ctx;
+  int saved;
+  LayerScope(Context& c, int layer) : ctx(c), saved(c.layer) { ctx.layer = layer; }
+  ~LayerScope() { ctx.layer = saved; }
+  LayerScope(const LayerScope&) = delete;
+  LayerScope& operator=(const LayerScope&) = delete;
+};
+
+/// Paints and hit-tests the open dropdown's list, if it belongs to `layer`.
+///
+/// Call once per layer, immediately after everything at that layer is drawn: after the panels
+/// with kLayerPanel, after the pop-ups with kLayerPopup. The layer test is what keeps a
+/// dropdown declared inside a pop-up from being painted at the panel layer and then covered by
+/// the pop-up that owns it - which is what happened for the whole life of the voxel import
+/// dialog - and equally keeps a panel's dropdown from floating over a pop-up in front of it.
+inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
   if (ctx.open_select == 0 || ctx.select_opts == nullptr || ctx.select_count <= 0) { return; }
+  if (ctx.select_layer != layer) { return; }
   const Rect& b = ctx.select_rect;
   const int h = ctx.canvas.GlyphH() + 6;
   int w = b.w;

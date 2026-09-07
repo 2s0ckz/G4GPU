@@ -276,7 +276,7 @@ static void DrawVisPopup(App& a) {
   ui::Context& c = a.uic;
   const int lh = a.font.glyph_h;
   const int row = lh + 6;
-  const ui::Rect r = PopupFrame(a, 520, 13 * row + 52, "Visualization attributes");
+  const ui::Rect r = PopupFrame(a, 520, 12 * row + 52, "Visualization attributes");
   int y = r.y;
 
   VisAttributes& v = a.vis_attr;
@@ -288,13 +288,13 @@ static void DrawVisPopup(App& a) {
 
   ColorFields(a, 830, {r.x + 14, y, r.w - 28, row}, "background", v.bg);
   y += row + 2;
-  ColorFields(a, 834, {r.x + 14, y, r.w - 28, row}, "gamma", v.gamma);
+  // By charge, not by species - Geant4's own convention, and one row fewer than the four
+  // species names this used to list, because "other" is not a charge a particle can have.
+  ColorFields(a, 834, {r.x + 14, y, r.w - 28, row}, "neutral", v.neutral);
   y += row + 2;
-  ColorFields(a, 838, {r.x + 14, y, r.w - 28, row}, "electron", v.electron);
+  ColorFields(a, 838, {r.x + 14, y, r.w - 28, row}, "negative", v.negative);
   y += row + 2;
-  ColorFields(a, 842, {r.x + 14, y, r.w - 28, row}, "positron", v.positron);
-  y += row + 2;
-  ColorFields(a, 846, {r.x + 14, y, r.w - 28, row}, "other", v.other);
+  ColorFields(a, 842, {r.x + 14, y, r.w - 28, row}, "positive", v.positive);
   y += row + 8;
 
   ui::Checkbox(c, 850, {r.x + 14, y, 160, row}, "solids", v.show_solids);

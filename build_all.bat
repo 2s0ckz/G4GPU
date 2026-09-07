@@ -44,7 +44,7 @@ if "%MODE%"=="" set MODE=all
 set SRC=%~dp0src
 set NV=nvcc -std=c++17 -O2 -I "%SRC%"
 set NVG=nvcc -std=c++17 -O2 -arch=sm_86 -I "%SRC%"
-set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle test_track_arena
+set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle test_track_arena test_voxel_import
 
 rem Tests that launch real kernels rather than calling __host__ __device__ code on the
 rem host. They need the arch flag: StepTally reduces with atomicAdd on a double, which
@@ -355,13 +355,17 @@ rem past its frame, whose buttons fell off the bottom, or whose label overflowed
 rem would look correct to all of them - which is how a button caption came to straddle the edge
 rem of the dialog it was in. The selftest holds each one up for a frame and photographs it;
 rem this asserts the pictures exist, and a person can look at them when something reads oddly.
-for %%D in (world voxel anchor physics vis) do (
+rem voxel_open is the voxel dialog with one of its dropdowns open. It is here because a
+rem dropdown declared inside a pop-up was painted at the panel layer and then covered by the
+rem pop-up that owned it, so it did not appear at all - the one GUI defect in docs/RISK.md V14
+rem that no check reading numbers could ever have seen.
+for %%D in (world voxel voxel_open anchor physics vis) do (
   if not exist "%~dp0out\g4builder_dlg_%%D.png" (
     echo FATAL: the builder selftest did not capture the %%D dialog.
     exit /b 1
   )
 )
-echo the five dialogs were captured
+echo the six dialogs were captured
 rem The custom-scorer flag must not change the number a scorer reports until the generated
 rem file is edited. It is not free: a filtered scorer's total is accumulated event by event on
 rem the host through Accept(), while a stock one's comes from the device array. The selftest
