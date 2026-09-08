@@ -218,6 +218,44 @@ was added).
 
 **Colouring follows Geant4** - by charge: negative red, neutral green, positive blue.
 
+### The render pass is float; the transport is not
+
+The geometry pass calls the transport's own functions, and on a GeForce card that meant paying
+FP64 rates for a picture: one FP64 unit per 64 FP32 units on sm_86. So the render pass is given
+a float copy of the scene (`render/float_geometry.cuh`) and the transport keeps its doubles.
+
+The split is not caution. Float mesh geometry puts about 1e-5 mm of error into where a track
+stops, and the dose is the number this project is judged on; a pixel is a third of a millimetre
+at any useful zoom.
+
+Measured by alternating two builds differing only in this, within one session, at 1680x960:
+
+```
+   triangles      double     float    gain
+      40,000    47.6 ms   25.5 ms    1.86x
+     401,956    61.6 ms   28.5 ms    2.16x
+   1,607,824    70.6 ms   31.9 ms    2.21x
+```
+
+which is 21 fps to 39, 16 to 35, and 14 to 33. The spread within each triple was under 1%, and
+the paired design is there because run-to-run variation across builds on this card is about 6% -
+see docs/RISK.md V21 for the time that ate a wrong conclusion.
+
+**The conversion is a cast, and the BVH is the reason to check that.** A box rounded INWARD by
+one ulp no longer contains its own triangles, and the traversal rejects any subtree whose box
+the ray misses - a hole in the mesh, not a shading error. It cannot happen here because
+`build_bvh` sets each bound to the min or max of vertex COORDINATES, so every bound is one of
+the numbers it will be compared against, and rounding to float is monotonic. That property is
+asserted in `tests/test_float_render.cu` rather than assumed: the first version of the
+conversion spent sixty lines recomputing every box from the float triangles, and the test
+written to justify them showed a plain cast breaks containment in none of 4095 nodes.
+
+The voxel arrays are shared rather than copied - cells are shorts, class layers are ints - so a
+512^3 phantom does not get a second 268 MB.
+
+**What it costs in the picture**: the viewer's selftest counts the pixels solid geometry
+covers, and it moved from 57768 to 57766. Two pixels of silhouette in fifty-seven thousand.
+
 ### A voxel volume is not one surface, and the layer rule still applies to it
 
 A grid whose cells are coloured individually is marched cell by cell inside the outer walk,

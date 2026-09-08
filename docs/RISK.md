@@ -3080,3 +3080,87 @@ for, not the numbers it built. The generator lands on the next whole UV sphere, 
 request - 80,656 rather than 40,000, and so on. The speedups are unaffected, since both columns
 measured the same geometry; the labels were wrong.
 
+
+### V23: a worry implemented before it was tested, and the test that deleted it
+
+Two changes: per-class layers for voxel volumes, and a float render pass. The entry is about the
+second, and about one habit.
+
+#### The sixty lines that should not have been written
+
+The render pass needed a float copy of the scene. The worry worth having was the BVH: a box
+rounded INWARD by one ulp no longer contains its own triangles, the traversal rejects any
+subtree whose box the ray misses, and the result is a hole in the mesh rather than a shading
+error. Correct worry.
+
+So the conversion was written to RECOMPUTE every node's box from the float triangles - a
+post-order walk, leaves from their triangles and interior nodes from their children, about
+sixty lines with a recursion and an empty-node special case - and the file's header comment
+explained at length why an epsilon would have been a guess and this was not.
+
+Then the test. It asked the direct question: does a plain cast break containment? In 4095
+nodes, over a sphere offset 400 mm from the origin so that float rounding had something to
+bite on: NO. Not once.
+
+The reason is one line of `build_bvh`: `lo[k] = std::min(lo[k], c)` over vertex coordinates. So
+every box bound IS one of the numbers that will later be compared against it, and rounding to
+float is monotonic - `float(bound) <= float(vertex)` wherever `bound <= vertex`. Containment
+survives the cast by construction. The sixty lines were guarding against arithmetic that does
+not happen.
+
+They are gone. What replaced them is the test asserting the property the cast depends on, so
+that a future change to `build_bvh` which COMPUTES a bound rather than picking one fails here
+instead of appearing as holes in somebody's CAD import.
+
+The habit worth naming: the worry was real, the reasoning about the fix was plausible, and the
+comment justifying it was written before anything was measured. One test on the actual data
+answered it in a minute. THE ORDER MATTERS - test the worry, then write the fix it justifies.
+
+#### And a limit of ray_triangle, found by a fixture that was too tidy
+
+The first ray sweep aimed every ray at the sphere's exact centre from a lattice of directions.
+Result: 14 of 4000 rays that hit in double missed in float, with a worst distance difference of
+120 mm - the sphere's diameter, so float had found the FAR surface.
+
+That reads like a broken conversion. It is not. Look at the other number in the same run: 21 of
+those 4000 rays missed in DOUBLE as well. Those rays land on the shared edges of a UV sphere,
+where Moller-Trumbore's barycentric test can reject both adjacent triangles and leave a hole -
+`ray_triangle`'s `u < 0 || u > 1` on a hit that is exactly on the edge. Both precisions have
+the hole; float lands on it more often because it rounds more.
+
+Jitter the aim by a third of a millimetre, off the lattice: 4000 of 4000 hit in both, nothing
+missing, nothing extra, worst difference 0.0007 mm.
+
+So the sweep is jittered, and the alignment case is recorded rather than asserted - asserting
+it would be asserting a known limit of the intersector. Two things worth keeping from it: a
+fixture aligned with the geometry it tests measures the alignment, not the code; and the second
+number in the output - how many missed in double - is what turned a diagnosis into a fact.
+
+#### What the float pass is worth
+
+Paired, alternating two builds differing only in `renderer.cuh`'s instantiation, within one
+session at 1680x960:
+
+```
+   triangles      double     float    gain
+      40,000    47.6 ms   25.5 ms    1.86x
+     401,956    61.6 ms   28.5 ms    2.16x
+   1,607,824    70.6 ms   31.9 ms    2.21x
+```
+
+Spread inside each triple under 1%. Paired because variation across builds of identical source
+on this card is about 6%, which is the lesson of V21 and V10 applied rather than relearned.
+
+The picture's cost: the viewer's selftest counts the pixels solid geometry covers, and it went
+from 57768 to 57766.
+
+#### One more thing the per-class layer work turned up
+
+The equivalence test for per-class layers first reported exactly 2.0000x the energy for the
+scene with a scorer covering both a phantom and the box overlapping it. Not physics:
+`SetSensitiveDetector` calls `AddNewDetector` once per volume, so a detector attached to two
+volumes appears twice in `Detectors()`, and the test's helper summed its scorer twice.
+`AssignIndices` already de-duplicates and `Scorers()` is the list it built - which the comment
+in G4SDManager says in as many words. The helper was copied from `test_voxel_materials.cu`,
+where it was latent because that test scores one volume; both are fixed.
+

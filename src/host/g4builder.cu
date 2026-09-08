@@ -37,6 +37,7 @@
 #include "g4/G4RunManager.hh"
 #include "g4/G4UImanager.hh"
 #include "host/transport_run.cuh"
+#include "render/float_geometry.cuh"
 #include "render/png.h"
 #include "render/renderer.cuh"
 #include "render/ui.h"
@@ -257,6 +258,9 @@ struct App {
   /// How many entries d_class_rgba holds. Kept so the selftest can read back the array the
   /// kernel reads, rather than assuming a length from the class list of one solid.
   int class_rgba_n = 0;
+  /// The float copy of the scene the render pass walks. See render/float_geometry.cuh: the
+  /// transport stays double because the dose depends on it, and the picture does not.
+  vis::FloatGeometry render_geom;
   /// The per-class layer field in the colour pop-up, and which class it currently holds.
   ///
   /// Seeded when the pop-up opens on a different class rather than every frame: reseeding
@@ -674,6 +678,36 @@ static void RebuildScene(App& a) {
                           cudaMemcpyHostToDevice));
   }
 
+  // THE FLOAT COPY THE RENDER PASS WALKS.
+  //
+  // Built here because this is where the geometry changes, and from the HOST pools rather than
+  // from the device ones the engine just uploaded - the conversion is arithmetic and the host
+  // is where the doubles are. The voxel arrays are handed over as they are: cells are shorts
+  // and class layers are ints, so both precisions read the same bytes.
+  {
+    vis::HostGeometry hg{};
+    hg.volumes = scene.volumes.data();
+    hg.n_volumes = static_cast<int>(scene.volumes.size());
+    hg.world = scene.world;
+    hg.solids = scene.pool.solids.data();
+    hg.n_solids = static_cast<int>(scene.pool.solids.size());
+    hg.xforms = scene.pool.xforms.data();
+    hg.n_xforms = static_cast<int>(scene.pool.xforms.size());
+    hg.aux = scene.pool.aux.data();
+    hg.n_aux = static_cast<int>(scene.pool.aux.size());
+    hg.tri = scene.pool.tri.data();
+    hg.n_tri = static_cast<int>(scene.pool.tri.size());
+    hg.bvh = scene.pool.bvh.data();
+    hg.n_bvh = static_cast<int>(scene.pool.bvh.size());
+    const auto& gd = a.engine->geometry();
+    geom::VoxelStore<float> vf{};
+    vf.material = gd.voxels.material;
+    vf.count = gd.voxels.count;
+    vf.cls = gd.voxels.cls;
+    vf.class_layer = gd.voxels.class_layer;
+    a.render_geom.Build(hg, vf);
+  }
+
   // Frame the camera on the world the first time.
   static bool framed = false;
   if (!framed && !scene.volumes.empty()) {
@@ -944,9 +978,9 @@ static void DrawFrame(App& a) {
   const vis::Palette pal = CurrentPalette(a);
 
   if (a.vis_attr.show_solids) {
-    vis::render_geometry<real_t><<<grid, block>>>(a.engine->geometry(), a.d_styles, cam,
-                                                  a.d_fb, a.vis_attr.voxel_grid_lines,
-                                                  a.d_voxel_class, a.d_class_rgba);
+    vis::render_geometry<float><<<grid, block>>>(a.render_geom.geometry(), a.d_styles, cam,
+                                                 a.d_fb, a.vis_attr.voxel_grid_lines,
+                                                 a.d_voxel_class, a.d_class_rgba);
   } else {
     CUDA_CHECK(cudaMemset(a.d_fb, 0xFF, sizeof(unsigned long long) * w * h));
   }

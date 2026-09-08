@@ -36,6 +36,7 @@
 #include "g4/G4RunManager.hh"
 #include "g4/G4UImanager.hh"
 #include "host/transport_run.cuh"
+#include "render/float_geometry.cuh"
 #include "render/png.h"
 #include "render/renderer.cuh"
 #include "render/vis_manager.h"
@@ -136,6 +137,9 @@ struct App {
   host::TransportEngine<real_t>* engine = nullptr;
   vis::TrajectoryBuffer traj{};
   vis::VolumeStyle* d_styles = nullptr;
+  /// The float copy of the scene the render pass walks. See render/float_geometry.cuh: the
+  /// transport stays double because the dose depends on it, and the picture does not.
+  vis::FloatGeometry render_geom;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
   std::vector<unsigned int> host_rgba;
@@ -423,8 +427,8 @@ static void DrawFrame(App& a) {
   const dim3 grid((view_w + 15) / 16, (a.height + 15) / 16);
 
   if (a.show_solids && rm != nullptr) {
-    vis::render_geometry<real_t><<<grid, block>>>(a.engine->geometry(), a.d_styles, cam,
-                                                  a.d_fb);
+    vis::render_geometry<float><<<grid, block>>>(a.render_geom.geometry(), a.d_styles, cam,
+                                                 a.d_fb);
   } else {
     CUDA_CHECK(cudaMemset(a.d_fb, 0xFF, sizeof(unsigned long long) * view_w * a.height));
   }
@@ -949,6 +953,34 @@ bool Open(const Options& opt) {
     CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * styles.size()));
     CUDA_CHECK(cudaMemcpy(a.d_styles, styles.data(),
                           sizeof(vis::VolumeStyle) * styles.size(), cudaMemcpyHostToDevice));
+
+    // The float copy the render pass walks, from the HOST pools rather than the device ones
+    // the engine uploaded - the conversion is arithmetic and the host is where the doubles
+    // are. The voxel arrays are handed over as they stand: cells are shorts and class layers
+    // are ints, so both precisions read the same bytes.
+    {
+      vis::HostGeometry hg{};
+      hg.volumes = scene.volumes.data();
+      hg.n_volumes = static_cast<int>(scene.volumes.size());
+      hg.world = scene.world;
+      hg.solids = scene.pool.solids.data();
+      hg.n_solids = static_cast<int>(scene.pool.solids.size());
+      hg.xforms = scene.pool.xforms.data();
+      hg.n_xforms = static_cast<int>(scene.pool.xforms.size());
+      hg.aux = scene.pool.aux.data();
+      hg.n_aux = static_cast<int>(scene.pool.aux.size());
+      hg.tri = scene.pool.tri.data();
+      hg.n_tri = static_cast<int>(scene.pool.tri.size());
+      hg.bvh = scene.pool.bvh.data();
+      hg.n_bvh = static_cast<int>(scene.pool.bvh.size());
+      const auto& gd = a.engine->geometry();
+      geom::VoxelStore<float> vf{};
+      vf.material = gd.voxels.material;
+      vf.count = gd.voxels.count;
+      vf.cls = gd.voxels.cls;
+      vf.class_layer = gd.voxels.class_layer;
+      a.render_geom.Build(hg, vf);
+    }
 
     a.n_edges = static_cast<int>(edges.Size());
     const size_t nb = sizeof(float) * a.n_edges;

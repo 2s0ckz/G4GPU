@@ -139,7 +139,14 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
   constexpr int kMaxLayers = 8;
   // A nudge past each entry point, so the ownership test and the next search start inside the
   // surface just crossed rather than exactly on it.
-  const real_t kNudge = real_t(1e-4);
+  //
+  // TEN TIMES LARGER IN FLOAT, and not by taste. A coordinate of 500 mm - this project's
+  // default world is 500 - has a float ulp of 6e-5 mm, so 1e-4 is under two ulps: adding it
+  // may not move the value at all, and a nudge that does not move the point leaves the search
+  // standing on the surface it just crossed, finding it again until the layer cap. 1e-3 is
+  // sixteen ulps there and still a thirtieth of a pixel at any useful zoom. The transport uses
+  // the same two numbers for the same reason - see kPushDistance.
+  const real_t kNudge = (sizeof(real_t) == 4) ? real_t(1e-3) : real_t(1e-4);
 
   float acc_r = 0, acc_g = 0, acc_b = 0;
   float acc_a = 0;
@@ -371,8 +378,9 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       const int ccount = static_cast<int>(vol.solid.p[7]);
       geom::VoxelWalk<real_t> walk;
       // A nudge inside, so the entry point is unambiguously in the first cell rather than on
-      // its face - the same reason the outer loop nudges past each surface it crosses.
-      const Vec3<real_t> start = hit_local + real_t(1e-4) * local_dir;
+      // its face - the same reason the outer loop nudges past each surface it crosses, and the
+      // same constant, because the comparison below adds one to the other.
+      const Vec3<real_t> start = hit_local + kNudge * local_dir;
       bool covered = false;    ///< the walk ended because a higher layer took the space
       real_t end_t = 0;        ///< where it ended, measured from `hit`
       if (walk.Start(grid, start, local_dir)) {
