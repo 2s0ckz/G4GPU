@@ -161,11 +161,16 @@ G4Material* FindByName(const char* nist) {
   return nullptr;
 }
 
+/// Every scorer's total, over the DE-DUPLICATED list.
+///
+/// Not by walking Detectors(): SetSensitiveDetector registers its detector once per volume, so
+/// a scorer attached to two volumes appears twice there and summing it twice reports double
+/// the energy - which is what this file's equivalence check first reported, exactly 2.0000x,
+/// for a scorer that covered a phantom and the box overlapping it. G4SDManager::Scorers() is
+/// the list AssignIndices built, one entry per slot.
 double ScorerTotal() {
   double t = 0;
-  for (G4VSensitiveDetector* sd : G4SDManager::GetSDMpointer()->Detectors()) {
-    for (G4VPrimitiveScorer* ps : sd->GetScorers()) { t += ps->total; }
-  }
+  for (G4VPrimitiveScorer* ps : G4SDManager::GetSDMpointer()->Scorers()) { t += ps->total; }
   return t;
 }
 

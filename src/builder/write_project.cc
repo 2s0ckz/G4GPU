@@ -167,6 +167,27 @@ bool WriteExeDir(std::ofstream& f, const Model& m) {
 
 /// Emits the voxel-cell loader, and returns true if any solid needs it.
 ///
+/// The per-class layers of @p s, or empty when every class is on the volume's own layer.
+///
+/// The same rule build_scene.hh applies, and it has to be the same one: if the two disagree
+/// about whether a phantom HAS per-class layers, the builder and the project it generates
+/// transport it differently, and the comparison between them is what would notice - which is
+/// a slow and confusing way to find a duplicated rule. Hence one function, called by the
+/// writer for the sidecar and by the emitter for the code.
+inline std::vector<int> ClassLayersOf(const Solid& s) {
+  if (s.shape != Shape::kVoxelGrid || s.voxel_classes.empty()) { return {}; }
+  std::vector<int> layers(s.voxel_classes.size(), s.layer);
+  bool differs = false;
+  for (std::size_t i = 0; i < s.voxel_classes.size(); ++i) {
+    const int L = s.voxel_classes[i].layer;
+    if (L != kInheritLayer && L != s.layer) {
+      layers[i] = L;
+      differs = true;
+    }
+  }
+  return differs ? layers : std::vector<int>{};
+}
+
 /// Deliberately strict about the count: a cell file that did not match its grid would
 /// otherwise transport with whatever happened to be in memory after it.
 bool WriteVoxelLoader(std::ofstream& f, const Model& m) {
@@ -189,6 +210,34 @@ bool WriteVoxelLoader(std::ofstream& f, const Model& m) {
        "  if (got != want) {\n"
        "    std::printf(\"FATAL: %s holds %zu cells, the grid needs %zu\\n\", path.c_str(),\n"
        "                got, want);\n"
+       "    std::exit(2);\n"
+       "  }\n"
+       "}\n"
+       "/// The same, for the per-cell CLASS index.\n"
+       "///\n"
+       "/// Only written when some class of this phantom is on a layer of its own: the class\n"
+       "/// of a cell is what says which layer applies to it, and without it the project\n"
+       "/// would transport the phantom as one layer while the builder transported it as\n"
+       "/// several. Two answers from one model is what the comparison between them exists\n"
+       "/// to prevent.\n"
+       "void LoadVoxelClasses(G4VoxelGrid* grid, const char* file) {\n"
+       "  const std::size_t want =\n"
+       "      static_cast<std::size_t>(grid->GetNx()) * grid->GetNy() * grid->GetNz();\n"
+       "  grid->ClassCells().assign(want, static_cast<short>(-1));\n"
+       "  const std::string path = ExeDir() + \"\\\\\" + file;\n"
+       "  FILE* f = std::fopen(path.c_str(), \"rb\");\n"
+       "  if (f == nullptr) { f = std::fopen(file, \"rb\"); }\n"
+       "  if (f == nullptr) {\n"
+       "    std::printf(\"FATAL: cannot open voxel classes %s (nor %s)\\n\", path.c_str(),\n"
+       "                file);\n"
+       "    std::exit(2);\n"
+       "  }\n"
+       "  const std::size_t got =\n"
+       "      std::fread(grid->ClassCells().data(), sizeof(short), want, f);\n"
+       "  std::fclose(f);\n"
+       "  if (got != want) {\n"
+       "    std::printf(\"FATAL: %s holds %zu classes, the grid needs %zu\\n\",\n"
+       "                path.c_str(), got, want);\n"
        "    std::exit(2);\n"
        "  }\n"
        "}\n"
@@ -302,6 +351,35 @@ void WriteSolids(std::ofstream& f, const Model& m) {
           f << detail::MatVar(m, static_cast<int>(k));
         }
         f << "});\n";
+      }
+      // PER-CLASS LAYERS, when this phantom has any that differ from its own layer.
+      //
+      // Three things have to arrive together or none of them mean anything: the class index
+      // per cell, one colour per class (which is what tells the grid it HAS classes, and so
+      // where its per-class run goes), and the layers themselves.
+      const std::vector<int> cl = ClassLayersOf(m.solids[i]);
+      if (!cl.empty()) {
+        f << "  LoadVoxelClasses(" << detail::SolidVar(m, i) << ", \"" << m.solids[i].name
+          << ".classes\");\n";
+        f << "  " << detail::SolidVar(m, i) << "->ClassColours() = {";
+        for (std::size_t k = 0; k < m.solids[i].voxel_classes.size(); ++k) {
+          const VoxelClass& vc = m.solids[i].voxel_classes[k];
+          const unsigned int al =
+              vc.visible ? static_cast<unsigned int>(vc.opacity * 255.0f + 0.5f) : 0u;
+          const unsigned int rgba =
+              (al << 24) | (static_cast<unsigned int>(vc.r * 255.0f + 0.5f) << 16)
+              | (static_cast<unsigned int>(vc.g * 255.0f + 0.5f) << 8)
+              | static_cast<unsigned int>(vc.b * 255.0f + 0.5f);
+          if (k > 0) { f << ", "; }
+          f << "0x" << std::hex << rgba << std::dec << "u";
+        }
+        f << "};\n";
+        f << "  " << detail::SolidVar(m, i) << "->ClassLayers() = {";
+        for (std::size_t k = 0; k < cl.size(); ++k) {
+          if (k > 0) { f << ", "; }
+          f << cl[k];
+        }
+        f << "};\n";
       }
     }
     if (m.solids[i].shape == Shape::kImportedMesh) {
@@ -1341,6 +1419,35 @@ bool WriteProject(const Model& model, const std::string& dir) {
     std::fwrite(cells.data(), sizeof(short), n, cf);
     std::fclose(cf);
     std::printf("  wrote %s (%zu cells)\n", path.c_str(), n);
+
+    // The class index per cell, when the classes are on layers of their own. Same walk as
+    // above; only what is stored differs, because the layer of a cell is decided by its class
+    // and not by its material - two classes may share a material and still rank differently.
+    if (!ClassLayersOf(s).empty() && s.voxel_values.size() == n) {
+      std::vector<short> classes(n, static_cast<short>(-1));
+      for (std::size_t i = 0; i < n; ++i) {
+        const float v = s.voxel_values[i];
+        for (std::size_t ci = 0; ci < s.voxel_classes.size(); ++ci) {
+          const VoxelClass& c = s.voxel_classes[ci];
+          const bool hit = (s.voxel_kind == VoxelKind::kDiscrete)
+                               ? (static_cast<double>(v) == c.value)
+                               : (v >= c.value && v < c.value_max);
+          if (hit) {
+            classes[i] = static_cast<short>(ci);
+            break;
+          }
+        }
+      }
+      const std::string cpath = (fs::path(dir) / (s.name + ".classes")).string();
+      FILE* clf = std::fopen(cpath.c_str(), "wb");
+      if (clf == nullptr) {
+        std::printf("cannot write %s\n", cpath.c_str());
+        return false;
+      }
+      std::fwrite(classes.data(), sizeof(short), n, clf);
+      std::fclose(clf);
+      std::printf("  wrote %s (%zu class indices)\n", cpath.c_str(), n);
+    }
   }
 
 
@@ -1432,6 +1539,7 @@ bool WriteModelFile(const Model& m, const std::string& path) {
           << v.r << " " << v.g << " " << v.b << " " << v.visible << " "
           << (v.label.empty() ? "-" : v.label) << "\n";
         if (v.opacity != 1.0f) { f << "  vcopacity " << v.opacity << "\n"; }
+        if (v.layer != kInheritLayer) { f << "  vclayer " << v.layer << "\n"; }
       }
     }
   }
@@ -1535,6 +1643,10 @@ bool ReadModelFile(Model& m, const std::string& path) {
     } else if (key == "vcopacity") {
       if (!m.solids.empty() && !m.solids.back().voxel_classes.empty()) {
         in >> m.solids.back().voxel_classes.back().opacity;
+      }
+    } else if (key == "vclayer") {
+      if (!m.solids.empty() && !m.solids.back().voxel_classes.empty()) {
+        in >> m.solids.back().voxel_classes.back().layer;
       }
     } else if (key == "weight") {
       if (!m.sources.empty()) { in >> m.sources.back().weight; }

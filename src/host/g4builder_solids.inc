@@ -118,10 +118,17 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       const ui::Color vsw = ui::rgb(static_cast<int>(vc.r * 255),
                                     static_cast<int>(vc.g * 255),
                                     static_cast<int>(vc.b * 255));
-      const std::string label = (s.voxel_kind == VoxelKind::kDiscrete)
-                                    ? Fmt("%-9g %s", vc.value, vmat.c_str())
-                                    : Fmt("%-4.0f..%-4.0f %s", vc.value, vc.value_max,
-                                          vmat.c_str());
+      // The layer, but only when it is not the volume's. A column of the same number beside
+      // every class would be noise; the point of showing it is to see at a glance which
+      // classes were given one, on a phantom with two hundred of them.
+      const std::string lay = (vc.layer != kInheritLayer && vc.layer != s.layer)
+                                  ? Fmt(" L%d", vc.layer)
+                                  : std::string();
+      const std::string label =
+          (s.voxel_kind == VoxelKind::kDiscrete)
+              ? Fmt("%-9g %s%s", vc.value, vmat.c_str(), lay.c_str())
+              : Fmt("%-4.0f..%-4.0f %s%s", vc.value, vc.value_max, vmat.c_str(),
+                    lay.c_str());
       const int id =
           kIdClassRow + static_cast<int>(i) * kIdClassStride + static_cast<int>(k);
       // A class gets an eye too. It is the same question one level down - what is behind the

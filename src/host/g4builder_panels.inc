@@ -925,9 +925,11 @@ static void DrawColorPopup(App& a) {
   // a whole solid at 0 is indistinguishable from a deleted one, which is why that keeps its
   // floor of 5%.
   double min_opacity = 5.0;
+  VoxelClass* pclass = nullptr;   ///< the class being edited, or null for the whole solid
   if (a.popup_target2 >= 0
       && a.popup_target2 < static_cast<int>(sol.voxel_classes.size())) {
     VoxelClass& vc = sol.voxel_classes[static_cast<std::size_t>(a.popup_target2)];
+    pclass = &vc;
     pr = &vc.r;
     pg = &vc.g;
     pb = &vc.b;
@@ -940,8 +942,10 @@ static void DrawColorPopup(App& a) {
 
   const int cell = 22;
   const int cols = 12, rows = 6;
+  // A class gets one row taller, for its layer.
   const ui::Rect box{a.width / 2 - (cols * cell) / 2 - 10, a.height / 2 - 140,
-                     cols * cell + 20, rows * cell + 150};
+                     cols * cell + 20,
+                     rows * cell + 150 + ((pclass != nullptr) ? a.font.glyph_h + 12 : 0)};
   ui::Panel(c, box);
   c.canvas.Text(box.x + 10, box.y + 8, title, ui::theme::kText);
 
@@ -1018,6 +1022,49 @@ static void DrawColorPopup(App& a) {
                   ui::theme::kTextDim);
   }
   y += a.font.glyph_h + 10;
+
+  // THE CLASS'S LAYER, which is not a display setting: it decides who owns the space where
+  // this class overlaps another volume, for the transport as much as for the picture.
+  //
+  // Three states, not two: this class's own layer, or the volume's. Inheriting is a state of
+  // its own rather than a copy of the volume's number, because the navigator only takes its
+  // per-point layer path when a class actually differs - a phantom whose classes all inherit
+  // costs nothing, and one whose classes were each set to the volume's own number would
+  // otherwise cost the same as one that really does differ.
+  if (pclass != nullptr) {
+    // A CHECKBOX AND A NUMBER, not a number with a blank state. "Inherit the volume's layer"
+    // is a real third state and it has to be expressible, but NumberField carries its value
+    // through atof, where an empty string and a typed 0 are the same number - so blank could
+    // not have meant inherit without the field growing a notion of emptiness it does not have.
+    bool own = (pclass->layer != kInheritLayer);
+    const bool toggled =
+        ui::Checkbox(c, 908, {box.x + 10, y, 120, a.font.glyph_h + 4}, "own layer", own);
+    if (toggled) {
+      pclass->layer = own ? sol.layer : kInheritLayer;
+      a.class_layer_for = -1;   // reseed the field from the new value
+      a.model.Touch();
+      a.scene_dirty = true;
+    }
+    if (a.class_layer_for != a.popup_target2 || a.class_layer_solid != a.popup_target) {
+      a.class_layer_for = a.popup_target2;
+      a.class_layer_solid = a.popup_target;
+      a.class_layer_field.Init((pclass->layer == kInheritLayer) ? sol.layer : pclass->layer,
+                               "%.0f");
+    }
+    if (ui::NumberInput(c, 907, {box.x + 136, y, 54, a.font.glyph_h + 4},
+                        a.class_layer_field, "", own)
+        && own) {
+      pclass->layer = static_cast<int>(a.class_layer_field.value);
+      a.model.Touch();
+      a.scene_dirty = true;
+    }
+    c.canvas.Text(box.x + 196, y + 3,
+                  own ? Fmt("the volume is on %d", sol.layer)
+                      : Fmt("takes the volume's, %d", sol.layer),
+                  ui::theme::kTextDim);
+    y += a.font.glyph_h + 12;
+  }
+
   // The preview: the solid's color at its opacity, over a light and a dark square.
   {
     const int pw = 60, ph = a.font.glyph_h + 6;
@@ -1556,9 +1603,7 @@ static void ProbeRay(App& a, g4gpu::Vec3<G4double> from, g4gpu::Vec3<G4double> d
   g.n_volumes = static_cast<int>(scene.volumes.size());
   g.world = scene.world;
   g.store = scene.pool.store();
-  g.voxels.material =
-      scene.pool.voxel_cells.empty() ? nullptr : scene.pool.voxel_cells.data();
-  g.voxels.count = static_cast<int>(scene.pool.voxel_cells.size());
+  g.voxels = scene.pool.voxel_store();
   if (g.n_volumes <= 0) { return; }
 
   auto name_of = [&](int v) {
@@ -1993,6 +2038,54 @@ static void InsertSelftestVoxels(App& a) {
   a.sel_solid = a.model.AddSolid(s);
   a.scene_dirty = true;
   Log("selftest: added an 8x8x8 voxel volume");
+}
+
+/// Puts one of the selftest phantom's classes on a layer of its own, under a box that
+/// outranks the other.
+///
+/// The only thing in the selftest that exercises per-class layers END TO END, and the reason
+/// it is here rather than in a later frame is the generated project: the model is saved at
+/// frame 20 and the two are then run against each other, so this has to be in the model
+/// before that. What it covers on both sides is the whole chain - build_scene deciding the
+/// layers differ at all, G4Flatten's layer range, the navigator's per-point rank, the engine's
+/// upload, and, on the project side, a `.classes` sidecar and the emitted ClassLayers call
+/// that nothing else would touch.
+///
+/// After it: the phantom's odd cells are on layer 5 and keep their tissue, its even cells
+/// inherit layer 2 and lose to a box of air on layer 3. So half the phantom stops being
+/// tissue, the dose moves, and the builder and the project have to move together.
+static void SelftestPhantomClassLayers(App& a) {
+  int ph = -1;
+  for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+    if (a.model.solids[i].name == "Phantom") { ph = static_cast<int>(i); }
+  }
+  if (ph < 0 || a.model.solids[static_cast<std::size_t>(ph)].voxel_classes.size() < 2) {
+    std::printf("selftest: FAILED - no Phantom with two classes to put on layers\n");
+    return;
+  }
+  Solid& p = a.model.solids[static_cast<std::size_t>(ph)];
+  p.voxel_classes[1].layer = p.layer + 3;   // above the box below
+
+  Solid cover;
+  cover.shape = Shape::kBox;
+  cover.name = "PhantomCover";
+  cover.p[0] = p.p[0];
+  cover.p[1] = p.p[1];
+  cover.p[2] = p.p[2];
+  cover.pos[0] = p.pos[0];
+  cover.pos[1] = p.pos[1];
+  cover.pos[2] = p.pos[2];
+  cover.layer = p.layer + 1;   // above class 0, below class 1
+  cover.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;  // the world's
+  cover.opacity = 0.25f;
+  cover.r = 0.5f;
+  cover.g = 0.5f;
+  cover.b = 0.9f;
+  a.model.AddSolid(cover);
+  a.model.Touch();
+  a.scene_dirty = true;
+  Log(Fmt("selftest: phantom class 1 on layer %d, under a box on layer %d - half its cells "
+          "now belong to the box", p.voxel_classes[1].layer, cover.layer));
 }
 
 /// FNV-1a over the 3D viewport's pixels. For asking whether the PICTURE changed.

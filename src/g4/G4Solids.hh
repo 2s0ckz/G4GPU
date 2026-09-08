@@ -576,6 +576,19 @@ class G4VoxelGrid : public G4VSolid {
   /// One colour per class, 0xAARRGGBB, for the renderer. Empty draws the volume as one box.
   std::vector<unsigned int>& ClassColours() { return class_rgba_; }
 
+  /// ONE LAYER PER CLASS, so a phantom can win an overlap where it is bone and lose it where
+  /// it is air.
+  ///
+  /// Empty - the normal case - means every cell has the volume's own layer, and nothing in the
+  /// navigator or the engine does any extra work. Non-empty must be the same length as
+  /// ClassColours(): the two are the same list of classes and Build gives them one offset.
+  ///
+  /// A layer here is the same number the layer on a placement is, and it is compared the same
+  /// way: higher wins where two volumes overlap, and a tie goes to whichever was placed later.
+  /// So a class on the volume's own layer behaves exactly as it did before this existed.
+  std::vector<int>& ClassLayers() { return class_layers_; }
+  const std::vector<int>& ClassLayers() const { return class_layers_; }
+
   G4int Build(g4gpu::g4::SolidPool& pool) const override {
     g4gpu::g4::Sol s = make(g4gpu::geom::SolidType::kVoxelGrid,
                             {hx_, hy_, hz_, static_cast<G4double>(nx_),
@@ -621,6 +634,13 @@ class G4VoxelGrid : public G4VSolid {
       s.p[6] = static_cast<G4double>(
           pool.add_class_colours(class_rgba_.data(), static_cast<int>(class_rgba_.size())));
       s.p[7] = static_cast<G4double>(class_rgba_.size());
+      // The layer run rides at the same offset. Appended whenever ANY volume in the scene has
+      // per-class layers, because the runs are concatenated and one volume opting out would
+      // shift every later volume's offset; the layers appended for a volume that opted out are
+      // its own layer, which is what its cells had anyway.
+      pool.add_class_layers(
+          (class_layers_.size() == class_rgba_.size()) ? class_layers_.data() : nullptr,
+          static_cast<int>(class_rgba_.size()), layer_hint_);
     } else {
       s.p[6] = 0;
       s.p[7] = 0;
@@ -630,6 +650,10 @@ class G4VoxelGrid : public G4VSolid {
   }
   G4double Extent() const override { return std::sqrt(hx_ * hx_ + hy_ * hy_ + hz_ * hz_); }
 
+  /// The volume's own layer, for cells and classes that do not name one. Set by G4Flatten,
+  /// which is the only place that knows what layer the placement went on.
+  void SetLayerHint(G4int l) { layer_hint_ = l; }
+
   G4int GetNx() const { return nx_; }
   G4int GetNy() const { return ny_; }
   G4int GetNz() const { return nz_; }
@@ -637,6 +661,8 @@ class G4VoxelGrid : public G4VSolid {
  private:
   G4double hx_, hy_, hz_;
   G4int nx_, ny_, nz_;
+  G4int layer_hint_ = 0;
+  std::vector<int> class_layers_;
   std::vector<short> cells_;
   /// See SetCellMaterials. Empty means cells_ already holds device indices.
   std::vector<G4Material*> cell_materials_;

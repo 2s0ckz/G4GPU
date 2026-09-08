@@ -162,12 +162,34 @@ inline FlatScene flatten(G4double range_cut_mm = 0.7 /*mm*/) {
   // Emit one volume, returning its index.
   auto emit = [&](G4PVPlacement* p, const geom::Transform<G4double>& x, int layer) {
     geom::Volume<G4double> v{};
+    // A GRID HAS TO KNOW ITS OWN LAYER BEFORE IT IS BUILT, because Build writes one layer per
+    // class and a class that named none gets the volume's. The solid does not otherwise know
+    // where it was placed - this is the only point at which both facts are in hand.
+    if (auto* grid = dynamic_cast<G4VoxelGrid*>(p->GetLogicalVolume()->GetSolid())) {
+      grid->SetLayerHint(layer);
+    }
     v.solid = out.pool.solids[p->GetLogicalVolume()->GetSolid()->Build(out.pool)];
     // Build appended a copy; the Volume carries it by value, so drop the pool entry's role as
     // the top-level solid but keep it - boolean children reference the pool by index and the
     // indices must stay stable.
     v.xform = x;
     v.layer = layer;
+    // The range of layers this volume can have anywhere. For everything but a grid whose
+    // classes named layers, that is one number and the flag stays off - see
+    // geom::Volume::has_class_layers for why the flag matters more than the numbers.
+    if (const auto* grid = dynamic_cast<const G4VoxelGrid*>(
+            p->GetLogicalVolume()->GetSolid())) {
+      const std::vector<int>& cl = grid->ClassLayers();
+      if (!cl.empty()) {
+        v.has_class_layers = true;
+        v.layer_lo = layer;   // a cell with no class gets the volume's own layer
+        v.layer_hi = layer;
+        for (int L : cl) {
+          if (L < v.layer_lo) { v.layer_lo = L; }
+          if (L > v.layer_hi) { v.layer_hi = L; }
+        }
+      }
+    }
     v.material = p->GetLogicalVolume()->GetMaterial()->device_index;
     const int idx = static_cast<int>(out.volumes.size());
     out.volumes.push_back(v);

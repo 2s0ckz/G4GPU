@@ -762,9 +762,7 @@ inline G4double G4RunManager::ScoredMass(G4int scorer_index) const {
     g.n_volumes = static_cast<int>(scene_.volumes.size());
     g.world = scene_.world;
     g.store = store;
-    g.voxels.material =
-        scene_.pool.voxel_cells.empty() ? nullptr : scene_.pool.voxel_cells.data();
-    g.voxels.count = static_cast<int>(scene_.pool.voxel_cells.size());
+    g.voxels = scene_.pool.voxel_store();
 
     constexpr int kSamples = 200000;
     unsigned int state = 0x2545F491u + static_cast<unsigned int>(i) * 2654435761u;

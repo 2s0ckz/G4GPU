@@ -55,9 +55,7 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
   g.n_volumes = n;
   g.world = scene.world;
   g.store = store;
-  g.voxels.material =
-      scene.pool.voxel_cells.empty() ? nullptr : scene.pool.voxel_cells.data();
-  g.voxels.count = static_cast<int>(scene.pool.voxel_cells.size());
+  g.voxels = scene.pool.voxel_store();
 
   // The world-space bounding box of each volume: the solid's local cube of half-width
   // `solid_half_extent`, rotated into the world and bounded on each axis.

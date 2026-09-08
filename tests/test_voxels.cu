@@ -346,6 +346,140 @@ int main() {
     check(outside == 0, "no point inside the grid is outside its coordinate bound");
   }
 
+  // ---------------------------------------------------------------- per-class layers
+  //
+  // A CLASS OF A PHANTOM CAN OWN THE SPACE ITS VOLUME LOSES.
+  //
+  // The layer rule gives shared space to the higher layer, and a voxel volume used to have
+  // one layer for all of it. So a phantom overlapping a seat, a couch or an implant was
+  // either always on top - its air winning over solid metal - or always underneath, with its
+  // bone losing to the same. Per-class layers are the third answer, and the whole of the
+  // question is per POINT: the same volume outranks its neighbour in one cell and not in the
+  // next.
+  //
+  // Three things have to hold, and they are checked separately because they fail separately.
+  {
+    printf("\n== a voxel class can be on its own layer ==\n");
+    // Sixteen cells along z, alternating class 0 and class 1. Both classes are given the SAME
+    // material, which is the case that catches a step that ends only where the material
+    // changes: the layer changes at every boundary here and the material never does.
+    constexpr int n = 16;
+    const real_t half = 80;
+    const real_t cell_h = 2 * half / n;
+    std::vector<short> cells(static_cast<std::size_t>(n), static_cast<short>(7));
+    std::vector<short> cls(static_cast<std::size_t>(n), 0);
+    for (int k = 0; k < n; ++k) { cls[static_cast<std::size_t>(k)] = (k % 2) ? 1 : 0; }
+    // Class 0 inherits the volume's layer (1); class 1 is on 5. A box on layer 3 covers the
+    // whole grid, so it outranks class 0 and loses to class 1.
+    const int class_layers[2] = {1, 5};
+
+    std::vector<Volume<real_t>> vols(3);
+    vols[0].solid = {SolidType::kBox, {400, 400, 400}};
+    vols[0].xform = make_translation<real_t>({0, 0, 0});
+    vols[0].layer = 0;
+    vols[0].material = 0;
+    vols[1].solid = {SolidType::kVoxelGrid, {half, half, half, 1, 1, n}};
+    vols[1].solid.a = 0;
+    vols[1].solid.p[6] = 0;   // the class run starts at 0 and is two long
+    vols[1].solid.p[7] = 2;
+    vols[1].xform = make_translation<real_t>({0, 0, 0});
+    vols[1].layer = 1;
+    vols[1].material = 7;
+    vols[1].has_class_layers = true;
+    vols[1].layer_lo = 1;
+    vols[1].layer_hi = 5;
+    vols[2].solid = {SolidType::kBox, {half, half, half}};
+    vols[2].xform = make_translation<real_t>({0, 0, 0});
+    vols[2].layer = 3;
+    vols[2].material = 9;
+
+    Geometry<real_t> g{};
+    g.volumes = vols.data();
+    g.n_volumes = 3;
+    g.world = 0;
+    g.voxels.material = cells.data();
+    g.voxels.count = n;
+    g.voxels.cls = cls.data();
+    g.voxels.class_layer = class_layers;
+
+    // 1. WHO OWNS EACH CELL. The property, stated directly, at every cell centre.
+    int wrong_owner = 0, wrong_mat = 0;
+    for (int k = 0; k < n; ++k) {
+      const real_t z = -half + (k + real_t(0.5)) * cell_h;
+      const Vec3<real_t> p{0, 0, z};
+      const int want = (k % 2) ? 1 : 2;    // class 1 keeps it, class 0 loses to the box
+      if (locate(g, p) != want) { ++wrong_owner; }
+      const int want_mat = (k % 2) ? 7 : 9;
+      if (material_at(g, locate(g, p), p) != want_mat) { ++wrong_mat; }
+    }
+    printf("  %d cells: %d wrong owner, %d wrong material\n", n, wrong_owner, wrong_mat);
+    check(wrong_owner == 0, "each cell is owned by the higher of its class and the box");
+    check(wrong_mat == 0, "and reports that owner's material");
+
+    // 2. A STEP ENDS WHERE THE LAYER CHANGES, even though the material does not.
+    //
+    // Without it, the walk crosses all sixteen cells in one step - the material is 7
+    // throughout - and the box covering half of them is never seen.
+    {
+      const VoxelGrid<real_t> grid = voxel_grid_of(vols[1].solid);
+      int changed_to = -1;
+      const real_t t = voxel_step(g.voxels, grid, {0, 0, -half + real_t(0.001)}, {0, 0, 1},
+                                  changed_to, false);
+      printf("  voxel_step from the near face: %g mm (one cell is %g)\n",
+             static_cast<double>(t), static_cast<double>(cell_h));
+      check(fabs(t - (cell_h - real_t(0.001))) < real_t(1e-6),
+            "a step inside the grid ends at the first cell boundary, layer not material");
+    }
+
+    // 3. WHERE A GRID STARTS OUTRANKING SOMETHING, which is what the box's own steps need.
+    //
+    // From inside the box at the near face, the first cell that beats layer 3 is cell 1, one
+    // cell in. Asked for a rank the whole grid beats, it is zero; for one nothing beats,
+    // never.
+    {
+      const VoxelGrid<real_t> grid = voxel_grid_of(vols[1].solid);
+      const Vec3<real_t> q{0, 0, -half + real_t(0.001)};
+      const Vec3<real_t> d{0, 0, 1};
+      const long long box_rank = volume_rank(3, 2);
+      const real_t t = voxel_first_outranking(g.voxels, grid, q, d, 1, vols[1].layer,
+                                              box_rank, kInfinity<real_t>());
+      printf("  first cell outranking the box: %g mm\n", static_cast<double>(t));
+      check(fabs(t - (cell_h - real_t(0.001))) < real_t(1e-6),
+            "a grid starts outranking a box at the first cell of the winning class");
+      const real_t t_none =
+          voxel_first_outranking(g.voxels, grid, q, d, 1, vols[1].layer,
+                                 volume_rank(99, 0), kInfinity<real_t>());
+      check(t_none >= kInfinity<real_t>(), "and never, against a layer no class beats");
+      const real_t t_all =
+          voxel_first_outranking(g.voxels, grid, q, d, 1, vols[1].layer,
+                                 volume_rank(-5, 0), kInfinity<real_t>());
+      check(t_all == real_t(0), "and at once, against a layer every class beats");
+      // The limit is what keeps this from walking a phantom's whole diagonal for a step that
+      // was only going a millimetre.
+      const real_t t_lim = voxel_first_outranking(g.voxels, grid, q, d, 1, vols[1].layer,
+                                                  box_rank, cell_h * real_t(0.5));
+      check(t_lim >= kInfinity<real_t>(), "and gives up at the limit it was given");
+    }
+
+    // 4. AND NONE OF IT HAPPENS WITHOUT THE ARRAYS. The same geometry with the class arrays
+    // withheld is the old behaviour exactly: one layer for the whole grid, so the box on 3
+    // outranks all of it.
+    {
+      Geometry<real_t> g2 = g;
+      g2.voxels.cls = nullptr;
+      g2.voxels.class_layer = nullptr;
+      std::vector<Volume<real_t>> v2(vols);
+      v2[1].has_class_layers = false;
+      g2.volumes = v2.data();
+      int owned_by_grid = 0;
+      for (int k = 0; k < n; ++k) {
+        const real_t z = -half + (k + real_t(0.5)) * cell_h;
+        if (locate(g2, {0, 0, z}) == 1) { ++owned_by_grid; }
+      }
+      check(owned_by_grid == 0, "with no per-class layers the box owns every cell, as before");
+    }
+  }
+
   printf("\n%s (%d failures)\n", fails ? "FAILED" : "ALL PASS", fails);
   return fails;
 }

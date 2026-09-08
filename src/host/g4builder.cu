@@ -257,6 +257,13 @@ struct App {
   /// How many entries d_class_rgba holds. Kept so the selftest can read back the array the
   /// kernel reads, rather than assuming a length from the class list of one solid.
   int class_rgba_n = 0;
+  /// The per-class layer field in the colour pop-up, and which class it currently holds.
+  ///
+  /// Seeded when the pop-up opens on a different class rather than every frame: reseeding
+  /// every frame would overwrite what is being typed halfway through a number.
+  ui::NumberField class_layer_field{};
+  int class_layer_for = -1;
+  int class_layer_solid = -1;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
   /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
@@ -1327,6 +1334,8 @@ int main(int argc, char** argv) {
       if (frame == 11) { InsertSelftestTransparency(a); }
       if (frame == 12) { SelftestCheckOverlapRefusal(a); }
       if (frame == 13) { SelftestUseWater(a); }
+      // Before the run and before the project is saved, so both sides see it.
+      if (frame == 13) { SelftestPhantomClassLayers(a); }
       if (frame == 14) { a.sel_solid = 1; }
       if (frame == 14) {
         // The camera onto the transparent pair, and fewer events than a real run: 200 events

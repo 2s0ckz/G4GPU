@@ -345,6 +345,11 @@ class TransportEngine {
   geom::Transform<real_t>* d_pool_xforms_ = nullptr;
   real_t* d_pool_aux_ = nullptr;
   short* d_voxels_ = nullptr;
+  /// Per-cell class index and per-class layer, uploaded only when some voxel class was given
+  /// a layer of its own. Null otherwise, which is what switches the navigator's per-point
+  /// layer path off. See geom::VoxelStore.
+  short* d_voxel_class_ = nullptr;
+  int* d_class_layer_ = nullptr;
   real_t* d_tri_ = nullptr;
   real_t* d_bvh_ = nullptr;
   double* d_score_ = nullptr;

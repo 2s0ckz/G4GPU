@@ -250,6 +250,25 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
               | (static_cast<unsigned int>(vc.g * 255.0f + 0.5f) << 8)
               | static_cast<unsigned int>(vc.b * 255.0f + 0.5f));
         }
+
+        // PER-CLASS LAYERS, and only if they say something the volume's own layer does not.
+        //
+        // A run of layers that all equal the volume's layer means exactly what no run at all
+        // means, and the difference between them is what the navigator pays: with a run
+        // present it asks the class at every point where it used to read one number. So the
+        // test is on the VALUES rather than on whether anyone touched the control - set a
+        // class's layer to the volume's own and the cost goes away again.
+        std::vector<int> layers(s.voxel_classes.size(), s.layer);
+        bool differs = false;
+        for (std::size_t ci = 0; ci < s.voxel_classes.size(); ++ci) {
+          const int L = s.voxel_classes[ci].layer;
+          if (L != kInheritLayer && L != s.layer) {
+            layers[ci] = L;
+            differs = true;
+          }
+        }
+        grid->ClassLayers().clear();
+        if (differs) { grid->ClassLayers() = layers; }
       }
 
       // A DIRECT MAP from value to class for the discrete case, not a search per cell.

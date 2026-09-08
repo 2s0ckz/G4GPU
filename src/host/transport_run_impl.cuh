@@ -633,6 +633,28 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     g.store.bvh = d_bvh_;
     g.voxels.material = d_voxels_;
     g.voxels.count = static_cast<int>(scene.pool.voxel_cells.size());
+
+    // PER-CLASS LAYERS, and only when some class asked for one.
+    //
+    // The class array is another short per cell - 268 MB for a 512^3 phantom, the same as the
+    // materials - so a batch run whose classes all sit on one layer must not be made to carry
+    // it. `any_class_layers` is the scene saying whether the navigator will ever look.
+    if (scene.pool.any_class_layers
+        && scene.pool.voxel_class_cells.size() == scene.pool.voxel_cells.size()
+        && !scene.pool.voxel_class_layer.empty()) {
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_voxel_class_,
+                                  sizeof(short) * scene.pool.voxel_class_cells.size()));
+      G4GPU_CUDA_CHECK(cudaMemcpy(d_voxel_class_, scene.pool.voxel_class_cells.data(),
+                                  sizeof(short) * scene.pool.voxel_class_cells.size(),
+                                  cudaMemcpyHostToDevice));
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_class_layer_,
+                                  sizeof(int) * scene.pool.voxel_class_layer.size()));
+      G4GPU_CUDA_CHECK(cudaMemcpy(d_class_layer_, scene.pool.voxel_class_layer.data(),
+                                  sizeof(int) * scene.pool.voxel_class_layer.size(),
+                                  cudaMemcpyHostToDevice));
+      g.voxels.cls = d_voxel_class_;
+      g.voxels.class_layer = d_class_layer_;
+    }
     geom_ = g;
 
     // Physics tables. The element list comes from the materials actually in the scene, so a
@@ -1321,6 +1343,8 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_pool_xforms_);
     cudaFree(d_pool_aux_);
     cudaFree(d_voxels_);
+    cudaFree(d_voxel_class_);
+    cudaFree(d_class_layer_);
     cudaFree(d_tri_);
     cudaFree(d_bvh_);
   }

@@ -203,10 +203,26 @@ enum class VoxelKind : int {
 };
 
 /// One distinct value in a discrete voxel volume, or one HU band in a continuous one.
+/// A voxel class layer meaning "whatever layer the volume is on".
+///
+/// A sentinel rather than a copy of the volume's layer, and the reason is cost rather than
+/// tidiness: the navigator only takes its per-point layer path when some class differs from
+/// the volume, so a phantom whose classes all inherit has to be distinguishable from one
+/// whose classes were each set to the same number. See build_scene, which drops the whole
+/// per-class run when every class agrees with the volume.
+constexpr int kInheritLayer = -2147483647;
+
 struct VoxelClass {
   double value = 0;      ///< the voxel value, or the lower edge of the HU band
   double value_max = 0;  ///< upper edge, for a continuous band
   int material = -1;
+  /// This class's overlap priority, or kInheritLayer to take the volume's.
+  ///
+  /// The same number a solid's layer is, compared the same way: higher wins where two volumes
+  /// overlap, a tie goes to whichever was placed later. What it buys is a phantom that wins
+  /// an overlap where it is bone and loses it where it is air - one volume, two answers,
+  /// which the layer model could not say before.
+  int layer = kInheritLayer;
   float r = 0.7f, g = 0.7f, b = 0.7f;
   /// 1 is opaque, 0 invisible. Carried per class because a segmented phantom is only
   /// readable when the outer tissue is transparent and the bone is not.

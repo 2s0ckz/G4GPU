@@ -50,6 +50,73 @@ Nothing failed; three things quietly gave wrong answers:
 `tests/test_voxels.cu` now checks both answers against the box of the same half extents, which
 is what a grid is.
 
+## A class can be on its own layer
+
+The layer rule gives shared space to the higher layer, and a voxel volume used to have one
+layer for all of it. So a phantom overlapping a seat, a helmet or an implant was either always
+on top - its AIR cells winning over solid aluminium - or always underneath, with its bone
+losing to the same. **Per-class layers are the third answer**: one volume that outranks its
+neighbour where it is bone and loses where it is air.
+
+`VoxelClass::layer` carries it, `kInheritLayer` means "the volume's", and that is a state of its
+own rather than a copy of the volume's number - see the cost note below. In the GUI it is a
+checkbox and a number in the per-class colour pop-up (click a class's swatch), and a class with
+one shows `L<n>` beside its material in the solid list.
+
+**A layer here is the same number a placement's layer is and is compared the same way**: higher
+wins, and a tie goes to whichever was placed later. So a class on the volume's own layer
+behaves exactly as it did before this existed.
+
+### What it changes in the navigator
+
+A volume's priority stops being constant over the volume, which three things had to follow:
+
+* `locate` asks the class at the point (`volume_rank_at`) instead of reading one number, and
+  its cheap rejection has to use the volume's HIGHEST possible layer - a grid whose bone class
+  outranks everything and whose air class outranks nothing cannot be dismissed on one number;
+* **a step ends where the class layer changes**, not only where the material does. Two classes
+  may share a material and rank differently - assign one material to every class and then raise
+  bone's layer, which is exactly what the GUI makes easy - and a step that crossed both would
+  have any volume overlapping its far half go unseen;
+* and a volume looking AT such a grid cannot use "where does its box start" as "where does it
+  start outranking me", because the answer is a cell boundary inside it.
+  `voxel_first_outranking` walks for it, bounded by the best distance the step already has, so
+  a grid the ray merely clips costs a few cells rather than its diagonal.
+
+`Volume::has_class_layers` gates all of it, and the flag matters more than the numbers beside
+it: `layer` has no default and never has, so every site that builds a Volume sets it, while two
+more ints with no default would have been whatever the stack held - and `layer_hi` reading as a
+small number silently PRUNES a volume that should have ended the step.
+
+### What it costs, and when
+
+Nothing, until a class actually differs from its volume. The per-cell class array is another
+`short` per cell - 268 MB for a 512^3 phantom, the same as the materials - so it is uploaded
+only when the scene says some class named a layer, and `VoxelStore::cls` being null is what
+switches the per-point path off everywhere.
+
+The test is on the VALUES, not on whether anyone touched the control: set a class's layer to
+the volume's own number and the cost goes away again. `build_scene.hh` and
+`write_project.cc`'s `ClassLayersOf` apply the same rule, and they have to - if the two
+disagreed about whether a phantom HAS per-class layers, the builder and the project it
+generates would transport it differently.
+
+### What is checked
+
+* `tests/test_voxels.cu` - who owns each cell, the material each reports, the step that ends at
+  a layer change with the material constant across it, and `voxel_first_outranking` including
+  its limit. Exact, no beam.
+* `tests/test_voxel_layers.cu` - an EQUIVALENCE with a beam: a grid whose class 0 is air under
+  a box of tissue that outranks it, against the same grid with class 0's MATERIAL set to tissue
+  and no box at all. Same materials everywhere by two mechanisms, one needing all of the above
+  and one needing none of it, so they have to deposit the same. They agree to 0.7% for a 1 MeV
+  gamma, 0.3% for a 6 MeV electron and 9e-5% for an 80 MeV proton, which stops in the target
+  and so deposits all of it either way.
+* the builder's selftest puts one of the phantom's classes on a layer of its own before the
+  project is saved, so the builder and the generated project are compared with the feature in
+  play - which is the only thing that exercises the `.classes` sidecar and the emitted
+  `ClassLayers` call.
+
 ## How a step inside one works
 
 `geom::voxel_step` (`src/geometry/voxels.cuh`) is an Amanatides-Woo DDA in the solid's own

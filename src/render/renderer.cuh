@@ -318,11 +318,49 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       // its space, which is what `locate` says and therefore what the transport sees. Hiding
       // a box over a phantom leaves the hole it occupies, the same as it already does over an
       // ordinary solid.
-      real_t t_own = geom::kInfinity<real_t>();
-      for (int v = 0; v < geometry.n_volumes; ++v) {
-        if (v == best_vol || !geom::outranks(geometry, v, best_vol)) { continue; }
-        const real_t t = entry_ahead(v, hit);
-        if (t < t_own) { t_own = t; }
+      // WHICH IS A QUESTION PER CELL, once classes can be on different layers.
+      //
+      // A grid whose bone class outranks the box over it and whose air class does not has two
+      // answers along one ray, so a single clamp cannot express it. What is constant per ray
+      // is each candidate volume's ENTRY - so the scan happens once and records, for each
+      // volume that could outrank any class here, how far away it starts and what it ranks.
+      // The march then takes the nearest of those that outrank the cell it is looking at,
+      // which is a handful of comparisons and no geometry calls.
+      //
+      // For a grid whose classes are all on one layer - every phantom until now - every cell
+      // has the same rank and this collapses to exactly the single clamp it replaces.
+      constexpr int kMaxCovers = 4;
+      real_t cov_t[kMaxCovers];
+      long long cov_rank[kMaxCovers];
+      int n_cov = 0;
+      {
+        // The lowest rank any cell here can have. A volume that cannot beat this cannot cover
+        // any cell of the grid, and for a uniform grid that is the whole test.
+        const long long lo_rank = geom::volume_rank(geom::layer_lo_of(geometry, best_vol),
+                                                    best_vol);
+        for (int v = 0; v < geometry.n_volumes; ++v) {
+          if (v == best_vol || !geom::could_outrank(geometry, v, lo_rank)) { continue; }
+          const real_t t = entry_ahead(v, hit);
+          if (t >= geom::kInfinity<real_t>()) { continue; }
+          const long long r = geom::volume_rank(geom::layer_hi_of(geometry, v), v);
+          if (n_cov < kMaxCovers) {
+            cov_t[n_cov] = t;
+            cov_rank[n_cov] = r;
+            ++n_cov;
+            continue;
+          }
+          // Full: keep the nearest, since a farther surface can only clamp later. Dropping
+          // the farthest can only ever draw a cell that should have been covered, and only
+          // in a scene with five higher-layer volumes over one phantom.
+          int worst = 0;
+          for (int k = 1; k < kMaxCovers; ++k) {
+            if (cov_t[k] > cov_t[worst]) { worst = k; }
+          }
+          if (t < cov_t[worst]) {
+            cov_t[worst] = t;
+            cov_rank[worst] = r;
+          }
+        }
       }
       // p[6] and p[7] are spare on a voxel grid - p[0..2] is the half extent and
       // p[3..5] the cell counts - so the class run rides on the SOLID, exactly as the
@@ -341,6 +379,17 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
         Vec3<real_t> face_n = n;   // the grid's own surface, for the first cell
         bool more = true;
         while (more && acc_a < 0.995f) {
+          // This cell's own rank, and the nearest surface that outranks it. Both are the
+          // volume's own when the grid has no per-class layers, and then t_own is the same
+          // number for every cell.
+          const int cell_layer =
+              geom::voxel_cell_layer(geometry.voxels, grid, walk.Index(grid));
+          const long long cell_rank = geom::volume_rank(
+              (cell_layer == geom::kNoClassLayer) ? vol.layer : cell_layer, best_vol);
+          real_t t_own = geom::kInfinity<real_t>();
+          for (int k = 0; k < n_cov; ++k) {
+            if (cov_rank[k] > cell_rank && cov_t[k] < t_own) { t_own = cov_t[k]; }
+          }
           // walk.t is the entry of the cell about to be drawn, so a cell straddling the
           // boundary is drawn: the part of it the grid owns is in front of the surface.
           //

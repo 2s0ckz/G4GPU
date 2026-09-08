@@ -68,8 +68,12 @@ rem has no path. test_voxel_materials needs one because what it checks - that a 
 rem transported as the material its class was assigned - was wrong for every phantom whose
 rem classes used a material no ordinary volume did, and the symptom was a gamma crossing 200 mm
 rem of tissue depositing nothing. See docs/RISK.md V20.
-set TESTS_SCENE=test_trajectory test_voxel_materials
+set TESTS_SCENE=test_trajectory test_voxel_materials test_voxel_layers
 
+rem test_voxel_layers is here for the same reason: what it checks - that a voxel class on a
+rem layer of its own transports as the volume that WINS its cells - is a property of a run,
+rem and the equivalence it checks it against is a second run of a second scene.
+rem
 rem A project with its own step hook AND NOTHING ELSE LINKED. It builds its own detector, so
 rem it needs no scene, and it must not be given one: a second translation unit that includes
 rem g4/G4RunManager.hh without the same G4STEP_HOOK sees G4RunManager holding a differently

@@ -19,6 +19,7 @@
 #include "g4/G4Types.hh"
 #include "geometry/bvh_build.hh"
 #include "geometry/solids.cuh"
+#include "geometry/voxels.cuh"
 
 namespace g4gpu::g4 {
 
@@ -42,6 +43,15 @@ struct SolidPool {
   /// the same reason: a flattened volume has no back-reference to the model solid it came
   /// from, so anything the renderer needs per voxel volume has to ride on the solid.
   std::vector<unsigned int> voxel_class_rgba;
+  /// One LAYER per voxel class, at the same offsets as voxel_class_rgba - the same run of
+  /// classes, so the same p[6] finds both.
+  ///
+  /// Always the same length as the colour run, filled with the volume's own layer for a volume
+  /// that named none. It has to be: the runs are concatenated over volumes, so a volume opting
+  /// out would shift every later volume's offset and the one number p[6] could no longer find
+  /// both. `any_class_layers` is what says whether any of it was chosen, and that flag rather
+  /// than emptiness is what decides whether the device and the navigator ever see it.
+  std::vector<int> voxel_class_layer;
   /// Triangles (9 reals each) and BVH nodes (8 reals each) for every mesh in the scene.
   /// G4TessellatedSolid::Build appends to both through geom::build_bvh.
   std::vector<G4double> tri;
@@ -70,6 +80,18 @@ struct SolidPool {
     voxel_class_rgba.insert(voxel_class_rgba.end(), rgba, rgba + n);
     return off;
   }
+  bool any_class_layers = false;   ///< did any volume name layers of its own?
+  /// Appends a volume's per-class layers. @p layers may be null, in which case the run is
+  /// filled with @p own - the volume's own layer - so the two runs stay the same length and
+  /// one offset finds both.
+  void add_class_layers(const int* layers, int n, int own) {
+    if (layers != nullptr) {
+      voxel_class_layer.insert(voxel_class_layer.end(), layers, layers + n);
+      any_class_layers = true;
+    } else {
+      voxel_class_layer.insert(voxel_class_layer.end(), static_cast<std::size_t>(n), own);
+    }
+  }
   int add_voxels(const short* cells, int n, const short* classes = nullptr) {
     const int off = static_cast<int>(voxel_cells.size());
     voxel_cells.insert(voxel_cells.end(), cells, cells + n);
@@ -80,6 +102,26 @@ struct SolidPool {
                                static_cast<short>(-1));
     }
     return off;
+  }
+  /// The per-cell pools as the navigator wants them.
+  ///
+  /// One place, because four host callers assemble a geom::Geometry by hand - the run
+  /// manager's scored mass, the builder's overlap check and its ray probe, and the tests -
+  /// and a field added to VoxelStore has to reach all of them or one of them silently gets
+  /// the old behaviour.
+  ///
+  /// The class arrays are handed over only when some class carries a layer. Otherwise the
+  /// navigator must not see them: `cls` non-null is what switches on the per-point layer
+  /// path, and paying for it when every class is on one layer would be a cost for nothing.
+  geom::VoxelStore<G4double> voxel_store() const {
+    geom::VoxelStore<G4double> vs{};
+    vs.material = voxel_cells.empty() ? nullptr : voxel_cells.data();
+    vs.count = static_cast<int>(voxel_cells.size());
+    if (any_class_layers && voxel_class_cells.size() == voxel_cells.size()) {
+      vs.cls = voxel_class_cells.data();
+      vs.class_layer = voxel_class_layer.data();
+    }
+    return vs;
   }
   geom::SolidStore<G4double> store() const {
     geom::SolidStore<G4double> st{};

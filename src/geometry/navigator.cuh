@@ -39,6 +39,24 @@ struct Volume {
   /// boundary, not only where the material changes, so a deposit belongs to exactly one cell.
   /// See geom::voxel_step and G4PSEnergyDeposit3D, which limits steps for the same reason.
   bool score_per_voxel = false;
+
+  /// PER-CLASS LAYERS: whether this volume's layer varies from point to point, and over what
+  /// range if it does. Only a voxel grid whose classes were given layers of their own can.
+  ///
+  /// The flag is what makes this safe to add. `layer` has no default and never has, so every
+  /// site that builds a Volume sets it; two more ints with no default would have been
+  /// whatever the stack held, and `layer_hi` reading as a small number silently PRUNES a
+  /// volume that should have ended the step. Off by default means every existing caller keeps
+  /// the behaviour it had, and the range is read only where the flag says it means something.
+  ///
+  /// What the range is for: `step_to_boundary` must decide, per volume, whether it can
+  /// possibly end the step, and it cannot walk a phantom's cells to find out. `layer_hi`
+  /// answers "could this outrank me anywhere", `layer_lo` answers "does it outrank me
+  /// everywhere", and only a volume that is neither pays for a cell walk. G4Flatten fills
+  /// them; `layer` itself is inside the range, because a cell with no class gets it.
+  bool has_class_layers = false;
+  int layer_lo = 0;
+  int layer_hi = 0;
 };
 
 template <typename real_t>
@@ -60,31 +78,92 @@ __host__ __device__ inline bool inside_volume(const Geometry<real_t>& g, int i,
   return inside(g.store, v.solid, to_local(v.xform, p));
 }
 
+/// True if volume @p i has a layer that varies from point to point - a voxel grid whose
+/// classes were given layers of their own. Everything else has one layer and answers faster.
+template <typename real_t>
+__host__ __device__ inline bool layer_varies(const Geometry<real_t>& g, int i) {
+  return g.volumes[i].has_class_layers;
+}
+
+/// The highest and lowest layer volume @p i can have anywhere. Its own layer unless its
+/// classes carry layers of their own. See Volume::has_class_layers.
+template <typename real_t>
+__host__ __device__ inline int layer_hi_of(const Geometry<real_t>& g, int i) {
+  const Volume<real_t>& v = g.volumes[i];
+  return v.has_class_layers ? v.layer_hi : v.layer;
+}
+template <typename real_t>
+__host__ __device__ inline int layer_lo_of(const Geometry<real_t>& g, int i) {
+  const Volume<real_t>& v = g.volumes[i];
+  return v.has_class_layers ? v.layer_lo : v.layer;
+}
+
+/// The layer volume @p i has AT @p p, in world coordinates.
+///
+/// For everything but a voxel grid with per-class layers this is the volume's own layer and
+/// the point is not looked at.
+template <typename real_t>
+__host__ __device__ inline int volume_layer_at(const Geometry<real_t>& g, int i,
+                                               const Vec3<real_t>& p) {
+  const Volume<real_t>& v = g.volumes[i];
+  if (!layer_varies(g, i) || v.solid.type != SolidType::kVoxelGrid) { return v.layer; }
+  return voxel_layer_at(g.voxels, voxel_grid_of(v.solid), to_local(v.xform, p), v.layer);
+}
+
+/// Volume @p i's priority at @p p, as one comparable number. See geom::volume_rank.
+template <typename real_t>
+__host__ __device__ inline long long volume_rank_at(const Geometry<real_t>& g, int i,
+                                                    const Vec3<real_t>& p) {
+  return volume_rank(volume_layer_at(g, i, p), i);
+}
+
 /// The volume owning @p p: the highest-layer volume containing it, later definition winning
 /// ties. kOutsideWorld if the point is outside the world.
 template <typename real_t>
 __host__ __device__ inline int locate(const Geometry<real_t>& g, const Vec3<real_t>& p) {
   if (!inside_volume(g, g.world, p)) { return kOutsideWorld; }
   int best = g.world;
-  int best_layer = g.volumes[g.world].layer;
+  long long best_rank = volume_rank(g.volumes[g.world].layer, g.world);
   for (int i = 0; i < g.n_volumes; ++i) {
     if (i == g.world) { continue; }
-    const int layer = g.volumes[i].layer;
-    if (layer < best_layer) { continue; }  // cannot win, even on a tie-break
+    // The cheap rejection first, and it has to use the volume's HIGHEST possible layer: a
+    // grid whose bone class outranks everything and whose air class outranks nothing cannot
+    // be dismissed on one number. layer_hi == layer_lo for every ordinary volume, so this
+    // costs the same comparison it always did.
+    if (volume_rank(layer_hi_of(g, i), i) < best_rank) { continue; }
     if (!inside_volume(g, i, p)) { continue; }
-    // layer > best_layer wins outright; layer == best_layer wins by being later.
+    const long long rank = volume_rank_at(g, i, p);
+    if (rank < best_rank) { continue; }
     best = i;
-    best_layer = layer;
+    best_rank = rank;
   }
   return best;
 }
 
 /// True if entering volume @p i would take ownership away from volume @p cur.
+///
+/// Layers only, no point: for two ordinary volumes that is the whole answer, and for anything
+/// with a per-point layer the caller has to ask at a point. The callers that must are
+/// step_to_boundary and the renderer's cell march; this remains for the rest.
 template <typename real_t>
 __host__ __device__ inline bool outranks(const Geometry<real_t>& g, int i, int cur) {
   const int li = g.volumes[i].layer;
   const int lc = g.volumes[cur].layer;
   return (li > lc) || (li == lc && i > cur);
+}
+
+/// True if volume @p i outranks @p rank ANYWHERE, and hence might end a step.
+template <typename real_t>
+__host__ __device__ inline bool could_outrank(const Geometry<real_t>& g, int i,
+                                              long long rank) {
+  return volume_rank(layer_hi_of(g, i), i) > rank;
+}
+
+/// True if volume @p i outranks @p rank EVERYWHERE, so entering it is enough to end a step.
+template <typename real_t>
+__host__ __device__ inline bool always_outranks(const Geometry<real_t>& g, int i,
+                                                long long rank) {
+  return volume_rank(layer_lo_of(g, i), i) > rank;
 }
 
 /// Distance along @p dir from @p p to the next point where locate() would return something
@@ -94,6 +173,13 @@ __host__ __device__ inline bool outranks(const Geometry<real_t>& g, int i, int c
 /// lower-ranked volume overlapping @p vol is invisible from inside it, which is exactly the
 /// property that makes the layer model work - no "subtract the daughter from the mother"
 /// bookkeeping is needed anywhere.
+///
+/// WITH PER-CLASS LAYERS, "outranks it" IS A QUESTION ABOUT A POINT. @p vol's own rank is
+/// taken at @p p, which is sound because a step inside a grid also ends wherever the class
+/// layer changes - see voxel_step - so the rank cannot change part-way through one. And a
+/// candidate grid may outrank @p vol in some of its cells and not others, in which case
+/// entering its box is not the answer and a cell walk is; that walk is bounded by the best
+/// distance already found, so a grid the ray merely clips costs a few cells.
 ///
 /// @param[out] next_volume  volume entered, or kOutsideWorld when @p vol was left, in which
 ///                          case the caller resolves the new volume with resolve_after_step
@@ -105,10 +191,31 @@ __host__ __device__ inline real_t step_to_boundary(const Geometry<real_t>& g, in
   real_t best = dist_out(g.store, v.solid, to_local(v.xform, p), dir_to_local(v.xform, dir));
   next_volume = kOutsideWorld;
 
+  const long long cur_rank = volume_rank_at(g, vol, p);
   for (int i = 0; i < g.n_volumes; ++i) {
-    if (i == vol || !outranks(g, i, vol)) { continue; }
+    if (i == vol || !could_outrank(g, i, cur_rank)) { continue; }
     const Volume<real_t>& u = g.volumes[i];
-    const real_t t = dist_in(g.store, u.solid, to_local(u.xform, p), dir_to_local(u.xform, dir));
+    const Vec3<real_t> ql = to_local(u.xform, p);
+    const Vec3<real_t> dl = dir_to_local(u.xform, dir);
+    if (layer_varies(g, i) && u.solid.type == SolidType::kVoxelGrid
+        && !always_outranks(g, i, cur_rank)) {
+      // Some of its classes win here and some do not, so the boundary that matters is a cell
+      // boundary inside it rather than its own surface.
+      const VoxelGrid<real_t> grid = voxel_grid_of(u.solid);
+      real_t t0 = real_t(0);
+      if (!inside(g.store, u.solid, ql)) {
+        t0 = dist_in(g.store, u.solid, ql, dl);
+        if (t0 >= best) { continue; }
+      }
+      const real_t tw = voxel_first_outranking(g.voxels, grid, ql + t0 * dl, dl, i, u.layer,
+                                               cur_rank, best - t0);
+      if (tw < kInfinity<real_t>() && t0 + tw < best) {
+        best = t0 + tw;
+        next_volume = i;
+      }
+      continue;
+    }
+    const real_t t = dist_in(g.store, u.solid, ql, dl);
     if (t < best) {
       best = t;
       next_volume = i;
