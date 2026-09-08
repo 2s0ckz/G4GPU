@@ -112,12 +112,20 @@ __host__ __device__ inline bool mesh_bbox_inside(const real_t* p, const Vec3<rea
 /// Nearest triangle hit with t in (t_min, t_max), or kInfinity. @p edge_dist_out reports how
 /// close that hit came to a triangle edge.
 template <typename real_t>
+/// @param tri_out  if not null, receives the index of the triangle that was hit, or -1.
+///        The renderer wants it: the face normal of that triangle is the exact surface normal,
+///        and this walk already knows which triangle won. The alternative is normal_at, which
+///        for a mesh falls through to numerical_normal - six containment tests, each of which
+///        for a mesh is up to four full parity counts. Twenty-four uncullable traversals for a
+///        number this walk had in hand. See docs/RISK.md V21.
 __host__ __device__ inline real_t mesh_nearest_hit(const SolidStore<real_t>& st,
                                                    const Solid<real_t>& s,
                                                    const Vec3<real_t>& o, const Vec3<real_t>& d,
                                                    real_t t_min, real_t t_max,
-                                                   real_t& edge_dist_out) {
+                                                   real_t& edge_dist_out,
+                                                   int* tri_out = nullptr) {
   edge_dist_out = real_t(1);
+  if (tri_out != nullptr) { *tri_out = -1; }
   if (st.tri == nullptr || st.bvh == nullptr) { return kInfinity<real_t>(); }
   const Vec3<real_t> inv_d = bvh_inv_dir(d);
 
@@ -126,6 +134,7 @@ __host__ __device__ inline real_t mesh_nearest_hit(const SolidStore<real_t>& st,
   stack[sp++] = s.a;  // this mesh's root node index
   real_t best = t_max;
   real_t best_edge = real_t(1);
+  int best_tri = -1;
 
   while (sp > 0) {
     const int ni = stack[--sp];
@@ -147,10 +156,30 @@ __host__ __device__ inline real_t mesh_nearest_hit(const SolidStore<real_t>& st,
       if (t <= t_min || t >= best) { continue; }
       best = t;
       best_edge = ed;
+      best_tri = first + k;
     }
   }
   edge_dist_out = best_edge;
+  if (tri_out != nullptr) { *tri_out = (best < t_max) ? best_tri : -1; }
   return (best < t_max) ? best : kInfinity<real_t>();
+}
+
+/// The face normal of triangle @p tri, unnormalised length aside.
+///
+/// The mesh's own winding decides which way it points, and a CAD import cannot be trusted to
+/// wind consistently - so callers that want an outward normal should flip it against the view
+/// direction rather than believe it.
+template <typename real_t>
+__host__ __device__ inline Vec3<real_t> mesh_triangle_normal(const SolidStore<real_t>& st,
+                                                             int tri) {
+  if (st.tri == nullptr || tri < 0) { return Vec3<real_t>{0, 0, real_t(1)}; }
+  const real_t* v = st.tri + static_cast<long long>(tri) * 9;
+  const Vec3<real_t> e1{v[3] - v[0], v[4] - v[1], v[5] - v[2]};
+  const Vec3<real_t> e2{v[6] - v[0], v[7] - v[1], v[8] - v[2]};
+  const Vec3<real_t> n = cross(e1, e2);
+  const real_t m2 = dot(n, n);
+  if (m2 <= real_t(0)) { return Vec3<real_t>{0, 0, real_t(1)}; }
+  return n * (real_t(1) / sqrt(m2));
 }
 
 /// How close to a triangle edge a hit may land before the parity count is untrustworthy: two

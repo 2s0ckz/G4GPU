@@ -150,15 +150,51 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     const Vec3<real_t> from = origin + travelled * dir;
     real_t best_t = geom::kInfinity<real_t>();
     int best_vol = -1;
+    int best_tri = -1;   // for a mesh: the triangle that was hit, so its face normal is free
     for (int v = 0; v < geometry.n_volumes; ++v) {
       if (!styles[v].solid || styles[v].a == 0) { continue; }
+      const auto& vol = geometry.volumes[v];
+
+      // A MESH TAKES THE CHEAP PATH: one BVH walk, and the normal comes off the triangle.
+      //
+      // The generic path below is the transport's, and it is right for the transport and
+      // ruinous for a picture. Per pixel, per layer, a mesh volume was paying:
+      //
+      //   inside_volume  -> mesh_inside, up to 4 full parity counts
+      //   dist_in        -> mesh_dist: one nearest hit plus up to 16 more parity counts,
+      //                     verifying that the hit is not a graze
+      //   normal_at      -> numerical_normal: six containment tests, up to 24 parity counts
+      //
+      // A parity count cannot be culled the way a nearest-hit walk can - there is no
+      // best-so-far to reject a subtree against - so it visits every leaf along the ray. That
+      // is what made a 100k-triangle import unusable while the BVH itself was fine.
+      //
+      // A picture needs none of it. The nearest hit ahead is the surface to draw, a graze is
+      // harmless to shade, and the face normal of the winning triangle is EXACT where the
+      // numerical gradient was an approximation. The inside test goes too: with a
+      // strictly-ahead hit the search cannot re-find the surface it just crossed, which is
+      // what that test was there to prevent.
+      if (vol.solid.type == geom::SolidType::kMesh) {
+        real_t edge = 0;
+        int tri = -1;
+        const real_t t = geom::mesh_nearest_hit(
+            geometry.store, vol.solid, geom::to_local(vol.xform, from),
+            geom::dir_to_local(vol.xform, dir), geom::kSurfTolerance<real_t>(),
+            geom::kInfinity<real_t>(), edge, &tri);
+        if (t < best_t) {
+          best_t = t;
+          best_vol = v;
+          best_tri = tri;
+        }
+        continue;
+      }
+
       // A volume the ray is already inside has no *entry* surface ahead of it, and asking
       // dist_in from inside gives a distance of about zero - so without this test the search
       // re-finds the volume just entered, paints its front face again, and does that until
       // the accumulated alpha saturates. The effect is that a half-transparent box renders
       // fully opaque and nothing behind it is ever reached. That is the whole bug.
       if (geom::inside_volume(geometry, v, from)) { continue; }
-      const auto& vol = geometry.volumes[v];
       // geometry.store, not the store-free overload. That overload passes an empty SolidStore,
       // whose `solids`, `aux`, `tri` and `bvh` are all null - so a boolean operand lookup
       // dereferences null and a mesh finds no triangles.
@@ -167,6 +203,7 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       if (t < best_t) {
         best_t = t;
         best_vol = v;
+        best_tri = -1;
       }
     }
     if (best_vol < 0 || best_t >= geom::kInfinity<real_t>()) { break; }
@@ -183,8 +220,13 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
 
     const Vec3<real_t> local_dir = geom::dir_to_local(vol.xform, dir);
     const Vec3<real_t> hit_local = geom::to_local(vol.xform, hit);
+    // The mesh's normal was found by the walk that found the hit; everything else asks.
     Vec3<real_t> n =
-        geom::dir_to_global(vol.xform, geom::normal_at(geometry.store, vol.solid, hit_local));
+        (best_tri >= 0)
+            ? geom::dir_to_global(vol.xform,
+                                  geom::mesh_triangle_normal<real_t>(geometry.store, best_tri))
+            : geom::dir_to_global(vol.xform,
+                                  geom::normal_at(geometry.store, vol.solid, hit_local));
     // Two-sided lighting: a head-on light plus a little ambient, so curvature reads.
     real_t ndl = -dot(n, dir);
     if (ndl < real_t(0)) { ndl = -ndl; }

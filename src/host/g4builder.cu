@@ -1111,8 +1111,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int main(int argc, char** argv) {
   App& a = g_app;
   int selftest_frames = 0;
+  /// -benchmesh N: import an N-triangle sphere, render a fixed number of frames, and print
+  /// milliseconds per frame. A performance claim about the viewer needs a number from the
+  /// viewer, not from a micro-benchmark of one function.
+  int bench_mesh = 0;
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "-benchmesh") == 0) {
+      bench_mesh = (i + 1 < argc) ? std::atoi(argv[i + 1]) : 200000;
+      continue;
+    }
     if (std::strcmp(argv[i], "-selftest") == 0) {
       selftest_frames = 50;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
@@ -1207,6 +1215,57 @@ int main(int argc, char** argv) {
       DispatchMessage(&msg);
     }
     if (!a.running) { break; }
+
+    // -benchmesh: import a mesh of the requested size, aim at it, and time the frames.
+    //
+    // Its own block rather than a selftest frame, because it must not be entangled with the
+    // selftest's model - and because the number it prints is the one to quote when claiming
+    // the viewer got faster. A micro-benchmark of one function is evidence about that
+    // function; this is evidence about the viewer.
+    if (bench_mesh > 0) {
+      static int bench_actual = 0;
+      if (frame == 3) {
+        // The generator lands on the next whole UV sphere, so what it built is what gets
+        // reported - quoting the request would put a number in the log that is not the number
+        // that was rendered.
+        bench_actual = InsertBenchMesh(a, bench_mesh, 60.0);
+        a.scene_dirty = true;
+      }
+      if (frame == 6) {
+        // Close enough that the mesh fills the view, so the rays actually reach triangles. A
+        // benchmark of a mesh off screen measures the box test that rejects it.
+        a.distance = 200.0f;
+        a.azimuth = 0.7f;
+        a.elevation = 0.35f;
+      }
+      if (frame >= 9) {
+        static double t_sum = 0;
+        static int t_n = 0;
+        static LARGE_INTEGER freq{}, prev{};
+        if (t_n == 0) {
+          QueryPerformanceFrequency(&freq);
+          QueryPerformanceCounter(&prev);
+        } else {
+          LARGE_INTEGER now{};
+          QueryPerformanceCounter(&now);
+          t_sum += 1000.0 * static_cast<double>(now.QuadPart - prev.QuadPart)
+                   / static_cast<double>(freq.QuadPart);
+          prev = now;
+        }
+        ++t_n;
+        // Bounded by frames as well as by samples, so a run that has nothing to time - an
+        // import that failed, a mesh that never appeared - still leaves rather than sitting
+        // in the message loop waiting for a frame count it will never reach. This is a batch
+        // mode; it has no window anyone is watching.
+        if (t_n > 40 || frame > 200) {
+          std::printf("benchmesh: %d triangles, %.2f ms per frame (%.1f fps) at %dx%d\n",
+                      bench_actual, t_sum / (t_n - 1), 1000.0 * (t_n - 1) / t_sum, a.width,
+                      a.height);
+          std::fflush(stdout);
+          a.running = false;
+        }
+      }
+    }
 
     if (selftest_frames > 0) {
       // Exercise the whole path without a human: insert solids, import a mesh, score it,

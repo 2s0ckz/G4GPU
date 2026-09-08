@@ -1990,6 +1990,70 @@ static void InsertSelftestVoxels(App& a) {
   Log("selftest: added an 8x8x8 voxel volume");
 }
 
+/// Writes a sphere of about @p want triangles as a binary STL and imports it.
+///
+/// For -benchmesh, which exists because "the viewer bogs down on big CAD files" is not a
+/// number. A UV sphere is a fair stand-in for a CAD import as far as the renderer is
+/// concerned: the cost is set by how many triangles the tree holds and how many the rays
+/// reach, not by whether the shape came from a CAD kernel.
+///
+/// Binary STL rather than ASCII: a 200,000-triangle ASCII file is 40 MB of text and the point
+/// here is to measure the render, not the parser.
+static int InsertBenchMesh(App& a, int want, double radius) {
+  const char* path = "D:/g4gpu/out/benchmesh.stl";
+  int bands = 4;
+  while (2 * bands * bands < want) { ++bands; }
+  const int nu = bands * 2, nv = bands;
+  std::vector<float> tri;
+  tri.reserve(static_cast<std::size_t>(nu) * nv * 2 * 9);
+  auto at = [&](int i, int j, double out[3]) {
+    const double u = 2.0 * 3.14159265358979 * i / nu;
+    const double v = 3.14159265358979 * j / nv;
+    out[0] = radius * std::sin(v) * std::cos(u);
+    out[1] = radius * std::sin(v) * std::sin(u);
+    out[2] = radius * std::cos(v);
+  };
+  for (int j = 0; j < nv; ++j) {
+    for (int i = 0; i < nu; ++i) {
+      double p[4][3];
+      at(i, j, p[0]);
+      at(i + 1, j, p[1]);
+      at(i + 1, j + 1, p[2]);
+      at(i, j + 1, p[3]);
+      const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+      for (const auto& q : idx) {
+        for (int k = 0; k < 3; ++k) {
+          for (int c = 0; c < 3; ++c) { tri.push_back(static_cast<float>(p[q[k]][c])); }
+        }
+      }
+    }
+  }
+  const unsigned n_tri = static_cast<unsigned>(tri.size() / 9);
+  FILE* f = std::fopen(path, "wb");
+  if (f == nullptr) {
+    Log("benchmesh: cannot write the STL");
+    return 0;
+  }
+  char header[80] = {0};
+  std::fwrite(header, 1, 80, f);
+  std::fwrite(&n_tri, sizeof n_tri, 1, f);
+  for (unsigned t = 0; t < n_tri; ++t) {
+    const float zero[3] = {0, 0, 0};
+    std::fwrite(zero, sizeof(float), 3, f);                       // facet normal, unused
+    std::fwrite(&tri[static_cast<std::size_t>(t) * 9], sizeof(float), 9, f);
+    const unsigned short attr = 0;
+    std::fwrite(&attr, sizeof attr, 1, f);
+  }
+  std::fclose(f);
+
+  if (!ImportFile(a, path)) {
+    Log("benchmesh: import failed");
+    return 0;
+  }
+  Log(Fmt("benchmesh: %u triangles", n_tri));
+  return static_cast<int>(n_tri);
+}
+
 /// Writes a small ASCII STL and imports it, so the pipeline exercises the mesh reader, the
 /// BVH build, mesh transport, the triangle sidecar and the loader that reads it back.
 ///

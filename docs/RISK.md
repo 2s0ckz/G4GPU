@@ -2850,3 +2850,92 @@ this bug was only caught because it produced 96%. A material mix-up worth 3% wou
 Not tightened here: it needs its own measurement of what the two sides actually do across
 models, and doing it inside a fix for something else is how a threshold gets miscalibrated in
 the first place - which is V10.
+
+### V21: the picture was paying the transport's price, and two optimisation claims that were not measured
+
+Reported as: the viewer is overwhelmed by CAD imports past about 100,000 triangles, while
+MeshLab shows the same file without trouble.
+
+Those are not the same job - MeshLab rasterises and this ray-traces - but that explains a
+constant factor, not a wall. A BVH ray-traces millions of triangles interactively.
+
+#### What it actually was
+
+Not the triangle count, and not the BVH. Measured on the host, `mesh_nearest_hit` at a million
+triangles costs 1.6x what it costs at two thousand, with tree depth going 11 to 19. The tree is
+a perfectly ordinary median split and it works.
+
+The renderer calls the TRANSPORT's geometry functions - deliberately, so that the picture shows
+what the transport sees, which is a good principle that turned out to have a price nobody had
+priced. Per pixel, per composited layer, a mesh volume was paying:
+
+```
+  inside_volume  -> mesh_inside          up to  4 full parity counts
+  dist_in        -> mesh_dist            1 nearest hit + up to 16 parity counts
+  normal_at      -> numerical_normal     up to 24 parity counts
+```
+
+A parity count is the expensive kind. A nearest-hit walk rejects any subtree whose box begins
+beyond the closest hit so far; a parity count has no best-so-far to reject against, so it
+visits every leaf along the ray. So the renderer was doing about forty-four uncullable
+traversals per pixel where one cullable one would do.
+
+`normal_at` is the worst and the silliest of the three: `numerical_normal` finite-differences
+the containment test six times to APPROXIMATE a normal that the BVH walk already knew exactly.
+The triangle it hit has a face normal. Returning it from the same walk is cheaper and more
+accurate than the gradient it replaces.
+
+A picture needs none of the rest either. The nearest hit ahead is the surface to draw, a graze
+is harmless to shade, and the inside test was there to stop the search re-finding the surface
+it had just crossed - which a strictly-ahead hit cannot do anyway.
+
+Measured in the viewer at 1680x960, before and after:
+
+```
+   triangles        before                after            gain
+      40,000    166.2 ms   6.0 fps    45.1 ms  22.2 fps    3.7x
+     200,704    223.4 ms   4.5 fps    53.5 ms  18.7 fps    4.2x
+     802,816    285.8 ms   3.5 fps    61.2 ms  16.3 fps    4.7x
+```
+
+#### And the two claims that were wrong
+
+**"double is costing 5.5 to 19x."** That one holds and is measured on the card: at one ray per
+pixel for 1440x880, `mesh_nearest_hit` takes 4.70 ms in float and 89.57 ms in double at 20k
+triangles, 18.76 against 103.75 at a million. Note what the double column does as triangles
+grow - 89.6, 88.9, 103.8, essentially FLAT - while float goes 4.7, 11.3, 18.8. In double the
+card is so short of FP64 units that the tree barely matters; the pass is arithmetic-bound. In
+float the cost tracks the tree, which is the healthy regime. The render pass is still double;
+that is the next change and it needs a render-only float copy of the geometry.
+
+**"front-to-back child ordering is usually worth a further 1.5 to 2x."** Said without measuring
+it. Implemented, it first appeared 1-3% SLOWER, which I reported as a regression - also wrong,
+because run-to-run variation ACROSS BUILDS of identical source is about 6% on this card, and a
+1-3% difference sits inside it. This is V10 again: a difference compared against nothing.
+
+Settled by building both variants and alternating them within one session, where the spread is
+about 1%:
+
+```
+  pair   unordered   ordered    diff
+     1       53.45     54.53   +1.08
+     2       53.59     57.54   +3.95
+     3       55.84     55.17   -0.67
+     4       54.16     54.43   +0.27
+     5       53.33     56.41   +3.08
+```
+
+Mean difference +1.54 ms, paired sd 1.93, so t = 1.79 on 4 degrees of freedom - not
+significant. The honest conclusion is neither of the two I gave: the change makes no
+measurable difference. It is dropped for that reason, which is different from being slower.
+
+Consistent with the arithmetic-bound finding above: when the limit is FP64 throughput,
+reordering traversal cannot help much either way. Worth retrying after the render pass is
+float, because the regime it failed in will have changed.
+
+#### The lesson worth keeping
+
+Two of the three things in this entry were standard optimisations quoted from memory rather
+than measured, and both were wrong for this code: one because the bottleneck was somewhere
+else entirely, one because the effect was below the noise. The one that paid was found by
+reading what the renderer actually called, per pixel, and counting.
