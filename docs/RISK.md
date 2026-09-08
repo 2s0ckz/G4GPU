@@ -3164,3 +3164,63 @@ volumes appears twice in `Detectors()`, and the test's helper summed its scorer 
 in G4SDManager says in as many words. The helper was copied from `test_voxel_materials.cu`,
 where it was latent because that test scores one volume; both are fixed.
 
+
+### V24: a rule extended in one place and left behind in another, twice
+
+Per-class layers (V23) made a volume's priority a function of the point. Two things that ask
+about layers were not told.
+
+#### The one that was reported
+
+"Overlap checking is not working for objects on one layer and voxel classes that are set to
+that layer." Exactly right, and the code says why in one line:
+
+```
+  if (scene.volumes[i].layer != scene.volumes[j].layer) { continue; }
+```
+
+A phantom on layer 2, a box over it on layer 3, one of the phantom's classes raised to 3. In
+those cells two volumes share the space at the same layer, which is what the refusal exists to
+prevent - the tie-break is list order, so the dose depends on the order the detector was built
+in. The pair was dismissed before any point was looked at, because 2 is not 3.
+
+The fix is the same shape as V23's: the pair test is on the RANGE of layers each volume can
+have, and every sample point is asked what layer each SIDE has there. Both halves matter. Range
+alone would refuse every phantom with a raised class, because the range meets the box's layer
+whether or not any cell does - which is why the test asserts that the clash CLEARS when the
+class moves off that layer, and not only that it appears when the class is on it.
+
+The lesson is not "remember the overlap check". It is that a feature which changes what a word
+means - here, what "on the same layer" means - has to be followed everywhere the word is used,
+and grep for the word is the way to do that. `layer` appears in the navigator, the renderer, the
+overlap check, the scored mass and the flattener; V23 did the first two and the last.
+
+#### The one that was not reported, and was worse
+
+The warning was made to name the offending class, because "the phantom overlaps the seat" is
+not actionable when the phantom has two hundred classes. It printed `Phantom[class 1]` where the
+class has the label `odd`.
+
+A label of "[class 1]" is the fallback for "this solid has no such class". So the lookup was
+reading the wrong solid - and the reason is a comment that had been in the file for a long time
+saying it could not:
+
+```
+  // The flattened scene's index is the placement's, and the model's solids are in the
+  // same order for a model built here
+```
+
+They are not. `G4Flatten` emits one volume per PLACEMENT, and a boolean's two operands are model
+solids that are never placed. One subtraction in the scene shifts every model index after it.
+
+What that was costing, in code that had nothing to do with this change: the pop-up's "raise the
+second one's layer" button read the flattened index as a model index and raised a DIFFERENT
+solid's layer - silently, leaving the clash it was offered to fix exactly where it was, and
+moving something the user had not asked about. Both sites now look the solid up by name, which
+is the back-reference the flattened scene does not carry.
+
+Two things worth keeping. An assumption written in a comment is not a checked assumption, and
+this one had been read and reproduced rather than tested. And it surfaced because a message was
+made to say something specific: "[class 1]" was wrong in a way "[the phantom]" could never have
+been. A message that names the thing it is about is a test that runs every time anyone looks.
+

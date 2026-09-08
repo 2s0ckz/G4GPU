@@ -78,7 +78,14 @@ constexpr int kBottomMin = 90;
 struct SameLayerOverlap {
   int a = -1;
   int b = -1;
+  /// The layer they CLASH ON, which is not necessarily either volume's own: a phantom on
+  /// layer 2 whose bone class is on 3 clashes with a box on 3, and the number to report is 3.
   int layer = 0;
+  /// The voxel class each side was in where they clashed, or -1 for a volume with no classes.
+  /// A phantom has two hundred of them and "the phantom overlaps the seat" is not enough to
+  /// act on; which class is.
+  int class_a = -1;
+  int class_b = -1;
   double mm3 = 0;       ///< estimated volume of the shared region
   /// That, as a fraction of the smaller solid - or negative when the smaller solid has no
   /// closed-form volume to divide by. Estimating one would mean sampling a solid whose
@@ -120,6 +127,8 @@ enum : int {
   kIdClassEye = 7000000,
   kIdSourceRow = 8000000,
   kIdPickRow = 9000000,
+  /// + solid * kIdClassStride + class, like the two above: the layer menu on each class row.
+  kIdClassLayer = 10000000,
   /// One block per solid inside kIdClassRow and kIdClassEye. Equal to the importer's
   /// kMaxClasses; tests/test_ui_layout.cu checks the two have not drifted apart.
   kIdClassStride = 4096,
@@ -258,16 +267,16 @@ struct App {
   /// How many entries d_class_rgba holds. Kept so the selftest can read back the array the
   /// kernel reads, rather than assuming a length from the class list of one solid.
   int class_rgba_n = 0;
+  /// The options for a voxel class's layer menu, rebuilt each frame and held here.
+  ///
+  /// In App rather than in the drawing function because ui::Select records the array it was
+  /// given and DrawOpenSelect reads it back at the END of the frame - a local would be gone
+  /// by then. One list serves every row, since the choices do not depend on the class.
+  std::vector<std::string> layer_opt_text;
+  std::vector<const char*> layer_opt;
   /// The float copy of the scene the render pass walks. See render/float_geometry.cuh: the
   /// transport stays double because the dose depends on it, and the picture does not.
   vis::FloatGeometry render_geom;
-  /// The per-class layer field in the colour pop-up, and which class it currently holds.
-  ///
-  /// Seeded when the pop-up opens on a different class rather than every frame: reseeding
-  /// every frame would overwrite what is being typed halfway through a number.
-  ui::NumberField class_layer_field{};
-  int class_layer_for = -1;
-  int class_layer_solid = -1;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
   /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
@@ -1205,7 +1214,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 60;
+      selftest_frames = 62;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1370,6 +1379,7 @@ int main(int argc, char** argv) {
       if (frame == 13) { SelftestUseWater(a); }
       // Before the run and before the project is saved, so both sides see it.
       if (frame == 13) { SelftestPhantomClassLayers(a); }
+      if (frame == 13) { SelftestCheckClassOverlapRefusal(a); }
       if (frame == 14) { a.sel_solid = 1; }
       if (frame == 14) {
         // The camera onto the transparent pair, and fewer events than a real run: 200 events
@@ -1741,6 +1751,134 @@ int main(int argc, char** argv) {
         a.distance = 900.f;
         a.azimuth = 0.9f;
         a.elevation = 0.25f;
+      }
+      // THE CLASS ROWS, AND WHAT THE VOLUME'S OWN FIELDS DO TO THEM.
+      //
+      // Three things at once, because they are one screen: the layer menu on each class row,
+      // the two columns that keep a material visible beside a long name, and the two "for
+      // all" rules that replaced a button.
+      //
+      // The rules are called rather than clicked - SetSolidMaterial and SetSolidLayer exist as
+      // functions for exactly this reason, since a selftest cannot synthesise a click on a
+      // pop-up's list row.
+      if (frame == 57) {
+        int ph = -1;
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (a.model.solids[i].name == "Phantom") { ph = static_cast<int>(i); }
+        }
+        if (ph < 0) {
+          std::printf("selftest: FAILED - no Phantom to open\n");
+        } else {
+          Solid& p = a.model.solids[static_cast<std::size_t>(ph)];
+          // A name far longer than the column, which is the reported case: an imported
+          // phantom is called after its file.
+          p.name = "adult_male_1mm_segmented_raw";
+          p.ui_expanded = true;
+          a.sel_solid = ph;
+          a.pfield_for = -2;
+          // And one class on a layer of its own, so the menu has something to show that is
+          // not the volume's.
+          if (p.voxel_classes.size() > 1) { p.voxel_classes[1].layer = p.layer + 3; }
+          a.model.Touch();
+          a.scene_dirty = true;
+        }
+      }
+      if (frame == 58) {
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_class_rows.png");
+        int ph = -1;
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (a.model.solids[i].name == "adult_male_1mm_segmented_raw") {
+            ph = static_cast<int>(i);
+          }
+        }
+        if (ph < 0) {
+          std::printf("selftest: FAILED - the renamed Phantom is gone\n");
+        } else {
+          const Solid& p = a.model.solids[static_cast<std::size_t>(ph)];
+          const int n_cls = static_cast<int>(p.voxel_classes.size());
+
+          // The volume's MATERIAL is every class's. Deliberately a material the classes do
+          // not already have, or the check would pass without the rule.
+          // Any material the classes do not already have. Named by that property rather than
+          // by looking for a bone: the first attempt asked for the last material in the list
+          // and got the one every class already carried, which the guard below caught and
+          // which is how this ended up specified rather than guessed.
+          const int have = p.voxel_classes.empty() ? -1 : p.voxel_classes[0].material;
+          int want = -1;
+          for (std::size_t m = 0; m < a.model.materials.size(); ++m) {
+            if (static_cast<int>(m) != have) {
+              want = static_cast<int>(m);
+              break;
+            }
+          }
+          bool already = true;
+          for (const VoxelClass& vc : p.voxel_classes) { already = already && vc.material == want; }
+          SetSolidMaterial(a, ph, want);
+          int wrong = 0;
+          for (const VoxelClass& vc : a.model.solids[static_cast<std::size_t>(ph)]
+                                          .voxel_classes) {
+            if (vc.material != want) { ++wrong; }
+          }
+          if (already) {
+            std::printf("selftest: FAILED - every class already had material %d, so setting "
+                        "the volume's proves nothing\n", want);
+          } else if (wrong != 0 || a.model.solids[static_cast<std::size_t>(ph)].material
+                                       != want) {
+            std::printf("selftest: FAILED - setting the volume's material left %d of %d "
+                        "classes on another one\n", wrong, n_cls);
+          } else {
+            std::printf("selftest: the volume's material is every class's (%d classes)\n",
+                        n_cls);
+          }
+
+          // And the volume's LAYER puts every class back on it.
+          const int before_own = static_cast<int>(
+              std::count_if(a.model.solids[static_cast<std::size_t>(ph)].voxel_classes.begin(),
+                            a.model.solids[static_cast<std::size_t>(ph)].voxel_classes.end(),
+                            [](const VoxelClass& vc) { return vc.layer != kInheritLayer; }));
+          SetSolidLayer(a, ph, 6);
+          int still_own = 0;
+          for (const VoxelClass& vc : a.model.solids[static_cast<std::size_t>(ph)]
+                                          .voxel_classes) {
+            if (vc.layer != kInheritLayer) { ++still_own; }
+          }
+          if (before_own == 0) {
+            std::printf("selftest: FAILED - no class had a layer of its own, so setting the "
+                        "volume's proves nothing\n");
+          } else if (still_own != 0
+                     || a.model.solids[static_cast<std::size_t>(ph)].layer != 6) {
+            std::printf("selftest: FAILED - setting the volume's layer left %d of %d classes "
+                        "on their own\n", still_own, n_cls);
+          } else {
+            std::printf("selftest: the volume's layer carries every class (%d had their "
+                        "own)\n", before_own);
+          }
+        }
+      }
+      // And the menu OPEN, which is the only way to see that its list lands where the row is
+      // rather than off the panel or behind it. Opened by id, the way frame 45 opens the
+      // colormap menu - there is no click to synthesise.
+      if (frame == 59) {
+        for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+          if (a.model.solids[i].name == "adult_male_1mm_segmented_raw") {
+            a.uic.open_select =
+                kIdClassLayer + static_cast<int>(i) * kIdClassStride + 1;
+          }
+        }
+        if (a.uic.open_select == 0) {
+          std::printf("selftest: FAILED - no class layer menu to open\n");
+        }
+      }
+      if (frame == 60) {
+        if (a.uic.block.w <= 0 || a.uic.block.h <= 0) {
+          std::printf("selftest: FAILED - the class layer menu opened but painted no list\n");
+        } else {
+          std::printf("selftest: a voxel class's layer menu opens on its own row (%d x %d at "
+                      "%d,%d)\n", a.uic.block.w, a.uic.block.h, a.uic.block.x,
+                      a.uic.block.y);
+        }
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_class_layer_menu.png");
+        a.uic.open_select = 0;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

@@ -341,6 +341,24 @@ findstr /C:"a run with a same-layer overlap was refused" "%TEMP%\g4gpu_builder.t
   type "%TEMP%\g4gpu_builder.txt"
   exit /b 1
 )
+rem And the same rule where the layer belongs to a CLASS rather than to the volume: a phantom
+rem on layer 2 whose bone class is on 3 clashes with a box on 3, in those cells and nowhere
+rem else. The check compared the two VOLUMES and saw nothing at all.
+findstr /C:"a voxel class on another volume" "%TEMP%\g4gpu_builder.txt" >nul || (
+  echo FATAL: the builder selftest did not prove the PER-CLASS same-layer refusal.
+  echo        A voxel class raised to another volume's layer shares that space with it at
+  echo        the same layer, so which one owns it depends on list order and a run must be
+  echo        refused rather than report a dose that depends on the build order.
+  type "%TEMP%\g4gpu_builder.txt"
+  exit /b 1
+)
+findstr /C:"it clears when the class moves off that layer" "%TEMP%\g4gpu_builder.txt" >nul || (
+  echo FATAL: the per-class overlap check did not CLEAR when the class moved off that layer,
+  echo        so it is flagging pairs on their layer RANGE rather than on where the two are
+  echo        actually on one layer - which would refuse every phantom with a raised class.
+  type "%TEMP%\g4gpu_builder.txt"
+  exit /b 1
+)
 findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_builder.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the builder selftest logged a failure.

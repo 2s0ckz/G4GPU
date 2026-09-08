@@ -59,9 +59,28 @@ losing to the same. **Per-class layers are the third answer**: one volume that o
 neighbour where it is bone and loses where it is air.
 
 `VoxelClass::layer` carries it, `kInheritLayer` means "the volume's", and that is a state of its
-own rather than a copy of the volume's number - see the cost note below. In the GUI it is a
-checkbox and a number in the per-class colour pop-up (click a class's swatch), and a class with
-one shows `L<n>` beside its material in the solid list.
+own rather than a copy of the volume's number - see the cost note below.
+
+**In the GUI it is a menu on the class's own row, beside its material.** Expand a voxel volume
+in the solids list and each class has one; the first entry is the volume's own layer, which is
+what every class has until someone says otherwise, and the rest run from 0 to a little above
+the highest layer anything in the model uses. It was in the per-class colour pop-up first,
+which is two clicks away from the row it belongs to and behind a control that says "colour".
+
+A menu rather than a number field for a mechanical reason: a field needs an edit buffer that
+survives frames, and there is one buffer for the whole UI because exactly one thing is being
+edited at a time (`ui::EditBuffer`) - so two hundred class rows cannot each have one. A
+`ui::Select` keeps no state of its own; the open one lives in the Context, by id.
+
+**The volume's own material and layer are the "for all" controls.** Assign material on a voxel
+volume sets every class as well - every cell takes its material from its class, so the volume's
+own is only the fallback for a cell that matched none, and "the material of the phantom" cannot
+mean anything else. Setting the volume's layer puts every class back to inheriting, which is
+the same statement about layers. Both are logged, because both discard choices that may have
+been made one row at a time; both are `SetSolidMaterial` and `SetSolidLayer`, which exist as
+functions so the selftest can call them - a click on a pop-up's list row is not something it
+can synthesise. There is no longer a separate "Material for all" button: a second control that
+was a special case of the first is one control and a thing to explain.
 
 **A layer here is the same number a placement's layer is and is compared the same way**: higher
 wins, and a tie goes to whichever was placed later. So a class on the volume's own layer
@@ -101,6 +120,30 @@ the volume's own number and the cost goes away again. `build_scene.hh` and
 disagreed about whether a phantom HAS per-class layers, the builder and the project it
 generates would transport it differently.
 
+### And the overlap check follows it
+
+"Two volumes on the same layer, overlapping" is refused, because the tie-break is list order
+and a dose that depends on it is not a number. Once a class carries a layer, **that question is
+about a POINT**: a phantom on layer 2 whose bone class is on 3 clashes with a box on 3, in the
+bone cells and nowhere else.
+
+So `FindSameLayerOverlaps` tests the RANGE of layers each volume can have - one number for
+everything but such a grid - and then asks every sample point what layer each side has there,
+counting only the points where the two agree. A box over a phantom's air on 2 while the box is
+on 3 is exactly what the layer model is for; refusing that would refuse the feature.
+
+The warning names the class by its label - `Phantom[bone] and Seat overlap on layer 3` - because
+"the phantom overlaps the seat" is not something you can act on when the phantom has two hundred
+classes and one of them is the problem.
+
+That naming turned up a separate bug worth knowing about. The overlap list carries FLATTENED
+volume indices, and the code read them as model solid indices "for a model built here". They do
+not match: `G4Flatten` emits one volume per PLACEMENT, and a boolean's two operands are model
+solids that are never placed - so a scene with one subtraction in it shifts every later index.
+The pop-up's "raise the second one's layer" button was therefore raising a different solid's
+layer, silently, leaving the clash exactly where it was. Both now look the solid up by name,
+which is the back-reference the flattened scene does not carry.
+
 ### What is checked
 
 * `tests/test_voxels.cu` - who owns each cell, the material each reports, the step that ends at
@@ -116,6 +159,11 @@ generates would transport it differently.
   project is saved, so the builder and the generated project are compared with the feature in
   play - which is the only thing that exercises the `.classes` sidecar and the emitted
   `ClassLayers` call.
+* and it raises a class onto the covering box's layer and checks three things: the clash is
+  found, the run is refused, and **it clears when the class moves off that layer** - the last
+  being what says the range test did not simply start flagging every pair whose ranges meet.
+  The phantom's range is 2 to 5 and the box sits on 3 either way, so the pair stays a candidate
+  and only the per-point comparison can clear it.
 
 ## How a step inside one works
 

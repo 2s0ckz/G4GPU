@@ -1321,8 +1321,50 @@ inline bool ListRow(Context& ctx, int id, const Rect& r, const std::string& labe
     ctx.canvas.StrokeRect(sw, theme::kBorder);
     x += sw.w + 8;
   }
-  ctx.canvas.Text(x, r.y + (r.h - ctx.canvas.font->glyph_h) / 2, label,
-                  selected ? theme::kText : theme::kTextDim);
+  ctx.canvas.TextFit(x, r.y + (r.h - ctx.canvas.font->glyph_h) / 2, label,
+                     selected ? theme::kText : theme::kTextDim, r.x + r.w - x - 6);
+  return clicked;
+}
+
+/// A list row in TWO COLUMNS, each keeping a fixed share of the row whatever is in it.
+///
+/// One label with the two fields padded into it - `Fmt("%-12s %s", name, material)` - looks
+/// like columns until a name is longer than the padding, and then the second field slides
+/// right and off the end of the row. Which is not a cosmetic problem: the material is the
+/// field you scan a solids list FOR, and a phantom imported from a file called
+/// `adult_male_1mm_segmented.raw` pushed it out of view entirely.
+///
+/// So the row is split by proportion and each column is ellipsized inside its own share. A
+/// long name loses its tail; the material stays where it is on every row, which is what makes
+/// a column a column.
+inline bool ListRow2(Context& ctx, int id, const Rect& r, const std::string& left,
+                     const std::string& right, bool selected, Color swatch = 0,
+                     int left_pct = 58) {
+  const bool hover = ctx.Hovering(r);
+  if (hover) { ctx.hot = id; }
+  const bool clicked = hover && ctx.in->left_pressed;
+  if (selected) {
+    ctx.canvas.FillRect(r, rgba(86, 156, 214, 60));
+  } else if (hover) {
+    ctx.canvas.FillRect(r, rgba(255, 255, 255, 14));
+  }
+  int x = r.x + 6;
+  if (swatch != 0) {
+    const Rect sw = ListRowSwatchRect(ctx, r);
+    ctx.canvas.FillRect(sw, swatch);
+    ctx.canvas.StrokeRect(sw, theme::kBorder);
+    x += sw.w + 8;
+  }
+  const Color col = selected ? theme::kText : theme::kTextDim;
+  const int y = r.y + (r.h - ctx.canvas.font->glyph_h) / 2;
+  const int avail = r.x + r.w - x - 6;
+  int lw = (avail > 0) ? avail * left_pct / 100 : 0;
+  // A right column narrower than a few characters says nothing; below that the left one gives
+  // way, because a truncated name is still recognisable and a truncated material is not.
+  const int min_right = 9 * ctx.canvas.font->glyph_w;
+  if (avail - lw < min_right) { lw = (avail > min_right) ? avail - min_right : 0; }
+  ctx.canvas.TextFit(x, y, left, col, lw - 6);
+  ctx.canvas.TextFit(x + lw, y, right, col, avail - lw);
   return clicked;
 }
 
@@ -1341,6 +1383,17 @@ inline int ListRowRenamable(Context& ctx, int id, const Rect& r, const std::stri
     return 0;
   }
   return ListRow(ctx, id, r, label, selected, swatch) ? 1 : 0;
+}
+
+/// The same, in two columns. See ListRow2 for why the columns are fixed shares.
+inline int ListRowRenamable2(Context& ctx, int id, const Rect& r, const std::string& left,
+                             const std::string& right, bool selected, bool editing,
+                             std::string& buffer, Color swatch = 0, int left_pct = 58) {
+  if (editing) {
+    if (TextField(ctx, id, r, buffer, left, 40)) { return 2; }
+    return 0;
+  }
+  return ListRow2(ctx, id, r, left, right, selected, swatch, left_pct) ? 1 : 0;
 }
 
 /// A scrolling text log. `scroll` is the first visible line; a negative value pins to the end,

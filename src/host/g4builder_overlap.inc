@@ -6,6 +6,17 @@
 // then reports is arbitrary - the same detector with the volumes added in the other order
 // gives a different answer, and nothing says so.
 //
+// "ON THE SAME LAYER" IS A QUESTION ABOUT A POINT, not about two volumes. Once a voxel class
+// can carry a layer of its own, a phantom on layer 2 whose bone class is on 3 clashes with a
+// box on 3 - in the bone cells, and nowhere else. This compared the two VOLUMES' layers and
+// so saw nothing at all: 2 is not 3, and the pair was dismissed before any point was looked
+// at. Reported exactly that way.
+//
+// So the pair test is now on the RANGE of layers each volume can have, which is one number
+// for everything but such a grid, and every sample point is asked what layer each side has
+// THERE. A phantom whose bone is on 3 and whose air is on 2, against a box on 3, is a
+// candidate by range and a clash only in the bone.
+//
 // So it is refused. A run with an unresolved same-layer overlap does not produce a wrong
 // number that needs interpreting; it produces a number whose meaning depends on the insertion
 // order, which is worse.
@@ -18,7 +29,7 @@
 //      axis-aligned extent gives a world box that contains the solid. Boxes that miss cannot
 //      overlap.
 //   2. for the pairs that survive, sample the INTERSECTION of the two boxes and ask how many
-//      samples are inside both solids.
+//      samples are inside both solids AND on the same layer as each other there.
 //
 // Sampling where the overlap must be, rather than throughout one of the volumes, is what
 // makes the test sensitive to a small overlap. Sampling the smaller volume's own bounding
@@ -33,6 +44,28 @@
 // jittered lattice rather than independent points, because a lattice cannot leave half the
 // box empty by chance, and a thin sliver is exactly the case where that matters.
 
+
+/// The voxel class containing @p p in volume @p v, or -1 if it has none.
+///
+/// For the message. "The phantom overlaps the seat" is not something a user can act on when
+/// the phantom has two hundred classes and one of them is the problem.
+static int ClassAt(const geom::Geometry<G4double>& g, const g4::FlatScene& scene, int v,
+                   const g4gpu::Vec3<G4double>& p) {
+  (void)scene;
+  const auto& vol = g.volumes[v];
+  if (vol.solid.type != geom::SolidType::kVoxelGrid || g.voxels.cls == nullptr) { return -1; }
+  const geom::VoxelGrid<G4double> grid = geom::voxel_grid_of(vol.solid);
+  const g4gpu::Vec3<G4double> q = geom::to_local(vol.xform, p);
+  int ijk[3];
+  geom::voxel_cell_of(grid, q, ijk);
+  for (int k = 0; k < 3; ++k) {
+    if (ijk[k] < 0 || ijk[k] >= grid.n[k]) { return -1; }
+  }
+  const int cell = grid.index(ijk[0], ijk[1], ijk[2]);
+  if (cell < 0 || cell >= g.voxels.count) { return -1; }
+  const int c = static_cast<int>(g.voxels.cls[cell]);
+  return (c >= 0 && c < grid.class_count) ? c : -1;
+}
 
 /// Finds same-layer overlaps in the flattened scene.
 ///
@@ -85,7 +118,12 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
     if (i == scene.world) { continue; }
     for (int j = i + 1; j < n; ++j) {
       if (j == scene.world) { continue; }
-      if (scene.volumes[i].layer != scene.volumes[j].layer) { continue; }
+      // Could they be on the same layer ANYWHERE: do the two layer ranges meet. Identical to
+      // comparing the two layers for every volume that has only one, which is all of them
+      // until a voxel class is given one of its own.
+      const int lo_i = geom::layer_lo_of(g, i), hi_i = geom::layer_hi_of(g, i);
+      const int lo_j = geom::layer_lo_of(g, j), hi_j = geom::layer_hi_of(g, j);
+      if (hi_i < lo_j || hi_j < lo_i) { continue; }
 
       // Where both boxes are. Empty on any axis and they cannot share a point.
       double blo[3], bhi[3];
@@ -109,6 +147,8 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
         return static_cast<double>(state >> 8) / static_cast<double>(1u << 24);
       };
       int in_both = 0;
+      int clash_layer = 0;
+      int clash_cls_a = -1, clash_cls_b = -1;
       for (int ix = 0; ix < kSide; ++ix) {
         for (int iy = 0; iy < kSide; ++iy) {
           for (int iz = 0; iz < kSide; ++iz) {
@@ -116,7 +156,19 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
             const g4gpu::Vec3<G4double> p{blo[0] + f[0] * (bhi[0] - blo[0]),
                                           blo[1] + f[1] * (bhi[1] - blo[1]),
                                           blo[2] + f[2] * (bhi[2] - blo[2])};
-            if (geom::inside_volume(g, i, p) && geom::inside_volume(g, j, p)) { ++in_both; }
+            if (!geom::inside_volume(g, i, p) || !geom::inside_volume(g, j, p)) { continue; }
+            // Sharing a point is not the problem; sharing a point AT THE SAME LAYER is. A
+            // box over a phantom's air on 2 while the box is on 3 is exactly what the layer
+            // model is for, and refusing it would refuse the feature.
+            const int li = geom::volume_layer_at(g, i, p);
+            const int lj = geom::volume_layer_at(g, j, p);
+            if (li != lj) { continue; }
+            if (in_both == 0) {
+              clash_layer = li;
+              clash_cls_a = ClassAt(g, scene, i, p);
+              clash_cls_b = ClassAt(g, scene, j, p);
+            }
+            ++in_both;
           }
         }
       }
@@ -127,7 +179,9 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
       SameLayerOverlap o;
       o.a = i;
       o.b = j;
-      o.layer = scene.volumes[i].layer;
+      o.layer = clash_layer;
+      o.class_a = clash_cls_a;
+      o.class_b = clash_cls_b;
       o.mm3 = box_mm3 * in_both / kSamples;
       // As a share of the smaller solid - but only when BOTH have a closed form to divide by,
       // because otherwise there is no telling which of them is smaller and "% of the smaller
@@ -143,6 +197,54 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
     }
   }
   return out;
+}
+
+/// The model solid a flattened volume came from, BY NAME, or -1.
+///
+/// Not by index. The index was assumed to match "for a model built here" - it is written down
+/// that way in the pop-up below - and it does not: G4Flatten emits one volume per PLACEMENT,
+/// and a boolean's two operands are model solids that are never placed. Put a subtraction in
+/// the scene and every model solid after it sits at a different index from its volume.
+///
+/// What that was costing: the pop-up's "raise the second one's layer" button raised whatever
+/// model solid happened to sit at the flattened index - a different solid, silently, and the
+/// clash it was meant to fix stayed exactly where it was. Found because a class label came
+/// out as "[class 1]" when the class has the label "odd": the lookup was reading a solid with
+/// no classes at all.
+///
+/// Names are unique - InsertShape makes them so, and the flattener names each placement after
+/// its solid - so a name is the back-reference the scene does not carry.
+static int ModelIndexOf(const App& a, int vol) {
+  if (a.run_manager == nullptr) { return -1; }
+  const auto& scene = a.run_manager->GetScene();
+  if (vol < 0 || vol >= static_cast<int>(scene.names.size())) { return -1; }
+  const std::string& want = scene.names[static_cast<std::size_t>(vol)];
+  for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+    if (a.model.solids[i].name == want) { return static_cast<int>(i); }
+  }
+  return -1;
+}
+
+/// One side of a clash, named: the volume, and the class if it was one of a phantom's.
+///
+/// The class's LABEL where there is one, because that is what the user gave it - "bone" says
+/// what to do about it and "class 37" does not.
+static std::string OverlapSideName(const App& a, int vol, int cls) {
+  const auto& scene = a.run_manager->GetScene();
+  std::string name = (vol >= 0 && vol < static_cast<int>(scene.names.size()))
+                         ? scene.names[static_cast<std::size_t>(vol)]
+                         : std::string("?");
+  if (cls < 0) { return name; }
+  std::string label;
+  const int mi = ModelIndexOf(a, vol);
+  if (mi >= 0) {
+    const Solid& s = a.model.solids[static_cast<std::size_t>(mi)];
+    if (cls < static_cast<int>(s.voxel_classes.size())) {
+      const VoxelClass& vc = s.voxel_classes[static_cast<std::size_t>(cls)];
+      label = vc.label.empty() ? Fmt("%g", vc.value) : vc.label;
+    }
+  }
+  return name + (label.empty() ? Fmt("[class %d]", cls) : ("[" + label + "]"));
 }
 
 /// Recomputes the same-layer overlap list. Called after a scene rebuild, not per frame: it
@@ -169,15 +271,14 @@ static void RefreshOverlaps(App& a) {
   }
   const auto& scene = a.run_manager->GetScene();
   for (const SameLayerOverlap& o : a.overlaps) {
+    const std::string na = OverlapSideName(a, o.a, o.class_a);
+    const std::string nb = OverlapSideName(a, o.b, o.class_b);
     if (o.fraction >= 0) {
       Log(Fmt("WARNING: %s and %s overlap on layer %d (%.3g mm3, %.3g%% of the smaller one)",
-              scene.names[static_cast<std::size_t>(o.a)].c_str(),
-              scene.names[static_cast<std::size_t>(o.b)].c_str(), o.layer, o.mm3,
-              100 * o.fraction));
+              na.c_str(), nb.c_str(), o.layer, o.mm3, 100 * o.fraction));
     } else {
-      Log(Fmt("WARNING: %s and %s overlap on layer %d (%.3g mm3)",
-              scene.names[static_cast<std::size_t>(o.a)].c_str(),
-              scene.names[static_cast<std::size_t>(o.b)].c_str(), o.layer, o.mm3));
+      Log(Fmt("WARNING: %s and %s overlap on layer %d (%.3g mm3)", na.c_str(), nb.c_str(),
+              o.layer, o.mm3));
     }
   }
   Log("  Two volumes on the same layer have no resolution: which one owns the shared space");
@@ -206,12 +307,12 @@ static void DrawOverlapPopup(App& a) {
                                     ? Fmt("%.3g mm3, %.3g%% of the smaller", o.mm3,
                                           100 * o.fraction)
                                     : Fmt("%.3g mm3", o.mm3);
-      c.canvas.Text(r.x + 22, y,
-                    Fmt("%-16s and %-16s   layer %d   %s",
-                        scene.names[static_cast<std::size_t>(o.a)].c_str(),
-                        scene.names[static_cast<std::size_t>(o.b)].c_str(), o.layer,
-                        share.c_str()),
-                    ui::theme::kText);
+      c.canvas.TextFit(r.x + 22, y,
+                       Fmt("%s and %s   layer %d   %s",
+                           OverlapSideName(a, o.a, o.class_a).c_str(),
+                           OverlapSideName(a, o.b, o.class_b).c_str(), o.layer,
+                           share.c_str()),
+                       ui::theme::kText, r.w - 36);
       y += lh;
     }
   }
@@ -237,14 +338,16 @@ static void DrawOverlapPopup(App& a) {
 
   if (ui::Button(c, 870, {r.x + 14, y, 200, row + 2}, "Raise the second one's layer")) {
     if (!a.overlaps.empty() && a.run_manager != nullptr) {
-      // The flattened scene's index is the placement's, and the model's solids are in the
-      // same order for a model built here - which is why this is offered as a shortcut and
-      // the panel is still where a layer is normally set.
-      const int b = a.overlaps.front().b;
-      if (b >= 0 && b < static_cast<int>(a.model.solids.size())) {
-        ++a.model.solids[static_cast<std::size_t>(b)].layer;
-        a.model.Touch();
-        a.scene_dirty = true;
+      // By name, not by index. See ModelIndexOf: a boolean's operands are model solids that
+      // are never placed, so the flattened index this list carries is not the model index and
+      // this button was raising a different solid's layer.
+      //
+      // Through SetSolidLayer, so a voxel volume's classes follow it. Raising the volume and
+      // leaving a class behind on the layer it was clashing on would have left the clash
+      // exactly where it was, and the pop-up would have come straight back.
+      const int b = ModelIndexOf(a, a.overlaps.front().b);
+      if (b >= 0) {
+        SetSolidLayer(a, b, a.model.solids[static_cast<std::size_t>(b)].layer + 1);
         Log(Fmt("%s is now on layer %d", a.model.solids[static_cast<std::size_t>(b)].name.c_str(),
                 a.model.solids[static_cast<std::size_t>(b)].layer));
       }

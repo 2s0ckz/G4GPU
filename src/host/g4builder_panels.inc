@@ -852,10 +852,70 @@ static void DrawMenuBar(App& a) {
   c.canvas.TextRight(a.width - 10, (kMenuH - a.font.glyph_h) / 2, title, ui::theme::kTextDim);
 }
 
-// ---------------------------------------------------------------- deleting, and the panels
+// ---------------------------------------------------------------- what a volume's own
+// material and layer mean for its classes
 //
-// The panels are in their own files. They came to nearly seven hundred lines between them,
-// which is most of this one, and they are the part that changes most.
+// Both are named functions rather than code inside the controls that trigger them, and there
+// are two reasons that is worth the indirection.
+//
+// The first is that these are the ONLY "for all" gestures left. There used to be a "Material
+// for all" button beside Assign material, which is a second control that is a special case of
+// the first - and the answer to "how do I set every class" being a different button from "how
+// do I set the material" is a thing to explain rather than a thing to see.
+//
+// The second is that the behaviour is worth asserting, and a button is not callable. The
+// builder's selftest calls both of these and checks what they did to the classes; a click is
+// not something it can synthesise.
+
+/// A voxel volume's material, and therefore every one of its classes'.
+///
+/// Every cell takes its material from its class; the volume's own is the fallback for a cell
+/// whose value matched no class at all. So "the material of the phantom" cannot sensibly mean
+/// anything else. A segmentation's classes nearly all want one material - soft tissue - with a
+/// handful of exceptions, so the route to a phantom that transports is to set the volume here
+/// and then correct the bone in its own row.
+///
+/// Logged, because it discards choices that may have been made one row at a time.
+static void SetSolidMaterial(App& a, int solid, int material) {
+  if (solid < 0 || solid >= static_cast<int>(a.model.solids.size())) { return; }
+  Solid& s = a.model.solids[static_cast<std::size_t>(solid)];
+  s.material = material;
+  if (!s.voxel_classes.empty()) {
+    for (VoxelClass& vc : s.voxel_classes) { vc.material = material; }
+    if (material >= 0 && material < static_cast<int>(a.model.materials.size())) {
+      Log(Fmt("%s: all %d classes are now %s", s.name.c_str(),
+              static_cast<int>(s.voxel_classes.size()),
+              a.model.materials[static_cast<std::size_t>(material)].name.c_str()));
+    }
+  }
+  a.model.Touch();
+  a.scene_dirty = true;
+}
+
+/// A solid's layer, and for a voxel volume every one of its classes'.
+///
+/// Putting the classes back to inheriting is what makes this mean "all of them": a class that
+/// inherits IS on the volume's layer, so one number moves the whole phantom. The exceptions
+/// are then set one row at a time, which is the order the work actually happens in - you
+/// discover that the bone has to win after you have placed the phantom, not before.
+static void SetSolidLayer(App& a, int solid, int layer) {
+  if (solid < 0 || solid >= static_cast<int>(a.model.solids.size())) { return; }
+  Solid& s = a.model.solids[static_cast<std::size_t>(solid)];
+  s.layer = layer;
+  int changed = 0;
+  for (VoxelClass& vc : s.voxel_classes) {
+    if (vc.layer != kInheritLayer) {
+      vc.layer = kInheritLayer;
+      ++changed;
+    }
+  }
+  if (changed > 0) {
+    Log(Fmt("%s: %d class%s put back on the volume's layer, now %d", s.name.c_str(), changed,
+            changed == 1 ? "" : "es", layer));
+  }
+  a.model.Touch();
+  a.scene_dirty = true;
+}
 
 // ---------------------------------------------------------------- deleting, and the panels
 //
@@ -925,11 +985,9 @@ static void DrawColorPopup(App& a) {
   // a whole solid at 0 is indistinguishable from a deleted one, which is why that keeps its
   // floor of 5%.
   double min_opacity = 5.0;
-  VoxelClass* pclass = nullptr;   ///< the class being edited, or null for the whole solid
   if (a.popup_target2 >= 0
       && a.popup_target2 < static_cast<int>(sol.voxel_classes.size())) {
     VoxelClass& vc = sol.voxel_classes[static_cast<std::size_t>(a.popup_target2)];
-    pclass = &vc;
     pr = &vc.r;
     pg = &vc.g;
     pb = &vc.b;
@@ -942,10 +1000,8 @@ static void DrawColorPopup(App& a) {
 
   const int cell = 22;
   const int cols = 12, rows = 6;
-  // A class gets one row taller, for its layer.
   const ui::Rect box{a.width / 2 - (cols * cell) / 2 - 10, a.height / 2 - 140,
-                     cols * cell + 20,
-                     rows * cell + 150 + ((pclass != nullptr) ? a.font.glyph_h + 12 : 0)};
+                     cols * cell + 20, rows * cell + 150};
   ui::Panel(c, box);
   c.canvas.Text(box.x + 10, box.y + 8, title, ui::theme::kText);
 
@@ -1023,47 +1079,9 @@ static void DrawColorPopup(App& a) {
   }
   y += a.font.glyph_h + 10;
 
-  // THE CLASS'S LAYER, which is not a display setting: it decides who owns the space where
-  // this class overlaps another volume, for the transport as much as for the picture.
-  //
-  // Three states, not two: this class's own layer, or the volume's. Inheriting is a state of
-  // its own rather than a copy of the volume's number, because the navigator only takes its
-  // per-point layer path when a class actually differs - a phantom whose classes all inherit
-  // costs nothing, and one whose classes were each set to the volume's own number would
-  // otherwise cost the same as one that really does differ.
-  if (pclass != nullptr) {
-    // A CHECKBOX AND A NUMBER, not a number with a blank state. "Inherit the volume's layer"
-    // is a real third state and it has to be expressible, but NumberField carries its value
-    // through atof, where an empty string and a typed 0 are the same number - so blank could
-    // not have meant inherit without the field growing a notion of emptiness it does not have.
-    bool own = (pclass->layer != kInheritLayer);
-    const bool toggled =
-        ui::Checkbox(c, 908, {box.x + 10, y, 120, a.font.glyph_h + 4}, "own layer", own);
-    if (toggled) {
-      pclass->layer = own ? sol.layer : kInheritLayer;
-      a.class_layer_for = -1;   // reseed the field from the new value
-      a.model.Touch();
-      a.scene_dirty = true;
-    }
-    if (a.class_layer_for != a.popup_target2 || a.class_layer_solid != a.popup_target) {
-      a.class_layer_for = a.popup_target2;
-      a.class_layer_solid = a.popup_target;
-      a.class_layer_field.Init((pclass->layer == kInheritLayer) ? sol.layer : pclass->layer,
-                               "%.0f");
-    }
-    if (ui::NumberInput(c, 907, {box.x + 136, y, 54, a.font.glyph_h + 4},
-                        a.class_layer_field, "", own)
-        && own) {
-      pclass->layer = static_cast<int>(a.class_layer_field.value);
-      a.model.Touch();
-      a.scene_dirty = true;
-    }
-    c.canvas.Text(box.x + 196, y + 3,
-                  own ? Fmt("the volume is on %d", sol.layer)
-                      : Fmt("takes the volume's, %d", sol.layer),
-                  ui::theme::kTextDim);
-    y += a.font.glyph_h + 12;
-  }
+  // The class's LAYER is not here, and was here once. It is a menu on the class's own row in
+  // the solids list, beside its material, because that is where the question is asked - two
+  // clicks away behind a control that says "colour" is not. See DrawSolidsSection.
 
   // The preview: the solid's color at its opacity, over a light and a dark square.
   {
@@ -1900,6 +1918,115 @@ static void SelftestCheckOverlapRefusal(App& a) {
     std::printf("FATAL: the layer was restored and the overlap did not clear.\n");
     std::exit(2);
   }
+}
+
+/// A VOXEL CLASS ON ANOTHER VOLUME'S LAYER IS A SAME-LAYER OVERLAP, and has to be refused.
+///
+/// The reported case: a phantom on layer 2, a box over it on layer 3, and one of the phantom's
+/// classes raised to 3. In those cells two volumes share the space at the same layer, so which
+/// one owns it is decided by list order - the thing the refusal exists to prevent - and the
+/// check saw nothing, because it compared the two VOLUMES' layers and 2 is not 3.
+///
+/// Three things are asserted here, in this order, because they fail separately:
+///
+///   1. with the class on the box's layer, the clash is found AND the run is refused;
+///   2. the pair reported is the phantom and the box, on the box's layer - not some other
+///      pair that happens to clash for another reason;
+///   3. and with the class put back, the clash clears. Which is the check that says the range
+///      test did not simply start flagging every pair whose layer ranges meet: the phantom's
+///      range is 2 to 5 and the box sits on 3 either way, so the pair stays a CANDIDATE and
+///      the per-point layer comparison is the only thing that can clear it.
+static void SelftestCheckClassOverlapRefusal(App& a) {
+  int ph = -1, cov = -1;
+  for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+    if (a.model.solids[i].name == "Phantom") { ph = static_cast<int>(i); }
+    if (a.model.solids[i].name == "PhantomCover") { cov = static_cast<int>(i); }
+  }
+  if (ph < 0 || cov < 0 || a.model.solids[static_cast<std::size_t>(ph)].voxel_classes.size() < 2) {
+    std::printf("FATAL: selftest could not find the Phantom and PhantomCover to test the\n"
+                "  per-class same-layer refusal.\n");
+    std::exit(2);
+  }
+  Solid& p = a.model.solids[static_cast<std::size_t>(ph)];
+  const int cover_layer = a.model.solids[static_cast<std::size_t>(cov)].layer;
+  const int saved = p.voxel_classes[1].layer;
+  if (p.layer == cover_layer) {
+    std::printf("FATAL: the Phantom and PhantomCover are already on one layer, so this\n"
+                "  cannot tell a per-class clash from a per-volume one.\n");
+    std::exit(2);
+  }
+
+  p.voxel_classes[1].layer = cover_layer;
+  a.model.Touch();
+  a.scene_dirty = true;
+  RebuildScene(a);
+
+  if (a.overlaps.empty()) {
+    std::printf("FATAL: a voxel class was put on the covering box's layer and the overlap\n"
+                "  check found nothing. The refusal cannot fire, and a run whose ownership\n"
+                "  depends on list order would go ahead.\n");
+    std::exit(2);
+  }
+  // The overlap list carries FLATTENED volume indices, which are not the model's: a boolean's
+  // operands are model solids that are never placed. Both are found by name here for the same
+  // reason ModelIndexOf exists - and the first version of this check compared them to the
+  // model indices and failed on a scene where the clash was correctly reported, which is how
+  // the mismatch was noticed at all.
+  int fph = -1, fcov = -1;
+  {
+    const auto& scene = a.run_manager->GetScene();
+    for (std::size_t v = 0; v < scene.names.size(); ++v) {
+      if (scene.names[v] == "Phantom") { fph = static_cast<int>(v); }
+      if (scene.names[v] == "PhantomCover") { fcov = static_cast<int>(v); }
+    }
+  }
+  bool named = false;
+  for (const SameLayerOverlap& o : a.overlaps) {
+    const bool pair = (o.a == fph && o.b == fcov) || (o.a == fcov && o.b == fph);
+    if (pair && o.layer == cover_layer) { named = true; }
+  }
+  if (!named) {
+    std::printf("FATAL: the clash found was not the Phantom (volume %d) against PhantomCover "
+                "(volume %d) on layer %d.\n", fph, fcov, cover_layer);
+    std::exit(2);
+  }
+  // And the class was named, which is what makes the message actionable. A label rather than
+  // an index proves the model lookup found the right solid.
+  bool labelled = false;
+  for (const SameLayerOverlap& o : a.overlaps) {
+    const std::string na = OverlapSideName(a, o.a, o.class_a);
+    const std::string nb = OverlapSideName(a, o.b, o.class_b);
+    if (na.find("[odd]") != std::string::npos || nb.find("[odd]") != std::string::npos) {
+      labelled = true;
+    }
+  }
+  if (!labelled) {
+    std::printf("FATAL: the clash did not name the class by its label. The flattened volume\n"
+                "  index was read as a model index somewhere - see ModelIndexOf.\n");
+    std::exit(2);
+  }
+  const int events_before = a.last_events;
+  RunFromGui(a, 25);
+  if (a.last_events != events_before || a.popup != Popup::kOverlap) {
+    std::printf("FATAL: a run with a voxel class on another volume's layer was NOT refused.\n"
+                "  last_events %d -> %d, popup %d\n",
+                events_before, a.last_events, static_cast<int>(a.popup));
+    std::exit(2);
+  }
+  Log("selftest: a voxel class on another volume's layer is refused, as it should be");
+
+  a.popup = Popup::kNone;
+  p.voxel_classes[1].layer = saved;
+  a.model.Touch();
+  a.scene_dirty = true;
+  RebuildScene(a);
+  if (!a.overlaps.empty()) {
+    std::printf("FATAL: the class was put back on layer %d and the clash did not clear - so\n"
+                "  the check is flagging the pair on its layer RANGE rather than on where\n"
+                "  the two are actually on one layer.\n", saved);
+    std::exit(2);
+  }
+  Log("selftest: and it clears when the class moves off that layer");
 }
 
 /// Adds what the rendering changes need in order to be looked at.

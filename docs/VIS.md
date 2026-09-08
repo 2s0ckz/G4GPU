@@ -147,6 +147,20 @@ the fixed controls use the low numbers. Two widgets sharing an id still draw and
 correctly on their own rectangles, so the symptom is not "the wrong button" but a rename
 typing into the wrong row, and nothing about that points at numbering.
 
+### List rows are columns
+
+`ui::ListRow2` gives a row's two fields a fixed share of the width each, and ellipsizes both
+inside their own share. One padded string - `Fmt("%-12s %s", name, material)` - looks like
+columns until a name is longer than the padding, and then the second field slides right and off
+the end of the row. That is not cosmetic: the material is the field a solids list is scanned
+FOR, and a phantom imported from a file called `adult_male_1mm_segmented.raw` pushed it out of
+view entirely. Below about nine characters of room for the right column the LEFT one gives way,
+because a truncated name is still recognisable and a truncated material is not.
+
+Checked by the pixels in `tests/test_ui_layout.cu` - the row is drawn with a solid-coverage
+font and the ink is measured - rather than by re-deriving the arithmetic, which would pass
+whatever the row did.
+
 ### The source form
 
 A source's direction is three fields, shown for every kind except the isotropic shell, which

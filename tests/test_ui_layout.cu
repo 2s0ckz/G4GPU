@@ -362,6 +362,12 @@ int main() {
     }
     Check(lowest >= 50000, "no growing list reaches down into the fixed control numbers");
 
+    // The layer menu on each voxel class row: a third block strided by class, added when the
+    // layer stopped being buried in the colour pop-up. Enumerated here for the same reason
+    // the other two are - solid * 4096 + class has to stay inside its own million.
+    for (int i = 0; i < 200; ++i) {
+      for (int k = 0; k < 4096; ++k) { ids.push_back(10000000LL + i * 4096 + k); }
+    }
     std::sort(ids.begin(), ids.end());
     bool dup = false;
     long long first_dup = 0;
@@ -588,6 +594,82 @@ int main() {
       Check(ctx.block.h > 0,
             "a menu bar with nothing open leaves an open dropdown's region alone");
     }
+  }
+
+  // ---- 13. A LONG NAME MUST NOT PUSH THE MATERIAL OUT OF THE ROW.
+  //
+  // The solids list used to draw one string, `Fmt("%-12s %s", name, material)`, which looks
+  // like two columns until a name is longer than twelve characters - and then the material
+  // slides right and off the end of the row. It is the field the list is scanned FOR, and a
+  // phantom imported from a file called adult_male_1mm_segmented.raw pushed it out of view.
+  //
+  // Checked BY THE PIXELS, not by re-deriving the arithmetic: the font is given solid
+  // coverage, the row is drawn, and the ink is measured. Re-computing the share here and
+  // comparing it to itself would pass whatever ListRow2 did.
+  {
+    ui::Font font;
+    font.glyph_w = 8;
+    font.glyph_h = 15;
+    font.ascent = 12;
+    // Solid glyphs, so "where is the text" is answerable by looking.
+    font.coverage.assign(
+        static_cast<std::size_t>(ui::Font::kCount) * font.glyph_w * font.glyph_h, 255);
+    font.ready = true;
+
+    constexpr int kW = 400, kH = 40;
+    std::vector<unsigned int> px(static_cast<std::size_t>(kW) * kH, 0u);
+    ui::Input in;
+    ui::Context ctx;
+    const ui::Rect r{0, 0, 300, 20};
+
+    // Draws one row on a cleared canvas and returns the first and last inked column in it.
+    // The cursor is parked well outside the row: a hovered row fills its whole width with a
+    // highlight, and that is ink too. Found by this check reporting the first inked column as
+    // zero, which is the row's own background and not any text at all.
+    in.mouse_x = 999;
+    in.mouse_y = 999;
+    auto ink = [&](const std::string& left, const std::string& right, int* first, int* last) {
+      std::fill(px.begin(), px.end(), 0u);
+      ctx.Begin(px.data(), kW, kH, &font, &in);
+      ctx.canvas.clip = ui::Rect{0, 0, kW, kH};
+      ui::ListRow2(ctx, 77, r, left, right, false, 0);
+      *first = -1;
+      *last = -1;
+      for (int x = 0; x < kW; ++x) {
+        for (int y = 0; y < r.h; ++y) {
+          if (px[static_cast<std::size_t>(y) * kW + x] != 0u) {
+            if (*first < 0) { *first = x; }
+            *last = x;
+            break;
+          }
+        }
+      }
+    };
+
+    // Where the right column starts, with nothing in the left one to confuse the measurement.
+    int a_first = -1, a_last = -1;
+    ink("", "M", &a_first, &a_last);
+    Check(a_first > r.x + 6, "the right column starts inside the row, not at its left edge");
+
+    // The same row with a name far too long for its share: the right column must still start
+    // in the same place, and must still be drawn.
+    int b_first = -1, b_last = -1;
+    ink("adult_male_1mm_segmented_raw_and_then_some_more", "M", &b_first, &b_last);
+    std::printf("  right column at x=%d alone, and the row ends at x=%d with a long name "
+                "(row is %d wide)\n",
+                a_first, b_last, r.w);
+    Check(b_last >= a_first,
+          "with a long name the material is still drawn at or past the column it belongs to");
+    Check(b_last < r.x + r.w, "and nothing is drawn past the end of the row");
+
+    // And the left column is clipped to its own share rather than running under the right
+    // one: with nothing in the right column, the name's ink still stops short of where the
+    // right column begins.
+    int c_first = -1, c_last = -1;
+    ink("adult_male_1mm_segmented_raw_and_then_some_more", "", &c_first, &c_last);
+    std::printf("  a long name alone ends at x=%d, where the right column starts at x=%d\n",
+                c_last, a_first);
+    Check(c_last < a_first, "a long name is cut off before the material's column");
   }
 
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "PASSED", g_fails);

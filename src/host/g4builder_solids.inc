@@ -68,9 +68,12 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     }
     const ui::Rect row_r{rr.x + arrow_w + eye_w, rr.y, rr.w - arrow_w - eye_w, row};
 
-    const int hit = ui::ListRowRenamable(c, kIdSolidRow + static_cast<int>(i), row_r,
-                                         Fmt("%-12s %s", s.name.c_str(), mat.c_str()),
-                                         a.sel_solid == static_cast<int>(i), editing, buf, sw);
+    // Name and material in COLUMNS, not one padded string. See ui::ListRow2: `%-12s` looks
+    // like a column until a name is longer than twelve characters, and an imported phantom's
+    // name is `adult_male_1mm_segmented_raw`.
+    const int hit = ui::ListRowRenamable2(c, kIdSolidRow + static_cast<int>(i), row_r,
+                                          s.name, mat, a.sel_solid == static_cast<int>(i),
+                                          editing, buf, sw);
     if (hit == 1) {
       if (a.sel_solid == static_cast<int>(i)) {
         a.rename_target = key;
@@ -109,6 +112,36 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     // the only way to assign materials to a segmented phantom. Collapsed by default, because
     // a real segmentation has dozens and they would bury every other solid in the scene.
     if (!has_children || !s.ui_expanded) { continue; }
+
+    // THE LAYER CHOICES, one list for every class row.
+    //
+    // A menu rather than a number field: a field needs a per-row edit buffer that survives
+    // frames, and there is one buffer for the whole UI because exactly one thing is being
+    // edited at a time (see ui::EditBuffer) - so two hundred rows cannot each have one. A
+    // Select keeps no state of its own at all; the open one lives in the Context, by id.
+    //
+    // The list runs from 0 to a little above the highest layer anything in the model uses,
+    // which is the range a layer is ever chosen from: you put a class just above or just
+    // below some other volume. Entry 0 is the volume's own, which is what every class has
+    // until someone says otherwise.
+    {
+      int top = s.layer;
+      for (const Solid& o : a.model.solids) {
+        if (o.layer > top) { top = o.layer; }
+        for (const VoxelClass& vc : o.voxel_classes) {
+          if (vc.layer != kInheritLayer && vc.layer > top) { top = vc.layer; }
+        }
+      }
+      top += 2;
+      if (top > 40) { top = 40; }
+      a.layer_opt_text.clear();
+      a.layer_opt_text.push_back(Fmt("vol (%d)", s.layer));
+      for (int L = 0; L <= top; ++L) { a.layer_opt_text.push_back(Fmt("%d", L)); }
+      a.layer_opt.clear();
+      for (const std::string& t : a.layer_opt_text) { a.layer_opt.push_back(t.c_str()); }
+    }
+    const int lay_w = 9 * a.font.glyph_w + 16;
+
     for (std::size_t k = 0; k < s.voxel_classes.size(); ++k) {
       const VoxelClass& vc = s.voxel_classes[k];
       const std::string vmat =
@@ -118,17 +151,9 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       const ui::Color vsw = ui::rgb(static_cast<int>(vc.r * 255),
                                     static_cast<int>(vc.g * 255),
                                     static_cast<int>(vc.b * 255));
-      // The layer, but only when it is not the volume's. A column of the same number beside
-      // every class would be noise; the point of showing it is to see at a glance which
-      // classes were given one, on a phantom with two hundred of them.
-      const std::string lay = (vc.layer != kInheritLayer && vc.layer != s.layer)
-                                  ? Fmt(" L%d", vc.layer)
-                                  : std::string();
-      const std::string label =
-          (s.voxel_kind == VoxelKind::kDiscrete)
-              ? Fmt("%-9g %s%s", vc.value, vmat.c_str(), lay.c_str())
-              : Fmt("%-4.0f..%-4.0f %s%s", vc.value, vc.value_max, vmat.c_str(),
-                    lay.c_str());
+      const std::string vlabel = (s.voxel_kind == VoxelKind::kDiscrete)
+                                     ? Fmt("%g", vc.value)
+                                     : Fmt("%.0f..%.0f", vc.value, vc.value_max);
       const int id =
           kIdClassRow + static_cast<int>(i) * kIdClassStride + static_cast<int>(k);
       // A class gets an eye too. It is the same question one level down - what is behind the
@@ -142,13 +167,40 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
         a.model.Touch();
         a.scene_dirty = true;
       }
-      const ui::Rect vrow{panel.x + 8 + arrow_w + 12 + eye_w, y, w - 32 - arrow_w - eye_w,
-                          row};
+      // The row stops short of the layer menu's column, so the menu's clicks are the menu's:
+      // ListRow claims everything inside its own rectangle.
+      const ui::Rect vfull{panel.x + 8 + arrow_w + 12 + eye_w, y,
+                           w - 32 - arrow_w - eye_w, row};
+      const ui::Rect vrow{vfull.x, vfull.y, vfull.w - lay_w - 4, row};
+      const ui::Rect lrow{vfull.x + vfull.w - lay_w, vfull.y, lay_w, row};
+
+      // ITS LAYER, next to its material, because that is where the question is asked. It was
+      // in the colour pop-up behind the swatch first, which is two clicks away from the row
+      // it belongs to and behind a control that says "colour".
+      //
+      // Entry 0 is the volume's own layer. A class set to the volume's NUMBER rather than to
+      // entry 0 means the same thing and costs the same nothing - build_scene compares the
+      // values, not who typed them - so the menu does not have to be careful about which of
+      // the two it leaves behind.
+      int lsel = 0;
+      if (vc.layer != kInheritLayer) {
+        const int idx = vc.layer + 1;
+        lsel = (idx >= 1 && idx < static_cast<int>(a.layer_opt.size())) ? idx : 0;
+      }
+      if (ui::Select(c, kIdClassLayer + static_cast<int>(i) * kIdClassStride
+                            + static_cast<int>(k),
+                     lrow, lsel, a.layer_opt.data(),
+                     static_cast<int>(a.layer_opt.size()))) {
+        s.voxel_classes[k].layer = (lsel == 0) ? kInheritLayer : (lsel - 1);
+        a.model.Touch();
+        a.scene_dirty = true;
+      }
+
       // The swatch takes the click, the rest of the row assigns a material. Tested before the
       // row is drawn but acted on after, so the row still draws its hover and its swatch on
       // the frame the swatch is clicked.
       const bool on_swatch = c.Hovering(ui::ListRowSwatchRect(c, vrow));
-      if (ui::ListRow(c, id, vrow, label, false, vsw)) {
+      if (ui::ListRow2(c, id, vrow, vlabel, vmat, false, vsw, 34)) {
         if (on_swatch) {
           a.popup = Popup::kColor;
           a.popup_target = static_cast<int>(i);
@@ -257,19 +309,24 @@ static int DrawSolidForm(App& a, const ui::Rect& panel, int y) {
   y += 3;
 
   // Layer, since it is the one concept a Geant4 user has to learn here.
+  //
+  // THE VOLUME'S LAYER IS ALSO "ALL ITS CLASSES", which is why this puts every class back to
+  // inheriting. A segmentation's classes nearly all want one layer with a handful of
+  // exceptions, and the way to say that is to set the volume and then correct the exceptions
+  // in their own rows - not to find a second control that means "and all of them too".
+  // Logged, because it discards choices that were made one row at a time.
   c.canvas.Text(panel.x + 8, y + 3, "layer", ui::theme::kTextDim);
   if (ui::Button(c, 650, {panel.x + 62, y, 26, row}, "-", s.layer > 1)) {
-    --s.layer;
-    a.model.Touch();
-    a.scene_dirty = true;
+    SetSolidLayer(a, a.sel_solid, s.layer - 1);
   }
   c.canvas.Text(panel.x + 96, y + 3, Fmt("%d", s.layer), ui::theme::kText);
   if (ui::Button(c, 651, {panel.x + 120, y, 26, row}, "+")) {
-    ++s.layer;
-    a.model.Touch();
-    a.scene_dirty = true;
+    SetSolidLayer(a, a.sel_solid, s.layer + 1);
   }
-  c.canvas.Text(panel.x + 154, y + 3, "higher wins", ui::theme::kTextDim);
+  c.canvas.Text(panel.x + 154, y + 3,
+                s.voxel_classes.empty() ? "higher wins"
+                                        : "higher wins - and every class follows",
+                ui::theme::kTextDim);
   y += row + 4;
 
 
@@ -329,25 +386,12 @@ static int DrawSolidForm(App& a, const ui::Rect& panel, int y) {
   // about a file as you read it, alongside the cell size and the colormap, and a second copy
   // of the control in the solid's panel is a second place to look for it. See
   // DrawImportVoxelPopup.
-  if (s.shape == Shape::kVoxelGrid && !s.voxel_classes.empty()) {
-    // One material for every class at once.
-    //
-    // A segmentation's classes nearly all want the same material - soft tissue - with a
-    // handful of exceptions, so the shortest route to a phantom that transports is to set
-    // them all and then correct the bone. Two hundred rows through the picker is not that
-    // route, and the alternative people actually take is to give up and use one box of
-    // water.
-    if (ui::Button(c, 414, {panel.x + 8, y, bw2, row + 2}, "Material for all")) {
-      a.popup = Popup::kPick;
-      a.pick_kind = PickKind::kMaterialForVoxelClass;
-      a.pick_target = a.sel_solid;
-      a.pick_target2 = -1;   // every class, not one of them
-    }
-    c.canvas.TextFit(panel.x + 14 + bw2, y + 4,
-                     Fmt("all %d classes", static_cast<int>(s.voxel_classes.size())),
-                     ui::theme::kTextDim, bw2 - 4);
-    y += row + 5;
-  }
+  //
+  // Nor is there a "material for all" button any more. Assign material, above, is that: for a
+  // voxel volume it sets every class as well, because "the material of the phantom" is the
+  // only thing the volume's own material could sensibly mean when every cell takes its
+  // material from a class. Two controls, one of which was a special case of the other, is one
+  // control and a thing to explain.
   return y + row + 10;
 }
 
