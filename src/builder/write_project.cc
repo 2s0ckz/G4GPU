@@ -281,6 +281,28 @@ void WriteSolids(std::ofstream& f, const Model& m) {
       // Fill the cells from the sidecar. The loader is emitted once, below.
       f << "  LoadVoxelCells(" << detail::SolidVar(m, i) << ", \"" << m.solids[i].name
         << ".cells\");\n";
+      // AND SAY WHAT THE NUMBERS IN IT MEAN.
+      //
+      // The .cells file holds MODEL material indices - see the writer below, which walks the
+      // classes and stores `c.material`. Read straight into a grid they are numbers from the
+      // wrong table: G4VoxelGrid expects device indices, which are handed out later and in
+      // placement order. So the grid is given the model's material list, in model order, and
+      // translates for itself. Same mechanism as build_scene.hh, because it is the same file
+      // format being read.
+      //
+      // This was missing and the builder's comparison against the generated project could not
+      // see it: both sides were tested on a model of air and water alone, where model order
+      // and device order coincide. The moment the selftest phantom used a third material the
+      // two disagreed by 96%, which is what a phantom of the wrong material deposits. See
+      // docs/RISK.md V20.
+      if (!m.materials.empty()) {
+        f << "  " << detail::SolidVar(m, i) << "->SetCellMaterials({";
+        for (std::size_t k = 0; k < m.materials.size(); ++k) {
+          if (k > 0) { f << ", "; }
+          f << detail::MatVar(m, static_cast<int>(k));
+        }
+        f << "});\n";
+      }
     }
     if (m.solids[i].shape == Shape::kImportedMesh) {
       // Fill the triangles from the sidecar and close the solid, which builds its BVH.

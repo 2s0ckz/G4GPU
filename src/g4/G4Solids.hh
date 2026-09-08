@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "g4/G4Material.hh"   // G4VoxelGrid translates its cells through G4Material::device_index
 #include "g4/G4VSolid.hh"
 
 // ---------------------------------------------------------------- flat-faced
@@ -545,6 +546,33 @@ class G4VoxelGrid : public G4VSolid {
   std::vector<short>& Cells() { return cells_; }
   /// The class index per cell, for the renderer. Same length as Cells(), or empty.
   std::vector<short>& ClassCells() { return class_cells_; }
+
+  /// What the numbers in Cells() MEAN, when they are not device material indices.
+  ///
+  /// Two callers fill a grid and they were numbering its cells differently.
+  ///
+  /// A hand-built grid (a test, a scene) writes `mat->device_index` straight into a cell,
+  /// which is what the transport reads, and leaves this empty.
+  ///
+  /// A grid built from a model - the builder importing a segmentation - cannot: device
+  /// indices do not exist yet. They are handed out in G4Flatten, from the materials of the
+  /// PLACED volumes, and Construct() runs first. So the builder wrote its own material
+  /// indices and the transport read them as device indices, which agree only when every
+  /// model material, in order, is also some placed volume's material. Add one material the
+  /// user has not placed anywhere and the numbering slides; assign a class a material no
+  /// ordinary volume uses - the normal case for a segmented phantom, where the volume has one
+  /// material and its classes have others - and that material is never even built, because
+  /// nothing walks voxel classes looking for materials to build.
+  ///
+  /// What that looked like: a gamma read an out-of-range material and flew through the
+  /// phantom depositing nothing, and an electron read one and dumped its whole energy in
+  /// three steps. See docs/RISK.md V20.
+  ///
+  /// So a grid may now say what its cell numbers refer to. Non-empty means Cells() holds
+  /// indices into THIS list; Build() translates them to device indices, and G4Flatten builds
+  /// every material in it so that they have one.
+  void SetCellMaterials(std::vector<G4Material*> mats) { cell_materials_ = std::move(mats); }
+  const std::vector<G4Material*>& CellMaterials() const { return cell_materials_; }
   /// One colour per class, 0xAARRGGBB, for the renderer. Empty draws the volume as one box.
   std::vector<unsigned int>& ClassColours() { return class_rgba_; }
 
@@ -552,7 +580,37 @@ class G4VoxelGrid : public G4VSolid {
     g4gpu::g4::Sol s = make(g4gpu::geom::SolidType::kVoxelGrid,
                             {hx_, hy_, hz_, static_cast<G4double>(nx_),
                              static_cast<G4double>(ny_), static_cast<G4double>(nz_)});
-    s.a = pool.add_voxels(cells_.data(), static_cast<int>(cells_.size()),
+    // Cells go to the device as DEVICE material indices, whatever they are numbered as here.
+    // See SetCellMaterials.
+    std::vector<short> device_cells;
+    const short* cells = cells_.data();
+    if (!cell_materials_.empty()) {
+      device_cells.resize(cells_.size());
+      for (std::size_t i = 0; i < cells_.size(); ++i) {
+        const short v = cells_[i];
+        if (v < 0 || static_cast<std::size_t>(v) >= cell_materials_.size()) {
+          device_cells[i] = -1;   // unassigned; material_at falls back to the volume's own
+          continue;
+        }
+        const G4Material* m = cell_materials_[static_cast<std::size_t>(v)];
+        if (m == nullptr) {
+          device_cells[i] = -1;
+          continue;
+        }
+        if (m->device_index < 0) {
+          // Only reachable if G4Flatten did not build this grid's materials before flattening
+          // its solid. Fatal rather than silently -1: a class the user assigned, transported
+          // as something else, is the failure this whole mechanism exists to end.
+          std::printf("\nFATAL: voxel material \"%s\" was never built for the device.\n"
+                      "       G4Flatten must build a grid's CellMaterials before its solid.\n",
+                      m->GetName().c_str());
+          std::exit(2);
+        }
+        device_cells[i] = static_cast<short>(m->device_index);
+      }
+      cells = device_cells.data();
+    }
+    s.a = pool.add_voxels(cells, static_cast<int>(cells_.size()),
                           (class_cells_.size() == cells_.size()) ? class_cells_.data()
                                                                  : nullptr);
     // Where this volume's class colours are, for the renderer to look up per cell. Zero
@@ -580,6 +638,8 @@ class G4VoxelGrid : public G4VSolid {
   G4double hx_, hy_, hz_;
   G4int nx_, ny_, nz_;
   std::vector<short> cells_;
+  /// See SetCellMaterials. Empty means cells_ already holds device indices.
+  std::vector<G4Material*> cell_materials_;
   /// Parallel to cells_, holding which voxel class each cell came from. Render-only; see
   /// SolidPool::voxel_class_cells.
   std::vector<short> class_cells_;

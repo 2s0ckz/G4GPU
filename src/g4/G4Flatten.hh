@@ -22,6 +22,7 @@
 #include <vector>
 #include "data/materials.cuh"
 #include "g4/G4PVPlacement.hh"
+#include "g4/G4Solids.hh"   // G4VoxelGrid, for a grid's own cell materials
 #include "g4/G4SDManager.hh"
 #include "geometry/navigator.cuh"
 #include "geometry/volume_of.cuh"
@@ -108,6 +109,17 @@ inline FlatScene flatten(G4double range_cut_mm = 0.7 /*mm*/) {
 
   // Materials first, so every volume can carry an index rather than a pointer.
   std::map<G4Material*, int> mat_index;
+  auto build_material = [&](G4Material* mat) {
+    if (mat == nullptr || mat_index.find(mat) != mat_index.end()) { return; }
+    const int idx = mat->Build(out.materials, range_cut_mm);
+    if (idx < 0) {
+      std::printf("\nFATAL: material table full at \"%s\" (limit %d).\n",
+                  mat->GetName().c_str(), data::kMaxMaterials);
+      std::exit(2);
+    }
+    mat->device_index = idx;
+    mat_index[mat] = idx;
+  };
   for (G4PVPlacement* p : placements) {
     G4Material* mat = p->GetLogicalVolume()->GetMaterial();
     if (mat == nullptr) {
@@ -115,15 +127,16 @@ inline FlatScene flatten(G4double range_cut_mm = 0.7 /*mm*/) {
                   p->GetLogicalVolume()->GetName().c_str());
       std::exit(2);
     }
-    if (mat_index.find(mat) == mat_index.end()) {
-      const int idx = mat->Build(out.materials, range_cut_mm);
-      if (idx < 0) {
-        std::printf("\nFATAL: material table full at \"%s\" (limit %d).\n",
-                    mat->GetName().c_str(), data::kMaxMaterials);
-        std::exit(2);
-      }
-      mat->device_index = idx;
-      mat_index[mat] = idx;
+    build_material(mat);
+    // AND THE MATERIALS OF ITS CELLS, if it is a voxel grid that named them.
+    //
+    // A volume's own material is not the whole story for a voxel grid: the point of one is
+    // that its cells have materials of their own, and for a segmented phantom those are
+    // mostly materials no ordinary volume uses. Walking placements alone left them unbuilt,
+    // with device_index -1, while the cells went to the device holding numbers that indexed a
+    // table those materials were not in. See G4VoxelGrid::SetCellMaterials and RISK.md V20.
+    if (const auto* grid = dynamic_cast<const G4VoxelGrid*>(p->GetLogicalVolume()->GetSolid())) {
+      for (G4Material* cm : grid->CellMaterials()) { build_material(cm); }
     }
   }
 

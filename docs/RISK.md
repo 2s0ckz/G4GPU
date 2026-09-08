@@ -2711,3 +2711,142 @@ claimed the cursor. Broken, it reads 40630.
 Reading `hot` rather than clicking is still deliberate: it is exactly the state that was
 wrong, and reading it has no side effect, where a simulated click on whatever lies under those
 coordinates might add or delete a source.
+
+### V20: a voxel cell's material was a number from the wrong table
+
+Reported as two symptoms, which is what made it worth chasing rather than dismissing:
+
+> gammas appear to pass straight through the phantom, even at low energy. electrons and
+> positrons on the other hand cannot seem to penetrate any non-air voxel, no matter how high
+> energy they are
+
+Opposite failures usually mean two faults. These were one, and the two directions are what
+identified it: no physics error makes a gamma too transparent AND an electron too absorbing.
+A wrong number read out of an array does exactly that.
+
+#### The two halves
+
+The builder fills a voxel grid's cells during `Construct()`, with indices into
+`Model::materials`, because that is the only numbering that exists then. DEVICE material
+indices are handed out later, in `G4Flatten`. The transport read the cells as device indices.
+
+**Model order and device order are not the same order.** Device indices are assigned by
+walking placements and taking each logical volume's material, so they cover only the materials
+of placed volumes, in placement order. One material in the user's list that is not on any
+volume slides every index after it.
+
+**And a material used only by voxel classes was never built at all.** Nothing walked voxel
+classes looking for materials, so such a material kept `device_index = -1` and never entered
+the table the kernels read. For a segmented phantom this is the ordinary case: the volume
+carries one material and its two hundred classes carry others.
+
+The result was an index out of range of the material table. The kernels read past the end of
+it, so a gamma got an enormous mean free path and crossed the phantom depositing nothing,
+while an electron got an enormous stopping power and dumped its whole energy at the entry
+face. Measured, on 200 mm of soft tissue built as a box and as an identical grid:
+
+```
+  beam              box MeV/evt   grid MeV/evt    ratio
+  gamma 6 MeV          1.818155       0.000000   0.0000
+  gamma 0.1 MeV        0.045223       0.000000   0.0000
+  e- 100 MeV          45.654891      99.995802   2.1903
+  e- 10 MeV            9.745349       9.997658   1.0259
+  e+ 20 MeV           18.392694      19.997902   1.0873
+```
+
+x0.0000 and x2.1903 are the two sentences of the report, in numbers.
+
+#### Why nothing caught it
+
+Every test that touched a voxel grid used **Air and Water only**, and with those two the model
+order and the device order coincide: the world is air, the phantom is water, so model 0 is
+device 0 and model 1 is device 1. The builder's own selftest phantom is exactly that, and it
+reports 174 cells hit summing to the volume total to 5.6e-16 - correct, and blind to this.
+
+`tests/test_voxel_scoring.cu` could not see it either, for a different reason: it builds its
+grid by hand with `SetCell(k, water->device_index)`, so it writes device indices directly and
+never exercises the builder's numbering at all.
+
+So the fault needed a third material to appear, and every test had two. The new test uses five,
+with the spares deliberately BETWEEN the ones that get placed, and gives the cells a material
+nothing else uses - because that is what a phantom looks like and it is the case the old code
+got wrong.
+
+#### The fix
+
+A grid now says what its cell numbers mean. `G4VoxelGrid::SetCellMaterials` takes the table the
+numbers index; `Build()` translates through it to device indices; `G4Flatten` builds every
+material in it, alongside the materials of placed volumes. A grid built by hand leaves the
+table empty and its cells pass through untouched, so the direct `device_index` route still
+works.
+
+A material in that table with no device index is a FATAL rather than a fallback to the volume's
+own. Falling back is what the ordinary `material_at` path does for a cell that was never
+assigned, and it is right there; but a class the user DID assign, silently transported as
+something else, is precisely the failure this mechanism exists to end, and the version of that
+failure that was live for weeks was silent.
+
+#### Three wrong theories, in order
+
+Worth recording because each was cheap to test and expensive to assume.
+
+**Unassigned materials.** A cell whose class has no material gets -1, and `material_at` falls
+back to the volume's own. That would have explained the symptoms. The user's own note killed
+it - they had assigned water to every class and air to class 0.
+
+**The step budget.** Every voxel boundary ends a step, and the transport advances every live
+track one step per iteration of a loop bounded at 1000. A 400-cell traverse costs 400 of them,
+so a fine grid starving its own tracks was plausible. Falsified by measurement: the same water
+as a box and as grids of 1, 8, 32, 64, 128, 200 and 400 cells gave 9.6766 MeV/event in every
+case, 74 iterations, nothing abandoned. `every_cell` is only switched on for a volume with a
+per-voxel scorer, which that geometry did not have.
+
+**"The wrong material."** Once the numbering was understood I described the effect as reading
+the wrong material. It is worse than that: the index is out of RANGE, so the read is past the
+end of the table. That distinction matters for what to expect - a wrong material gives wrong
+but bounded physics, and an out-of-range read gives whatever is in memory.
+
+#### Amendment: the same fault a second time, in the emitter
+
+Fixing the builder and giving the selftest phantom a third material turned the pipeline red on a
+check nobody had aimed at this:
+
+```
+FATAL: 'cells' disagrees. builder 41570.230751 MeV, generated project 1515.64 MeV (96.35%).
+```
+
+The `.cells` sidecar a saved project ships holds MODEL material indices - `write_project.cc`
+walks the classes and stores `c.material` - and the generated `LoadVoxelCells` reads it straight
+into `grid->Cells()`. So a project you save and run had the identical fault: its phantom
+transported as whatever material the number happened to name. 1515 of 41570 MeV is 3.6%, which
+is about what a phantom of air deposits.
+
+Two instances of one mistake, in two files, because the same file format is read in two places
+and only one of them was thought about. The emitter now writes what the builder writes:
+
+```cpp
+LoadVoxelCells(solidPhantom, "Phantom.cells");
+solidPhantom->SetCellMaterials({matAir, matWater, matSoftTissue});
+```
+
+and the two sides agree to 0.00% on both scorers.
+
+What is worth taking from it: the check that caught this is the one whose own comment says it
+exists so that "run it here" and "save it and run that" cannot disagree about what a model
+means. It had been passing for months on a model of air and water, where nothing could
+disagree. A comparison is only as good as the model it compares - and the cheapest way to
+strengthen one is usually to make the model less symmetric, not to tighten the threshold.
+
+#### Open, and measured while here: that comparison's threshold is far too loose
+
+`compare_project.ps1` allows 6%, calibrated in V10 on the belief that the builder and the
+generated project are two independent Monte Carlos - 6.4% apart at 200000 histories, 0.80% at a
+million. They now agree to 0.00% at a million, which is not what two independent samples do. The
+seed unification means both sides start from the same default, so this is a determinism check
+wearing a statistical threshold.
+
+That matters because 6% is three orders of magnitude looser than the check can now afford, and
+this bug was only caught because it produced 96%. A material mix-up worth 3% would still pass.
+Not tightened here: it needs its own measurement of what the two sides actually do across
+models, and doing it inside a fix for something else is how a threshold gets miscalibrated in
+the first place - which is V10.

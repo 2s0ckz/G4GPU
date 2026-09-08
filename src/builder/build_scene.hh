@@ -317,6 +317,11 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
         }
         grid->Cells()[idx] = static_cast<short>(mat);
       }
+      // The cells hold MODEL material indices, so the grid is told what those mean. Without
+      // this the transport reads them as device indices - see G4VoxelGrid::SetCellMaterials
+      // for what that did. Passing the whole list, in model order, is what makes the numbers
+      // already written correct rather than needing a second pass over 25 million cells.
+      grid->SetCellMaterials(materials_);
       if (!have_values && !s.voxel_values.empty()) {
         std::printf("solid \"%s\": %zu voxel values for %zu cells; using the solid material\n",
                     s.name.c_str(), s.voxel_values.size(), n);

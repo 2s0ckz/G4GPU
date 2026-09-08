@@ -64,8 +64,11 @@ rem Tests that run a real scene through the STOCK engine: they link out\transpor
 rem rather than instantiating their own kernels, so they build in seconds where
 rem TESTS_PROJECT takes minutes. test_trajectory needs a real shower because what it checks -
 rem that a track's recorded segments join up - is a property of a path, and a synthetic step
-rem has no path.
-set TESTS_SCENE=test_trajectory
+rem has no path. test_voxel_materials needs one because what it checks - that a voxel cell is
+rem transported as the material its class was assigned - was wrong for every phantom whose
+rem classes used a material no ordinary volume did, and the symptom was a gamma crossing 200 mm
+rem of tissue depositing nothing. See docs/RISK.md V20.
+set TESTS_SCENE=test_trajectory test_voxel_materials
 
 rem A project with its own step hook AND NOTHING ELSE LINKED. It builds its own detector, so
 rem it needs no scene, and it must not be given one: a second translation unit that includes

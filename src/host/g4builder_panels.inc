@@ -1718,6 +1718,19 @@ static void InsertSelftestStoreSolids(App& a) {
 /// gamma through 3 cm of air deposits nothing, so the generated project's dose came out as
 /// exactly zero and the pipeline's "it ran" check was satisfied by it. A check a zero
 /// satisfies is not a check.
+///
+/// It also adds a SECOND material and gives it to the voxel classes alone.
+///
+/// That is not decoration. Air plus water is the one configuration in which a voxel cell's
+/// material index is right by accident: the world is air and everything else is water, so the
+/// model's numbering and the device's coincide, and cells holding model indices transported
+/// correctly for as long as nothing else was in the list. Every voxel test in this project had
+/// exactly those two materials, and a gamma crossing a phantom of anything else deposited
+/// nothing at all. See docs/RISK.md V20.
+///
+/// So the phantom's classes get a material NO PLACED VOLUME USES, which is what a segmented
+/// phantom actually looks like, and the per-voxel scoring check downstream is then a check on
+/// the numbering as well as on the arithmetic.
 static void SelftestUseWater(App& a) {
   Material w;
   w.name = "Water";
@@ -1725,12 +1738,20 @@ static void SelftestUseWater(App& a) {
   w.density = 1.0;
   w.state = MatterState::kLiquid;
   const int idx = a.model.AddMaterial(w);
+  Material t;
+  t.name = "SoftTissue";
+  t.nist_name = "G4_TISSUE_SOFT_ICRP";
+  t.density = 1.03;
+  t.state = MatterState::kSolid;
+  const int tissue = a.model.AddMaterial(t);
   for (std::size_t i = 1; i < a.model.solids.size(); ++i) {
     a.model.solids[i].material = idx;
-    for (VoxelClass& c : a.model.solids[i].voxel_classes) { c.material = idx; }
+    for (VoxelClass& c : a.model.solids[i].voxel_classes) { c.material = tissue; }
   }
   a.scene_dirty = true;
-  Log("selftest: added G4_WATER and assigned it to every solid but the world");
+  Log(Fmt("selftest: G4_WATER on every solid but the world, and G4_TISSUE_SOFT_ICRP on the "
+          "voxel classes only (model index %d)",
+          tissue));
 }
 // ---------------------------------------------------------------- selftest helpers
 
