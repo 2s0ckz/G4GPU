@@ -11,7 +11,11 @@
 //   * the material at a point matches the cell it is in, for the whole grid;
 //   * a randomised march never loses length: the segments always sum to the chord through the
 //     box, which is the invariant that catches an off-by-one in the cell index or a missed
-//     boundary.
+//     boundary;
+//   * and the grid answers the two questions every solid is asked about its SIZE - how far it
+//     reaches and how much space it fills - the same way the box of the same dimensions does.
+//     It used to answer zero to both, being absent from the switch in each function, and that
+//     is the kind of wrong that no traversal test can see. See section 5.
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -19,6 +23,7 @@
 #include "core/rng.cuh"
 #include "data/materials.cuh"
 #include "geometry/navigator.cuh"
+#include "geometry/volume_of.cuh"
 
 using namespace g4gpu;
 using namespace g4gpu::geom;
@@ -279,6 +284,66 @@ int main() {
     }
     printf("  %d cell centres checked, %d wrong\n", n * n * n, bad);
     check(bad == 0, "every cell centre reports its own material");
+  }
+
+  // ---------------------------------------------------------------- how big is it
+  //
+  // A GRID IS A BOX, AND HAS TO ANSWER LIKE ONE.
+  //
+  // `solid_half_extent` and `analytic_volume` are switches over solid type, and kVoxelGrid was
+  // in neither. It therefore fell through to the default in each: a coordinate bound of ZERO,
+  // and no closed form, which sends solid_volume off to sample a cube of side zero and get
+  // nothing. Both are load-bearing, and none of the traversal above touches either:
+  //
+  //   * a bound of zero collapses the bounding sphere the same-layer overlap check compares
+  //     centre separations against, so a phantom only registered as overlapping something
+  //     when their centres nearly coincided. That is what "the overlap check only fires if
+  //     there is substantial overlap" was;
+  //   * a volume of zero is a MASS of zero for anything scored on a grid as a whole, and a
+  //     dose is energy over mass;
+  //   * and the viewer sizes the camera from the same bound, so a phantom framed the view
+  //     around every object except itself.
+  //
+  // Checked against the box of the same half extent, because that is what a grid is: the same
+  // shape, with a material per cell inside it. Deliberately anisotropic, so an answer that
+  // took one axis for all three would show.
+  {
+    printf("\n== a grid is sized like the box it is ==\n");
+    SolidStore<real_t> st{};
+    Solid<real_t> grid{};
+    grid.type = SolidType::kVoxelGrid;
+    grid.p[0] = 150; grid.p[1] = 100; grid.p[2] = 850;   // a tall phantom, mm
+    grid.p[3] = 60;  grid.p[4] = 40;  grid.p[5] = 340;   // cells
+    grid.a = 0;
+    Solid<real_t> box{};
+    box.type = SolidType::kBox;
+    box.p[0] = 150; box.p[1] = 100; box.p[2] = 850;
+
+    const real_t he_grid = solid_half_extent(st, grid);
+    const real_t he_box = solid_half_extent(st, box);
+    printf("  half extent: grid %g, box %g (expected 850)\n", he_grid, he_box);
+    check(he_grid == he_box, "the grid's coordinate bound is the box's");
+    check(he_grid == real_t(850), "and it is the largest half extent");
+
+    const real_t v_grid = solid_volume(st, grid);
+    const real_t v_box = solid_volume(st, box);
+    const real_t want = real_t(8) * 150 * 100 * 850;
+    printf("  volume: grid %g, box %g (expected %g)\n", v_grid, v_box, want);
+    check(v_grid == want, "the grid's volume is its half extents times eight");
+    check(v_grid == v_box, "which is the box's volume");
+
+    // The bound has to BOUND: no point the grid contains may lie outside it. Same contract
+    // tests/test_solids.cu checks for the other thirty solids, which this type is not in.
+    int outside = 0;
+    Philox<real_t> rng(0xB0Bu, 0u);
+    for (int i = 0; i < 20000; ++i) {
+      const Vec3<real_t> q{real_t(1.2) * he_grid * (2 * rng.uniform() - 1),
+                           real_t(1.2) * he_grid * (2 * rng.uniform() - 1),
+                           real_t(1.2) * he_grid * (2 * rng.uniform() - 1)};
+      if (!inside(st, grid, q)) { continue; }
+      if (fabs(q.x) > he_grid || fabs(q.y) > he_grid || fabs(q.z) > he_grid) { ++outside; }
+    }
+    check(outside == 0, "no point inside the grid is outside its coordinate bound");
   }
 
   printf("\n%s (%d failures)\n", fails ? "FAILED" : "ALL PASS", fails);

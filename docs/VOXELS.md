@@ -30,6 +30,26 @@ Everything else about the volume is ordinary: it is placed with a transform like
 takes part in the layer rule like any solid, and `dist_in` / `dist_out` / `inside` treat it as
 a box. What differs is only what is *inside* it.
 
+**Which means every function that switches on solid type has to have a case for it.** Two did
+not - `geom::solid_half_extent` and `geom::analytic_volume` - so a grid fell through to their
+defaults and answered that it reached zero millimetres and enclosed zero cubic millimetres.
+Nothing failed; three things quietly gave wrong answers:
+
+* the same-layer overlap check compares centre separation against the sum of two bounding
+  radii, and a radius of zero meant a phantom only registered as overlapping something when
+  their centres nearly coincided. Reported as the check "only firing if there is substantial
+  overlap";
+* `G4RunManager::ScoredMass` sizes its sampling box from the same bound, so the mass of
+  anything scored on a grid came out as zero. Both the builder and a generated project print
+  the dose only `if (mass > 0)`, so the effect was not an infinity anyone would notice - it was
+  a phantom that reported its energy deposit in MeV and no dose at all, with nothing saying
+  why. The selftest's 40 mm water cube now reports 0.064 kg, which is exactly its mass;
+* and the viewer sizes its camera from the same bound, so a phantom framed the view around
+  every object except itself.
+
+`tests/test_voxels.cu` now checks both answers against the box of the same half extents, which
+is what a grid is.
+
 ## How a step inside one works
 
 `geom::voxel_step` (`src/geometry/voxels.cuh`) is an Amanatides-Woo DDA in the solid's own

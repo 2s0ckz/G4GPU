@@ -23,7 +23,8 @@
 //   * the thumb must stay inside its track at every scroll offset, and must reach both ends -
 //     a thumb that stops short cannot scroll to the bottom by dragging;
 //   * and a widget clipped out of its section must not be clickable, which is a property of
-//     Context::Hovering rather than of any widget - see section 8.
+//     Context::Hovering rather than of any widget - see section 8. The same goes for a widget
+//     an open dropdown is painted over, which is section 11.
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -387,6 +388,206 @@ int main() {
       if (old[i] == old[i - 1]) { old_dup = true; }
     }
     Check(old_dup, "the old stride of 100 does collide at 200 classes, as claimed");
+  }
+
+  // ---- 11. AN OVERLAY PAINTED LAST HAS TO BE HIT-TESTED FIRST.
+  //
+  // An open dropdown's list is drawn after the panel that declared it, because everything
+  // drawn after a widget paints over it. That puts its rows LAST in the frame, so by the time
+  // they are tested every widget they cover has already had its turn at the cursor - and one
+  // of them has taken the click. Reported as: picking a row of an open menu opens the closed
+  // menu that the row happens to sit on top of.
+  //
+  // Context::block is the region the list occupied, carried over from the frame it was painted
+  // on, and Hovering refuses the cursor to anything at or behind its layer inside it.
+  {
+    // The pure property first, with no widgets involved: it is one condition in Hovering, the
+    // same as the clip in section 8, and the layer is what stops it over-reaching.
+    ui::Input in;
+    ui::Context ctx;
+    ctx.in = &in;
+    ctx.canvas.clip = ui::Rect{0, 0, 1600, 900};
+    const ui::Rect covered{100, 200, 120, 24};
+    in.mouse_x = 150;
+    in.mouse_y = 210;
+    Check(ctx.Hovering(covered), "with no list open the widget is hovered");
+
+    ctx.block = ui::Rect{80, 180, 200, 100};
+    ctx.block_layer = ui::Context::kLayerPanel;
+    ctx.layer = ui::Context::kLayerPanel;
+    Check(!ctx.Hovering(covered), "under an open list at its own layer, it is not");
+    ctx.layer = ui::Context::kLayerPopup;
+    Check(ctx.Hovering(covered),
+          "a pop-up in front of the list is not covered by it and stays live");
+    ctx.layer = ui::Context::kLayerPanel;
+    in.mouse_x = 400;   // outside the list
+    Check(ctx.Hovering(ui::Rect{380, 200, 120, 24}),
+          "a widget beside the list is unaffected");
+  }
+
+  // And the reported case end to end, through the real widgets: two dropdowns in a column,
+  // the upper one open, and a click on the row of its list that lies over the lower one's
+  // button. The lower one must not open, and the row must be the thing that was picked.
+  {
+    // A font filled in rather than built: Font::Build is GDI, and what this needs from a font
+    // is its METRICS. Fixed numbers also make the row arithmetic below the same on every
+    // machine, where a real face's tmHeight is whatever the system decided.
+    ui::Font font;
+    font.glyph_w = 8;
+    font.glyph_h = 15;
+    font.ascent = 12;
+    font.coverage.assign(
+        static_cast<std::size_t>(ui::Font::kCount) * font.glyph_w * font.glyph_h, 0);
+    font.ready = true;
+    {
+      constexpr int kW = 640, kH = 600;
+      std::vector<unsigned int> px(static_cast<std::size_t>(kW) * kH, 0u);
+      ui::Input in;
+      ui::Context ctx;
+
+      static const char* const kOpts[4] = {"mm", "cm", "m", "um"};
+      const int rh = font.glyph_h + 6;          // DrawOpenSelect's row height
+      const ui::Rect ra{100, 100, 120, 22};     // the upper dropdown
+      // The middle of row 1 of the list the upper one opens: below its button, 2 px of
+      // border, then one whole row.
+      const int row1_mid = ra.y + ra.h + 2 + rh + rh / 2;
+      const ui::Rect rb{100, row1_mid - 10, 120, 22};   // the lower dropdown, under that row
+      const ui::Rect btn{100, row1_mid + rh - 10, 120, 22};  // and a plain button under row 2
+
+      int va = 0, vb = 0;
+      bool button_fired = false;
+      // One frame of the panel: two dropdowns, a button, then the open list.
+      auto frame = [&]() {
+        ctx.Begin(px.data(), kW, kH, &font, &in);
+        ctx.canvas.clip = ui::Rect{0, 0, kW, kH};
+        ui::Select(ctx, 11, ra, va, kOpts, 4);
+        ui::Select(ctx, 22, rb, vb, kOpts, 4);
+        if (ui::Button(ctx, 33, btn, "Import")) { button_fired = true; }
+        ui::DrawOpenSelect(ctx, ui::Context::kLayerPanel);
+        ctx.End();
+        in.EndFrame();
+      };
+
+      // Frame 1: click the upper dropdown's button. Its list opens and is painted.
+      in.mouse_x = ra.x + 10;
+      in.mouse_y = ra.y + 10;
+      in.left_down = true;
+      in.left_pressed = true;
+      frame();
+      Check(ctx.open_select == 11, "clicking the upper dropdown opens it");
+      const ui::Rect list = ctx.block;
+      Check(list.h > 0 && list.Contains(rb.x + 10, row1_mid),
+            "its list covers the lower dropdown's button");
+
+      // Frame 2: the mouse is on row 1, which is on top of the LOWER dropdown's button, and
+      // clicks. This is the reported gesture.
+      in.mouse_x = rb.x + 10;
+      in.mouse_y = row1_mid;
+      in.left_down = true;
+      in.left_pressed = true;
+      frame();
+      Check(ctx.open_select == 11, "the click stays with the open dropdown");
+      Check(ctx.select_picked == 1, "and it picked the row that was clicked");
+      Check(vb == 0, "the covered dropdown's value is untouched");
+
+      // Frame 3: the upper dropdown consumes the pick and closes.
+      frame();
+      Check(va == 1, "the value it was opened for changed");
+      Check(ctx.open_select == 0, "and the list is closed");
+      Check(ctx.block.w == 0 && ctx.block.h == 0, "with nothing left blocked");
+
+      // A plain button under the list is no different: the same rule covers every widget,
+      // not only the one whose id happened to be a dropdown.
+      va = 0;
+      in.mouse_x = ra.x + 10;
+      in.mouse_y = ra.y + 10;
+      in.left_down = true;
+      in.left_pressed = true;
+      frame();
+      in.mouse_x = btn.x + 10;
+      in.mouse_y = btn.y + 10;
+      in.left_down = true;
+      in.left_pressed = true;
+      in.left_released = false;
+      frame();
+      in.left_down = false;
+      in.left_released = true;
+      frame();
+      Check(!button_fired, "a button under the open list does not fire");
+
+      // ---- 12. AND THE MENU BAR, which had the same fault and a worse symptom.
+      //
+      // MenuBar::Item records its rows and EndMenu paints them, and the bar draws after the
+      // panels - so a panel control under an open menu had already claimed the click. Unlike
+      // a dropdown, Item() returns true on hover-and-press whoever else took it, so a menu
+      // entry over a panel button fired BOTH of them.
+      //
+      // The bar borrows the same one blocked region, so this also checks the save and restore
+      // that keeps it from wiping an open dropdown's region on its way past.
+      ui::MenuBar mb;
+      bool menu_button_fired = false;
+      bool item_fired = false;
+      // The middle of the menu panel's third row. The panel opens at the foot of the bar with
+      // 4 px of border, and each row is glyph_h + 8 tall - derived rather than guessed,
+      // because the point of the test is that the button below is UNDER that row.
+      const int item_y = 24 + 4 + 2 * (font.glyph_h + 8) + (font.glyph_h + 8) / 2;
+      const ui::Rect under{20, item_y - 10, 160, 22};   // a panel control under that row
+      // Button fires on RELEASE while it holds `active`, so a press-only frame proves nothing
+      // about it - the check that the button underneath stays quiet has to run the release
+      // too. Found by removing the fix and watching that assertion pass anyway.
+      auto menu_frame = [&](bool press, bool release, int mx, int my) {
+        ctx.Begin(px.data(), kW, kH, &font, &in);
+        ctx.canvas.clip = ui::Rect{0, 0, kW, kH};
+        in.mouse_x = mx;
+        in.mouse_y = my;
+        in.left_down = press;
+        in.left_pressed = press;
+        in.left_released = release;
+        // The panel first, as the real frame does.
+        if (ui::Button(ctx, 44, under, "Add")) { menu_button_fired = true; }
+        mb.Begin(ctx, ui::Rect{0, 0, kW, 24});
+        if (mb.Menu(ctx, "File")) {
+          if (mb.Item(ctx, "New")) { item_fired = true; }
+          if (mb.Item(ctx, "Open")) { item_fired = true; }
+          if (mb.Item(ctx, "Save")) { item_fired = true; }
+          mb.EndMenu(ctx);
+        }
+        mb.EndBar(ctx);
+        ctx.End();
+        in.EndFrame();
+      };
+
+      menu_frame(true, false, 20, 12);     // click the File title: the menu opens
+      menu_frame(false, true, 20, 12);     // release it
+      menu_frame(false, false, 20, 12);    // a frame with it open, so its panel is published
+      Check(ctx.block.h > 0, "an open menu publishes the region its panel covers");
+      Check(under.Contains(30, item_y) && ctx.block.Contains(30, item_y),
+            "and that region reaches the button underneath");
+      menu_frame(true, false, 30, item_y);
+      menu_frame(false, true, 30, item_y);
+      Check(item_fired, "the menu item fires");
+      Check(!menu_button_fired, "and the button underneath it does not");
+
+      // The bar must have put back the region it found, or an open dropdown loses its rows.
+      in.left_down = false;
+      ctx.open_select = 0;
+      ctx.block = ui::Rect{};
+      va = 0;
+      in.mouse_x = ra.x + 10;
+      in.mouse_y = ra.y + 10;
+      in.left_down = true;
+      in.left_pressed = true;
+      ctx.Begin(px.data(), kW, kH, &font, &in);
+      ctx.canvas.clip = ui::Rect{0, 0, kW, kH};
+      ui::Select(ctx, 11, ra, va, kOpts, 4);
+      ui::DrawOpenSelect(ctx, ui::Context::kLayerPanel);
+      mb.Begin(ctx, ui::Rect{0, 0, kW, 24});   // no menu open: nothing to publish
+      mb.EndBar(ctx);
+      ctx.End();
+      in.EndFrame();
+      Check(ctx.block.h > 0,
+            "a menu bar with nothing open leaves an open dropdown's region alone");
+    }
   }
 
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "PASSED", g_fails);

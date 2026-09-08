@@ -2939,3 +2939,144 @@ Two of the three things in this entry were standard optimisations quoted from me
 than measured, and both were wrong for this code: one because the bottleneck was somewhere
 else entirely, one because the effect was below the noise. The one that paid was found by
 reading what the renderer actually called, per pixel, and counting.
+
+### V22: five reports from one afternoon at the keyboard, and what each of them actually was
+
+Five things reported in one message. They are together because the pattern is: none of the five
+was where it looked, and three were one line each in a place nobody would have gone looking.
+
+#### 1. A phantom visible through an opaque object in front of it
+
+The cell march inside a voxel volume had no ownership test along it. The outer walk asks
+`locate` at every surface it draws - a higher layer takes the space wherever it overlaps, so a
+lower volume's surface is not there and is not drawn - and the march that walks a grid's cells
+skipped that question entirely and ran the grid's whole depth in one go. Cells inside an opaque
+box placed over the phantom were therefore composited, and being nearer the eye they arrived
+BEFORE that box's own surface, so front-to-back blending put them on top of it.
+
+Two halves to the fix, and the second is the one that would have been missed: the march stops
+where an outranking volume begins, AND resumes past it, or everything behind a translucent
+object over a phantom vanishes instead of being drawn wrongly.
+
+Then a third thing, found by the test failing: the outermost hidden cells were still drawn,
+because `walk.t` counts from a point nudged 1e-4 mm past the grid's entry while the ownership
+distance counts from the entry itself. Out by a nudge, in the direction of drawing a cell the
+cover owns - and it only shows when a box face is FLUSH with a cell boundary, which is the
+normal case rather than the corner case, because cells are on a lattice and a box placed over
+them lands on it. One cell at a quarter opacity in front of an opaque surface is a quarter of
+the pixel.
+
+Worth writing down about the fixture: the first version put the hidden cells one cell clear of
+the cover, the invariant passed, and the flush arithmetic would have shipped. It failed only
+because the first fixture happened to be flush, and the honest sequence was: fixture fails,
+hypothesis (the nudge), test the hypothesis by giving the fixture a margin, watch it pass, fix
+the arithmetic, put the fixture back to flush because flush is the harder case.
+
+#### 2. An import arriving on layer 2
+
+No reason. `ImportFile` said `s.layer = 2` and `InsertShape` said 1. The consequence is not
+cosmetic: an imported mesh or phantom outranked everything already placed, won every overlap
+without anyone choosing that, and was exempt from the same-layer refusal that would otherwise
+have pointed the overlap out.
+
+Changing it moved the selftest scene, because the selftest's mesh cube sits inside the orb and
+the cylinder that earlier frames place and its RANK decides who owns that space - which the
+scorer on it then measures. The trace was three new overlap warnings and nothing else; the dose
+happened to be unchanged. The fixture now pins its own layer, because a default two files away
+is not where a compared number should be decided from.
+
+#### 3. Overlap checking that only fired on a substantial overlap
+
+`kVoxelGrid` was missing from `solid_half_extent`'s switch, so it returned zero. See VOXELS.md
+for the three things that broke; the reported one is that the check's first stage compares
+centre separation against the sum of the bounding radii, and a radius of zero only clears when
+the other volume's centre is nearly on top of the grid's own.
+
+The one worth dwelling on is the one nobody reported. `ScoredMass` sizes its integration box
+from that bound too, so the mass of a scored phantom was zero - and because both the builder
+and every generated project print the dose only `if (mass > 0)`, the symptom was not an
+infinity but a MISSING LINE. A phantom you scored reported its megaelectronvolts and no dose,
+and nothing said why. Which is the failure mode this register keeps rediscovering: the wrong
+answer that declines to print itself.
+
+The check was also insensitive for a second, independent reason, so the one-line fix would not
+have been enough: it sampled the smaller volume's own bounding CUBE, sized by that solid's
+LARGEST half extent. A phantom 300 x 200 x 1700 mm sits in a cube of 3400 mm on a side and
+fills 2% of it, so 4000 samples put 80 points in the phantom and an overlap under about a
+percent of it went unseen. It now samples the INTERSECTION of the two bounding boxes - which is
+where an overlap has to be - on a jittered lattice, and the boxes are the rotated bounding cube
+bounded per axis rather than the bounding sphere, which is tight for an unrotated solid where
+the sphere is sqrt(3) too big on every axis. Measured on the selftest scene: a 30 mm cube inside
+a 75 mm sphere comes back as 2.7e+04 mm3 and 100% of the smaller, which is exact.
+
+#### 4. Picking a row of an open dropdown opening the menu underneath it
+
+An overlay painted last has to be hit-tested first, and in one pass over the frame it cannot be
+both. The list is drawn after the panel that declared it - everything drawn after a widget
+paints over it - so by the time its rows are tested, every widget it covers has had its turn
+and one of them has taken the click.
+
+`Context::block` is the region the list occupied, carried over from the frame it was painted on,
+and `Hovering` refuses the cursor to anything at or behind its layer inside it. A frame stale,
+which is where the list actually is on screen. The same rule covers every widget rather than
+dropdowns only, which is why the test checks a plain Button under the list too.
+
+**And then the menu bar, which has the same fault and a worse symptom.** Not reported - found by
+asking what else in this UI paints an overlay after the thing it covers. `MenuBar::Item` records
+its rows and `EndMenu` paints them, and the bar draws after the panels. Two ways it is worse
+than the dropdown case: `Item()` returns true on hover-and-press whoever else took the click, so
+a menu entry over a panel button fired BOTH of them; and `EndBar` only closes the menu when
+`ctx.hot == 0`, which the control underneath had just set to itself, so the menu did not close
+either. The bar borrows the same single blocked region, saving and restoring what it found, or a
+bar drawn between `DrawOpenSelect` and the next frame would wipe an open dropdown's region on
+its way past.
+
+The test for that half was vacuous on its first attempt and said so only when the fix was
+removed: `Button` fires on RELEASE while it holds `active`, so a press-only frame proves nothing
+about a button, and "the button underneath did not fire" passed with the bug in place. Three
+assertions in this entry needed the bug put back before they could be trusted; two of them were
+wrong until that was done.
+
+#### 5. Resizing the left panel rotating the view
+
+A splitter's grab strip straddles the boundary it moves, deliberately, so its inner half lies
+inside the 3D view - and those columns were claimed by two things at once. What makes this worth
+an entry is the asymmetry, which the report noticed and which says it is arbitration and not a
+stray pixel: `left_w = mouse_x` puts the view's FIRST column under the cursor, so the pointer is
+inside the view for the whole drag, while `right_w = width - mouse_x` puts the view's EXCLUSIVE
+right edge there and the pointer is just outside for the whole drag. One rule, applied
+consistently, and one of the three geometries happened to escape it.
+
+#### And a measurement, because the fix changed the kernel
+
+The additions took `render_geometry` from 250 registers and no spilling to 255 registers and 222
+bytes of spill stores, with the stack frame 1760 -> 2144 bytes. A single benchmark run then read
+7-9% slower than the figures from the previous session, which is exactly the shape of the mistake
+V10 and V21 are about, so it was measured properly: two binaries differing only in
+`renderer.cuh`, alternated within one session.
+
+```
+  pair        with        without      diff
+     1       58.04         58.15      -0.11
+     2       57.99         57.73      +0.26
+     3       62.01         61.44      +0.57
+     4       61.36         61.59      -0.23
+     5       61.26         61.42      -0.16
+```
+
+Mean difference +0.07 ms on 58 ms, paired sd 0.34, t = 0.43 on 4 degrees of freedom. Not
+significant. Note what BOTH columns do down the table - 58 to 61 ms - which is 6% of drift
+inside one session, and is the whole of the 7-9% the single run showed.
+
+Two things learned that are worth keeping. `__noinline__` on the new ownership helpers, tried to
+keep their frames out of the hot path, made it WORSE - 2352 bytes and 306 spill bytes - because
+an ABI call forces the caller to save its live registers around it. And the register report is
+cheap evidence where a benchmark is expensive: `nvcc -Xptxas -v -cubin` on a one-line translation
+unit that instantiates the kernel takes twenty seconds and says exactly what changed, where the
+benchmark needs a paired design and ten minutes to say anything at all.
+
+Also corrected here: the triangle counts in V21's table are the numbers `-benchmesh` was ASKED
+for, not the numbers it built. The generator lands on the next whole UV sphere, which is 2x the
+request - 80,656 rather than 40,000, and so on. The speedups are unaffected, since both columns
+measured the same geometry; the labels were wrong.
+

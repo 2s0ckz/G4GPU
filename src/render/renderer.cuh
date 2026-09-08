@@ -146,6 +146,36 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
   float first_t = -1;
   real_t travelled = 0;
 
+  // Is this volume a voxel grid that will be drawn cell by cell? Asked in two places - the
+  // surface search and the walk itself - and they must agree, or a grid is re-entered by a
+  // rule that then declines to draw it and the pixel loops until the layer cap.
+  auto per_cell_grid = [&](int v) {
+    return geometry.volumes[v].solid.type == geom::SolidType::kVoxelGrid
+           && voxel_class != nullptr && class_rgba != nullptr
+           && static_cast<int>(geometry.volumes[v].solid.p[7]) > 0;
+  };
+  // The nearest entry ahead of @p p, for the volumes that OUTRANK a grid: it is where the
+  // grid stops owning the ray.
+  //
+  // Plain dist_in, and no shortcut for a mesh even though the fast path above has one. What a
+  // shortcut here would buy is a cheaper ownership scan for a scene holding both a per-cell
+  // voxel grid and a mesh above it; what it costs is a third inlined copy of the BVH walk in a
+  // kernel that already spills. The ownership work in this function is done once per
+  // composited layer, not per triangle, so the argument that made the fast path worth 4x does
+  // not apply to it. Simplicity wins by default when neither side is measured.
+  //
+  // The register situation, since it is easy to check and easy to get wrong: these additions
+  // took render_geometry from 250 registers and no spilling to 255 and 222 bytes of spill
+  // stores (nvcc -Xptxas -v). That is real and it costs nothing measurable - paired A/B on
+  // two binaries differing only in this file, t = 0.43 on 4 dof. Removing this shortcut did
+  // not reduce the spilling either, and __noinline__ on the ownership helpers made it worse,
+  // because an ABI call forces the caller to save its live registers. See docs/RISK.md V22.
+  auto entry_ahead = [&](int v, const Vec3<real_t>& p) {
+    const auto& u = geometry.volumes[v];
+    return geom::dist_in(geometry.store, u.solid, geom::to_local(u.xform, p),
+                         geom::dir_to_local(u.xform, dir));
+  };
+
   for (int layer = 0; layer < kMaxLayers && acc_a < 0.995f; ++layer) {
     const Vec3<real_t> from = origin + travelled * dir;
     real_t best_t = geom::kInfinity<real_t>();
@@ -194,7 +224,29 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       // re-finds the volume just entered, paints its front face again, and does that until
       // the accumulated alpha saturates. The effect is that a half-transparent box renders
       // fully opaque and nothing behind it is ever reached. That is the whole bug.
-      if (geom::inside_volume(geometry, v, from)) { continue; }
+      if (geom::inside_volume(geometry, v, from)) {
+        // A GRID DRAWN CELL BY CELL IS THE EXCEPTION, because its interior is not one
+        // surface. The walk below stops where a higher layer takes the space over, so the
+        // cells BEYOND whatever covers the grid are still to be drawn - and the ray is inside
+        // the grid the whole time. Without this they were simply lost.
+        if (!per_cell_grid(v)) { continue; }
+        // Who owns this point: the same question locate answers for the transport. If it is
+        // the grid, the grid has already been walked from here and there is nothing ahead of
+        // it; if it is something else, that something outranks the grid (locate returns the
+        // highest layer containing the point) and the grid resumes where it ends.
+        const int own = geom::locate(geometry, from);
+        if (own < 0 || own == v) { continue; }
+        const auto& cov = geometry.volumes[own];
+        const real_t t = geom::dist_out(geometry.store, cov.solid,
+                                        geom::to_local(cov.xform, from),
+                                        geom::dir_to_local(cov.xform, dir));
+        if (t < best_t) {
+          best_t = t;
+          best_vol = v;
+          best_tri = -1;
+        }
+        continue;
+      }
       // geometry.store, not the store-free overload. That overload passes an empty SolidStore,
       // whose `solids`, `aux`, `tri` and `bvh` are all null - so a boolean operand lookup
       // dereferences null and a mesh finds no triangles.
@@ -210,6 +262,7 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
 
     const auto& vol = geometry.volumes[best_vol];
     const Vec3<real_t> hit = from + best_t * dir;
+    const real_t t_hit = travelled + best_t;   ///< distance from the eye to this surface
     travelled += best_t + kNudge;
 
     // Is this surface actually the boundary of the volume that *owns* the space behind it?
@@ -248,9 +301,29 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     // normal is the unit vector along it. Without that every cell shades identically and the
     // result is fog with an outline. With it, the boundary between two classes reads as a
     // surface, which is what makes the picture anatomy rather than a colour field.
-    if (vol.solid.type == geom::SolidType::kVoxelGrid && voxel_class != nullptr
-        && class_rgba != nullptr && static_cast<int>(vol.solid.p[7]) > 0) {
+    if (per_cell_grid(best_vol)) {
       const geom::VoxelGrid<real_t> grid = geom::voxel_grid_of(vol.solid);
+      // HOW FAR THE GRID OWNS THE RAY.
+      //
+      // A higher layer takes the space wherever it overlaps, so the cells under it are not
+      // there as far as the transport is concerned and must not be drawn - the same rule the
+      // `locate` test above applies to an ordinary surface. The walk had no such test: it
+      // marched the grid's whole depth in one go and composited every cell along it,
+      // including the ones sitting inside an opaque volume placed over the phantom. Front to
+      // back, those cells arrive BEFORE that volume's own surface, so they were blended over
+      // the top of it - which is a phantom showing through a solid object, reported exactly
+      // that way.
+      //
+      // Style is deliberately not consulted: a volume that is hidden or wireframe still owns
+      // its space, which is what `locate` says and therefore what the transport sees. Hiding
+      // a box over a phantom leaves the hole it occupies, the same as it already does over an
+      // ordinary solid.
+      real_t t_own = geom::kInfinity<real_t>();
+      for (int v = 0; v < geometry.n_volumes; ++v) {
+        if (v == best_vol || !geom::outranks(geometry, v, best_vol)) { continue; }
+        const real_t t = entry_ahead(v, hit);
+        if (t < t_own) { t_own = t; }
+      }
       // p[6] and p[7] are spare on a voxel grid - p[0..2] is the half extent and
       // p[3..5] the cell counts - so the class run rides on the SOLID, exactly as the
       // cell-array offset rides in `a`. Nothing records which model solid a flattened
@@ -262,10 +335,31 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       // A nudge inside, so the entry point is unambiguously in the first cell rather than on
       // its face - the same reason the outer loop nudges past each surface it crosses.
       const Vec3<real_t> start = hit_local + real_t(1e-4) * local_dir;
+      bool covered = false;    ///< the walk ended because a higher layer took the space
+      real_t end_t = 0;        ///< where it ended, measured from `hit`
       if (walk.Start(grid, start, local_dir)) {
         Vec3<real_t> face_n = n;   // the grid's own surface, for the first cell
         bool more = true;
         while (more && acc_a < 0.995f) {
+          // walk.t is the entry of the cell about to be drawn, so a cell straddling the
+          // boundary is drawn: the part of it the grid owns is in front of the surface.
+          //
+          // MEASURED FROM THE SAME PLACE, AND TIES GO TO THE COVER. walk.t counts from
+          // `start`, which is kNudge past `hit`, while t_own counts from `hit` - so the raw
+          // comparison is out by that nudge, and it is out in the direction of drawing a cell
+          // the cover owns. A box whose face is FLUSH with a cell boundary is exactly where
+          // that shows, and flush is not an unlikely arrangement: cells are on a lattice and
+          // a box put over one lands on it. The cell was then composited in front of an
+          // opaque surface at a quarter opacity, which tints it - one cell's worth of a
+          // phantom showing through, which is the same bug in miniature.
+          //
+          // The surface tolerance decides the exact tie, in favour of the cover, so that
+          // alignment gives a definite answer instead of one an ulp of rounding picks.
+          if (walk.t + kNudge >= t_own - geom::kSurfTolerance<real_t>()) {
+            covered = true;
+            end_t = t_own;
+            break;
+          }
           const int idx = walk.Index(grid);
           if (idx >= 0 && idx < geometry.voxels.count) {
             const int cls = static_cast<int>(voxel_class[idx]);
@@ -281,9 +375,7 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
                 acc_g += w * static_cast<float>((rgba >> 8) & 0xFFu) * sh;
                 acc_b += w * static_cast<float>(rgba & 0xFFu) * sh;
                 acc_a += w;
-                if (first_t < 0) {
-                  first_t = static_cast<float>(travelled - kNudge + walk.t);
-                }
+                if (first_t < 0) { first_t = static_cast<float>(t_hit + walk.t); }
               }
             }
           }
@@ -298,9 +390,22 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
             face_n = geom::dir_to_global(vol.xform, ln);
           }
         }
+        if (!covered) { end_t = walk.t; }   // the far side of the grid, where Next() stopped
       }
-      // The grid has been accounted for over its whole depth, so the outer walk resumes past
-      // it rather than shading its box as well.
+      // The grid is accounted for as far as it owns the ray, so the search resumes there
+      // rather than shading its box as well.
+      //
+      // A NUDGE SHORT of a covering surface, not past it: a volume the ray is already inside
+      // has no entry surface ahead of it, so restarting inside the thing that covers the
+      // phantom is how that thing would never get painted. Past the grid's own far side when
+      // nothing covered it, which is the same reasoning the other way round.
+      //
+      // At least a nudge either way. A covering surface flush with the grid's front face
+      // gives end_t = 0, and a pixel whose distance does not advance is a pixel that spins
+      // here until the layer cap.
+      real_t resume = covered ? (end_t - kNudge) : (end_t + kNudge);
+      if (resume < kNudge) { resume = kNudge; }
+      travelled = t_hit + resume;
       continue;
     }
 

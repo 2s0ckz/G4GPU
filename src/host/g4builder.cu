@@ -78,7 +78,11 @@ struct SameLayerOverlap {
   int a = -1;
   int b = -1;
   int layer = 0;
-  double fraction = 0;  ///< of the smaller volume's sampled points, how many were in both
+  double mm3 = 0;       ///< estimated volume of the shared region
+  /// That, as a fraction of the smaller solid - or negative when the smaller solid has no
+  /// closed-form volume to divide by. Estimating one would mean sampling a solid whose
+  /// containment test is a BVH parity count, on every edit, which is not worth a percentage.
+  double fraction = -1;
 };
 
 /// What a picker pop-up is choosing. Defined here rather than in g4builder_pick.inc because
@@ -191,6 +195,24 @@ struct App {
   /// computes it - hence a field rather than a local. One frame of lag on a cursor shape is
   /// not perceptible.
   int split_hot = 0;
+  /// Did the press that is currently down land on a splitter's grab strip?
+  ///
+  /// A grab strip STRADDLES the boundary it moves, so its inner half lies inside the 3D view
+  /// - deliberately, so the cursor need not find the exact pixel. That makes those few
+  /// columns claimable by two things at once, and dragging the left splitter did both: the
+  /// view rotated as the panel resized.
+  ///
+  /// Only the left one showed it, and the asymmetry says why it is arbitration and not a
+  /// stray pixel. `left_w = mouse_x` puts the view's first column exactly under the cursor,
+  /// so the pointer is inside the view for the whole drag; `right_w = width - mouse_x` puts
+  /// its EXCLUSIVE right edge there, so the pointer is just outside for the whole drag. The
+  /// bottom splitter is the same as the right one. One rule was being applied consistently
+  /// and one of the three geometries happened to escape it.
+  ///
+  /// Decided at the press rather than from `dragging_split`, which is only set once the frame
+  /// runs: a WM_MOUSEMOVE carrying more than two pixels can arrive first, and then the orbit
+  /// has already begun.
+  bool press_on_split = false;
   bool running = true;
   bool resized = true;
 
@@ -454,6 +476,16 @@ static ui::Rect BottomSplitRect(const App& a) {
   return {b.x, b.y - kSplitterW / 2, b.w, kSplitterW};
 }
 
+/// Did a press at (@p x, @p y) land on a splitter's grab strip?
+///
+/// One function so that the message handler and the selftest ask the same question. The
+/// answer decides who owns a press in the few columns where a grab strip and the 3D view
+/// overlap - see App::press_on_split, which is where the overlap is explained.
+static bool PressOnSplitter(const App& a, int x, int y) {
+  return LeftSplitRect(a).Contains(x, y) || RightSplitRect(a).Contains(x, y)
+         || BottomSplitRect(a).Contains(x, y);
+}
+
 /// Drags whichever splitter was grabbed, and keeps every panel above its minimum.
 ///
 /// Clamped rather than free: a sidebar dragged to zero width cannot be dragged back, because
@@ -465,7 +497,11 @@ static void UpdateSplitters(App& a) {
   const ui::Rect r = RightSplitRect(a);
   const ui::Rect b = BottomSplitRect(a);
 
-  if (a.dragging_split == 0 && a.input.left_pressed) {
+  // Not through an open dropdown's list: it is painted over the splitter and the click
+  // belongs to whatever row is under the cursor. Same rule as ui::Context::Hovering, which
+  // these three cannot use - a splitter is not a widget and has no clip of its own.
+  const bool covered = a.uic.block.Contains(a.input.mouse_x, a.input.mouse_y);
+  if (a.dragging_split == 0 && a.input.left_pressed && !covered) {
     if (l.Contains(a.input.mouse_x, a.input.mouse_y)) {
       a.dragging_split = 1;
     } else if (r.Contains(a.input.mouse_x, a.input.mouse_y)) {
@@ -1034,12 +1070,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       a.input.left_pressed = true;
       a.last_x = static_cast<short>(LOWORD(lp));
       a.last_y = static_cast<short>(HIWORD(lp));
+      // A press on a splitter is a resize and nothing else. See App::press_on_split.
+      a.press_on_split = PressOnSplitter(a, static_cast<short>(LOWORD(lp)),
+                                         static_cast<short>(HIWORD(lp)));
       SetCapture(hwnd);
       return 0;
     case WM_LBUTTONUP:
       a.input.left_down = false;
       a.input.left_released = true;
       a.orbiting = false;
+      a.press_on_split = false;
       ReleaseCapture();
       return 0;
     case WM_RBUTTONDOWN:
@@ -1065,8 +1105,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       a.input.mouse_y = y;
       // Orbiting begins only after the cursor has moved with the button down inside the view
       // and no gizmo handle claimed the press, so a click-to-select does not also spin the
-      // camera by a pixel.
+      // camera by a pixel. Nor when the press was on a splitter, and nor under an open
+      // dropdown - both are things drawn over the view that own their own drags.
       if (a.input.left_down && over_view && !a.drag.active && a.uic.active == 0
+          && !a.press_on_split && !a.uic.block.Contains(x, y)
           && (std::abs(dx) + std::abs(dy)) > 2) {
         a.orbiting = true;
       }
@@ -1122,7 +1164,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 50;
+      selftest_frames = 60;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1532,6 +1574,130 @@ int main(int argc, char** argv) {
         }
         a.input.mouse_x = 0;
         a.input.mouse_y = 0;
+      }
+      // WHAT A HIGHER LAYER COVERS CANNOT CHANGE THE PICTURE.
+      //
+      // The cell march used to walk a voxel volume's whole depth in one go, with no ownership
+      // test along it - so cells sitting inside an opaque volume placed over the phantom were
+      // composited anyway, and being nearer the eye they were blended ON TOP of that volume's
+      // own surface. Reported as a phantom showing through a solid object in front of it.
+      //
+      // Checked as an invariant rather than by inspecting a pixel: recolour a class the slab
+      // owns the space of, and NOTHING may change.
+      //
+      // With three positive controls, because "nothing changed" is what several other kinds
+      // of broken look like too:
+      //
+      //   * recolouring the class in FRONT of the slab must change the picture, or the
+      //     fixture is off screen and the invariant is about nothing;
+      //   * recolouring the SLAB must change it, or the slab is not being painted - which
+      //     would satisfy the invariant for the wrong reason, and would mean the search steps
+      //     over the very surface it stopped for;
+      //   * and once the slab is made translucent, recolouring the class BEYOND it must
+      //     change the picture. That is the other half of the rule: the march has to resume
+      //     past the covering volume rather than end there, or everything behind a
+      //     transparent object placed over a phantom disappears.
+      if (frame == 49) {
+        InsertSelftestCoveredVoxels(a);
+        // Straight down -z, so every ray that reaches the far side of the grid crosses the
+        // slab: the eye is on the grid's axis and the slab is wider than the grid, so a ray
+        // is closer to the axis at the slab than at anything behind it.
+        a.target = vis::Vec3f{0.f, 250.f, 0.f};
+        a.distance = 260.f;
+        a.azimuth = 0.f;
+        a.elevation = 0.f;
+      }
+      static unsigned long long cover_base = 0;
+      static unsigned long long cover_hidden = 0;
+      if (frame == 50) {
+        cover_base = ViewportChecksum(a);
+        SaveFramePng(a, "D:/g4gpu/out/g4builder_covered_voxels.png");
+        RecolourVoxelClass(a, "Covered", 2, 0.1f, 0.9f, 0.2f);   // inside the slab
+      }
+      static unsigned long long cover_beyond_opaque = 0;
+      if (frame == 51) {
+        cover_hidden = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Covered", 2, 0.9f, 0.2f, 0.9f);   // back as it was
+        RecolourVoxelClass(a, "Covered", 3, 0.9f, 0.7f, 0.1f);   // BEYOND the opaque slab
+      }
+      static unsigned long long cover_seen = 0;
+      if (frame == 52) {
+        cover_beyond_opaque = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Covered", 3, 0.3f, 0.3f, 0.8f);   // back as it was
+        RecolourVoxelClass(a, "Covered", 1, 0.2f, 0.4f, 0.9f);   // IN FRONT of the slab
+      }
+      if (frame == 53) {
+        cover_seen = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Covered", 1, 0.55f, 0.75f, 0.55f);  // back as it was
+        RecolourSolid(a, "Cover", 0.2f, 0.3f, 0.9f);               // and the SLAB itself
+      }
+      static unsigned long long cover_translucent = 0;
+      if (frame == 54) {
+        const unsigned long long cover_box = ViewportChecksum(a);
+        if (cover_hidden != cover_base) {
+          std::printf("selftest: FAILED - recolouring a voxel class whose space a "
+                      "higher-layer volume owns changed the picture (%llu -> %llu), so "
+                      "covered cells are still being drawn\n",
+                      cover_base, cover_hidden);
+        } else if (cover_beyond_opaque != cover_base) {
+          std::printf("selftest: FAILED - recolouring a voxel class BEYOND an opaque "
+                      "higher-layer volume changed the picture (%llu -> %llu)\n",
+                      cover_base, cover_beyond_opaque);
+        } else if (cover_seen == cover_base) {
+          std::printf("selftest: FAILED - recolouring the voxel class in FRONT of the slab "
+                      "changed nothing (%llu), so the checks above proved nothing\n",
+                      cover_base);
+        } else if (cover_box == cover_base) {
+          std::printf("selftest: FAILED - recolouring the covering slab changed nothing "
+                      "(%llu), so it is not being drawn and the invariant above is satisfied "
+                      "by the wrong thing\n", cover_base);
+        } else {
+          std::printf("selftest: what a higher layer covers does not reach the picture - not "
+                      "the cells inside it, not the cells behind it - and the cover and the "
+                      "cells in front of it do\n");
+        }
+        RecolourSolid(a, "Cover", 0.85f, 0.85f, 0.35f);
+        SetSolidOpacity(a, "Cover", 0.4f);   // now see through it
+      }
+      if (frame == 55) {
+        cover_translucent = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Covered", 3, 0.9f, 0.7f, 0.1f);   // beyond a see-through slab
+      }
+      if (frame == 56) {
+        const unsigned long long beyond_seen = ViewportChecksum(a);
+        if (beyond_seen == cover_translucent) {
+          std::printf("selftest: FAILED - with the slab translucent, recolouring the voxel "
+                      "class BEYOND it changed nothing (%llu), so the cell march stops at a "
+                      "covering volume instead of resuming past it\n", cover_translucent);
+        } else {
+          std::printf("selftest: with the covering volume made translucent, the cells beyond "
+                      "it are drawn again\n");
+        }
+        RecolourVoxelClass(a, "Covered", 3, 0.3f, 0.3f, 0.8f);
+        SetSolidOpacity(a, "Cover", 1.0f);
+        // The splitter grab strips overlap the 3D view by design, so a press there is claimed
+        // by two things at once unless something arbitrates. PressOnSplitter is that, and
+        // this is the pixel it has to get right: the first column of the view.
+        const ui::Rect vr = ViewRect(a);
+        const int my = vr.y + vr.h / 2;
+        const bool ambiguous = vr.Contains(vr.x, my);
+        const bool claimed = PressOnSplitter(a, vr.x, my);
+        const bool right_claimed = PressOnSplitter(a, vr.x + vr.w - 1, my);
+        const bool middle_free = !PressOnSplitter(a, vr.x + vr.w / 2, my);
+        if (!ambiguous || !claimed || !right_claimed || !middle_free) {
+          std::printf("selftest: FAILED - splitter arbitration: view-owns-first-column %d, "
+                      "splitter-claims-it %d, right edge %d, middle free %d\n",
+                      ambiguous, claimed, right_claimed, middle_free);
+        } else {
+          std::printf("selftest: the view's edge columns are claimed by the splitters, not by "
+                      "the camera\n");
+        }
+        // The camera back, so the overview picture at the end is the same one it has
+        // always been.
+        a.target = vis::Vec3f{95.f, 0.f, 0.f};
+        a.distance = 900.f;
+        a.azimuth = 0.9f;
+        a.elevation = 0.25f;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

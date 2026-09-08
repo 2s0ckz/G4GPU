@@ -28,6 +28,7 @@ __host__ inline real_t analytic_volume(const Solid<real_t>& s) {
       // closed mesh, and cheaper and more accurate than sampling it. See geometry/bvh_build.hh.
       return s.p[6];
     case SolidType::kBox:
+    case SolidType::kVoxelGrid:   // a box that happens to hold a material per cell
       return real_t(8) * p[0] * p[1] * p[2];
     case SolidType::kTrd:
       // The prismatoid formula: (h/3)(A1 + A2 + sqrt(A1 A2)) does not apply, because the
@@ -144,6 +145,22 @@ __host__ inline real_t solid_half_extent(const SolidStore<real_t>& st, const Sol
       // p[3..5] its centre, so this is the farthest corner.
       return fmax(fabs(p[3]) + p[0], fmax(fabs(p[4]) + p[1], fabs(p[5]) + p[2]));
     case SolidType::kBox:
+    case SolidType::kVoxelGrid:
+      // A voxel grid IS a box as far as any bound is concerned: p[0..2] are its half extent
+      // and every cell is inside it. Leaving it out - which is how it was for the whole life
+      // of the type - dropped it through to the `default` below, which returns ZERO, and a
+      // bound of zero is not conservative in either direction. What that silently broke:
+      //
+      //   * same-layer overlap detection. Its cheap first stage compares centre separation
+      //     against the sum of the two bounding radii, so a phantom with radius 0 only
+      //     registered when the other volume's centre was nearly on top of its own. Reported
+      //     as the check "only firing if there is substantial overlap", which is what a test
+      //     that can only see the middle of a volume looks like from outside.
+      //   * the mass of anything scored on a grid, because solid_volume falls back to
+      //     sampling a box of this size and a box of side zero has no volume. A dose is
+      //     energy over mass.
+      //   * the camera's idea of how large the scene is, so a phantom framed the view around
+      //     everything except itself.
       return fmax(p[0], fmax(p[1], p[2]));
     case SolidType::kTrd:
       return fmax(fmax(p[0], p[1]), fmax(fmax(p[2], p[3]), p[4]));

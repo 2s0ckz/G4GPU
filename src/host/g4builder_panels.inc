@@ -584,7 +584,12 @@ static bool ImportFile(App& a, const std::string& path,
     if (!std::isalnum(static_cast<unsigned char>(c))) { c = '_'; }
   }
   s.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
-  s.layer = 2;
+  // Layer 1, the same as a shape inserted from the menu. It was 2 for no stated reason, which
+  // meant an imported mesh or phantom silently OUTRANKED everything already placed: it won
+  // every overlap without anyone choosing that, and it was exempt from the same-layer refusal
+  // that would otherwise have pointed the overlap out. What should be on top is a decision
+  // for whoever built the scene, so a new solid arrives level with the rest.
+  s.layer = 1;
 
   if (detail::EndsWith(path, ".stl") || detail::EndsWith(path, ".obj")
       || detail::EndsWith(path, ".ply")) {
@@ -1365,7 +1370,7 @@ static void DrawFlatDetectorPopup(App& a) {
     s.det_rows = static_cast<int>(rows_f.value);
     s.det_cols = static_cast<int>(cols_f.value);
     s.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
-    s.layer = 2;
+    s.layer = 1;   // level with everything else, as ImportFile and InsertShape now are
     s.r = 0.4f;
     s.g = 0.8f;
     s.b = 0.9f;
@@ -1990,6 +1995,172 @@ static void InsertSelftestVoxels(App& a) {
   Log("selftest: added an 8x8x8 voxel volume");
 }
 
+/// FNV-1a over the 3D viewport's pixels. For asking whether the PICTURE changed.
+///
+/// The viewport only: the panels carry a log that grows on its own, and a checksum that
+/// included them would differ between two frames for reasons that have nothing to do with
+/// the render.
+static unsigned long long ViewportChecksum(const App& a) {
+  const ui::Rect v = ViewRect(a);
+  unsigned long long h = 1469598103934665603ull;
+  for (int y = 0; y < v.h; ++y) {
+    for (int x = 0; x < v.w; ++x) {
+      const std::size_t i = static_cast<std::size_t>(v.y + y) * a.width + (v.x + x);
+      if (i >= a.host_rgba.size()) { continue; }
+      h ^= a.host_rgba[i];
+      h *= 1099511628211ull;
+    }
+  }
+  return h;
+}
+
+/// Repaints one voxel class of a named solid and marks the scene for rebuild.
+static void RecolourVoxelClass(App& a, const char* name, int cls, float r, float g, float b) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    if (cls < 0 || cls >= static_cast<int>(s.voxel_classes.size())) { return; }
+    s.voxel_classes[static_cast<std::size_t>(cls)].r = r;
+    s.voxel_classes[static_cast<std::size_t>(cls)].g = g;
+    s.voxel_classes[static_cast<std::size_t>(cls)].b = b;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// Repaints a named solid and marks the scene for rebuild.
+static void RecolourSolid(App& a, const char* name, float r, float g, float b) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    s.r = r;
+    s.g = g;
+    s.b = b;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// Sets a named solid's opacity and marks the scene for rebuild.
+static void SetSolidOpacity(App& a, const char* name, float o) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    s.opacity = o;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// A voxel volume with a SLAB on a higher layer through the middle of it.
+///
+/// The fixture for the layer rule in the cell march. The slab spans further than the grid in
+/// x and y and only 10 mm either side of z = 0, and the camera looks along -z - so every ray
+/// that reaches the grid's far side crosses the slab, and which cells a ray can see is
+/// decided entirely by the slab. That is what lets one fixture ask both questions:
+///
+///   class 2  inside the slab. No ray reaches one of these cells without crossing the slab
+///            first, whatever the slab's opacity, because the slab OWNS that space - so
+///            whatever colour this class is given must never appear. Its cells are FLUSH with
+///            the slab's faces, deliberately: cells are on a lattice and a volume placed over
+///            them lands on it, and alignment is where the ownership comparison has to be
+///            exactly right rather than nearly.
+///   class 3  beyond the slab. Hidden while the slab is opaque, and visible once it is not -
+///            which is the only thing that distinguishes a march that RESUMES after the
+///            covering volume from one that stops at it and loses everything behind.
+///   class 1  in front of the slab. Always visible, so it is the control that says the
+///            fixture is on screen at all.
+///   class 0  straddling a slab face. There are none, with these numbers, and the class is
+///            kept so a change to them cannot silently reclassify a cell as hidden.
+///
+/// Placed well clear of the rest of the selftest scene, on layers of its own, so it neither
+/// overlaps anything on its own layer nor changes what anything else owns.
+static void InsertSelftestCoveredVoxels(App& a) {
+  const double gh = 40.0;               // the grid's half extent, mm
+  const int n = 16;                     // cells per axis, so 5 mm cells
+  const double cell = 2 * gh / n;
+  const double ch = 10.0;               // the slab's half thickness in z
+  const double cw = 60.0;               // and its half width, wider than the grid
+  const double px = 0, py = 250, pz = 0;
+
+  Solid s;
+  s.shape = Shape::kVoxelGrid;
+  s.name = "Covered";
+  s.p[0] = s.p[1] = s.p[2] = gh;
+  s.p[3] = s.p[4] = s.p[5] = n;
+  s.pos[0] = px;
+  s.pos[1] = py;
+  s.pos[2] = pz;
+  s.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  s.layer = 1;
+  s.r = 0.55f;
+  s.g = 0.75f;
+  s.b = 0.55f;
+  s.voxel_kind = VoxelKind::kDiscrete;
+  s.voxel_values.assign(static_cast<std::size_t>(n) * n * n, 0.0f);
+  int n_in = 0, n_near = 0, n_far = 0, n_edge = 0;
+  for (int k = 0; k < n; ++k) {
+    for (int j = 0; j < n; ++j) {
+      for (int i = 0; i < n; ++i) {
+        // The z of the cell's two faces. The slab is wider than the grid in x and y, so z is
+        // the only coordinate that decides anything.
+        const double zc = -gh + (k + 0.5) * cell;
+        const std::size_t idx =
+            static_cast<std::size_t>(i) + n * (j + static_cast<std::size_t>(n) * k);
+        if (std::fabs(zc) + cell * 0.5 <= ch) {
+          s.voxel_values[idx] = 2.0f;   // inside the slab
+          ++n_in;
+        } else if (zc - cell * 0.5 >= ch) {
+          s.voxel_values[idx] = 1.0f;   // in front of it, towards the camera
+          ++n_near;
+        } else if (zc + cell * 0.5 <= -ch) {
+          s.voxel_values[idx] = 3.0f;   // beyond it
+          ++n_far;
+        } else {
+          s.voxel_values[idx] = 0.0f;   // straddling a face
+          ++n_edge;
+        }
+      }
+    }
+  }
+  s.voxel_classes.clear();
+  static const char* const kLabels[4] = {"edge", "near", "inside", "far"};
+  for (int v = 0; v < 4; ++v) {
+    VoxelClass c;
+    c.value = v;
+    c.value_max = v + 1;
+    c.material = s.material;
+    c.label = kLabels[v];
+    c.opacity = (v == 0) ? 0.0f : 0.25f;
+    // Distinct colours, so a leak of one into the picture cannot be mistaken for another.
+    c.r = (v == 1) ? 0.55f : ((v == 2) ? 0.9f : 0.3f);
+    c.g = (v == 1) ? 0.75f : ((v == 2) ? 0.2f : 0.3f);
+    c.b = (v == 1) ? 0.55f : ((v == 2) ? 0.9f : 0.8f);
+    s.voxel_classes.push_back(c);
+  }
+  a.model.AddSolid(s);
+
+  Solid cover;
+  cover.shape = Shape::kBox;
+  cover.name = "Cover";
+  cover.p[0] = cover.p[1] = cw;
+  cover.p[2] = ch;
+  cover.pos[0] = px;
+  cover.pos[1] = py;
+  cover.pos[2] = pz;
+  cover.material = s.material;
+  cover.layer = 3;   // above the grid, and shared with nothing else in this scene
+  cover.opacity = 1.0f;
+  cover.r = 0.85f;
+  cover.g = 0.85f;
+  cover.b = 0.35f;
+  a.sel_solid = a.model.AddSolid(cover);
+  a.scene_dirty = true;
+  Log(Fmt("selftest: added a 16^3 voxel volume with a slab through its middle on a higher "
+          "layer (%d cells in the slab, %d in front, %d beyond, %d straddling)",
+          n_in, n_near, n_far, n_edge));
+}
+
 /// Writes a sphere of about @p want triangles as a binary STL and imports it.
 ///
 /// For -benchmesh, which exists because "the viewer bogs down on big CAD files" is not a
@@ -2094,6 +2265,21 @@ static void InsertSelftestMesh(App& a) {
   s.pos[0] = 0;
   s.pos[1] = 0;
   s.pos[2] = 40;
+  // What ImportFile decided, checked here because this is the one place in the selftest where
+  // an import happens: a new solid arrives LEVEL with everything else, not above it.
+  if (s.layer != 1) {
+    std::printf("selftest: FAILED - an imported solid arrived on layer %d, not 1. An import "
+                "that outranks what is already placed wins every overlap without anyone "
+                "choosing that.\n",
+                s.layer);
+  }
+  // Layer pinned by the fixture rather than taken from ImportFile's default. This cube sits
+  // inside the orb and the cylinder that frames 2 and 4 place, so its RANK decides who owns
+  // that space and therefore what the scorer on it measures - and the selftest's dose is
+  // compared against the generated project's. A default two files away is not where that
+  // should be decided from: when ImportFile's default changed from 2 to 1, this scene changed
+  // with it and the only trace was three new overlap warnings.
+  s.layer = 2;
   s.r = 0.9f;
   s.g = 0.6f;
   s.b = 0.3f;

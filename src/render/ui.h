@@ -459,6 +459,25 @@ struct Context {
   int select_count = 0;
   int select_picked = -1;                     ///< row clicked last frame, consumed by Select
 
+  /// Where the open dropdown's list was painted, and the layer it belongs to. Nothing at that
+  /// layer or behind it may claim the cursor inside it.
+  ///
+  /// AN OVERLAY THAT IS PAINTED LAST HAS TO BE HIT-TESTED FIRST, and in one pass over the
+  /// frame it cannot be both. The list is drawn after the panel that declared it, so by the
+  /// time its rows are tested every widget underneath has already had its turn - and one of
+  /// them has taken the click. With two Selects in a column that is exactly the reported bug:
+  /// picking a row of the open list opened the CLOSED menu the row was sitting on top of,
+  /// because that menu's own hit test ran first and set `open_select` to itself.
+  ///
+  /// So the region is carried over from the frame it was painted on, and the widgets check it
+  /// on the way past. One frame stale, which is where the list actually IS on screen - the
+  /// user clicks at what they can see, not at where the button has since scrolled to.
+  ///
+  /// The layer is what keeps it from over-reaching: a pop-up drawn in FRONT of an open panel
+  /// dropdown is not covered by it and must still take its own clicks.
+  Rect block{};
+  int block_layer = kLayerPanel;
+
   /// Focuses a text field from code, with its whole value selected.
   ///
   /// For the case where the *caller* decides a field should be editing - starting a rename
@@ -503,10 +522,16 @@ struct Context {
   /// there is no widget for which the answer should differ. Clicking what you cannot see is
   /// never right.
   ///
+  /// An open dropdown's list counts as something you cannot see through: `block` is that list
+  /// and a widget at its layer or behind it is UNDER it, so it is not clickable either. See
+  /// Context::block for why the region is a frame old.
+  ///
   /// Note for anyone adding a widget: test with THIS, not with `rect.Contains(mouse)`. The
   /// bare Contains is the version without the clip, and it is wrong in exactly the way above.
   bool Hovering(const Rect& r) const {
-    return in != nullptr && r.Contains(in->mouse_x, in->mouse_y)
+    if (in == nullptr) { return false; }
+    if (layer <= block_layer && block.Contains(in->mouse_x, in->mouse_y)) { return false; }
+    return r.Contains(in->mouse_x, in->mouse_y)
            && canvas.clip.Contains(in->mouse_x, in->mouse_y);
   }
 };
@@ -573,7 +598,9 @@ struct ScrollArea {
     if (id != 0 && ctx.in != nullptr && max_off > 0) {
       Rect track, thumb;
       BarRects(r, track, thumb);
-      const bool on_track = track.Contains(ctx.in->mouse_x, ctx.in->mouse_y);
+      // Hovering, not Contains: a bar is as coverable as any other widget, and an open
+      // dropdown painted across it must not take a click meant for one of its rows.
+      const bool on_track = ctx.Hovering(track);
       if (on_track) { ctx.hot = id; }
       if (on_track && ctx.in->left_pressed && ctx.active == 0) {
         ctx.active = id;
@@ -624,9 +651,7 @@ struct ScrollArea {
     Rect track, thumb;
     BarRects(r, track, thumb);
     if (track.h > 0) {
-      const bool lit = (ctx.active == id_ && id_ != 0)
-                       || (ctx.in != nullptr
-                           && track.Contains(ctx.in->mouse_x, ctx.in->mouse_y));
+      const bool lit = (ctx.active == id_ && id_ != 0) || ctx.Hovering(track);
       ctx.canvas.FillRect(track, theme::kField);
       ctx.canvas.FillRect(thumb, lit ? theme::kAccent : theme::kBorder);
     }
@@ -1391,11 +1416,29 @@ struct MenuBar {
   int dropdown_pen = 0;
   int dropdown_index = 0;
 
+  /// A MENU'S ITEMS HAVE THE SAME PROBLEM A DROPDOWN'S ROWS DO, and it was worse here.
+  ///
+  /// Item() records its rows and EndMenu paints them, and the bar is drawn after the panels -
+  /// so a panel control under an open menu has already claimed the click. Worse than for a
+  /// dropdown on two counts: Item() returns true on hover-and-press regardless of who else
+  /// took it, so a menu entry over a panel button fired BOTH; and EndBar only closes the menu
+  /// when `ctx.hot == 0`, which the control underneath had just set to itself, so the menu did
+  /// not close either.
+  ///
+  /// Same cure as ui::Context::block, and the bar borrows that one slot: it is cleared here
+  /// because everything the incoming region protects has already been drawn, EndMenu publishes
+  /// this menu's own panel in its place, and EndBar puts the previous one back if no menu is
+  /// open. Without the save and restore, a bar drawn between DrawOpenSelect and the next frame
+  /// would wipe an open dropdown's region and hand its rows' clicks back to the widgets below.
   void Begin(Context& ctx, const Rect& r) {
     bar = r;
     pen_x = r.x + 4;
     next_index = 0;
     hovered_item = -1;
+    saved_block_ = ctx.block;
+    saved_block_layer_ = ctx.block_layer;
+    published_ = false;
+    ctx.block = Rect{};
     Panel(ctx, r, theme::kPanelAlt);
   }
 
@@ -1552,7 +1595,20 @@ struct MenuBar {
       }
       if (sub_open >= 0) { sub_w_[sub_open & 15] = swant; }
       sub_items_.clear();
+      // The two panels together, so a click on the submenu is protected as well.
+      const int x0 = (sbox.x < box.x) ? sbox.x : box.x;
+      const int y0 = (sbox.y < box.y) ? sbox.y : box.y;
+      const int x1 = (sbox.x + sbox.w > box.x + box.w) ? sbox.x + sbox.w : box.x + box.w;
+      const int y1 = (sbox.y + sbox.h > box.y + box.h) ? sbox.y + sbox.h : box.y + box.h;
+      ctx.block = Rect{x0, y0, x1 - x0, y1 - y0};
+      ctx.block_layer = ctx.layer;
+      published_ = true;
+      return;
     }
+    // What this panel covers, for the widgets drawn under it next frame. See Begin.
+    ctx.block = box;
+    ctx.block_layer = ctx.layer;
+    published_ = true;
   }
 
   /// Closes any open menu when the user clicks elsewhere.
@@ -1563,6 +1619,12 @@ struct MenuBar {
       sub_open = -1;
     }
     if (open < 0) { sub_open = -1; }
+    // No menu panel this frame, so whatever region was in force before the bar drew is still
+    // the one that matters. See Begin.
+    if (!published_) {
+      ctx.block = saved_block_;
+      ctx.block_layer = saved_block_layer_;
+    }
   }
 
  private:
@@ -1582,6 +1644,11 @@ struct MenuBar {
   // The width each dropdown wanted last frame, per menu / submenu index. See Menu().
   int menu_w_[8] = {};
   int sub_w_[16] = {};
+  // The blocked region as it was when the bar started drawing, and whether this bar replaced
+  // it with one of its own. See Begin.
+  Rect saved_block_{};
+  int saved_block_layer_ = Context::kLayerPanel;
+  bool published_ = false;
 };
 
 // ---------------------------------------------------------------- dropdown
@@ -1716,9 +1783,10 @@ inline bool UnitField(Context& ctx, int id, const Rect& fr, const Rect& ur, Numb
 }
 
 /// What @p base_value shows as in the unit at @p unit_idx. For seeding a field.
-inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
-  if (ctx.open_select == 0 || ctx.select_opts == nullptr || ctx.select_count <= 0) { return; }
-  if (ctx.select_layer != layer) { return; }
+inline Rect OpenSelectRect(const Context& ctx) {
+  if (ctx.open_select == 0 || ctx.select_opts == nullptr || ctx.select_count <= 0) {
+    return Rect{};
+  }
   const Rect& b = ctx.select_rect;
   const int h = ctx.canvas.GlyphH() + 6;
   int w = b.w;
@@ -1737,13 +1805,31 @@ inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
     const int above = b.y - list_h;
     y = (above >= 0) ? above : ctx.canvas.height - list_h;
   }
+  return Rect{b.x, y, w, list_h};
+}
+
+inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
+  if (ctx.open_select == 0 || ctx.select_opts == nullptr || ctx.select_count <= 0) {
+    ctx.block = Rect{};
+    return;
+  }
+  // Not ours: leave `block` alone. It belongs to whichever layer's list is open, and this
+  // call is the wrong one to be clearing it.
+  if (ctx.select_layer != layer) { return; }
+  const Rect& b = ctx.select_rect;
+  const int h = ctx.canvas.GlyphH() + 6;
+  const Rect box = OpenSelectRect(ctx);
+  const int y = box.y;
+  // Our OWN rows are the one thing the blocked region must not block. Cleared before the
+  // rows are tested and set again below, so the region only ever applies to what was drawn
+  // before this call - which is everything the list covers.
+  ctx.block = Rect{};
 
   // The list is drawn over whatever is there, so its clip has to be the whole canvas: the
   // panel clip that was in force where the Select was declared has long since been restored,
   // but a caller may have left one set.
   const Rect saved = ctx.canvas.clip;
   ctx.canvas.clip = {0, 0, ctx.canvas.width, ctx.canvas.height};
-  const Rect box{b.x, y, w, list_h};
   ctx.canvas.FillRect(box, theme::kPanel);
   ctx.canvas.StrokeRect(box, theme::kAccent);
   bool over_list = false;
@@ -1761,11 +1847,19 @@ inline void DrawOpenSelect(Context& ctx, int layer = Context::kLayerPanel) {
   ctx.canvas.clip = saved;
 
   // A click anywhere else closes it without choosing. Not `ctx.hot == 0`, as the menu bar
-  // does: the list overlaps other widgets, and one of them will have claimed hot on the way
+  // does: the list overlaps other widgets, and one of them may have claimed hot on the way
   // past - the list is drawn last, so it never gets to claim it itself.
   if (!over_list && ctx.in != nullptr && ctx.in->left_pressed
       && !b.Contains(ctx.in->mouse_x, ctx.in->mouse_y)) {
     ctx.open_select = 0;
+  }
+
+  // What this list covers, for the widgets drawn under it NEXT frame. Set after its own rows
+  // are done, and only while it is still open - a list closed by the click just handled
+  // leaves nothing behind, or the click after it would land on a region with no list in it.
+  if (ctx.open_select != 0) {
+    ctx.block = box;
+    ctx.block_layer = layer;
   }
 }
 

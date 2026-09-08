@@ -115,9 +115,31 @@ every shape's fields get the right menu without a second table to keep in step.
 ### Two rules for anyone adding a widget
 
 **Hit-test with `Context::Hovering`, never with `rect.Contains(mouse)`.** `Hovering` requires
-the cursor to be inside the canvas clip as well as inside the widget, and that second half is
-what keeps a control scrolled out of its section from going on claiming clicks over whatever
-is drawn below it. The bare `Contains` is the version without it. See docs/RISK.md V19.
+three things: the cursor inside the widget, inside the canvas clip, and outside `Context::block`
+- the region an open dropdown's list is painted over. The clip is what keeps a control scrolled
+out of its section from going on claiming clicks over whatever is drawn below it; the block is
+what keeps a widget the list covers from taking a click meant for one of its rows. The bare
+`Contains` is the version without either. See docs/RISK.md V19 and V22.
+
+`block` is a frame old, deliberately. The list is painted after the panel that declared it, so
+its rows are hit-tested last in the frame and everything underneath has already had its turn -
+in one pass there is no other order available. Carrying the region over from the frame it was
+painted on puts it where the list actually is on screen, which is where the cursor is aiming.
+It carries a layer with it, so a pop-up drawn in FRONT of an open panel dropdown still takes
+its own clicks.
+
+The menu bar is the other overlay with this shape - `Item` records rows and `EndMenu` paints
+them, after the panels - and it uses the same one region, saving and restoring whatever it found
+so that a bar drawn while a dropdown is open does not wipe the dropdown's.
+
+Anything that hit-tests and is not a widget has to arbitrate for itself. There are two: the
+splitters, whose grab strips straddle the boundary they move and so overlap the 3D view by
+design, and the camera. A press on a strip is a resize and nothing else - `PressOnSplitter`
+decides, at the press, and the answer holds for the whole drag. This is not hypothetical
+tidiness: it was only ever wrong for the LEFT splitter, because `left_w = mouse_x` keeps the
+cursor on the view's first column for the whole drag while the right and bottom splitters put
+the view's exclusive edge there, and the camera claimed those columns too. Resizing the left
+panel rotated the view.
 
 **Take an id from the table in `g4builder.cu`, not from the next free number.** Anything
 indexed by a model list - one id per solid, per class, per source - needs a block of its own;
@@ -195,6 +217,38 @@ the physics path is unaffected (verified: 2.46M events/s and unchanged dose afte
 was added).
 
 **Colouring follows Geant4** - by charge: negative red, neutral green, positive blue.
+
+### A voxel volume is not one surface, and the layer rule still applies to it
+
+A grid whose cells are coloured individually is marched cell by cell inside the outer walk,
+because the ray's entry into the grid's bounding box is the outside of a box with the anatomy
+inside it. That march has to answer the same ownership question the outer walk answers for an
+ordinary surface: **a higher layer takes the space wherever it overlaps, so the cells under it
+are not there as far as the transport is concerned and are not drawn.**
+
+Two halves, and both are needed:
+
+* the march STOPS where the nearest volume that outranks the grid begins. Without it the march
+  ran the grid's whole depth and composited cells sitting inside an opaque volume placed over
+  the phantom - and front to back those cells arrive before that volume's own surface, so they
+  were blended on top of it. A phantom showing through a solid object in front of it.
+* and it RESUMES past that volume, at the far side of whatever covers the grid there. Without
+  that, everything behind a translucent object over a phantom disappears instead.
+
+The distances are compared from the same origin and ties go to the covering volume, because
+cells are on a lattice and a volume placed over them lands on it: a box face flush with a cell
+boundary is the normal case, not the corner case, and getting it wrong paints one cell's worth
+of colour over an opaque surface.
+
+Style is not consulted. A volume that is hidden or wireframe still owns its space, which is
+what `locate` says and therefore what the transport sees, so hiding a box over a phantom
+leaves the hole it occupies - the same as it already does over an ordinary solid.
+
+Both halves are asserted end to end by the builder's selftest, against a fixture whose classes
+are chosen by which side of a covering slab a cell is on: recolouring a class the slab owns
+must change nothing, and recolouring the class beyond it must change nothing while the slab is
+opaque and something once it is not. With three more controls, because "nothing changed" is
+also what a fixture that is off screen, or a cover that is not being painted, looks like.
 
 ## X-ray mode
 
