@@ -250,6 +250,90 @@ ribs behind it all present many surfaces along one ray. `kMaxLayers` = 8 in `ren
 the cap on how many are composited - which is a limit on the PICTURE as well as the cost, since
 a translucent assembly with more than eight walls loses the ones past the eighth.
 
+
+### The render is not in the UI frame
+
+Making the render faster twice over did not answer the actual complaint, and could not have. The
+panels are rasterised by the CPU into `host_rgba`, which is also where the rendered viewport is
+copied to, and between the two sat `cudaDeviceSynchronize()` - so the UI was not waiting on the
+render by choice, it was structurally DOWNSTREAM of it. Every millisecond the render cost was a
+millisecond before a hover highlight could repaint. A render made twice as fast still holds the
+UI up for half as long, and the next scene is twice as big.
+
+The render now runs on its own stream and the frame POLLS a `cudaEvent_t`:
+
+```
+  if (render_inflight) {
+    st = cudaEventQuery(render_done);       // NOT cudaEventSynchronize
+    if (st == cudaSuccess) { AdoptRender(a); }
+  }
+  if (!render_inflight) { IssueRender(a, w, h); }
+```
+
+Ready means adopt that image and launch the next; not ready means composite the PREVIOUS one and
+carry on. The UI runs at the refresh rate whatever the render costs. The visible cost is that in
+a slow scene the viewport is one render behind the camera, which is what every application of
+this kind does and is not what was reported.
+
+Three things that are the whole difference between this working and looking like it does nothing:
+
+**`cudaStreamCreate` returns a BLOCKING stream.** It implicitly synchronises with the legacy
+default stream, so any ordinary `cudaMemcpy` or `cudaMalloc` elsewhere in the frame waits for the
+render - the stall deleted from one line and reinstated by the allocator, invisible in the code.
+`cudaStreamCreateWithFlags(..., cudaStreamNonBlocking)`.
+
+**Pinned staging, sized to the WINDOW.** `cudaMemcpy2DAsync` out of pageable memory is not
+asynchronous, so the read-back had to move to pinned memory or nothing would have changed. But
+`cudaHostAlloc` pins pages and `cudaFreeHost` unpins them - milliseconds for six megabytes - and
+the VIEWPORT resizes on every frame of a splitter drag. Sizing the staging pair with the viewport
+would have put a fresh stall into exactly the interaction being fixed. The viewport is never
+larger than the window, so one allocation per window resize covers every viewport; a render
+smaller than the buffer carries its own dimensions alongside it and only the overlap is blitted.
+
+**Everything that frees what the render is using drains first, itself.** `AllocViewportSurface`,
+`AllocSurface` and `RebuildScene` each call `DrainRender` rather than trusting the frame to have
+noticed - and `RebuildScene` matters most, because the Run button reaches it through
+`RunFromGui` without going near a frame at all. A free while a kernel is still reading is a
+device heap corruption that surfaces several frames later somewhere unrelated.
+
+`-selftest` and `-benchmesh` wait rather than poll, for opposite reasons needing the same thing:
+the selftest's checksums compare a recolour against the frame after it, so its picture has to be
+that frame's; and the benchmark is measuring the render, which asynchronously is a launch.
+
+#### What is asserted, and why it is not the speed-up
+
+`-benchmesh` times the same scene twice in one process - render inside the frame, then render on
+its own stream - which makes the comparison paired by construction. But the gate in
+`build_all.bat` is not the frame-time ratio: below the refresh interval both arms are
+vsync-limited and the ratio says nothing, so a gate on it would pass every fast scene for the
+wrong reason.
+
+The gate is that the UI frame spends UNDER A MILLISECOND on the render - a launch and a poll -
+which holds on any scene and fails the moment a `cudaDeviceSynchronize` reappears in `DrawFrame`.
+It needs no slow geometry, so it costs the pipeline a small mesh rather than a large one.
+
+The selftest checks the BLIT against the device, and that is not the check it started as.
+
+The first version compared a checksum taken with the render inside the frame against one taken
+with it polled, and required them to be equal. That check is worth having - it is what says the
+staging swap and the adopt deliver the image at all - but as the ONLY check it was vacuous about
+the blit, and not as a worry: the row stride was broken by forty columns deliberately and the
+comparison reported the picture UNCHANGED, because the reference had gone through the same blit
+and was short by the same forty. A reference that shares the code path under test cannot fail.
+
+So the blit is now compared against `d_rgba` itself, in sync mode where the device still holds
+the image just composited - placement, stride and completeness, pixel for pixel. Immediately
+after the blit and before the panels, because the gizmo is drawn INSIDE the viewport and a
+comparison after it would report the gizmo as a mismatch. Both breaks are caught now: the short
+stride by the guard saying the comparison never ran, and a forty-column displacement by 201,600
+mismatched pixels. The checksum comparison called both of them fine.
+
+The polling check stays alongside it, over eight frames rather than four - the selftest scene
+renders in tens of milliseconds and only ONE render completed in a four-frame window on this
+machine, which is one bad day from zero and a gate reporting a failure that is not one. It
+carries a count of renders that actually completed, without which a matching picture would only
+prove it never changed.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's

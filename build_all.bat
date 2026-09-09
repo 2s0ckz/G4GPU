@@ -419,6 +419,51 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not check the custom-scorer equivalence.
   exit /b 1
 )
+rem The composited viewport must BE the device image - the blit's placement, stride and
+rem completeness, compared against d_rgba rather than against another frame that went through
+rem the same blit. A checksum comparison cannot see this: break the row stride and both sides
+rem of it are wrong identically. Verified by doing exactly that.
+findstr /C:"the composited viewport is the device image" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not compare the composited viewport with the device.
+  exit /b 1
+)
+rem And the selftest's own check that the polling path draws the same picture the waiting one does.
+rem Everything else in the selftest runs with the render inside the frame, so without this the
+rem staging swap, the row stride and the adopt would ship unexercised.
+findstr /C:"the render off the UI frame draws the same picture" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the async render draws the same picture.
+  exit /b 1
+)
+echo --- the render does not hold the UI up ---
+rem A GUI whose frame waits for its own render is a GUI that stops responding when the scene
+rem gets heavy, and that is what "hovering over a button that should change colour, it only
+rem changes about a full second later" was. -benchmesh times the same scene twice in one
+rem process - render inside the frame, then render on its own stream - and reports whether the
+rem UI frame still pays for it.
+rem
+rem A SMALL mesh on purpose. The invariant checked here is that the UI frame spends nothing on
+rem the render, and that does not need a slow render to fail: a cudaDeviceSynchronize put back
+rem into DrawFrame breaks it on any scene at all. The big-mesh numbers, where the payoff is
+rem visible, are in docs\VIS.md - they cost forty seconds that nothing here is waiting on.
+"%~dp0g4builder.exe" -benchmesh 200000 0.40 3 > "%TEMP%\g4gpu_bench.txt" 2>&1 || exit /b 1
+findstr /C:"benchmesh: render is off the UI frame" "%TEMP%\g4gpu_bench.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the render is back inside the UI frame.
+  findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt"
+  exit /b 1
+)
+rem And when the render IS slower than the refresh interval, the UI frame has to be faster than
+rem it. Below that both are vsync-limited and -benchmesh says so instead, which is why this is
+rem a check for the failure string rather than for a success one.
+findstr /C:"benchmesh: NOT DECOUPLED" "%TEMP%\g4gpu_bench.txt" >nul
+if not errorlevel 1 (
+  echo FATAL: a render slower than the refresh interval still slowed the UI frame.
+  findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt"
+  exit /b 1
+)
+findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt" || exit /b 1
 rem The generated project has to be a Geant4 project, not three files that happen to compile.
 rem It shipped DetectorConstruction, PrimaryGeneratorAction and RunAction and nothing else -
 rem no ActionInitialization, no EventAction, no SteppingAction - so there was nowhere to put

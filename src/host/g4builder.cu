@@ -294,6 +294,41 @@ struct App {
   /// current ViewRect every frame; see AllocViewportSurface for what went wrong without it.
   int fb_w = 0, fb_h = 0;
   std::vector<unsigned int> host_rgba;
+
+  /// THE RENDER DOES NOT HOLD THE UI UP.
+  ///
+  /// The panels are rasterised by the CPU into host_rgba, which is also where the render is
+  /// copied to - so the UI was structurally downstream of the render and a slow render was a
+  /// slow GUI. Reported as a hover highlight arriving a second late with a large translucent
+  /// CAD file loaded. The render now runs on its own stream and the frame composites the newest
+  /// COMPLETED image, which in a slow scene is one render behind the camera. See DrawFrame.
+  cudaStream_t render_stream = nullptr;
+  cudaEvent_t render_done = nullptr;
+  bool render_inflight = false;
+  /// Two pinned staging buffers: the read-back writes one while the compositor reads the other,
+  /// so adopting a finished image is a swap of an index and not a six-megabyte copy. PINNED
+  /// because a cudaMemcpy2DAsync out of pageable memory is not actually asynchronous - it would
+  /// have put the whole read-back back into the UI frame and looked like no change at all.
+  unsigned int* pin_rgba[2] = {nullptr, nullptr};
+  int pin_write = 0;             ///< the buffer the in-flight render is writing
+  int pin_read = -1;             ///< the newest completed image, -1 before the first one lands
+  int issue_w = 0, issue_h = 0;  ///< the viewport size the in-flight render was launched for
+  int shown_w = 0, shown_h = 0;  ///< and the size of the image in pin_read
+  /// Wait for the render rather than polling for it.
+  ///
+  /// Set under -selftest and -benchmesh, and for opposite reasons that need the same thing: the
+  /// selftest's checksums compare a recolour against the frame after it, so the picture has to
+  /// be THIS frame's; and the benchmark is measuring the render, which asynchronously is just a
+  /// launch. Every number -benchmesh has ever printed was taken this way, so they stay
+  /// comparable.
+  bool sync_render = false;
+  int render_frames = 0;   ///< completed renders, for -benchmesh to divide UI frames by
+  /// Compare the composited viewport against the device image, and count the pixels that
+  /// differ. Off by default; the selftest turns it on for a frame. See CountBlitMismatch, and
+  /// see the selftest for why a checksum taken through the same blit could not do this.
+  bool check_blit = false;
+  long long blit_mismatch = 0;
+  int blit_checked = 0;    ///< frames the comparison actually ran on, so zero cannot pass
   int n_segments = 0;
   geom::Volume<real_t>* d_vols = nullptr;
   int n_vols = 0;
@@ -617,7 +652,38 @@ static void SeedWorldDialog(App& a);
 /// buffer each edit invalidates, and getting that wrong produces a render that disagrees with
 /// the transport - the single most confusing failure a tool like this can have. A rebuild of a
 /// few hundred volumes is a few milliseconds.
+/// Takes the finished render as the image to composite, and hands the other buffer to the next.
+static void AdoptRender(App& a) {
+  a.pin_read = a.pin_write;
+  a.pin_write ^= 1;
+  a.shown_w = a.issue_w;
+  a.shown_h = a.issue_h;
+  a.render_inflight = false;
+  ++a.render_frames;
+}
+
+/// Waits for the render in flight, if there is one.
+///
+/// EVERYTHING THAT FREES WHAT A RENDER IS USING CALLS THIS FIRST, and each of them does it
+/// itself rather than trusting the frame to have noticed: the viewport buffers
+/// (AllocViewportSurface), the staging pair (AllocSurface), and the device geometry - this
+/// function, which the Run button reaches through RunFromGui without going near a frame at all.
+/// A free while a kernel is still reading is a device heap corruption that surfaces several
+/// frames later somewhere unrelated, which is the one class of bug worth being this blunt about.
+///
+/// All three happen on a resize or an edit, and neither of those is what "even opening a
+/// dropdown menu is extremely slow" was about - so waiting in them costs nothing that was
+/// ever reported.
+static void DrainRender(App& a) {
+  if (!a.render_inflight) { return; }
+  CUDA_CHECK(cudaEventSynchronize(a.render_done));
+  CUDA_CHECK(cudaGetLastError());
+  AdoptRender(a);
+}
+
 static void RebuildScene(App& a) {
+  // Before anything below is freed.
+  DrainRender(a);
   // The registries are global and additive, so a rebuild has to start from empty or the
   // previous version's volumes are still in the scene.
   G4PVPlacement::Registry().clear();
@@ -934,6 +1000,9 @@ static void AllocViewportSurface(App& a) {
   const ui::Rect v = ViewRect(a);
   const int w = std::max(1, v.w), h = std::max(1, v.h);
   if (a.d_fb != nullptr && w == a.fb_w && h == a.fb_h) { return; }
+  // Past the early return, so this is a real reallocation and there is something to free. See
+  // DrainRender: a free while a kernel is reading is a corruption that surfaces elsewhere.
+  DrainRender(a);
   if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
   if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
   CUDA_CHECK(cudaMalloc(&a.d_fb, sizeof(unsigned long long) * w * h));
@@ -945,6 +1014,26 @@ static void AllocViewportSurface(App& a) {
 static void AllocSurface(App& a) {
   AllocViewportSurface(a);
   a.host_rgba.assign(static_cast<size_t>(a.width) * a.height, ui::theme::kPanel);
+
+  // THE WINDOW'S SIZE, NOT THE VIEWPORT'S, and that is the whole reason this is here rather
+  // than beside the device buffers in AllocViewportSurface. cudaHostAlloc pins pages and
+  // cudaFreeHost unpins them, which costs milliseconds for six megabytes - and the viewport
+  // changes size on every frame of a splitter drag, so allocating with it would have put a
+  // stall into exactly the interaction this work is about removing. The viewport is never
+  // larger than the window, so one allocation per window resize covers every viewport.
+  // AllocViewportSurface may have returned early - the window resized, the viewport did not -
+  // in which case nothing has drained yet and a read-back is still landing in one of these.
+  DrainRender(a);
+  for (int i = 0; i < 2; ++i) {
+    if (a.pin_rgba[i] != nullptr) { CUDA_CHECK(cudaFreeHost(a.pin_rgba[i])); }
+    CUDA_CHECK(cudaHostAlloc(&a.pin_rgba[i],
+                             sizeof(unsigned int) * static_cast<size_t>(a.width) * a.height,
+                             cudaHostAllocDefault));
+  }
+  a.pin_write = 0;
+  a.pin_read = -1;
+  a.shown_w = 0;
+  a.shown_h = 0;
 
   if (a.tex == 0) { glGenTextures(1, &a.tex); }
   glBindTexture(GL_TEXTURE_2D, a.tex);
@@ -992,8 +1081,62 @@ static double NowMs() {
   return 1000.0 * static_cast<double>(n.QuadPart) / static_cast<double>(freq.QuadPart);
 }
 
+/// Launches the render for the current camera and returns WITHOUT waiting for it.
+///
+/// Everything goes on a.render_stream, including the read-back, so the only thing the caller
+/// pays is the launch. cudaEventRecord at the end is what a later frame polls to find out
+/// whether the image is ready.
+static void IssueRender(App& a, int w, int h) {
+  if (a.render_stream == nullptr) {
+    // NON-BLOCKING, which is not the default. A stream from cudaStreamCreate is a BLOCKING
+    // stream: it implicitly synchronises with the legacy default stream, so any ordinary
+    // cudaMemcpy or cudaMalloc anywhere else in the frame would wait for the render - which is
+    // the stall this is removing, reintroduced by the allocator.
+    CUDA_CHECK(cudaStreamCreateWithFlags(&a.render_stream, cudaStreamNonBlocking));
+    // No timing on the event: it is polled once a frame and never subtracted from another.
+    CUDA_CHECK(cudaEventCreateWithFlags(&a.render_done, cudaEventDisableTiming));
+  }
+  const vis::Camera cam = CurrentCamera(a);
+  const dim3 block(16, 16);
+  const dim3 grid((w + 15) / 16, (h + 15) / 16);
+  const vis::Palette pal = CurrentPalette(a);
+
+  if (a.vis_attr.show_solids) {
+    vis::render_geometry<float><<<grid, block, 0, a.render_stream>>>(
+        a.render_geom.geometry(), a.d_styles, cam, a.d_fb, a.vis_attr.voxel_grid_lines,
+        a.d_voxel_class, a.d_class_rgba);
+  } else {
+    CUDA_CHECK(cudaMemsetAsync(a.d_fb, 0xFF, sizeof(unsigned long long) * w * h,
+                               a.render_stream));
+  }
+  if (a.show_tracks && a.n_segments > 0) {
+    const int thick = static_cast<int>(a.vis_attr.track_width) - 1;
+    vis::render_trajectories<<<(a.n_segments + 127) / 128, 128, 0, a.render_stream>>>(
+        a.traj, a.n_segments, cam, a.d_fb, thick > 0 ? thick : 0, 1e-3f, pal);
+  }
+  vis::resolve_to_rgba<<<grid, block, 0, a.render_stream>>>(a.d_fb, a.d_rgba, w, h, pal);
+  // Into the staging buffer the compositor is NOT reading, tightly packed. The old copy went
+  // straight into host_rgba with the window's pitch as the destination stride, which cannot be
+  // done asynchronously: host_rgba is pageable and the panels are about to be drawn over it.
+  CUDA_CHECK(cudaMemcpy2DAsync(a.pin_rgba[a.pin_write], sizeof(unsigned int) * w, a.d_rgba,
+                               sizeof(unsigned int) * w, sizeof(unsigned int) * w, h,
+                               cudaMemcpyDeviceToHost, a.render_stream));
+  CUDA_CHECK(cudaEventRecord(a.render_done, a.render_stream));
+  // Immediately, so a bad launch configuration is reported here and not blamed on the frame
+  // that eventually waits for the event.
+  CUDA_CHECK(cudaGetLastError());
+  a.issue_w = w;
+  a.issue_h = h;
+  a.render_inflight = true;
+}
+
 static void DrawFrame(App& a) {
   const double t0 = a.time_phases ? NowMs() : 0.0;
+
+  // No drain here on purpose. AllocSurface, AllocViewportSurface and RebuildScene each wait for
+  // the render themselves, because each of them frees something it is using - see DrainRender.
+  // A frame that has to work out which of them is about to run is a frame that will get it
+  // wrong the first time a fourth one is added.
   if (a.resized) { AllocSurface(a); }
   // Every frame, because a splitter drag resizes the viewport without resizing the window.
   // It returns immediately when the size has not moved, so this costs a comparison.
@@ -1002,26 +1145,25 @@ static void DrawFrame(App& a) {
 
   const ui::Rect v = ViewRect(a);
   const int w = std::max(1, v.w), h = std::max(1, v.h);
-  const vis::Camera cam = CurrentCamera(a);
-  const dim3 block(16, 16);
-  const dim3 grid((w + 15) / 16, (h + 15) / 16);
-  const vis::Palette pal = CurrentPalette(a);
 
-  if (a.vis_attr.show_solids) {
-    vis::render_geometry<float><<<grid, block>>>(a.render_geom.geometry(), a.d_styles, cam,
-                                                 a.d_fb, a.vis_attr.voxel_grid_lines,
-                                                 a.d_voxel_class, a.d_class_rgba);
-  } else {
-    CUDA_CHECK(cudaMemset(a.d_fb, 0xFF, sizeof(unsigned long long) * w * h));
+  // POLL, DO NOT WAIT.
+  //
+  // This is the whole of the decoupling. The frame asks whether the render it started earlier
+  // has finished; if it has, that image becomes the one to composite and the next render goes
+  // out; if it has not, the frame composites the PREVIOUS one and carries on. The UI runs at
+  // the refresh rate whatever the render costs, and a slow scene shows as a viewport that
+  // updates less often rather than as a window that stops responding.
+  if (a.render_inflight) {
+    const cudaError_t st = cudaEventQuery(a.render_done);
+    if (st == cudaSuccess) {
+      AdoptRender(a);
+    } else if (st != cudaErrorNotReady) {
+      CUDA_CHECK(st);
+    }
   }
-  if (a.show_tracks && a.n_segments > 0) {
-    const int thick = static_cast<int>(a.vis_attr.track_width) - 1;
-    vis::render_trajectories<<<(a.n_segments + 127) / 128, 128>>>(
-        a.traj, a.n_segments, cam, a.d_fb, thick > 0 ? thick : 0, 1e-3f, pal);
-  }
-  vis::resolve_to_rgba<<<grid, block>>>(a.d_fb, a.d_rgba, w, h, pal);
-  CUDA_CHECK(cudaDeviceSynchronize());
-  CUDA_CHECK(cudaGetLastError());
+  if (!a.render_inflight) { IssueRender(a, w, h); }
+  // And -selftest and -benchmesh do wait, so their picture is this frame's. See App::sync_render.
+  if (a.sync_render) { DrainRender(a); }
   const double t1 = a.time_phases ? NowMs() : 0.0;
 
   // Background for the panels, then the render blitted into the viewport rectangle.
@@ -1040,9 +1182,39 @@ static void DrawFrame(App& a) {
   // cudaMemcpy2D takes the two pitches and does it in one call. The viewport is a window into
   // a wider host buffer, hence the destination pitch of the whole row.
   std::fill(a.host_rgba.begin(), a.host_rgba.end(), ui::theme::kPanel);
-  CUDA_CHECK(cudaMemcpy2D(&a.host_rgba[static_cast<size_t>(v.y) * a.width + v.x],
-                          sizeof(unsigned int) * a.width, a.d_rgba, sizeof(unsigned int) * w,
-                          sizeof(unsigned int) * w, h, cudaMemcpyDeviceToHost));
+  if (a.pin_read >= 0) {
+    // Only the overlap, because the viewport may have been resized since this image was
+    // launched: the rest stays panel colour until the next render lands. A splitter drag shows
+    // an image that is briefly the wrong size, which is the trade being made on purpose - the
+    // alternative is waiting, and waiting is the thing being removed.
+    const int cw = (w < a.shown_w) ? w : a.shown_w;
+    const int ch = (h < a.shown_h) ? h : a.shown_h;
+    for (int y = 0; y < ch; ++y) {
+      std::memcpy(&a.host_rgba[static_cast<size_t>(v.y + y) * a.width + v.x],
+                  &a.pin_rgba[a.pin_read][static_cast<size_t>(y) * a.shown_w],
+                  sizeof(unsigned int) * static_cast<size_t>(cw));
+    }
+    // AGAINST THE DEVICE IMAGE, not against another frame's copy of it.
+    //
+    // Here and not later: the panels and the gizmo are drawn over host_rgba next, and the
+    // gizmo is drawn INSIDE the viewport - so a comparison after them reports the gizmo as a
+    // mismatch. And only in sync mode, where d_rgba still holds the image that was just
+    // adopted; asynchronously the next render has already been launched over it.
+    if (a.check_blit && a.sync_render && cw == w && ch == h) {
+      std::vector<unsigned int> dev(static_cast<size_t>(w) * h);
+      CUDA_CHECK(cudaMemcpy(dev.data(), a.d_rgba, sizeof(unsigned int) * dev.size(),
+                            cudaMemcpyDeviceToHost));
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          if (dev[static_cast<size_t>(y) * w + x]
+              != a.host_rgba[static_cast<size_t>(v.y + y) * a.width + v.x + x]) {
+            ++a.blit_mismatch;
+          }
+        }
+      }
+      ++a.blit_checked;
+    }
+  }
 
   const double t2 = a.time_phases ? NowMs() : 0.0;
 
@@ -1268,7 +1440,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 67;
+      selftest_frames = 76;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1277,6 +1449,12 @@ int main(int argc, char** argv) {
       open_path = argv[i];
     }
   }
+
+  // NEITHER BATCH MODE POLLS. The selftest's checksums compare a recolour against the frame
+  // after it, so its picture has to be that frame's; and the benchmark is measuring the render,
+  // which asynchronously is a launch and nothing else. -benchmesh turns it off again halfway,
+  // to measure both - see below.
+  a.sync_render = (selftest_frames > 0 || bench_mesh > 0);
 
   cudaDeviceProp prop{};
   CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
@@ -1388,41 +1566,96 @@ int main(int argc, char** argv) {
         // From here and not earlier: the frames before this built the scene, and a BVH over a
         // million triangles charged to "cuda" would have said the render was the problem.
         a.time_phases = true;
-        static double t_sum = 0;
-        static int t_n = 0;
+        // TWO PHASES IN ONE PROCESS, which is what makes the comparison paired: the same scene,
+        // the same camera, the same binary, the same forty frames, one flag different. Phase 0
+        // waits for the render inside the frame, which is what the builder used to do and what
+        // every earlier number here was taken with. Phase 1 polls for it.
+        static double t_sum[2] = {0, 0};
+        static int t_n[2] = {0, 0};
+        static double cuda_ms[2] = {0, 0};
+        static int phase = 0;
         static LARGE_INTEGER freq{}, prev{};
-        if (t_n == 0) {
+        if (t_n[phase] == 0) {
           QueryPerformanceFrequency(&freq);
           QueryPerformanceCounter(&prev);
         } else {
           LARGE_INTEGER now{};
           QueryPerformanceCounter(&now);
-          t_sum += 1000.0 * static_cast<double>(now.QuadPart - prev.QuadPart)
-                   / static_cast<double>(freq.QuadPart);
+          t_sum[phase] += 1000.0 * static_cast<double>(now.QuadPart - prev.QuadPart)
+                          / static_cast<double>(freq.QuadPart);
           prev = now;
         }
-        ++t_n;
+        ++t_n[phase];
         // Bounded by frames as well as by samples, so a run that has nothing to time - an
         // import that failed, a mesh that never appeared - still leaves rather than sitting
         // in the message loop waiting for a frame count it will never reach. This is a batch
         // mode; it has no window anyone is watching.
-        if (t_n > 40 || frame > 200) {
-          std::printf("benchmesh: %d triangles, opacity %.2f, %d shells, %.2f ms per frame "
-                      "(%.1f fps) at %dx%d\n",
-                      bench_actual, bench_opacity, bench_shells, t_sum / (t_n - 1),
-                      1000.0 * (t_n - 1) / t_sum, a.width, a.height);
-          if (a.t_frames > 0) {
-            const double n = a.t_frames;
-            std::printf("  per frame: cuda %.2f ms, readback %.2f ms, ui %.2f ms, "
-                        "present %.2f ms\n",
-                        a.t_cuda / n, a.t_readback / n, a.t_ui / n, a.t_present / n);
+        if (t_n[phase] > 40 || frame > 200 + 40 * phase) {
+          if (a.t_frames > 0) { cuda_ms[phase] = a.t_cuda / a.t_frames; }
+          if (phase == 0) {
+            phase = 1;
+            a.sync_render = false;
+            a.t_cuda = a.t_readback = a.t_ui = a.t_present = 0;
+            a.t_frames = 0;
+            a.render_frames = 0;
+          } else {
+            // Both bounds can be reached with a single sample - an import that failed, a mesh
+            // that never appeared - and a mean over zero intervals is not a number. Say so
+            // rather than printing inf and letting the checks below read it as "fast".
+            // A mean over zero intervals is not a number, and both bounds can be reached with
+            // a single sample - an import that failed, a mesh that never appeared. Say so
+            // rather than printing inf and letting the checks below read it as "fast".
+            const int n0 = t_n[0] - 1, n1 = t_n[1] - 1;
+            a.running = false;
+            if (n0 < 1 || n1 < 1) {
+              std::printf("benchmesh: FATAL: too few frames to time (%d, %d)\n", t_n[0],
+                          t_n[1]);
+              std::fflush(stdout);
+            } else {
+              const double sync_ms = t_sum[0] / n0;
+              const double async_ms = t_sum[1] / n1;
+              std::printf("benchmesh: %d triangles, opacity %.2f, %d shells at %dx%d\n",
+                          bench_actual, bench_opacity, bench_shells, a.width, a.height);
+              std::printf("  render inside the UI frame: %6.2f ms per frame (%5.1f fps), "
+                          "cuda %.2f ms\n",
+                          sync_ms, 1000.0 / sync_ms, cuda_ms[0]);
+              std::printf("  render on its own stream:   %6.2f ms per frame (%5.1f fps), "
+                          "cuda %.2f ms, %.2f renders per UI frame\n",
+                          async_ms, 1000.0 / async_ms, cuda_ms[1],
+                          static_cast<double>(a.render_frames) / n1);
+              // THE STRUCTURAL INVARIANT, and it does not need a slow scene to bite. cuda here
+              // is the time the UI frame spends between starting the render and moving on,
+              // which asynchronously is a launch and a poll of an event: under a millisecond
+              // on any scene at all. Put a cudaDeviceSynchronize back into DrawFrame and this
+              // becomes the render time instead, whatever the picture looks like. Asserted
+              // separately from the frame-time comparison below, because that one only says
+              // anything when the render is slower than the refresh interval and most scenes
+              // are not.
+              std::printf("benchmesh: %s: the UI frame spent %.2f ms on a render costing "
+                          "%.2f ms\n",
+                          (cuda_ms[1] < 2.0) ? "render is off the UI frame"
+                                             : "RENDER IS STILL ON THE UI FRAME",
+                          cuda_ms[1], cuda_ms[0]);
+              // And the payoff, checked by the run that claims it. A fast scene passes by
+              // saying there was nothing to decouple, which is true and is not a pass smuggled
+              // in: the invariant above is what holds everywhere.
+              if (sync_ms > 18.0) {
+                std::printf("benchmesh: %s: a render slower than the refresh (%.1f ms) left "
+                            "the UI at %.1f ms\n",
+                            (async_ms < sync_ms * 0.9) ? "decoupled" : "NOT DECOUPLED",
+                            sync_ms, async_ms);
+              } else {
+                std::printf("benchmesh: decoupled: nothing to decouple, both frames are "
+                            "vsync-limited at %.1f ms\n", sync_ms);
+              }
+              std::fflush(stdout);
+            }
           }
-          std::fflush(stdout);
-          a.running = false;
         }
       }
     }
 
+    static unsigned long long async_want = 0;
     if (selftest_frames > 0) {
       // Exercise the whole path without a human: insert solids, import a mesh, score it,
       // run, and save a project.
@@ -1987,6 +2220,66 @@ int main(int argc, char** argv) {
         a.distance = 900.f;
         a.azimuth = 0.9f;
         a.elevation = 0.25f;
+        // And from the next frame, compare the composited viewport against the device image.
+        // See below for why this is a separate check and not the checksum one.
+        a.check_blit = true;
+        a.blit_mismatch = 0;
+        a.blit_checked = 0;
+      }
+      // 1. THE BLIT PUTS THE WHOLE DEVICE IMAGE WHERE IT BELONGS.
+      //
+      // Against the device, because against another frame there is nothing to find: a
+      // reference checksum goes through the SAME blit and matches it however wrong it is. That
+      // is not a worry, it is what happened - the row stride was broken by forty columns
+      // deliberately and check 2 below reported the picture unchanged, because both sides of
+      // its comparison were short by the same forty. So this one reads d_rgba, in sync mode
+      // where the device still holds the image that was just composited.
+      if (frame == 66) {
+        if (a.blit_checked == 0) {
+          std::printf("selftest: FAILED - the composited viewport was never compared with the "
+                      "device image, so nothing below means anything\n");
+        } else if (a.blit_mismatch != 0) {
+          std::printf("selftest: FAILED - the composited viewport differs from the device "
+                      "image in %lld pixels\n", a.blit_mismatch);
+        } else {
+          std::printf("selftest: the composited viewport is the device image pixel for pixel "
+                      "(%d frames)\n", a.blit_checked);
+        }
+        a.check_blit = false;
+
+        // 2. AND THE POLLING PATH DELIVERS THAT SAME IMAGE.
+        //
+        // Everything above this point runs with sync_render on, because the checksums compare a
+        // recolour against the frame after it - so nothing above exercises the polling path,
+        // and a swapped staging index or an adopt that never fires would ship. Here the scene
+        // and the camera stand still and the flag goes off: the same kernel on the same inputs
+        // is bit-identical, so the checksum has to be too.
+        async_want = ViewportChecksum(a);
+        a.sync_render = false;
+        // Zeroed here and required non-zero at 74: every frame so far completed a render
+        // synchronously, so counting from the start would have made the "a render actually
+        // landed" half of the check pass without one landing.
+        a.render_frames = 0;
+      }
+      // 67 to 73 change nothing. Eight frames, not four: the first has no completed image yet
+      // and composites frame 66's, and a render has to LAND inside the rest. The selftest scene
+      // renders in tens of milliseconds - one completed in a four-frame window on this machine,
+      // which is one bad day away from zero and a gate reporting a failure that is not one.
+      if (frame == 74) {
+        const unsigned long long got = ViewportChecksum(a);
+        if (got != async_want) {
+          std::printf("selftest: FAILED - the render off the UI frame drew a different picture "
+                      "(%llu -> %llu)\n", async_want, got);
+        } else if (a.render_frames == 0) {
+          std::printf("selftest: FAILED - no render completed while polling for one, so the "
+                      "picture only matched because it never changed\n");
+        } else {
+          std::printf("selftest: the render off the UI frame draws the same picture (%d "
+                      "completed while polling)\n", a.render_frames);
+        }
+        // Back on, so the frame that writes the PNG below is this frame's render and not one
+        // that happened to be in flight.
+        a.sync_render = true;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);
