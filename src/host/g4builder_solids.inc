@@ -35,7 +35,12 @@ static void RefreshLayerOptions(App& a) {
   top += 2;
   if (top > 40) { top = 40; }
   a.layer_opt_text.clear();
-  a.layer_opt_text.push_back(std::string(1, ui::Font::kEmptySetByte));
+  // THE WORD, not a symbol. ∅ was drawn out of an ellipse and a stroke because the atlas is
+  // indexed by byte and a three-byte UTF-8 character cannot reach it - and at eight pixels
+  // across it was never going to be more than a smudge that had to be explained. "null" is
+  // four characters, which is exactly the width the layer column already reserves for two
+  // digits and a menu arrow, and it needs no explaining.
+  a.layer_opt_text.push_back("null");
   for (int L = 0; L <= top; ++L) { a.layer_opt_text.push_back(Fmt("%d", L)); }
   a.layer_opt.clear();
   for (const std::string& t : a.layer_opt_text) { a.layer_opt.push_back(t.c_str()); }
@@ -276,6 +281,9 @@ static int DrawSolidForm(App& a, const ui::Rect& panel, int y) {
   }
 
   Solid& s = a.model.solids[a.sel_solid];
+  // kPendingFields while the insert form is up: it borrows these fields, so the value cached
+  // here is the pending primitive's and not this solid's. Any sentinel that is not a valid
+  // index re-seeds; naming it is what stops the next reader thinking -3 means "none".
   if (a.pfield_for != a.sel_solid) {
     // Seeded IN THE CHOSEN UNIT. Seeding the base value into a field labelled cm is the one
     // way this arrangement can lie: the number would be right for mm and wrong for what it

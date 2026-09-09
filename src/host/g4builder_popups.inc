@@ -303,6 +303,7 @@ static void DrawVisPopup(App& a) {
   y += row + 2;
   ui::Checkbox(c, 853, {r.x + 14, y, 160, row}, "tracks", a.show_tracks);
   ui::Checkbox(c, 854, {r.x + 180, y, 220, row}, "voxel gridlines", v.voxel_grid_lines);
+  ui::Checkbox(c, 855, {r.x + 410, y, 200, row}, "anti-alias", v.antialias);
   y += row + 2;
   y += c.canvas.TextWrapped(
       {r.x + 32, y, r.w - 46, 2 * lh},

@@ -335,10 +335,10 @@ carries a count of renders that actually completed, without which a matching pic
 prove it never changed.
 
 
-## ∅: a volume or a class that is not in the scene
+## null: a volume or a class that is not in the scene
 
 Every layer menu - on each solid row, on each voxel class row, and in the selected solid's form -
-opens with ∅ rather than a number. A solid or a class set to it is **not in the scene**: not
+opens with `null` rather than a number. A solid or a class set to it is **not in the scene**: not
 transported through, not drawn, and not scored.
 
 One fact, not three switches. A solid on it is not placed at all, so there is nothing to step
@@ -356,7 +356,7 @@ docs/RISK.md V28 has both. A cell that is not there does not lose an overlap; it
 part in one.
 
 `visible` is still a different thing and still separate: a hidden volume owns its space, is
-transported through, and is scored. ∅ is the answer to "this should not be here at all".
+transported through, and is scored. `null` is the answer to "this should not be here at all".
 
 The world is refused it outright - there is nothing to transport in without a world - and moving
 the world off layer 0 asks first, since the world contains everything and a world above another
@@ -436,23 +436,18 @@ are nearly equal. The same polycone kept 100% near the axis and 39% at 98% of th
 sweeps the type list now, aims at each shape's own material, and goes out to the limb. See
 docs/RISK.md V29.
 
-### ∅ is drawn, not rasterised
+### The entry is the word "null"
 
-The atlas is indexed by byte and the strings drawn through it are `std::string`, so a three-byte
-UTF-8 character cannot reach it. The null entry gets a byte nothing else uses
-(`ui::Font::kEmptySetByte`, 0x01) and `ui::Canvas::EmptySet` draws an ellipse and a stroke, the way
-`EyeToggle` draws its eye - so nothing about it depends on which font was found.
+It was ∅, drawn out of an ellipse and a stroke, because the atlas is indexed by byte and a
+three-byte UTF-8 character cannot reach it. Three attempts and as many passing tests later it
+was still a smudge at eight pixels across - docs/RISK.md V29 has the whole of that - and a
+symbol that has to be explained is worse than the word it stands for. `Canvas::EmptySet` and
+the byte it was reached by are gone.
 
-Rasterising U+2205 into an extra atlas slot was tried first and looked wrong, because a face
-missing the code point does not draw notdef: GDI font-links to another installed face at that
-face's metrics. Two things the drawing then has to get right, both of which were got wrong first:
-the stroke must OVERSHOOT the ring, or the glyph is a zero; and its width must scale with the
-glyph, or at eight pixels the ring fills itself in and the menu shows a blob.
-
-`tests/test_ui_layout.cu` draws it at the menu's size and at 25 px and measures the LARGEST
-enclosed empty region as a fraction of its own box - 14% drawn, 3% for the blob. Smaller measures
-all passed on the blob: a probe straight up from the centre lands on the stroke at eight pixels
-across, and "encloses an empty pixel" is satisfied by the scatter an over-thick ring leaves.
+What is worth checking is not how the entry looks but that the menu maps it to the layer: an
+off-by-one between the option INDEX and the layer NUMBER would put every solid one layer out,
+silently, and the option list is the only place that mapping exists. The builder selftest
+walks it.
 
 ### A volume on layer 0 clashes with the world
 
@@ -465,6 +460,98 @@ A volume placed ON layer 0 is a real same-layer overlap with the world, resolved
 "whichever was added later wins" - the tie-break the check exists to refuse, since it makes the
 dose depend on the order the detector was built in. The world is one more volume to the general
 rule now.
+
+
+## Anti-aliasing, at the edges only
+
+One ray per pixel puts a hard step wherever a surface ends: the pixel is the surface or it is
+not, so its coverage is 0 or 255 and never between, and a silhouette becomes a staircase. Four
+rays per pixel everywhere would fix that and cost four times the render, on a scene where the
+render is already the expensive part, to improve the small fraction of pixels that are on an
+edge.
+
+So the edges are found first and only those pixels are traced again:
+
+```
+  render_geometry   one ray per pixel, as before
+  mark_edges        one cheap pass over the framebuffer, no geometry: appends the pixels
+                    where a surface begins or ends to a list
+  refine_edges      four rays at each listed pixel, on a rotated grid, averaged
+  render_trajectories, resolve_to_rgba   as before
+```
+
+`trace_pixel` is the old kernel body, lifted out so that both passes can call it; the kernel is
+now four lines. **Before the trajectories**, deliberately: the track pass `atomicMin`s into the
+same framebuffer, and refining afterwards would retrace the geometry over a track and delete it.
+
+Averaging is sound because what the framebuffer holds is premultiplied colour and coverage:
+summing those over the samples and dividing is the coverage-weighted average of the surfaces
+seen. The depth is the nearest of the samples, since depth is what sorts tracks and edges against
+the first surface.
+
+**Coverage and depth decide what is an edge, not colour.** Colour was tried first and marks
+almost the whole frame on an imported mesh: a million-triangle sphere is shaded per triangle, so
+the colour steps between neighbouring pixels everywhere. The cost went to +47% opaque and +78%
+translucent. Those steps are also not aliasing - a facet boundary is real detail in the picture,
+and smoothing it blurs the model. What aliases is the silhouette, and that shows as a jump in
+coverage (against the background) or in depth (against other geometry), neither of which a
+smoothly curved interior has. The depth test is relative, because a 1 mm step matters at 50 mm
+and is nothing at 5 m.
+
+**The marked pixels are compacted into a list, and that is most of the performance.** Edge pixels
+are a thin scattered curve - 0.2% of the frame, spread so that nearly every warp holds one or two
+of them. A pass that read a per-pixel flag therefore ran four full traces on one lane while
+thirty-one idled: 2.38 ms for 2950 pixels, 200 ns a ray against 3.8 ns for an ordinary one.
+Compacted, the same rays are contiguous and every warp is full - 1.87 ms for the same pixels.
+
+What it costs, paired in one binary (`-benchmesh N opacity shells aa`):
+
+```
+   scene                          aa off     aa on    marked        frame
+   4,096 tri  opaque             3.39 ms    4.50 ms   3028 (0.2%)   60.0 fps both
+   100,000 tri  opaque           5.55 ms    6.69 ms   2925 (0.2%)   60.0 fps both
+   1,600,000 tri  opaque         6.69 ms    9.97 ms   2960 (0.2%)   60.0 fps both
+   3,200,000 tri  opacity 0.40  19.92 ms   30.23 ms   7377 (0.5%)   42 -> 29 fps
+```
+
+20% to 50% of the render, and the frame rate is unchanged in every case where the render fits
+inside the refresh interval - which, with the render on its own stream, is every case for the UI.
+The toggle is in the Visualization window for anyone who wants the milliseconds back.
+
+`-benchmesh` reports the marked count for the same reason it reports the phase split: when the
+cost of this pass is a surprise, that number is the whole explanation.
+
+## The insert menu asks for a size
+
+Choosing a primitive from Insert opens a form with its parameters and its position, rather than
+inserting one and leaving you to find the fields. Those are the two things anybody changes
+straight afterwards.
+
+**The default size comes from the world.** Each shape has proportions written in units of one,
+and they are scaled so that the largest LENGTH among them is half the world's half-extent -
+centred at the origin. A fixed fraction cannot do that job: the 0.15 that gave a sensible box in
+a 500 mm world gives a 1.5 mm speck in a 10 m one. Which parameters are lengths comes from
+`ShapeParams`' unit column, so a shape added later scales without anyone updating a table of
+maxima; the polycone's z-sections are scaled too, since its size is not in `p[]` at all.
+
+The smallest of the world's three half-extents is the reference, so the result fits in every
+direction. For the default cubic world that is exactly "half the world extent in that direction".
+
+The form borrows the selected solid's parameter fields rather than carrying fifteen of its own -
+`App::pfield_for` is the cache key those already had, and `kPendingFields` both claims them and
+guarantees the solid form re-seeds when the form closes.
+
+## The null layer says "null"
+
+It was ∅, drawn out of an ellipse and a stroke because the font atlas is indexed by byte and a
+three-byte UTF-8 character cannot reach it. At eight pixels across it was never going to be more
+than a smudge that had to be explained, and getting it that far took three attempts and as many
+tests that passed on a broken glyph (docs/RISK.md V29). The word is four characters, which is
+exactly the width the layer column already reserves, and it needs no explaining.
+
+What is worth checking is not how it looks but that the menu maps it to the layer: an off-by-one
+between the option INDEX and the layer NUMBER would put every solid one layer out, silently, and
+the option list is the only place that mapping exists.
 
 ## The control bar
 

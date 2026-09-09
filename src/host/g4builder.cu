@@ -151,6 +151,8 @@ enum class Popup {
   kOverlap,
   kPhysics, kVisAttributes,
   kWorld,
+  /// The size-and-position form the insert menu opens before it inserts. See SeedPrimitive.
+  kPrimitive,
   /// Confirming a change to the WORLD's layer. See SetSolidLayer.
   kWorldLayer
 };
@@ -171,6 +173,10 @@ struct VisAttributes {
   /// positron as nothing in the convention at all. Renamed as well as recoloured, because the
   /// species names are what made it plausible: nothing about "electron = light blue" looks
   /// wrong until you notice that electron means negative and negative means red.
+  /// Retrace the pixels where a surface begins or ends, and average, so silhouettes are not
+  /// staircases. On by default. What it costs is measured in docs/VIS.md - it is not free, and
+  /// it depends on how much of the frame is silhouette.
+  bool antialias = true;
   float neutral[3] = {0.235f, 0.863f, 0.353f};   ///< green
   float negative[3] = {1.0f, 0.235f, 0.235f};    ///< red
   float positive[3] = {0.314f, 0.510f, 1.0f};    ///< blue
@@ -295,11 +301,24 @@ struct App {
   /// The layer the world would be moved to, held while Popup::kWorldLayer asks. See
   /// SetSolidLayer for why moving the world is worth a question.
   int pending_world_layer = 0;
+  /// The primitive Popup::kPrimitive is editing, before it is in the model. Seeded by
+  /// SeedPrimitive; added by the form's Insert button and dropped by its Cancel.
+  Solid pending_solid;
+  /// What pfield_for holds while the insert form owns the parameter fields. Any value that is
+  /// not a valid solid index re-seeds the solid form; this one has a name so that reading it
+  /// says which of the two is using them.
+  static constexpr int kPendingFields = -3;
   /// The float copy of the scene the render pass walks. See render/float_geometry.cuh: the
   /// transport stays double because the dose depends on it, and the picture does not.
   vis::FloatGeometry render_geom;
   unsigned long long* d_fb = nullptr;
   unsigned int* d_rgba = nullptr;
+  /// The pixels the anti-aliasing pass should sample again, COMPACTED into a list, and how
+  /// many there are. See vis::mark_edges: a per-pixel flag left the refinement running one
+  /// lane per warp and cost fifty times what the rays are worth.
+  int* d_edge = nullptr;
+  unsigned int* d_edge_count = nullptr;
+  unsigned int edge_marked = 0;   ///< read back under -benchmesh, to explain the cost
   /// The viewport size d_fb and d_rgba were actually allocated for. Compared against the
   /// current ViewRect every frame; see AllocViewportSurface for what went wrong without it.
   int fb_w = 0, fb_h = 0;
@@ -1027,8 +1046,11 @@ static void AllocViewportSurface(App& a) {
   DrainRender(a);
   if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
   if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
+  if (a.d_edge != nullptr) { cudaFree(a.d_edge); }
   CUDA_CHECK(cudaMalloc(&a.d_fb, sizeof(unsigned long long) * w * h));
   CUDA_CHECK(cudaMalloc(&a.d_rgba, sizeof(unsigned int) * w * h));
+  CUDA_CHECK(cudaMalloc(&a.d_edge, sizeof(int) * static_cast<std::size_t>(w) * h));
+  if (a.d_edge_count == nullptr) { CUDA_CHECK(cudaMalloc(&a.d_edge_count, sizeof(unsigned int))); }
   a.fb_w = w;
   a.fb_h = h;
 }
@@ -1130,6 +1152,29 @@ static void IssueRender(App& a, int w, int h) {
   } else {
     CUDA_CHECK(cudaMemsetAsync(a.d_fb, 0xFF, sizeof(unsigned long long) * w * h,
                                a.render_stream));
+  }
+  // ANTI-ALIASING, AT THE EDGES ONLY.
+  //
+  // One ray per pixel puts a hard step wherever a surface ends: the pixel is either the
+  // surface or it is not, so a silhouette becomes a staircase. Four rays per pixel everywhere
+  // would fix it and cost four times the render - on a scene where the render is already the
+  // expensive part - to improve the few per cent of pixels that are on an edge. So the edges
+  // are found first (one cheap pass over the framebuffer, no geometry) and only those pixels
+  // are traced again.
+  //
+  // BEFORE the trajectories, and that ordering matters: the track pass atomicMins into the
+  // same framebuffer, and refining afterwards would retrace the geometry over the top of a
+  // track and delete it.
+  if (a.vis_attr.antialias && a.vis_attr.show_solids) {
+    CUDA_CHECK(cudaMemsetAsync(a.d_edge_count, 0, sizeof(unsigned int), a.render_stream));
+    vis::mark_edges<<<grid, block, 0, a.render_stream>>>(a.d_fb, w, h, a.d_edge,
+                                                        a.d_edge_count, 10);
+    // Sized for the worst case, one thread per pixel. See refine_edges: the count is on the
+    // device and reading it back to size this launch would put a synchronisation in the middle
+    // of a frame, which is what taking the render off the UI thread was for.
+    vis::refine_edges<float><<<(w * h + 255) / 256, 256, 0, a.render_stream>>>(
+        a.render_geom.geometry(), a.d_styles, cam, a.d_fb, a.d_edge, a.d_edge_count,
+        a.vis_attr.voxel_grid_lines, a.d_voxel_class, a.d_class_rgba);
   }
   if (a.show_tracks && a.n_segments > 0) {
     const int thick = static_cast<int>(a.vis_attr.track_width) - 1;
@@ -1448,6 +1493,7 @@ int main(int argc, char** argv) {
   int bench_mesh = 0;
   double bench_opacity = 1.0;
   int bench_shells = 1;
+  bool bench_aa = true;
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-benchmesh") == 0) {
@@ -1459,10 +1505,16 @@ int main(int argc, char** argv) {
       // And a third: how many concentric shells the one mesh holds, which is how many
       // surfaces a ray crosses. See InsertBenchMesh for why one sphere is not representative.
       if (i + 3 < argc && argv[i + 3][0] != '-') { bench_shells = std::atoi(argv[i + 3]); }
+      // And a fourth, 0 or 1: whether to anti-alias. Here so that the two arms can be measured
+      // without a rebuild between them, which is the only way to tell the cost of the extra
+      // rays from the cost of the codegen change that lifting trace_pixel out caused.
+      if (i + 4 < argc && argv[i + 4][0] != '-') {
+        bench_aa = (std::atoi(argv[i + 4]) != 0);
+      }
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 90;
+      selftest_frames = 97;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1477,6 +1529,7 @@ int main(int argc, char** argv) {
   // which asynchronously is a launch and nothing else. -benchmesh turns it off again halfway,
   // to measure both - see below.
   a.sync_render = (selftest_frames > 0 || bench_mesh > 0);
+  if (bench_mesh > 0) { a.vis_attr.antialias = bench_aa; }
 
   cudaDeviceProp prop{};
   CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
@@ -1614,6 +1667,10 @@ int main(int argc, char** argv) {
         // mode; it has no window anyone is watching.
         if (t_n[phase] > 40 || frame > 200 + 40 * phase) {
           if (a.t_frames > 0) { cuda_ms[phase] = a.t_cuda / a.t_frames; }
+          if (a.d_edge_count != nullptr) {
+            CUDA_CHECK(cudaMemcpy(&a.edge_marked, a.d_edge_count, sizeof(unsigned int),
+                                  cudaMemcpyDeviceToHost));
+          }
           if (phase == 0) {
             phase = 1;
             a.sync_render = false;
@@ -1641,6 +1698,13 @@ int main(int argc, char** argv) {
               std::printf("  render inside the UI frame: %6.2f ms per frame (%5.1f fps), "
                           "cuda %.2f ms\n",
                           sync_ms, 1000.0 / sync_ms, cuda_ms[0]);
+              {
+                const double px_total = static_cast<double>(a.width) * a.height;
+                std::printf("  anti-aliasing: %s, %u pixels marked as edges (%.1f%% of "
+                            "the viewport)\n",
+                            a.vis_attr.antialias ? "on" : "off", a.edge_marked,
+                            (px_total > 0) ? 100.0 * a.edge_marked / px_total : 0.0);
+              }
               std::printf("  render on its own stream:   %6.2f ms per frame (%5.1f fps), "
                           "cuda %.2f ms, %.2f renders per UI frame\n",
                           async_ms, 1000.0 / async_ms, cuda_ms[1],
@@ -2460,6 +2524,68 @@ int main(int argc, char** argv) {
         // and only a recolour that changes NOTHING says the cells are gone.
         RecolourVoxelClass(a, "Uncovered", 0, 0.05f, 0.95f, 0.35f);
       }
+      // ---- THE INSERT FORM: seeded from the world, and it inserts what it shows.
+      //
+      // The insert menu asks for a size and a position before it inserts, because those are
+      // the two things anyone changes straight afterwards. Two claims worth checking and they
+      // fail separately: the DEFAULT is set by the world rather than by a constant - the same
+      // fixed fraction that gives a sensible box in a 500 mm world gives a speck in a 10 m one
+      // - and what the form shows is what lands in the model.
+      static double form_want = 0;
+      static int form_solids = 0;
+      if (frame == 90) {
+        form_solids = static_cast<int>(a.model.solids.size());
+        OpenPrimitiveForm(a, Shape::kBox);
+        double world_half = a.model.solids[0].p[0];
+        if (a.model.solids[0].p[1] < world_half) { world_half = a.model.solids[0].p[1]; }
+        if (a.model.solids[0].p[2] < world_half) { world_half = a.model.solids[0].p[2]; }
+        form_want = 0.5 * world_half;
+      }
+      if (frame == 91) {
+        const Solid& p = a.pending_solid;
+        double largest = 0;
+        for (int k = 0; k < 3; ++k) {
+          if (std::fabs(p.p[k]) > largest) { largest = std::fabs(p.p[k]); }
+        }
+        const bool centred = (p.pos[0] == 0 && p.pos[1] == 0 && p.pos[2] == 0);
+        const bool sized = std::fabs(largest - form_want) < 1e-6;
+        const bool open = (a.popup == Popup::kPrimitive);
+        if (!open) {
+          std::printf("selftest: FAILED - the insert menu did not open the size form\n");
+        } else if (!sized) {
+          std::printf("selftest: FAILED - the form seeded a largest dimension of %g, and half "
+                      "the world is %g\n", largest, form_want);
+        } else if (!centred) {
+          std::printf("selftest: FAILED - the form did not centre the primitive on the world "
+                      "(%g %g %g)\n", p.pos[0], p.pos[1], p.pos[2]);
+        } else {
+          std::printf("selftest: the insert form seeds half the world (%g mm) centred on it\n",
+                      largest);
+        }
+        // Typed into, then inserted: what the form shows has to be what lands.
+        a.pending_solid.p[1] = 37.5;
+        a.pending_solid.pos[2] = -80.0;
+        CommitPrimitiveForm(a);
+      }
+      if (frame == 92) {
+        const int n_now = static_cast<int>(a.model.solids.size());
+        if (n_now != form_solids + 1) {
+          std::printf("selftest: FAILED - the insert form added %d solids, not one\n",
+                      n_now - form_solids);
+        } else {
+          const Solid& s = a.model.solids[static_cast<std::size_t>(n_now - 1)];
+          if (std::fabs(s.p[1] - 37.5) > 1e-9 || std::fabs(s.pos[2] + 80.0) > 1e-9) {
+            std::printf("selftest: FAILED - the inserted solid does not carry what the form "
+                        "held (half y %g, pos z %g)\n", s.p[1], s.pos[2]);
+          } else if (a.popup != Popup::kNone) {
+            std::printf("selftest: FAILED - the form stayed open after inserting\n");
+          } else {
+            std::printf("selftest: and it inserts exactly the size and position it was "
+                        "showing\n");
+          }
+        }
+      }
+
       if (frame == 89) {
         const unsigned long long after = ViewportChecksum(a);
         if (vc_recol == vc_base) {
@@ -2493,6 +2619,111 @@ int main(int argc, char** argv) {
       //
       // Uses the Nullable box from frame 75, which is inside the world and on layer 5.
       if (frame == 88) { SelftestCheckWorldOverlapRefusal(a); }
+
+      // ---- AND THE LAYER MENU CAN SAY "null" AT ALL.
+      //
+      // The entry is a word now. It was a symbol drawn out of an ellipse and a stroke,
+      // because the font atlas is indexed by byte and a three-byte UTF-8 character cannot
+      // reach it - and at eight pixels across it never became more than a smudge that had
+      // to be explained. What is worth checking either way is not how it looks but that the
+      // menu maps it to the layer: an off-by-one between the option INDEX and the layer
+      // NUMBER would put every solid one layer out, silently, and the list is the only
+      // place that mapping exists.
+      if (frame == 89) {
+        RefreshLayerOptions(a);
+        const int n_opt = static_cast<int>(a.layer_opt.size());
+        bool round_trip = (n_opt > 3) && (std::strcmp(a.layer_opt[0], "null") == 0)
+                          && (OptToLayer(0) == kNullLayer)
+                          && (LayerToOpt(a, kNullLayer) == 0);
+        for (int L = 0; L + 1 < n_opt && round_trip; ++L) {
+          if (OptToLayer(LayerToOpt(a, L)) != L) { round_trip = false; }
+          if (std::atoi(a.layer_opt[LayerToOpt(a, L)]) != L) { round_trip = false; }
+        }
+        if (!round_trip) {
+          std::printf("selftest: FAILED - the layer menu does not map its entries to the "
+                      "layers they name (%d entries, first \"%s\")\n", n_opt,
+                      (n_opt > 0) ? a.layer_opt[0] : "");
+        } else {
+          std::printf("selftest: the layer menu says \"null\" and every entry maps to the "
+                      "layer it names (%d entries)\n", n_opt);
+        }
+      }
+
+      // ---- ANTI-ALIASING: partial coverage where a surface ends, and only there.
+      //
+      // Aimed at the Nullable box, which is opaque and on its own in that corner of the world.
+      // Opaque matters: a translucent volume is partly covering every pixel it touches, which
+      // would put a floor under the count that has nothing to do with edges.
+      //
+      // A box, not a sphere, on purpose: its silhouette is four straight lines, which is the
+      // arrangement one ray per pixel turns into a staircase and the one anybody notices.
+      // EVERYTHING ELSE HIDDEN, and that is not tidiness. The first version of this aimed at
+      // the box and counted, and found 143,829 pixels already partly covered with the pass
+      // switched off - the scene has translucent volumes in it and several were in frame, so
+      // their coverage swamped the few hundred pixels of edge this is trying to measure. With
+      // one opaque box in view the floor is zero and the signal is the whole count.
+      static long long aa_off = 0;
+      static std::vector<char> aa_hidden;
+      if (frame == 93) {
+        a.target = vis::Vec3f{250.f, 0.f, 0.f};
+        a.distance = 220.f;
+        a.azimuth = 0.6f;
+        a.elevation = 0.3f;
+        const int keep = ModelIndexByName(a, "Nullable");
+        aa_hidden.assign(a.model.solids.size(), 0);
+        for (std::size_t k = 0; k < a.model.solids.size(); ++k) {
+          aa_hidden[k] = a.model.solids[k].visible ? 1 : 0;
+          if (static_cast<int>(k) != keep && static_cast<int>(k) != a.model.world()) {
+            a.model.solids[k].visible = false;
+          }
+        }
+        a.model.Touch();
+        a.scene_dirty = true;
+        a.vis_attr.antialias = false;
+      }
+      if (frame == 94) {
+        aa_off = CountPartialCoverage(a);
+        a.vis_attr.antialias = true;
+      }
+      if (frame == 95) {
+        const long long aa_on = CountPartialCoverage(a);
+        // The box is 40 mm at 220 mm through a 45 degree field: its silhouette is a few
+        // hundred pixels long, so a few hundred partly covered pixels is the right order and
+        // "more than twice as many" is a bound that cannot be met by noise.
+        if (aa_off > 40) {
+          std::printf("selftest: FAILED - %lld pixels were already partly covered with "
+                      "anti-aliasing off, so this scene cannot measure it\n", aa_off);
+        } else if (aa_on < 100 || aa_on < 4 * (aa_off + 1)) {
+          std::printf("selftest: FAILED - anti-aliasing produced %lld partly covered pixels "
+                      "against %lld without it, which is not a smoothed edge\n", aa_on, aa_off);
+        } else {
+          std::printf("selftest: anti-aliasing softens the silhouette (%lld partly covered "
+                      "pixels, against %lld with it off)\n", aa_on, aa_off);
+        }
+      }
+      // AND IT CHANGES THE PICTURE AND NOTHING ELSE. A pass that retraced the whole frame
+      // would also pass the count above; this says the interior is untouched, by turning it
+      // off again and requiring the picture to come back.
+      if (frame == 96) {
+        const unsigned long long with = ViewportChecksum(a);
+        a.vis_attr.antialias = false;
+        aa_off = static_cast<long long>(with);
+      }
+      if (frame == 97) {
+        const unsigned long long without = ViewportChecksum(a);
+        if (without == static_cast<unsigned long long>(aa_off)) {
+          std::printf("selftest: FAILED - turning anti-aliasing off changed nothing, so it was "
+                      "never on\n");
+        } else {
+          std::printf("selftest: and turning it off changes the picture back\n");
+        }
+        a.vis_attr.antialias = true;
+        for (std::size_t k = 0; k < a.model.solids.size() && k < aa_hidden.size(); ++k) {
+          a.model.solids[k].visible = (aa_hidden[k] != 0);
+        }
+        a.model.Touch();
+        a.scene_dirty = true;
+      }
 
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

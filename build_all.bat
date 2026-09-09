@@ -450,6 +450,44 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the world's layer is confirmed.
   exit /b 1
 )
+rem ANTI-ALIASING puts partial coverage where a surface ends, and nowhere else.
+rem
+rem One ray per pixel makes a silhouette a staircase: the pixel is the surface or it is not, so
+rem its coverage is 0 or 255 and never between. Four rays and an average is what produces the
+rem values between, so counting them counts the smoothing - measured on ONE OPAQUE BOX with the
+rem rest of the scene hidden, because a translucent volume is partly covering every pixel it
+rem touches and would swamp the few hundred that are edge.
+findstr /C:"anti-aliasing softens the silhouette" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the render is anti-aliased.
+  exit /b 1
+)
+findstr /C:"turning it off changes the picture back" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the anti-aliasing switch works.
+  exit /b 1
+)
+rem THE INSERT FORM: sized from the world, and it inserts what it shows. Two claims, and the
+rem first is the one a constant cannot meet - the same fraction that gives a sensible box in a
+rem 500 mm world gives a speck in a 10 m one.
+findstr /C:"the insert form seeds half the world" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the insert form is sized from the world.
+  exit /b 1
+)
+findstr /C:"it inserts exactly the size and position it was showing" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the insert form inserts what it shows.
+  exit /b 1
+)
+rem And that the layer menu can say "null" at all, and maps every entry to the layer it names.
+rem An off-by-one between the option INDEX and the layer NUMBER would put every solid one layer
+rem out, silently, and the option list is the only place that mapping exists.
+findstr /C:"every entry maps to the layer it names" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the layer menu maps its entries.
+  exit /b 1
+)
 rem A VOLUME ON THE WORLD'S OWN LAYER clashes with the world, and the run is refused.
 rem
 rem The world used to be exempt from the overlap check, on the reasoning that it contains

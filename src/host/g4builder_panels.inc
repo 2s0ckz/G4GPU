@@ -9,7 +9,26 @@
 // ---------------------------------------------------------------- actions
 
 /// Adds a primitive at the origin, with dimensions scaled to the world so it is visible.
-static void InsertPrimitive(App& a, Shape shape) {
+/// A primitive at its default size and position, NOT YET IN THE MODEL.
+///
+/// Separate from adding it because the insert menu now asks before it inserts: the size and the
+/// position are the two things a person always changes straight afterwards, and typing them into
+/// a form is fewer actions than inserting, hunting for the fields and correcting them.
+///
+/// THE DEFAULT SIZE IS SET BY THE WORLD. Each shape has proportions written below in units of
+/// one, and they are then scaled so that the largest LENGTH among them is half the world's
+/// half-extent. A fixed fraction cannot do that job: the same 0.15 that gives a sensible box in
+/// a 500 mm world gives a 1.5 mm speck in a 10 m one, and the first thing anybody did after
+/// inserting was to type the size in.
+///
+/// Which parameters are lengths comes from ShapeParams' unit column - "mm" scales, "deg" and
+/// the dimensionless counts do not. Reading it from there rather than from a table of maxima
+/// here is what stops the two drifting apart when a shape is added.
+///
+/// The SMALLEST of the world's three half-extents, so the result fits in every direction. For
+/// the default cubic world that is exactly "half the world extent in that direction"; for a
+/// flattened world it is the reading that cannot put the solid outside it.
+static Solid SeedPrimitive(App& a, Shape shape) {
   Solid s;
   s.shape = shape;
   s.name = ShapeName(shape);
@@ -23,8 +42,15 @@ static void InsertPrimitive(App& a, Shape shape) {
   };
   while (taken(s.name)) { s.name = std::string(ShapeName(shape)) + std::to_string(++suffix); }
 
-  const double world_half = a.model.solids.empty() ? 500.0 : a.model.solids[0].p[0];
-  const double d = world_half * 0.15;
+  double world_half = 500.0;
+  if (!a.model.solids.empty()) {
+    const Solid& w = a.model.solids[0];
+    world_half = w.p[0];
+    if (w.p[1] > 0 && w.p[1] < world_half) { world_half = w.p[1]; }
+    if (w.p[2] > 0 && w.p[2] < world_half) { world_half = w.p[2]; }
+  }
+  // Proportions first, in units of one; the scale comes after, from the largest length.
+  const double d = 1.0;
   for (double& v : s.p) { v = 0; }
   switch (shape) {
     case Shape::kBox: s.p[0] = s.p[1] = s.p[2] = d; break;
@@ -67,6 +93,40 @@ static void InsertPrimitive(App& a, Shape shape) {
       break;
     default: s.p[0] = s.p[1] = s.p[2] = d; break;
   }
+
+  // NOW THE SCALE, from the largest length among the parameters and the z-sections.
+  {
+    int np = 0;
+    const ShapeParam* sp = ShapeParams(shape, np);
+    double largest = 0;
+    for (int k = 0; k < np && k < 12; ++k) {
+      if (std::strcmp(sp[k].unit, "mm") != 0) { continue; }
+      const double m = std::fabs(s.p[k]);
+      if (m > largest) { largest = m; }
+    }
+    // A polycone says nothing about its size in p[] at all - its shape is the section list -
+    // so the sections have to be part of this or those two shapes would come out at unit size.
+    for (std::size_t k = 0; k + 2 < s.sections.size(); k += 3) {
+      const double mz = std::fabs(s.sections[k]);
+      const double mr = std::fabs(s.sections[k + 2]);
+      if (mz > largest) { largest = mz; }
+      if (mr > largest) { largest = mr; }
+    }
+    if (largest > 0) {
+      const double scale = 0.5 * world_half / largest;
+      for (int k = 0; k < np && k < 12; ++k) {
+        if (std::strcmp(sp[k].unit, "mm") == 0) { s.p[k] *= scale; }
+      }
+      for (std::size_t k = 0; k + 2 < s.sections.size(); k += 3) {
+        s.sections[k] *= scale;
+        s.sections[k + 1] *= scale;
+        s.sections[k + 2] *= scale;
+      }
+    }
+  }
+  // Centred on the world, which is where a new solid is least likely to be lost.
+  s.pos[0] = s.pos[1] = s.pos[2] = 0;
+
   // The world's material by default, so a new solid is placeable immediately rather than
   // being silently dropped for having none.
   s.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
@@ -80,10 +140,55 @@ static void InsertPrimitive(App& a, Shape shape) {
   s.g = pal[k][1];
   s.b = pal[k][2];
 
+  return s;
+}
+
+/// Adds a primitive at its defaults, with no form. The selftest's path, and the fallback for
+/// anything that wants one insertion without asking.
+static void InsertPrimitive(App& a, Shape shape) {
+  const Solid s = SeedPrimitive(a, shape);
   a.sel_solid = a.model.AddSolid(s);
   a.pfield_for = -2;
   a.scene_dirty = true;
   Log("inserted " + s.name);
+}
+
+/// Adds the primitive the form is holding, and hands the parameter fields back to it.
+///
+/// Named rather than left inside the button, for the reason SetSolidLayer is: a button is not
+/// callable, and the selftest's alternative is synthesising a click at a position computed from
+/// the form's layout - which tests the layout arithmetic and not the thing under test.
+static void CommitPrimitiveForm(App& a) {
+  a.sel_solid = a.model.AddSolid(a.pending_solid);
+  a.pfield_for = -2;          // the fields are the new solid's now, and re-seed from it
+  a.scene_dirty = true;
+  a.popup = Popup::kNone;
+  Log("inserted " + a.pending_solid.name);
+}
+
+/// Drops it, and hands the fields back the same way.
+static void CancelPrimitiveForm(App& a) {
+  a.pfield_for = -2;
+  a.popup = Popup::kNone;
+}
+
+/// Seeds the form and opens it. The one way in, so the menu and the shape list cannot drift.
+static void OpenPrimitiveForm(App& a, Shape shape) {
+  a.pending_solid = SeedPrimitive(a, shape);
+  int np = 0;
+  const ShapeParam* sp = ShapeParams(shape, np);
+  // Seeded IN THE CHOSEN UNIT, for the reason DrawSolidForm gives: a base value in a field
+  // labelled cm is the one way this arrangement can lie.
+  for (int k = 0; k < 12; ++k) {
+    const ui::UnitTable& u = ui::UnitsFor((k < np) ? sp[k].unit : "");
+    a.pfield[k].Init(ui::InUnit(a.pending_solid.p[k], a.p_unit[k], u));
+  }
+  for (int k = 0; k < 3; ++k) {
+    a.pos_field[k].Init(ui::InUnit(a.pending_solid.pos[k], a.pos_unit[k],
+                                   ui::LengthUnitTable()));
+  }
+  a.pfield_for = App::kPendingFields;
+  a.popup = Popup::kPrimitive;
 }
 
 /// Combines the two most recently selected solids. The selection is the second operand and the
@@ -808,7 +913,7 @@ static void DrawMenuBar(App& a) {
           {"Polyhedra", Shape::kPolyhedra},
       };
       for (const P& p : kPrims) {
-        if (a.menu.SubItem(c, p.label)) { InsertPrimitive(a, p.shape); }
+        if (a.menu.SubItem(c, p.label)) { OpenPrimitiveForm(a, p.shape); }
       }
     }
     a.menu.EndSubmenu(c);
@@ -1154,6 +1259,65 @@ static void DrawColorPopup(App& a) {
 }
 
 /// The full primitive list, for the shapes not on the Insert menu directly.
+/// The size and position of a primitive, asked before it is inserted.
+///
+/// It borrows the selected solid's parameter fields (a.pfield, a.pos_field and their unit
+/// choices) rather than carrying fifteen of its own. a.pfield_for is the cache key those
+/// fields already had, so setting it to kPendingFields both claims them and guarantees the
+/// solid form re-seeds from the real solid once this closes.
+static void DrawPrimitiveForm(App& a) {
+  ui::Context& c = a.uic;
+  Solid& s = a.pending_solid;
+  const int lh = a.font.glyph_h;
+  const int row = lh + 6;
+  int np = 0;
+  const ShapeParam* sp = ShapeParams(s.shape, np);
+  const int rows = np + 3;   // the parameters, then pos x/y/z
+
+  const ui::Rect box = PopupFrame(a, 380, rows * (row + 1) + 4 * row + lh,
+                                  Fmt("Insert a %s", ShapeName(s.shape)));
+  int y = box.y;
+  c.canvas.Text(box.x + 14, y,
+                "Sized to half the world and centred on it; change what you need.",
+                ui::theme::kTextDim);
+  y += lh + 8;
+
+  const int vx = box.x + 14 + 104;
+  const int vw = 84;
+  const int uw = 56;
+  auto unit_rect = [&](int yy) { return ui::Rect{vx + vw + 6, yy, uw, row}; };
+
+  for (int k = 0; k < np && k < 12; ++k) {
+    c.canvas.Text(box.x + 14, y + 3, sp[k].label, ui::theme::kTextDim);
+    const ui::UnitTable& u = ui::UnitsFor(sp[k].unit);
+    if (u.n <= 0) {
+      if (ui::NumberInput(c, 1400 + k, {vx, y, vw, row}, a.pfield[k])) {
+        s.p[k] = a.pfield[k].value;
+      }
+      c.canvas.Text(vx + vw + 6, y + 3, sp[k].unit, ui::theme::kTextDim);
+    } else {
+      ui::UnitField(c, 1400 + k, {vx, y, vw, row}, unit_rect(y), a.pfield[k], s.p[k],
+                    a.p_unit[k], u);
+    }
+    y += row + 1;
+  }
+  const char* axis[3] = {"x", "y", "z"};
+  for (int k = 0; k < 3; ++k) {
+    c.canvas.Text(box.x + 14, y + 3, Fmt("pos %s", axis[k]), ui::theme::kTextDim);
+    ui::UnitField(c, 1420 + k, {vx, y, vw, row}, unit_rect(y), a.pos_field[k], s.pos[k],
+                  a.pos_unit[k], ui::LengthUnitTable());
+    y += row + 1;
+  }
+  y += 6;
+
+  if (ui::Button(c, 1440, {box.x + 14, y, 110, row + 2}, "Insert")) {
+    CommitPrimitiveForm(a);
+  }
+  if (ui::Button(c, 1441, {box.x + box.w - 104, y, 90, row + 2}, "Cancel")) {
+    CancelPrimitiveForm(a);
+  }
+}
+
 static void DrawInsertPopup(App& a) {
   ui::Context& c = a.uic;
   const Shape all[] = {Shape::kBox, Shape::kTubs, Shape::kCons, Shape::kSphere, Shape::kOrb,
@@ -1170,8 +1334,7 @@ static void DrawInsertPopup(App& a) {
   int y = box.y + 8 + a.font.glyph_h + 6;
   for (int i = 0; i < n; ++i) {
     if (ui::ListRow(c, kIdPickRow + i, {box.x + 6, y, box.w - 12, row}, ShapeName(all[i]), false)) {
-      InsertPrimitive(a, all[i]);
-      a.popup = Popup::kNone;
+      OpenPrimitiveForm(a, all[i]);
     }
     y += row;
   }
@@ -2473,6 +2636,36 @@ static int SceneVolumeCount(const App& a) {
   return static_cast<int>(a.run_manager->GetScene().volumes.size());
 }
 
+/// How many viewport pixels are PARTLY covered by an opaque surface.
+///
+/// The signature of anti-aliasing, and the only one that is not a matter of taste. One ray per
+/// pixel puts a hard step at a silhouette: the pixel is the surface or it is not, so its
+/// coverage is 0 or 255 and nothing between. Sampling the pixel four times and averaging is
+/// exactly what produces the values in between, so counting them is counting the smoothing.
+///
+/// Read from d_fb rather than from the picture, because the picture cannot tell "half covered
+/// by a bright surface" from "fully covered by a dim one" - the resolve pass has already
+/// blended them into one colour. Coverage is the thing that changed.
+///
+/// TRANSLUCENT volumes have partial coverage everywhere by their nature, so a scene with one
+/// in view has a floor under this count that has nothing to do with edges. The caller aims at
+/// something opaque.
+static long long CountPartialCoverage(App& a) {
+  const ui::Rect v = ViewRect(a);
+  const int w = std::max(1, v.w), h = std::max(1, v.h);
+  std::vector<unsigned long long> fb(static_cast<std::size_t>(w) * h);
+  CUDA_CHECK(cudaMemcpy(fb.data(), a.d_fb, sizeof(unsigned long long) * fb.size(),
+                        cudaMemcpyDeviceToHost));
+  long long partial = 0;
+  for (unsigned long long q : fb) {
+    if (q == vis::kEmptyPixel) { continue; }
+    const int alpha = static_cast<int>((static_cast<unsigned int>(q & 0xFFFFFFFFull) >> 24)
+                                       & 0xFFu);
+    if (alpha > 0 && alpha < 255) { ++partial; }
+  }
+  return partial;
+}
+
 /// FNV-1a over the 3D viewport's pixels. For asking whether the PICTURE changed.
 ///
 /// The viewport only: the panels carry a log that grows on its own, and a checksum that
@@ -2798,6 +2991,7 @@ static void DrawPopup(App& a) {
     case Popup::kOverlap: DrawOverlapPopup(a); break;
     case Popup::kWorld: DrawWorldPopup(a); break;
     case Popup::kWorldLayer: DrawWorldLayerPopup(a); break;
+    case Popup::kPrimitive: DrawPrimitiveForm(a); break;
     default: break;
   }
   // A click in the view while no popup is up selects a solid. Done here, after every panel

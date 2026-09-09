@@ -61,10 +61,18 @@ struct Camera {
   int width;
   int height;
 
-  __host__ __device__ Vec3f ray_dir(int px, int py) const {
-    const float sx = (2.0f * (px + 0.5f) / width - 1.0f) * aspect * tan_half_fov;
-    const float sy = (1.0f - 2.0f * (py + 0.5f) / height) * tan_half_fov;
+  /// The ray through pixel-grid point (@p fx, @p fy), where integer + 0.5 is a pixel centre.
+  ///
+  /// Fractional so that a pixel can be sampled more than once, at offsets inside itself, which
+  /// is what the anti-aliasing pass does. ray_dir is this at the centre.
+  __host__ __device__ Vec3f ray_dir_at(float fx, float fy) const {
+    const float sx = (2.0f * fx / width - 1.0f) * aspect * tan_half_fov;
+    const float sy = (1.0f - 2.0f * fy / height) * tan_half_fov;
     return normalize(forward + sx * right + sy * up);
+  }
+
+  __host__ __device__ Vec3f ray_dir(int px, int py) const {
+    return ray_dir_at(px + 0.5f, py + 0.5f);
   }
 
   /// World point to pixel coordinates plus view depth. Returns false if behind the camera.
@@ -116,6 +124,17 @@ struct VolumeStyle {
   unsigned char a = 255;
 };
 
+/// ONE RAY, as a function of where in the pixel grid it starts.
+///
+/// This was the body of render_geometry, which is now four lines that call it once per pixel.
+/// Lifted out because the anti-aliasing pass has to trace the same ray at three more points
+/// inside the same pixel, and the alternative - a kernel that takes a sample offset and runs
+/// over the whole frame four times - would pay for four samples everywhere to improve the few
+/// per cent of pixels that are on an edge.
+///
+/// Returns a packed framebuffer word: see pack_pixel. Its colour is PREMULTIPLIED and its
+/// alpha is coverage, which is what makes several of them averageable.
+///
 /// Ray casts the solid volumes, front to back, with the layer rule and transparency.
 ///
 /// One thread per pixel. The walk, rather than "nearest entry point wins", exists for two
@@ -133,22 +152,19 @@ struct VolumeStyle {
 ///
 /// Capped at kMaxLayers surfaces per pixel. A ray through a detector crosses a handful; the
 /// cap is what stops a pathological model from making one pixel cost a thousand.
-template <typename real_t>
+///
 /// @param voxel_class per cell, parallel to geometry.voxels.material and indexed the same way
 ///        (VoxelGrid::index already carries the per-volume offset). Null renders voxel volumes
 ///        as the single box they were always rendered as.
 /// @param class_rgba  0xAARRGGBB per class, concatenated over volumes. A voxel solid's
 ///        p[6] says where its own run starts and p[7] how many classes long it is.
-__global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeStyle* styles,
-                                Camera cam, unsigned long long* fb,
-                                bool grid_lines = true,
-                                const short* voxel_class = nullptr,
-                                const unsigned int* class_rgba = nullptr) {
-  const int px = blockIdx.x * blockDim.x + threadIdx.x;
-  const int py = blockIdx.y * blockDim.y + threadIdx.y;
-  if (px >= cam.width || py >= cam.height) { return; }
-
-  const Vec3f d3 = cam.ray_dir(px, py);
+template <typename real_t>
+__device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry,
+                                          const VolumeStyle* styles, const Camera& cam,
+                                          float fx, float fy, bool grid_lines,
+                                          const short* voxel_class,
+                                          const unsigned int* class_rgba) {
+  const Vec3f d3 = cam.ray_dir_at(fx, fy);
   const Vec3<real_t> origin{real_t(cam.eye.x), real_t(cam.eye.y), real_t(cam.eye.z)};
   const Vec3<real_t> dir{real_t(d3.x), real_t(d3.y), real_t(d3.z)};
 
@@ -674,7 +690,153 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     if (ia > 255) { ia = 255; }
     value = pack_pixel(first_t, pack_rgba(ir, ig, ib, ia));
   }
-  fb[py * cam.width + px] = value;
+  return value;
+}
+
+template <typename real_t>
+__global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeStyle* styles,
+                                Camera cam, unsigned long long* fb,
+                                bool grid_lines = true,
+                                const short* voxel_class = nullptr,
+                                const unsigned int* class_rgba = nullptr) {
+  const int px = blockIdx.x * blockDim.x + threadIdx.x;
+  const int py = blockIdx.y * blockDim.y + threadIdx.y;
+  if (px >= cam.width || py >= cam.height) { return; }
+  fb[py * cam.width + px] = trace_pixel(geometry, styles, cam, px + 0.5f, py + 0.5f,
+                                        grid_lines, voxel_class, class_rgba);
+}
+
+/// A pixel's coverage and depth, with an empty pixel reading as "nothing, infinitely far".
+__device__ inline void edge_probe(unsigned long long v, int& cover, float& depth) {
+  if (v == kEmptyPixel) {
+    cover = 0;
+    depth = -1.0f;   // "no surface", distinguished from any real distance
+    return;
+  }
+  cover = static_cast<int>((static_cast<unsigned int>(v & 0xFFFFFFFFull) >> 24) & 0xFFu);
+  depth = __uint_as_float(static_cast<unsigned int>(v >> 32));
+}
+
+/// Marks the pixels worth sampling again: those where a SURFACE BEGINS OR ENDS.
+///
+/// A separate pass, and a separate buffer, because the refinement WRITES the framebuffer that
+/// the test reads. Testing and refining in one kernel would have each pixel comparing itself
+/// against neighbours that may or may not have been refined yet - an answer that depends on
+/// which block ran first.
+///
+/// COVERAGE AND DEPTH, NOT COLOUR, and that is the whole design of this pass. Colour was tried
+/// and marks almost the entire frame on an imported mesh: a million-triangle sphere is shaded
+/// per triangle, so the colour steps between neighbouring pixels everywhere, and the
+/// anti-aliasing cost went from a few per cent to +47% opaque and +78% translucent - measured.
+///
+/// Those colour steps are also not aliasing. A facet boundary is a real discontinuity in the
+/// picture and smoothing it would blur the model's own detail. What aliases is the SILHOUETTE,
+/// where a surface starts or stops - and that shows as a jump in coverage (against the
+/// background) or in depth (against other geometry), neither of which a smoothly curved
+/// interior has.
+///
+/// The depth test is relative, because a 1 mm step matters at 50 mm and is nothing at 5 m.
+/// APPENDS THE MARKED PIXELS TO A LIST rather than writing a per-pixel flag, and that is not
+/// bookkeeping - it is most of the performance of this feature.
+///
+/// Edge pixels are a thin scattered curve: 0.2% of the frame, spread so that almost every warp
+/// contains one or two of them. A refinement pass that tested a flag per pixel therefore ran
+/// four full traces on one lane while thirty-one idled, and cost 2.38 ms for 2950 pixels - 200
+/// ns a ray against 3.8 ns for an ordinary one, fifty times over. Measured, after the flag
+/// version was written and the cost was a surprise.
+///
+/// Compacted, the same rays are contiguous and every warp is full.
+///
+/// @param list   one entry per marked pixel, as py * width + px
+/// @param count  how many; also the append cursor
+__global__ void mark_edges(const unsigned long long* fb, int width, int height, int* list,
+                           unsigned int* count, int cover_threshold) {
+  const int px = blockIdx.x * blockDim.x + threadIdx.x;
+  const int py = blockIdx.y * blockDim.y + threadIdx.y;
+  if (px >= width || py >= height) { return; }
+  int cover_here = 0;
+  float depth_here = 0;
+  edge_probe(fb[py * width + px], cover_here, depth_here);
+  bool edge = false;
+  const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+  for (int k = 0; k < 4 && !edge; ++k) {
+    const int nx = px + dx[k], ny = py + dy[k];
+    if (nx < 0 || ny < 0 || nx >= width || ny >= height) { continue; }
+    int cover_there = 0;
+    float depth_there = 0;
+    edge_probe(fb[ny * width + nx], cover_there, depth_there);
+    const int dc = cover_here - cover_there;
+    if ((dc < 0 ? -dc : dc) >= cover_threshold) {
+      edge = true;
+    } else if ((depth_here < 0) != (depth_there < 0)) {
+      edge = true;   // one has a surface and the other does not
+    } else if (depth_here > 0 && depth_there > 0) {
+      const float lo = (depth_here < depth_there) ? depth_here : depth_there;
+      const float dd = depth_here - depth_there;
+      if ((dd < 0 ? -dd : dd) > 0.02f * lo) { edge = true; }
+    }
+  }
+  if (edge) {
+    const unsigned int at = atomicAdd(count, 1u);
+    list[at] = py * width + px;
+  }
+}
+
+/// Retraces the marked pixels at four points inside themselves and averages them.
+///
+/// A rotated grid, not a regular one: the four offsets sit on a 2x2 grid turned about 27
+/// degrees, so their projections onto the horizontal and the vertical are four DISTINCT
+/// positions rather than two. A near-horizontal or near-vertical edge - which is most edges in
+/// a scene of boxes - therefore gets four levels of coverage from four samples instead of two.
+///
+/// Averaging is sound because what is stored is premultiplied colour and coverage: summing
+/// those over the samples and dividing is exactly the coverage-weighted average of the
+/// surfaces seen. The depth is the NEAREST of them, since depth is used to sort tracks and
+/// edges against the first surface and the nearest sample is the first surface.
+/// One thread per pixel of the compacted list, so the warps are full. See mark_edges.
+///
+/// Launched over a grid sized for the worst case - every pixel an edge - because the count
+/// lives on the device and reading it back to size the launch would mean a synchronisation in
+/// the middle of the frame, which is the thing the render was just taken off the UI thread to
+/// avoid. The blocks past the count exit on their first instruction.
+template <typename real_t>
+__global__ void refine_edges(geom::Geometry<real_t> geometry, const VolumeStyle* styles,
+                             Camera cam, unsigned long long* fb, const int* list,
+                             const unsigned int* count, bool grid_lines = true,
+                             const short* voxel_class = nullptr,
+                             const unsigned int* class_rgba = nullptr) {
+  const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= *count) { return; }
+  const int at = list[i];
+  const int px = at % cam.width;
+  const int py = at / cam.width;
+
+  constexpr int kSamples = 4;
+  const float ox[kSamples] = {0.125f, 0.625f, 0.375f, 0.875f};
+  const float oy[kSamples] = {0.375f, 0.125f, 0.875f, 0.625f};
+
+  int sr = 0, sg = 0, sb = 0, sa = 0;
+  float near_t = -1.0f;
+  for (int k = 0; k < kSamples; ++k) {
+    const unsigned long long v = trace_pixel(geometry, styles, cam, px + ox[k], py + oy[k],
+                                             grid_lines, voxel_class, class_rgba);
+    if (v == kEmptyPixel) { continue; }
+    const unsigned int rgba = static_cast<unsigned int>(v & 0xFFFFFFFFull);
+    sr += static_cast<int>((rgba >> 16) & 0xFFu);
+    sg += static_cast<int>((rgba >> 8) & 0xFFu);
+    sb += static_cast<int>(rgba & 0xFFu);
+    sa += static_cast<int>((rgba >> 24) & 0xFFu);
+    const float t = __uint_as_float(static_cast<unsigned int>(v >> 32));
+    if (near_t < 0.0f || t < near_t) { near_t = t; }
+  }
+  if (near_t < 0.0f) {
+    fb[py * cam.width + px] = kEmptyPixel;
+    return;
+  }
+  fb[py * cam.width + px] = pack_pixel(near_t, pack_rgba((sr + kSamples / 2) / kSamples,
+                                                         (sg + kSamples / 2) / kSamples,
+                                                         (sb + kSamples / 2) / kSamples,
+                                                         (sa + kSamples / 2) / kSamples));
 }
 
 // ---------------------------------------------------------------- line pass

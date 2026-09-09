@@ -79,25 +79,6 @@ struct Font {
   static constexpr int kFirst = 32;
   static constexpr int kCount = 95;   ///< the printable ASCII run, 32 to 126
 
-  /// THE BYTE THAT MEANS ∅, WHICH IS DRAWN AND NOT RASTERISED.
-  ///
-  /// The atlas is indexed by byte and the strings drawn through it are std::string, so a
-  /// three-byte UTF-8 character cannot reach it - each byte lands outside the run and draws
-  /// nothing. A layer menu needs the symbol as TEXT, because its options go through ui::Select
-  /// as strings, so it gets a byte nothing else uses: 0x01 is not printable, cannot appear in a
-  /// name, a number or a material, and is one glyph wide, which the fixed-pitch layout
-  /// arithmetic depends on.
-  ///
-  /// The first version rasterised U+2205 into an extra atlas slot with the wide GDI call. It
-  /// passed a check for ink, and for ink across the middle where a notdef box has none - and it
-  /// still came out looking wrong, because a face without the code point does not draw notdef:
-  /// GDI FONT-LINKS to some other installed face, at that face's metrics, so what appears is a
-  /// glyph of the wrong size on the wrong baseline. Neither check could see that.
-  ///
-  /// Canvas::Text draws it instead, out of an ellipse and a stroke, the way EyeToggle draws its
-  /// eye. Nothing about it then depends on which font was found.
-  static constexpr char kEmptySetByte = '\x01';
-
   /// Builds the atlas. `face` may be any installed family; a fixed-pitch one keeps the
   /// per-character advance constant, which the layout code relies on.
   bool Build(const char* face, int pixel_height, bool bold = false) {
@@ -289,65 +270,6 @@ struct Canvas {
     }
   }
 
-  /// ∅ drawn into one glyph cell whose top-left is (@p x, @p y): a ring and a stroke.
-  ///
-  /// Drawn rather than rasterised from U+2205 - see Font::kEmptySetByte for why a font cannot
-  /// be relied on for it. Sized from the font's metrics so it matches the digits beside it in
-  /// the same menu, and drawn with the same coverage-to-alpha the atlas glyphs use, so it is
-  /// as anti-aliased as they are rather than a hard-edged shape among smooth ones.
-  void EmptySet(int x, int y, Color c) {
-    if (font == nullptr) { return; }
-    const int gw = font->glyph_w, gh = font->glyph_h;
-    // The ring sits on the digits' body: cap height above the baseline, inset a little from
-    // the cell so consecutive glyphs do not touch.
-    const double cx = x + gw * 0.5 - 0.5;
-    const double top = y + font->ascent - gh * 0.66;
-    const double bot = y + font->ascent - gh * 0.02;
-    const double cy = 0.5 * (top + bot);
-    const double ry = 0.5 * (bot - top);
-    const double rx = gw * 0.5 - 0.5;
-    if (rx <= 0.5 || ry <= 0.5) { return; }
-    // SCALED WITH THE GLYPH. A fixed 0.9 px half-width is a hairline at 25 px and thicker
-    // than the radius at 8, where it filled the ring solid - a blob, which is what the null
-    // entry looked like next to the digits in the menu.
-    const double w = fmax(0.20, fmin(rx, ry) * 0.10);
-    const int x0 = x - 1, x1 = x + gw + 1;
-    const int y0 = static_cast<int>(top) - 2, y1 = static_cast<int>(bot) + 2;
-    for (int py = y0; py <= y1; ++py) {
-      for (int px = x0; px <= x1; ++px) {
-        const double dx = px - cx, dy = py - cy;
-        // Distance to the ellipse, in pixels, near enough for a shape this size: the implicit
-        // value divided by the magnitude of its gradient. The same trick quadric_residual uses
-        // for exactly the same reason - a raw implicit value is not a length.
-        const double f = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) - 1.0;
-        const double gx = 2.0 * dx / (rx * rx), gy = 2.0 * dy / (ry * ry);
-        const double gm = std::sqrt(gx * gx + gy * gy);
-        double d = (gm > 1e-9) ? std::fabs(f) / gm : 1e9;
-        // The stroke: a segment through the centre at the ellipse's own diagonal, and it has
-        // to OVERSHOOT THE RING - that overshoot is the whole difference between ∅ and 0. The
-        // ring crosses this diagonal at |along| = sl/sqrt(2), so 0.95 * sl sticks out by about
-        // a third of the radius at each end.
-        //
-        // Clipping it to the ring instead (f <= 0.3) was tried, and at eight pixels across the
-        // result was a glyph indistinguishable from the digit 0 sitting directly beneath it in
-        // the same menu. Reported as the null symbol not looking right, and it was not: a
-        // circle with an invisible stroke is a zero.
-        const double sx = rx, sy = -ry;                     // direction of the stroke
-        const double sl = std::sqrt(sx * sx + sy * sy);
-        const double along = (dx * sx + dy * sy) / sl;
-        const double across = std::fabs(dx * sy - dy * sx) / sl;
-        if (std::fabs(along) <= sl * 0.95 && across < d) { d = across; }
-        // Coverage from the distance, one pixel of feathering.
-        if (d >= w + 0.5) { continue; }
-        double cov = (w + 0.5) - d;
-        if (cov > 1.0) { cov = 1.0; }
-        const unsigned a = static_cast<unsigned>(((c >> 24) & 255) * cov);
-        if (a == 0) { continue; }
-        Put(px, py, (c & 0x00FFFFFFu) | (a << 24));
-      }
-    }
-  }
-
   void HLine(int x0, int x1, int y, Color c) {
     for (int x = x0; x < x1; ++x) { Put(x, y, c); }
   }
@@ -419,11 +341,6 @@ struct Canvas {
     for (char raw : s) {
       const int ch = static_cast<unsigned char>(raw);
       if (ch == '\n') { continue; }
-      if (raw == Font::kEmptySetByte) {
-        EmptySet(pen, y, c);
-        pen += gw;
-        continue;
-      }
       const int idx = ch - Font::kFirst;
       if (idx < 0 || idx >= Font::kCount) {
         pen += gw;

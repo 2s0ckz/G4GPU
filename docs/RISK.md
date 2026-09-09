@@ -3691,3 +3691,89 @@ each case the code was believed because a green check was pointed at something a
 What found all three was looking at the artefact - the render, the menu, the scene - which is
 what the reports were. A test is evidence about the thing it measures, and every one of these was
 measuring something else.
+
+### V30: a cost in the wrong place twice, and a measurement that found it both times
+
+Anti-aliasing the render. The feature is four rays instead of one at the pixels on a silhouette,
+and the whole of the work was finding out where the time was actually going.
+
+#### First guess: the edge test
+
+`mark_edges` compared each pixel's COLOUR against its neighbours. Measured cost: +47% on an
+opaque mesh and +78% on a translucent one - against a comment in the same commit claiming "a few
+per cent, only edge pixels are retraced".
+
+The reason is obvious once written down and was not obvious before: a 3.2 million triangle sphere
+is shaded per triangle, so the colour steps between neighbouring pixels almost everywhere, and
+almost every pixel got marked. Those steps are also not aliasing - a facet boundary is real
+detail, and smoothing it blurs the model. What aliases is the silhouette, which shows as a jump
+in COVERAGE (against the background) or in DEPTH (against other geometry), and a smoothly curved
+interior has neither.
+
+So the test became coverage and depth. And the cost did not move: 8.44 ms against 8.45.
+
+#### Which is when the pass was made to report its own number
+
+`mark_edges` now counts what it marks, and `-benchmesh` prints it. **0.2% of the frame.** The
+refinement was tracing almost nothing, and the cost was not in the rays at all - so the colour
+theory had been wrong about the mechanism as well as the fix, and two rebuilds had gone into
+improving something that was not the problem.
+
+With the count in hand, and a runtime toggle so both arms could be measured from one binary:
+
+```
+                  before AA    aa off     aa on
+   opaque          5.70 ms     6.12 ms    8.50 ms
+   translucent    19.88 ms    20.01 ms   35.47 ms
+```
+
+Two separate costs, and they had been added together and blamed on one. Lifting `trace_pixel`
+out of the kernel so both passes could call it cost 5.70 -> 6.12 (codegen: the function is now
+inlined into two kernels). The refinement itself cost 6.12 -> 8.50, which is 2.38 ms for 2950
+pixels: 200 ns a ray, where an ordinary ray in the same frame is 3.8 ns.
+
+#### Second guess, and this one was right
+
+Fifty times the cost per ray is not arithmetic, it is occupancy. Edge pixels are a thin scattered
+curve, so nearly every warp contains one or two of them - and a pass that reads a per-pixel flag
+runs four full traces on that one lane while thirty-one idle.
+
+`mark_edges` appends the marked pixels to a LIST instead, and the refinement runs one thread per
+entry, so the rays are contiguous and the warps are full: 2.38 ms -> 1.87 ms opaque, 15.46 ->
+10.31 ms translucent.
+
+Still 158 ns a ray, and that residue is not divergence - it is that these are the most expensive
+rays in the frame. A ray grazing a silhouette descends deep into the BVH without a quick hit,
+while the "3.8 ns average" it was compared against is dominated by background pixels that cost
+nothing. The two numbers were never comparable, which is worth stating because the 50x that
+motivated the compaction was partly an artefact of dividing by the wrong denominator - the
+compaction was still worth 25%, but the argument for it was better than the evidence given.
+
+#### What the measurement discipline actually was, in order
+
+  1. a comment asserting "a few per cent" with no number behind it - wrong by an order of
+     magnitude
+  2. a fix to the edge criterion, correct on its own terms, worth nothing on the clock
+  3. a counter in the pass, which said the criterion was never the problem
+  4. a runtime toggle, which separated the codegen cost from the ray cost
+  5. compaction, worth 25%
+
+Steps 3 and 4 are cheap and should have come first. Both are permanent now: the count is in
+`-benchmesh`'s report and the toggle is in the Visualization window, so the next person to be
+surprised by this cost has the two numbers that explain it without building anything.
+
+#### The test is coverage, and the fixture had to be emptied first
+
+One ray per pixel gives a pixel coverage of 0 or 255 and nothing between; averaging four gives
+the values between. So the count of partly covered pixels IS the anti-aliasing, and it is read
+from the framebuffer rather than from the picture - the resolve pass has already blended coverage
+and colour into one number, and cannot tell "half covered by something bright" from "covered by
+something dim".
+
+The first attempt counted 143,829 partly covered pixels with the pass switched OFF. The selftest
+scene has translucent volumes in it and several were in frame, and a translucent volume is partly
+covering every pixel it touches. With everything but one opaque box hidden the floor is exactly
+zero and the signal is the whole count: **1119 against 0**.
+
+A box rather than a sphere, deliberately: its silhouette is four straight lines, which is the
+arrangement one ray per pixel turns into a staircase and the one anybody notices.
