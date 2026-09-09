@@ -52,6 +52,10 @@ struct SolidPool {
   /// both. `any_class_layers` is what says whether any of it was chosen, and that flag rather
   /// than emptiness is what decides whether the device and the navigator ever see it.
   std::vector<int> voxel_class_layer;
+  /// One flag per voxel class, at the same offsets again, non-zero where the class is NOT IN
+  /// THE SCENE. Same length as the other two runs for the same reason: one offset finds all
+  /// three, so a volume cannot opt out of any of them.
+  std::vector<unsigned char> voxel_class_absent;
   /// Triangles (9 reals each) and BVH nodes (8 reals each) for every mesh in the scene.
   /// G4TessellatedSolid::Build appends to both through geom::build_bvh.
   std::vector<G4double> tri;
@@ -81,6 +85,20 @@ struct SolidPool {
     return off;
   }
   bool any_class_layers = false;   ///< did any volume name layers of its own?
+  bool any_class_absent = false;   ///< is any class in the scene absent from it?
+  /// Appends a volume's per-class absence flags. @p absent may be null, in which case the run
+  /// is filled with zeroes - every class present, which is what every volume said before the
+  /// null layer existed.
+  void add_class_absent(const unsigned char* absent, int n) {
+    if (absent != nullptr) {
+      voxel_class_absent.insert(voxel_class_absent.end(), absent, absent + n);
+      for (int k = 0; k < n; ++k) {
+        if (absent[k] != 0) { any_class_absent = true; }
+      }
+    } else {
+      voxel_class_absent.insert(voxel_class_absent.end(), static_cast<std::size_t>(n), 0u);
+    }
+  }
   /// Appends a volume's per-class layers. @p layers may be null, in which case the run is
   /// filled with @p own - the volume's own layer - so the two runs stay the same length and
   /// one offset finds both.
@@ -117,9 +135,16 @@ struct SolidPool {
     geom::VoxelStore<G4double> vs{};
     vs.material = voxel_cells.empty() ? nullptr : voxel_cells.data();
     vs.count = static_cast<int>(voxel_cells.size());
-    if (any_class_layers && voxel_class_cells.size() == voxel_cells.size()) {
+    // EITHER reason to look. A class can be absent without any class naming a layer, and then
+    // the navigator still has to consult the per-cell class array to find out - so the switch
+    // is on both, not on layers alone.
+    if ((any_class_layers || any_class_absent)
+        && voxel_class_cells.size() == voxel_cells.size()) {
       vs.cls = voxel_class_cells.data();
       vs.class_layer = voxel_class_layer.data();
+      if (any_class_absent && voxel_class_absent.size() == voxel_class_layer.size()) {
+        vs.class_absent = voxel_class_absent.data();
+      }
     }
     return vs;
   }

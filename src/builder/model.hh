@@ -212,6 +212,32 @@ enum class VoxelKind : int {
 /// per-class run when every class agrees with the volume.
 constexpr int kInheritLayer = -2147483647;
 
+/// A solid or a voxel class carrying THIS in its layer field is not in the scene at all.
+///
+/// Not transported through, not drawn, and not scored - one fact for all three rather than
+/// three switches that can disagree. It shares the layer CONTROL because that is where the
+/// question is asked ("what is here, and what wins"), and because "nothing, this is not here"
+/// belongs beside "layer 3": someone deciding what a volume is for should not have to learn
+/// that hiding it, excluding it from the run and excluding it from the tally live in three
+/// different places.
+///
+/// IT IS NOT A LAYER, AND NOT A NUMBER. Nothing computes a rank from it. A solid carrying it
+/// is not placed; a class carrying it keeps its cells' values and its colour, and its cells
+/// are simply not part of the volume - geom::VoxelStore::class_absent carries that as its own
+/// per-class fact, and geom::inside_volume is where it is honoured. The space belongs to
+/// whatever else contains it, so no scorer sees it either: the tally follows ownership and
+/// needs no rule of its own.
+///
+/// The first implementation did make it a number - a layer two billion below everything, on
+/// the reasoning that such a cell would lose every overlap and the world would take its space
+/// with no new mechanism at all. geom::kNullLayerTag records what that cost. Absence is not a
+/// small number: a cell that is not there does not lose overlaps, it does not take part in
+/// them.
+///
+/// geom::kNullLayerTag is the same value, asserted equal in build_scene.hh, and exists in the
+/// geometry only so the flattener can refuse a placement that still carries it.
+constexpr int kNullLayer = -2147483646;
+
 struct VoxelClass {
   double value = 0;      ///< the voxel value, or the lower edge of the HU band
   double value_max = 0;  ///< upper edge, for a continuous band

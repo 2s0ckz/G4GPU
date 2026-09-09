@@ -350,6 +350,7 @@ class TransportEngine {
   /// layer path off. See geom::VoxelStore.
   short* d_voxel_class_ = nullptr;
   int* d_class_layer_ = nullptr;
+  unsigned char* d_class_absent_ = nullptr;
   real_t* d_tri_ = nullptr;
   real_t* d_bvh_ = nullptr;
   double* d_score_ = nullptr;

@@ -34,6 +34,28 @@ __host__ __device__ inline long long volume_rank(int layer, int index) {
 /// Sentinel for "this cell has no class, so the volume's own layer applies".
 constexpr int kNoClassLayer = -2147483647;
 
+/// NOT A LAYER. The value builder::kNullLayer uses in its own layer FIELD to mean "absent",
+/// present here only so the flattener can refuse to place a volume carrying it.
+///
+/// It is a tag and never reaches the geometry as a layer: `class_absent` below is how absence
+/// is represented, and no rank is ever computed from this number. That is the second design
+/// and the first one is worth recording, because it looked reasonable. Absence was spelled as
+/// a very negative LAYER, on the reasoning that volume_rank shifts the layer into the high
+/// half of a signed 64-bit word, so such a cell ranks below every ordinary cell and below the
+/// world - and locate would hand its space to whatever else contained it, with no new
+/// mechanism at all.
+///
+/// What that actually bought was two bugs and a workaround. The renderer read "something
+/// outranks this cell" as "a higher layer takes the space from here on", which is what that
+/// condition means everywhere else, and ENDED THE CELL MARCH - so nulling a phantom's front
+/// class deleted the phantom, far side included. And the same rank dragged the cover scan's
+/// minimum to the bottom, admitting every volume in the scene as a candidate cover, which
+/// needed a second minimum computed over the non-null classes to undo.
+///
+/// Absence is not a small number. A cell that is not there does not lose overlaps, it does not
+/// participate in them.
+constexpr int kNullLayerTag = -2147483646;
+
 /// The per-cell data for every voxel volume in a scene, in one pool.
 template <typename real_t>
 struct VoxelStore {
@@ -44,6 +66,14 @@ struct VoxelStore {
   /// PER-CLASS LAYERS, which is how a phantom can win an overlap where it is bone and lose it
   /// where it is air.
   ///
+  /// ABSENT CLASSES: one flag per class, at the same offsets as `class_layer`, non-zero where
+  /// the class is not in the scene. Null where no class in the scene is absent, which is what
+  /// keeps an ordinary phantom paying nothing for the feature.
+  ///
+  /// Separate from the layer rather than encoded in it, because it is a different question.
+  /// See kNullLayerTag for what encoding it as a layer cost.
+  const unsigned char* class_absent = nullptr;
+
   /// `cls` is the class index per cell - the same array the renderer colours by, at the same
   /// offsets - and `class_layer` is one layer per class, concatenated over volumes with a
   /// solid's p[6] naming where its run starts. Two arrays rather than a layer per cell because
@@ -139,6 +169,35 @@ __host__ __device__ inline int voxel_cell_layer(const VoxelStore<real_t>& vs,
   const int c = static_cast<int>(vs.cls[cell]);
   if (c < 0 || c >= g.class_count) { return kNoClassLayer; }
   return vs.class_layer[g.class_base + c];
+}
+
+/// True if cell @p cell belongs to a class that is not in the scene.
+///
+/// @p cell is a store index - what VoxelGrid::index returns - not a cell coordinate.
+template <typename real_t>
+__host__ __device__ inline bool voxel_cell_absent(const VoxelStore<real_t>& vs,
+                                                  const VoxelGrid<real_t>& g, int cell) {
+  if (vs.cls == nullptr || vs.class_absent == nullptr) { return false; }
+  if (cell < 0 || cell >= vs.count) { return false; }
+  const int c = static_cast<int>(vs.cls[cell]);
+  if (c < 0 || c >= g.class_count) { return false; }
+  return vs.class_absent[g.class_base + c] != 0;
+}
+
+/// True if @p q, in the grid's frame, falls in a cell that is not in the scene.
+template <typename real_t>
+__host__ __device__ inline bool voxel_absent_at(const VoxelStore<real_t>& vs,
+                                                const VoxelGrid<real_t>& g,
+                                                const Vec3<real_t>& q) {
+  if (vs.cls == nullptr || vs.class_absent == nullptr) { return false; }
+  const real_t tol = kSurfTolerance<real_t>();
+  if (fabs(q.x) > g.half[0] + tol || fabs(q.y) > g.half[1] + tol
+      || fabs(q.z) > g.half[2] + tol) {
+    return false;
+  }
+  int ijk[3];
+  voxel_cell_of(g, q, ijk);
+  return voxel_cell_absent(vs, g, g.index(ijk[0], ijk[1], ijk[2]));
 }
 
 /// The layer that applies at @p q inside the grid: its cell's class layer, or @p fallback.
@@ -272,6 +331,12 @@ __host__ __device__ inline real_t voxel_step(const VoxelStore<real_t>& vs,
   // kNoClassLayer when the scene has no per-class layers, and then this never changes and
   // costs one comparison per cell.
   int lay0 = voxel_cell_layer(vs, g, here);
+  // AND WHETHER THE CELL IS THERE AT ALL, for the same reason and one step further along. An
+  // absent cell is not part of this volume, so the boundary between a present cell and an
+  // absent one is a boundary between two different owners - the grid and whatever contains it.
+  // A step that crossed it would carry the grid's material through space the grid does not
+  // occupy.
+  bool gone0 = voxel_cell_absent(vs, g, here);
 
   // A CT is mostly homogeneous, so this walks a long way through identical cells. The bound is
   // the diagonal cell count, which is what a ray crossing the whole grid touches; without it a
@@ -287,7 +352,8 @@ __host__ __device__ inline real_t voxel_step(const VoxelStore<real_t>& vs,
     if (idx < 0 || idx >= vs.count) { return kInfinity<real_t>(); }
     const short mat = vs.material[idx];
     const int lay = voxel_cell_layer(vs, g, idx);
-    if (every_cell || mat != mat0 || lay != lay0) {
+    const bool gone = voxel_cell_absent(vs, g, idx);
+    if (every_cell || mat != mat0 || lay != lay0 || gone != gone0) {
       // A boundary the track is already standing on is not a step. Start() clamps a negative
       // t_next to zero, which is right for "the boundary is behind you" - but with every_cell
       // the very next thing the walk does is return it, and a zero-length step makes no
@@ -307,6 +373,7 @@ __host__ __device__ inline real_t voxel_step(const VoxelStore<real_t>& vs,
         return walk.t;
       }
       mat0 = mat;  // treat the zero-width cell as where we started, and keep walking
+      gone0 = gone;
       lay0 = lay;
     }
   }
@@ -334,19 +401,23 @@ __host__ __device__ inline real_t voxel_first_outranking(const VoxelStore<real_t
                                                          real_t limit) {
   VoxelWalk<real_t> walk;
   if (!walk.Start(g, q, d)) { return kInfinity<real_t>(); }
-  auto rank_of = [&](int cell) {
+  // AN ABSENT CELL OUTRANKS NOTHING, because it is not there. Asked as a separate question
+  // and not as a rank: this walk is looking for where the grid starts winning, and a cell the
+  // grid does not occupy cannot start winning anything.
+  auto outranks = [&](int cell) {
+    if (voxel_cell_absent(vs, g, cell)) { return false; }
     const int lay = voxel_cell_layer(vs, g, cell);
-    return volume_rank((lay == kNoClassLayer) ? vol_layer : lay, vol_index);
+    return volume_rank((lay == kNoClassLayer) ? vol_layer : lay, vol_index) > rank;
   };
   // The cell the ray is standing in counts: a track inside the grid, in a cell whose class
   // loses, is exactly the case this exists for, and the winning region may begin at the very
   // next boundary or may already be here.
-  if (rank_of(walk.Index(g)) > rank) { return real_t(0); }
+  if (outranks(walk.Index(g))) { return real_t(0); }
   const int max_steps = 2 * (g.n[0] + g.n[1] + g.n[2]) + 8;
   for (int iter = 0; iter < max_steps; ++iter) {
     if (!walk.Next(g)) { return kInfinity<real_t>(); }
     if (walk.t > limit) { return kInfinity<real_t>(); }
-    if (rank_of(walk.Index(g)) > rank) { return walk.t; }
+    if (outranks(walk.Index(g))) { return walk.t; }
   }
   return kInfinity<real_t>();
 }

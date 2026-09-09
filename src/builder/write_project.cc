@@ -174,18 +174,48 @@ bool WriteExeDir(std::ofstream& f, const Model& m) {
 /// transport it differently, and the comparison between them is what would notice - which is
 /// a slow and confusing way to find a duplicated rule. Hence one function, called by the
 /// writer for the sidecar and by the emitter for the code.
+///
+/// Which classes are ABSENT from the scene, or empty if none are. Absence is a fact about a
+/// class and not a layer it sits on - see builder::kNullLayer - so it travels as its own run.
+inline std::vector<unsigned char> ClassAbsentOf(const Solid& s) {
+  if (s.shape != Shape::kVoxelGrid || s.voxel_classes.empty()) { return {}; }
+  std::vector<unsigned char> absent(s.voxel_classes.size(), 0u);
+  bool any = false;
+  for (std::size_t i = 0; i < s.voxel_classes.size(); ++i) {
+    if (s.voxel_classes[i].layer == kNullLayer) {
+      absent[i] = 1u;
+      any = true;
+    }
+  }
+  return any ? absent : std::vector<unsigned char>{};
+}
+
+/// True if this solid is not part of the scene at all. See builder::kNullLayer.
+///
+/// The generated project has to agree with the builder's own scene or the whole point of
+/// generating it is lost: a run in the builder and a run of the emitted Geant4 code must be
+/// the same detector. build_scene.hh has the matching skip in its placement loop.
+inline bool IsNullLayer(const Solid& s) { return s.layer == kNullLayer; }
+
 inline std::vector<int> ClassLayersOf(const Solid& s) {
   if (s.shape != Shape::kVoxelGrid || s.voxel_classes.empty()) { return {}; }
   std::vector<int> layers(s.voxel_classes.size(), s.layer);
   bool differs = false;
   for (std::size_t i = 0; i < s.voxel_classes.size(); ++i) {
     const int L = s.voxel_classes[i].layer;
+    // AN ABSENT CLASS CARRIES THE VOLUME'S LAYER HERE, exactly as in build_scene.hh. The tag
+    // is not a layer and must never be written as one: a generated project that emitted it
+    // would rank those cells two billion below everything instead of leaving them out, which
+    // is a different detector from the one the builder ran. See builder::kNullLayer.
+    if (L == kNullLayer) { continue; }
     if (L != kInheritLayer && L != s.layer) {
       layers[i] = L;
       differs = true;
     }
   }
-  return differs ? layers : std::vector<int>{};
+  // Non-empty when EITHER thing has been said, because the runs travel together: the class
+  // index per cell, the colours, the layers and the absence all arrive or none of them do.
+  return (differs || !ClassAbsentOf(s).empty()) ? layers : std::vector<int>{};
 }
 
 /// Deliberately strict about the count: a cell file that did not match its grid would
@@ -380,6 +410,17 @@ void WriteSolids(std::ofstream& f, const Model& m) {
           f << cl[k];
         }
         f << "};\n";
+        // AND WHICH CLASSES ARE NOT IN THE SCENE AT ALL. Emitted only when some class is
+        // absent, so an ordinary phantom's generated code is unchanged.
+        const std::vector<unsigned char> ab = ClassAbsentOf(m.solids[i]);
+        if (!ab.empty()) {
+          f << "  " << detail::SolidVar(m, i) << "->ClassAbsent() = {";
+          for (std::size_t k = 0; k < ab.size(); ++k) {
+            if (k > 0) { f << ", "; }
+            f << static_cast<int>(ab[k]) << "u";
+          }
+          f << "};\n";
+        }
       }
     }
     if (m.solids[i].shape == Shape::kImportedMesh) {
@@ -404,6 +445,10 @@ void WritePlacements(std::ofstream& f, const Model& m) {
   for (std::size_t i = 0; i < m.solids.size(); ++i) {
     const int idx = static_cast<int>(i);
     if (IsOperandOnly(m, idx)) { continue; }  // consumed by a boolean, never placed
+    // Not in the scene, so not in the file. The builder's own build_scene.hh skips it in the
+    // same place and for the same reason; a project that emitted it would be a different
+    // detector from the one that was run, which is the one thing this file must never be.
+    if (IsNullLayer(m.solids[i]) && idx != world) { continue; }
     const Solid& s = m.solids[i];
     const std::string logic = detail::LogicVar(m, idx);
     const std::string mat = (s.material >= 0) ? detail::MatVar(m, s.material)

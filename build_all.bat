@@ -419,6 +419,46 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not check the custom-scorer equivalence.
   exit /b 1
 )
+rem THE NULL LAYER: a solid on it is not in the scene, and comes back when it is put back.
+rem
+rem Two claims that fail separately - one volume fewer in the flattened scene, which is what
+rem makes the transport and the tally ignore it, and a changed picture. Each of them is also
+rem satisfied by a fixture that was never on screen, so the selftest proves the box visible
+rem first by recolouring it; both fixtures were once placed outside the world, where nothing
+rem is drawn, and passed.
+findstr /C:"a solid on the null layer leaves the scene" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove a null-layer solid leaves the scene.
+  exit /b 1
+)
+findstr /C:"and comes back to exactly the picture it left" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove a null-layer solid can be put back.
+  exit /b 1
+)
+rem And a voxel class on it, checked on a grid with NOTHING over it - on a covered one the
+rem clamp removes such a cell whether the code means to or not, and breaking the rule
+rem deliberately left that check passing.
+findstr /C:"a voxel class on the null layer is not drawn" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove a null-layer voxel class is not drawn.
+  exit /b 1
+)
+rem The world is asked about before it moves off layer 0, and refused the null layer outright.
+findstr /C:"the world layer is confirmed before it moves" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the world's layer is confirmed.
+  exit /b 1
+)
+rem The null entry in every layer menu is one byte indexing a glyph rasterised from U+2205. A
+rem face without that code point rasterises its notdef box instead, which is a hollow
+rem rectangle - so the check is for ink AND for ink across the middle, where a slashed circle
+rem has some and a box has none.
+findstr /C:"the empty-set glyph is drawn and is not hollow" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the empty-set glyph renders.
+  exit /b 1
+)
 rem The composited viewport must BE the device image - the blit's placement, stride and
 rem completeness, compared against d_rgba rather than against another frame that went through
 rem the same blit. A checksum comparison cannot see this: break the row stride and both sides

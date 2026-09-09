@@ -141,6 +141,23 @@ inline FlatScene flatten(G4double range_cut_mm = 0.7 /*mm*/) {
   }
 
   // The world is the placement with no mother and no explicit layer.
+  //
+  // "No explicit layer" is spelled as a NEGATIVE layer, so every negative number reads as
+  // "this is the world" - which makes geom::kNullLayerTag, the model's tag for "not in the
+  // scene", indistinguishable from it here. A caller that places such a volume instead of
+  // skipping it gets "two placements have no mother", which is true and is no help at all:
+  // the mistake was placing it. Said plainly instead, and before the world test, so the
+  // message names the thing that happened.
+  for (G4PVPlacement* p : placements) {
+    if (p->GetMotherLogical() == nullptr && p->ExplicitLayer() == geom::kNullLayerTag) {
+      std::printf("\nFATAL: \"%s\" was placed on the null layer.\n"
+                  "  That layer means the volume is not in the scene, so it should not have\n"
+                  "  been placed at all - see builder::kNullLayer and the skip in\n"
+                  "  build_scene.hh's placement loop.\n",
+                  p->GetName().c_str());
+      std::exit(2);
+    }
+  }
   G4PVPlacement* world = nullptr;
   for (G4PVPlacement* p : placements) {
     if (p->GetMotherLogical() == nullptr && p->ExplicitLayer() < 0) {
@@ -184,11 +201,16 @@ inline FlatScene flatten(G4double range_cut_mm = 0.7 /*mm*/) {
         v.has_class_layers = true;
         v.layer_lo = layer;   // a cell with no class gets the volume's own layer
         v.layer_hi = layer;
+        // Over every class, with no exception needed: build_scene never puts the null tag in
+        // this array. An absent class carries the volume's own layer here, which is inside the
+        // range already, so the minimum and the maximum are over the layers that exist.
         for (int L : cl) {
           if (L < v.layer_lo) { v.layer_lo = L; }
           if (L > v.layer_hi) { v.layer_hi = L; }
         }
       }
+      // Absence is its own fact, and it is the flag inside_volume reads.
+      v.has_absent_classes = !grid->ClassAbsent().empty();
     }
     v.material = p->GetLogicalVolume()->GetMaterial()->device_index;
     const int idx = static_cast<int>(out.volumes.size());

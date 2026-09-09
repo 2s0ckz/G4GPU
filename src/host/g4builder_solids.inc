@@ -8,11 +8,60 @@
 // it, the way SOURCES is structured. Two separate panels meant looking in one place to pick a
 // thing and another to change it.
 
+/// THE LAYER CHOICES, one list shared by every row that offers them.
+///
+/// A menu rather than a number field: a field needs a per-row edit buffer that survives
+/// frames, and there is one buffer for the whole UI because exactly one thing is being edited
+/// at a time (see ui::EditBuffer) - so two hundred rows cannot each have one. A Select keeps no
+/// state of its own at all; the open one lives in the Context, by id.
+///
+/// The numbers run from 0 to a little above the highest layer anything in the model uses, which
+/// is the range a layer is ever chosen from: you put a volume just above or just below some
+/// other volume. Built once per frame rather than per row - every solid has one of these menus
+/// now, not only a voxel class, and rebuilding the strings two hundred times to get the same
+/// list is work nobody asked for.
+///
+/// ENTRY 0 IS THE NULL LAYER, and it is first because it is not a bigger or smaller number
+/// than the others - it is the answer "this is not in the scene", which does not belong at the
+/// far end of a list of forty numbers.
+static void RefreshLayerOptions(App& a) {
+  int top = 1;
+  for (const Solid& o : a.model.solids) {
+    if (o.layer > top) { top = o.layer; }
+    for (const VoxelClass& vc : o.voxel_classes) {
+      if (vc.layer != kInheritLayer && vc.layer > top) { top = vc.layer; }
+    }
+  }
+  top += 2;
+  if (top > 40) { top = 40; }
+  a.layer_opt_text.clear();
+  a.layer_opt_text.push_back(std::string(1, ui::Font::kEmptySetByte));
+  for (int L = 0; L <= top; ++L) { a.layer_opt_text.push_back(Fmt("%d", L)); }
+  a.layer_opt.clear();
+  for (const std::string& t : a.layer_opt_text) { a.layer_opt.push_back(t.c_str()); }
+}
+
+/// Which entry of that list a layer is, and which layer an entry means. One pair of functions
+/// because the list has an entry that is not a number and every caller would otherwise repeat
+/// the same off-by-one - and get it wrong once.
+static int LayerToOpt(const App& a, int layer) {
+  if (layer == kNullLayer) { return 0; }
+  const int n = static_cast<int>(a.layer_opt.size());
+  return (layer >= 0 && layer + 1 < n) ? layer + 1 : 1;   // 1 is layer 0
+}
+static int OptToLayer(int opt) { return (opt <= 0) ? kNullLayer : opt - 1; }
+
 static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
   ui::Context& c = a.uic;
   const int lh = a.font.glyph_h;
   const int row = lh + 5;
   const int w = panel.w;
+  RefreshLayerOptions(a);
+  // The layer column, reserved on every row: the label, then the menu. Wide enough for the
+  // null glyph and for two digits, which is the whole range the list offers.
+  const std::string lay_label = "Layer";
+  const int lay_label_w = static_cast<int>(lay_label.size()) * a.font.glyph_w + 6;
+  const int lay_w = 4 * a.font.glyph_w + 20;
   for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
     Solid& s = a.model.solids[i];
     const std::string mat =
@@ -66,7 +115,25 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
         a.scene_dirty = true;
       }
     }
-    const ui::Rect row_r{rr.x + arrow_w + eye_w, rr.y, rr.w - arrow_w - eye_w, row};
+    // The row stops short of the layer column, so the menu's clicks are the menu's: ListRow
+    // claims everything inside its own rectangle. Same arrangement as a class row below.
+    const ui::Rect sfull{rr.x + arrow_w + eye_w, rr.y, rr.w - arrow_w - eye_w, row};
+    const ui::Rect row_r{sfull.x, sfull.y, sfull.w - lay_w - lay_label_w - 4, row};
+    {
+      // EVERY SOLID, not only a voxel class. The layer is the one concept a Geant4 user has
+      // to learn here - it is what replaces the mother/daughter tree - and it was reachable
+      // only by selecting a solid and finding a pair of +/- buttons in the form below. A
+      // column in the list is where the question "what is on top of what" is actually asked,
+      // because it is the only place the volumes are side by side.
+      const ui::Rect slrow{sfull.x + sfull.w - lay_w, sfull.y, lay_w, row};
+      c.canvas.Text(slrow.x - lay_label_w, rr.y + (row - lh) / 2, lay_label,
+                    ui::theme::kTextDim);
+      int ssel = LayerToOpt(a, s.layer);
+      if (ui::Select(c, kIdSolidLayer + static_cast<int>(i), slrow, ssel,
+                     a.layer_opt.data(), static_cast<int>(a.layer_opt.size()))) {
+        SetSolidLayer(a, static_cast<int>(i), OptToLayer(ssel));
+      }
+    }
 
     // Name and material in COLUMNS, not one padded string. See ui::ListRow2: `%-12s` looks
     // like a column until a name is longer than twelve characters, and an imported phantom's
@@ -113,44 +180,12 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     // a real segmentation has dozens and they would bury every other solid in the scene.
     if (!has_children || !s.ui_expanded) { continue; }
 
-    // THE LAYER CHOICES, one list for every class row.
-    //
-    // A menu rather than a number field: a field needs a per-row edit buffer that survives
-    // frames, and there is one buffer for the whole UI because exactly one thing is being
-    // edited at a time (see ui::EditBuffer) - so two hundred rows cannot each have one. A
-    // Select keeps no state of its own at all; the open one lives in the Context, by id.
-    //
-    // The list runs from 0 to a little above the highest layer anything in the model uses,
-    // which is the range a layer is ever chosen from: you put a class just above or just
-    // below some other volume.
-    //
-    // JUST NUMBERS. There is no "inherits the volume's layer" entry, and there should not be
-    // one: a class inheriting layer 2 and a class explicitly on layer 2 mean the same thing
-    // and cost the same nothing, because build_scene compares the VALUES rather than who
-    // typed them. Two entries that read differently for one state is a distinction the user
-    // has to learn and cannot use. So a class with no layer of its own shows the volume's
-    // number, and picking that number is a no-op.
-    {
-      int top = s.layer;
-      for (const Solid& o : a.model.solids) {
-        if (o.layer > top) { top = o.layer; }
-        for (const VoxelClass& vc : o.voxel_classes) {
-          if (vc.layer != kInheritLayer && vc.layer > top) { top = vc.layer; }
-        }
-      }
-      top += 2;
-      if (top > 40) { top = 40; }
-      a.layer_opt_text.clear();
-      for (int L = 0; L <= top; ++L) { a.layer_opt_text.push_back(Fmt("%d", L)); }
-      a.layer_opt.clear();
-      for (const std::string& t : a.layer_opt_text) { a.layer_opt.push_back(t.c_str()); }
-    }
-    // "Layer" and then the number. The label is per row rather than a column header because
-    // the list has no header row to put one in, and a bare number beside a material reads as
-    // part of the material.
-    const std::string lay_label = "Layer";
-    const int lay_label_w = static_cast<int>(lay_label.size()) * a.font.glyph_w + 6;
-    const int lay_w = 4 * a.font.glyph_w + 20;
+    // NO "INHERITS THE VOLUME'S LAYER" ENTRY, and there should not be one: a class inheriting
+    // layer 2 and a class explicitly on layer 2 mean the same thing and cost the same nothing,
+    // because build_scene compares the VALUES rather than who typed them. Two entries that
+    // read differently for one state is a distinction the user has to learn and cannot use. So
+    // a class with no layer of its own shows the volume's number, and picking that number is a
+    // no-op.
 
     for (std::size_t k = 0; k < s.voxel_classes.size(); ++k) {
       const VoxelClass& vc = s.voxel_classes[k];
@@ -192,12 +227,12 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       // The EFFECTIVE layer: the class's own, or the volume's where it has none. Which is why
       // the menu is only numbers - see the note above the option list.
       const int eff = (vc.layer == kInheritLayer) ? s.layer : vc.layer;
-      int lsel = (eff >= 0 && eff < static_cast<int>(a.layer_opt.size())) ? eff : 0;
+      int lsel = LayerToOpt(a, eff);
       if (ui::Select(c, kIdClassLayer + static_cast<int>(i) * kIdClassStride
                             + static_cast<int>(k),
                      lrow, lsel, a.layer_opt.data(),
                      static_cast<int>(a.layer_opt.size()))) {
-        s.voxel_classes[k].layer = lsel;
+        s.voxel_classes[k].layer = OptToLayer(lsel);
         a.model.Touch();
         a.scene_dirty = true;
       }
@@ -321,17 +356,25 @@ static int DrawSolidForm(App& a, const ui::Rect& panel, int y) {
   // exceptions, and the way to say that is to set the volume and then correct the exceptions
   // in their own rows - not to find a second control that means "and all of them too".
   // Logged, because it discards choices that were made one row at a time.
+  // THE SAME MENU THE LIST ROW HAS, not a pair of +/- buttons.
+  //
+  // Two controls for one value is one too many the moment the value stops being an integer
+  // you can step: `s.layer - 1` on the null layer is two billion and one below nothing, and a
+  // "-" button that stopped at 1 could never reach layer 0 either. The menu offers exactly
+  // what a layer may be, which now includes not being in the scene at all.
   c.canvas.Text(panel.x + 8, y + 3, "layer", ui::theme::kTextDim);
-  if (ui::Button(c, 650, {panel.x + 62, y, 26, row}, "-", s.layer > 1)) {
-    SetSolidLayer(a, a.sel_solid, s.layer - 1);
+  {
+    int fsel = LayerToOpt(a, s.layer);
+    if (ui::Select(c, 650, {panel.x + 62, y, 4 * a.font.glyph_w + 20, row}, fsel,
+                   a.layer_opt.data(), static_cast<int>(a.layer_opt.size()))) {
+      SetSolidLayer(a, a.sel_solid, OptToLayer(fsel));
+    }
   }
-  c.canvas.Text(panel.x + 96, y + 3, Fmt("%d", s.layer), ui::theme::kText);
-  if (ui::Button(c, 651, {panel.x + 120, y, 26, row}, "+")) {
-    SetSolidLayer(a, a.sel_solid, s.layer + 1);
-  }
-  c.canvas.Text(panel.x + 154, y + 3,
-                s.voxel_classes.empty() ? "higher wins"
-                                        : "higher wins - and every class follows",
+  c.canvas.Text(panel.x + 62 + 4 * a.font.glyph_w + 30, y + 3,
+                (s.layer == kNullLayer)
+                    ? "not in the scene"
+                    : (s.voxel_classes.empty() ? "higher wins"
+                                               : "higher wins - and every class follows"),
                 ui::theme::kTextDim);
   y += row + 4;
 

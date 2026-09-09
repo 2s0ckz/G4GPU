@@ -251,7 +251,13 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
               | static_cast<unsigned int>(vc.b * 255.0f + 0.5f));
         }
 
-        // PER-CLASS LAYERS, and only if they say something the volume's own layer does not.
+        // The model's tag and the geometry's are the same number, and neither file can see the
+      // other's. They have to agree because G4Flatten refuses a placement carrying the tag -
+      // see kNullLayerTag, which is not a layer and is never compared as one.
+      static_assert(kNullLayer == geom::kNullLayerTag,
+                    "builder::kNullLayer and geom::kNullLayerTag must be the same value");
+
+      // PER-CLASS LAYERS, and only if they say something the volume's own layer does not.
         //
         // A run of layers that all equal the volume's layer means exactly what no run at all
         // means, and the difference between them is what the navigator pays: with a run
@@ -259,9 +265,21 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
         // test is on the VALUES rather than on whether anyone touched the control - set a
         // class's layer to the volume's own and the cost goes away again.
         std::vector<int> layers(s.voxel_classes.size(), s.layer);
+        std::vector<unsigned char> absent(s.voxel_classes.size(), 0u);
         bool differs = false;
+        bool any_absent = false;
         for (std::size_t ci = 0; ci < s.voxel_classes.size(); ++ci) {
           const int L = s.voxel_classes[ci].layer;
+          // AN ABSENT CLASS IS NOT GIVEN A LAYER. It keeps the volume's, which is what a cell
+          // with no class of its own gets, and the flag beside it is what says the cells are
+          // not in the scene. The tag never travels as a layer: a number two billion below
+          // everything would be read as "loses every overlap", and losing an overlap is not
+          // what being absent means - see geom::kNullLayerTag for what that cost.
+          if (L == kNullLayer) {
+            absent[ci] = 1u;
+            any_absent = true;
+            continue;
+          }
           if (L != kInheritLayer && L != s.layer) {
             layers[ci] = L;
             differs = true;
@@ -269,6 +287,8 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
         }
         grid->ClassLayers().clear();
         if (differs) { grid->ClassLayers() = layers; }
+        grid->ClassAbsent().clear();
+        if (any_absent) { grid->ClassAbsent() = absent; }
       }
 
       // A DIRECT MAP from value to class for the discrete case, not a search per cell.
@@ -417,6 +437,17 @@ inline G4VPhysicalVolume* ModelDetector::Construct() {
   for (std::size_t i = 0; i < m.solids.size(); ++i) {
     const int idx = static_cast<int>(i);
     if (operand[i] != 0) { continue; }
+    // NOT PLACED, which is the whole of what the null layer means for a solid.
+    //
+    // Not a flag consulted by the transport, the renderer and the scorer in three places, each
+    // of which could be missed: there is no volume, so there is nothing to consult. The
+    // sensitive-detector pass below keys off logicals_[i], which stays null here, so the
+    // tally goes with it.
+    //
+    // Never the world. A scene with no world has nothing to transport in at all, so the UI
+    // refuses it rather than leaving this to notice - see the layer control in
+    // g4builder_solids.inc.
+    if (m.solids[i].layer == kNullLayer && idx != world_idx) { continue; }
     G4VSolid* solid = BuildSolid(idx);
     if (solid == nullptr) { continue; }
 

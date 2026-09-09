@@ -57,6 +57,14 @@ struct Volume {
   bool has_class_layers = false;
   int layer_lo = 0;
   int layer_hi = 0;
+  /// Whether any of this volume's voxel classes is absent from the scene. See inside_volume,
+  /// which is where it is honoured, and geom::kNullLayerTag for why absence is a fact about a
+  /// class rather than a value in `layer_lo`.
+  ///
+  /// AT THE END OF THE STRUCT, like the three above it and for the same reason: test_navigation
+  /// builds Volumes with positional brace-init, and a field inserted in the middle silently
+  /// shifts every one of those initialisers by one.
+  bool has_absent_classes = false;
 };
 
 template <typename real_t>
@@ -71,11 +79,23 @@ struct Geometry {
 };
 
 /// True if @p p is inside volume @p i, in that volume's own frame.
+///
+/// A VOXEL CLASS SET TO NULL IS NOT PART OF THE VOLUME, and this is the one line that says so.
+/// Not a layer that loses every overlap - not there: locate cannot return the volume for such
+/// a point, so the space belongs to whatever else contains it, the transport steps through it
+/// as that material, and nothing scores it. Rendering and the tally follow from the same fact
+/// rather than from rules of their own.
+///
+/// Guarded by a flag, so a volume with no absent class - every volume until one is set - pays
+/// one bool test on a hot path and nothing else.
 template <typename real_t>
 __host__ __device__ inline bool inside_volume(const Geometry<real_t>& g, int i,
                                               const Vec3<real_t>& p) {
   const Volume<real_t>& v = g.volumes[i];
-  return inside(g.store, v.solid, to_local(v.xform, p));
+  const Vec3<real_t> q = to_local(v.xform, p);
+  if (!inside(g.store, v.solid, q)) { return false; }
+  if (!v.has_absent_classes || v.solid.type != SolidType::kVoxelGrid) { return true; }
+  return !voxel_absent_at(g.voxels, voxel_grid_of(v.solid), q);
 }
 
 /// True if volume @p i has a layer that varies from point to point - a voxel grid whose
@@ -140,6 +160,31 @@ __host__ __device__ inline int locate(const Geometry<real_t>& g, const Vec3<real
   return best;
 }
 
+/// True if nothing that outranks @p own_rank contains @p p. The shared half of the two below.
+///
+/// @pre inside_volume(g, i, p)
+template <typename real_t>
+__host__ __device__ inline bool nothing_outranks_at(const Geometry<real_t>& g, int i,
+                                                    const Vec3<real_t>& p, long long own) {
+  // Outside the world is owned by nothing, which is locate's first answer as well. Without
+  // this a volume poking out through the world face would draw the part that is not there.
+  if (!inside_volume(g, g.world, p)) { return false; }
+  for (int v = 0; v < g.n_volumes; ++v) {
+    // could_outrank is the cheap rejection and it has to be conservative: it uses the
+    // candidate's HIGHEST layer, so a grid whose bone class outranks everything and whose air
+    // class outranks nothing cannot be dismissed on one number. For every ordinary volume
+    // layer_hi == layer_lo and this is exact, which is why a mesh costs one comparison here.
+    if (v == i || !could_outrank(g, v, own)) { continue; }
+    if (!inside_volume(g, v, p)) { continue; }
+    // AND THEN THE RANK AT THE POINT, which is the half that conservative rejection cannot
+    // supply. Skipping it says a grid covers whatever its top class could cover: a box
+    // coincident with a phantom lost its surface inside every air cell, because air is in the
+    // same volume as bone. locate does this comparison too, after the same rejection.
+    if (volume_rank_at(g, v, p) > own) { return false; }
+  }
+  return true;
+}
+
 /// True if volume @p i owns @p p, GIVEN THAT IT CONTAINS IT.
 ///
 /// The same question as `locate(g, p) == i` restricted to a point already known to be inside
@@ -164,27 +209,11 @@ __host__ __device__ inline int locate(const Geometry<real_t>& g, const Vec3<real
 template <typename real_t>
 __host__ __device__ inline bool owns_contained_point(const Geometry<real_t>& g, int i,
                                                      const Vec3<real_t>& p) {
-  // Outside the world is owned by nothing, which is locate's first answer as well. Without
-  // this a volume poking out through the world face would draw the part that is not there.
-  if (!inside_volume(g, g.world, p)) { return false; }
   // Per POINT, not per volume - on BOTH sides. A grid's class decides its rank, and the whole
   // point of per-class layers is that the answer differs cell to cell.
-  const long long own = volume_rank_at(g, i, p);
-  for (int v = 0; v < g.n_volumes; ++v) {
-    // could_outrank is the cheap rejection and it has to be conservative: it uses the
-    // candidate's HIGHEST layer, so a grid whose bone class outranks everything and whose air
-    // class outranks nothing cannot be dismissed on one number. For every ordinary volume
-    // layer_hi == layer_lo and this is exact, which is why a mesh costs one comparison here.
-    if (v == i || !could_outrank(g, v, own)) { continue; }
-    if (!inside_volume(g, v, p)) { continue; }
-    // AND THEN THE RANK AT THE POINT, which is the half that conservative rejection cannot
-    // supply. Skipping it says a grid covers whatever its top class could cover: a box
-    // coincident with a phantom lost its surface inside every air cell, because air is in the
-    // same volume as bone. locate does this comparison too, after the same rejection.
-    if (volume_rank_at(g, v, p) > own) { return false; }
-  }
-  return true;
+  return nothing_outranks_at(g, i, p, volume_rank_at(g, i, p));
 }
+
 
 /// True if entering volume @p i would take ownership away from volume @p cur.
 ///

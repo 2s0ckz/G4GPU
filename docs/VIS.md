@@ -334,6 +334,74 @@ machine, which is one bad day from zero and a gate reporting a failure that is n
 carries a count of renders that actually completed, without which a matching picture would only
 prove it never changed.
 
+
+## ∅: a volume or a class that is not in the scene
+
+Every layer menu - on each solid row, on each voxel class row, and in the selected solid's form -
+opens with ∅ rather than a number. A solid or a class set to it is **not in the scene**: not
+transported through, not drawn, and not scored.
+
+One fact, not three switches. A solid on it is not placed at all, so there is nothing to step
+into and nothing to attach a detector to. A voxel class on it keeps its cells' values and its
+colour, and its cells are not part of the volume - `geom::inside_volume` returns false there, so
+`locate` cannot return the grid, the transport steps through as whatever does own the space, and
+the tally follows ownership without a rule of its own.
+
+**It is not a layer, and not a number.** No rank is computed from it. That is the second design;
+the first made absence a layer two billion below everything, on the reasoning that such a cell
+loses every overlap and the world takes its space for free. What it actually bought was a
+renderer that read "something outranks this cell" as "stop the march here" - deleting a phantom
+from its front class backwards - and a cover scan that admitted every volume in the scene.
+docs/RISK.md V28 has both. A cell that is not there does not lose an overlap; it does not take
+part in one.
+
+`visible` is still a different thing and still separate: a hidden volume owns its space, is
+transported through, and is scored. ∅ is the answer to "this should not be here at all".
+
+The world is refused it outright - there is nothing to transport in without a world - and moving
+the world off layer 0 asks first, since the world contains everything and a world above another
+volume's layer outranks that volume everywhere, emptying the detector in response to a one-click
+menu change.
+
+**The glyph.** The font atlas is indexed by byte and the strings drawn through it are
+`std::string`, so a three-byte UTF-8 character cannot reach it - each byte lands outside the
+printable run and draws nothing, which is why `ui::EyeToggle` draws its icon from primitives
+instead of typing one. A layer menu cannot do that: its options go through `ui::Select` as text.
+So one atlas slot is rasterised from U+2205 with the wide GDI call, and given a byte nothing else
+uses (`ui::Font::kEmptySetByte`, 0x01 - not printable, cannot appear in a name or a number, and
+one glyph wide, which the fixed-pitch layout arithmetic depends on).
+
+## Imports arrive assignable
+
+Two things an imported phantom used to leave for the user, both now defaults:
+
+**Index 0 is not special.** It arrived at zero opacity, because 0 means "nothing here" in most
+segmentation conventions and is also the commonest value, so an opaque import is a solid block.
+Usually true, and not this code's call: the convention belongs to the file, index 0 is sometimes
+a real structure, and a class that arrives invisible without being asked for has to be discovered
+before it can be wondered about. Anything unwanted in the scene now has a control that means
+exactly that, and it applies to any class rather than to whichever one is numbered zero. Every
+class arrives at a tenth.
+
+**Every class starts on the container's material.** A class with none makes the whole volume
+unbuildable - `build_scene` refuses to place a volume whose material is missing - so an import
+used to arrive in a state where the scene could not be built until every one of what may be two
+hundred rows had been visited. The volume's own material is what a cell matching no class already
+falls back to, so this agrees with the rest of the grid rather than inventing a value: wrong for
+most classes on a segmentation, and wrong in a column the user can see rather than absent.
+
+## +Z is up
+
+Elevation lifts out of the x-y plane rather than out of x-z, in the builder and in the viewer
+both. A detector is described in beam coordinates - z the beam axis, x-y transverse - and a
+viewer with y up shows a linac gantry on its side and a phantom's axial slices edge-on, so every
+dimension typed into the panels has to be mentally rotated to match the screen. It also makes
+`/vis/viewer/set/viewpointThetaPhi` mean what Geant4 means by it, since that command's theta is
+measured from +z.
+
+Elevation stays clamped short of the axis, which is what keeps `make_camera`'s
+`cross(forward, up)` from degenerating - so looking exactly down z is 1.5 rad, not 1.5708.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's

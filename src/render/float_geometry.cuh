@@ -145,6 +145,7 @@ inline void ConvertToFloat(const HostGeometry& h, FloatPools& out) {
     o.has_class_layers = v.has_class_layers;
     o.layer_lo = v.layer_lo;
     o.layer_hi = v.layer_hi;
+    o.has_absent_classes = v.has_absent_classes;
   }
   out.xforms.resize(static_cast<std::size_t>(h.n_xforms));
   for (int i = 0; i < h.n_xforms; ++i) {

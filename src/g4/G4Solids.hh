@@ -641,6 +641,10 @@ class G4VoxelGrid : public G4VSolid {
       pool.add_class_layers(
           (class_layers_.size() == class_rgba_.size()) ? class_layers_.data() : nullptr,
           static_cast<int>(class_rgba_.size()), layer_hint_);
+      // And the absence run, at that same offset and for that same reason.
+      pool.add_class_absent(
+          (class_absent_.size() == class_rgba_.size()) ? class_absent_.data() : nullptr,
+          static_cast<int>(class_rgba_.size()));
     } else {
       s.p[6] = 0;
       s.p[7] = 0;
@@ -653,6 +657,10 @@ class G4VoxelGrid : public G4VSolid {
   /// The volume's own layer, for cells and classes that do not name one. Set by G4Flatten,
   /// which is the only place that knows what layer the placement went on.
   void SetLayerHint(G4int l) { layer_hint_ = l; }
+  /// One flag per class, non-zero where the class is not in the scene. Empty means all
+  /// present, which is what a grid says unless someone set a class to the null layer.
+  std::vector<unsigned char>& ClassAbsent() { return class_absent_; }
+  const std::vector<unsigned char>& ClassAbsent() const { return class_absent_; }
 
   G4int GetNx() const { return nx_; }
   G4int GetNy() const { return ny_; }
@@ -666,6 +674,7 @@ class G4VoxelGrid : public G4VSolid {
   std::vector<short> cells_;
   /// See SetCellMaterials. Empty means cells_ already holds device indices.
   std::vector<G4Material*> cell_materials_;
+  std::vector<unsigned char> class_absent_;
   /// Parallel to cells_, holding which voxel class each cell came from. Render-only; see
   /// SolidPool::voxel_class_cells.
   std::vector<short> class_cells_;

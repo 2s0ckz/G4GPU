@@ -77,7 +77,20 @@ struct Font {
   bool ready = false;
 
   static constexpr int kFirst = 32;
-  static constexpr int kCount = 95;
+  static constexpr int kAscii = 95;   ///< the printable ASCII run, 32 to 126
+  /// ONE SLOT PAST ASCII, holding U+2205 EMPTY SET.
+  ///
+  /// The atlas is indexed by byte and the strings drawn through it are std::string, so a
+  /// three-byte UTF-8 character cannot reach it - each byte lands outside the run and draws
+  /// nothing, which is why EyeToggle draws its icon out of primitives instead of typing one.
+  /// A layer menu cannot do that: its options go through ui::Select as text.
+  ///
+  /// So one glyph is rasterised from the real code point and given a byte nothing else uses.
+  /// 0x01 is not printable, cannot appear in a name, a number or a material, and keeps the
+  /// advance at exactly one glyph - which the fixed-pitch layout arithmetic depends on.
+  static constexpr int kEmptySet = kAscii;
+  static constexpr char kEmptySetByte = '\x01';
+  static constexpr int kCount = kAscii + 1;
 
   /// Builds the atlas. `face` may be any installed family; a fixed-pitch one keeps the
   /// per-character advance constant, which the layout code relies on.
@@ -130,9 +143,18 @@ struct Font {
     FillRect(dc, &all, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(255, 255, 255));
-    for (int i = 0; i < kCount; ++i) {
+    for (int i = 0; i < kAscii; ++i) {
       const char ch = static_cast<char>(kFirst + i);
       TextOutA(dc, i * glyph_w, 0, &ch, 1);
+    }
+    // The wide call for this one, so the code point is the code point rather than whatever
+    // the machine's ANSI codepage maps a high byte to. A face without U+2205 draws its
+    // notdef box here, which is visible and wrong rather than invisible and wrong - and
+    // Consolas, Courier New and Lucida Console, which are the three this asks for in order,
+    // all have it.
+    {
+      const wchar_t empty_set = 0x2205;
+      TextOutW(dc, kEmptySet * glyph_w, 0, &empty_set, 1);
     }
     GdiFlush();
 
@@ -341,7 +363,7 @@ struct Canvas {
     for (char raw : s) {
       const int ch = static_cast<unsigned char>(raw);
       if (ch == '\n') { continue; }
-      const int idx = ch - Font::kFirst;
+      const int idx = (raw == Font::kEmptySetByte) ? Font::kEmptySet : (ch - Font::kFirst);
       if (idx < 0 || idx >= Font::kCount) {
         pen += gw;
         continue;

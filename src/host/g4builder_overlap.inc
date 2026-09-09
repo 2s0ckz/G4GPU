@@ -287,6 +287,63 @@ static void RefreshOverlaps(App& a) {
 }
 
 /// The pop-up that refuses a run, listing what has to be fixed.
+/// Asks before moving the world off layer 0. See SetSolidLayer for why.
+static void DrawWorldLayerPopup(App& a) {
+  ui::Context& c = a.uic;
+  const int lh = a.font.glyph_h;
+  const int row = lh + 6;
+  const ui::Rect r = PopupFrame(a, 520, 9 * lh + 3 * row, "Move the world off layer 0?");
+  int y = r.y;
+
+  c.canvas.Text(r.x + 14, y, Fmt("The world would go from layer 0 to layer %d.",
+                                 a.pending_world_layer),
+                ui::theme::kWarn);
+  y += lh + 8;
+  c.canvas.Text(r.x + 14, y, "The world contains every other volume, and a higher layer takes",
+                ui::theme::kTextDim);
+  y += lh;
+  c.canvas.Text(r.x + 14, y, "the space wherever two overlap. So a world above another",
+                ui::theme::kTextDim);
+  y += lh;
+  c.canvas.Text(r.x + 14, y, "volume's layer outranks that volume EVERYWHERE, and the volume",
+                ui::theme::kTextDim);
+  y += lh;
+  c.canvas.Text(r.x + 14, y, "stops being in the scene at all: no transport through it, no",
+                ui::theme::kTextDim);
+  y += lh;
+  c.canvas.Text(r.x + 14, y, "dose in it, and nothing drawn where it is.", ui::theme::kTextDim);
+  y += lh + 8;
+  {
+    int below = 0;
+    for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+      if (static_cast<int>(i) == a.model.world()) { continue; }
+      const int L = a.model.solids[i].layer;
+      if (L != kNullLayer && L < a.pending_world_layer) { ++below; }
+    }
+    // The count, because "some volumes would stop existing" is a warning and "eleven of your
+    // twelve volumes would stop existing" is an answer. Zero is worth saying too: it is the
+    // case where the change is harmless and the question is only a formality.
+    c.canvas.Text(r.x + 14, y,
+                  (below == 0)
+                      ? std::string("Nothing in this scene is below that layer, so nothing "
+                                    "would be lost.")
+                      : Fmt("%d volume%s in this scene %s below that layer.", below,
+                            below == 1 ? "" : "s", below == 1 ? "is" : "are"),
+                  (below == 0) ? ui::theme::kTextDim : ui::theme::kAccent);
+  }
+  y += lh + 12;
+
+  if (ui::Button(c, 880, {r.x + 14, y, 190, row + 2},
+                 Fmt("Move it to layer %d", a.pending_world_layer))) {
+    a.popup = Popup::kNone;
+    SetSolidLayer(a, a.model.world(), a.pending_world_layer, true);
+    Log(Fmt("the world is on layer %d", a.pending_world_layer));
+  }
+  if (ui::Button(c, 881, {r.x + r.w - 104, y, 90, row + 2}, "Leave it")) {
+    a.popup = Popup::kNone;
+  }
+}
+
 static void DrawOverlapPopup(App& a) {
   ui::Context& c = a.uic;
   const int lh = a.font.glyph_h;

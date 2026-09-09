@@ -537,6 +537,124 @@ int main() {
     }
   }
 
+  // ---- A CLASS THAT IS NOT IN THE SCENE IS NOT IN THE SCENE.
+  //
+  // Absence is a fact about a class, not a layer it is on. That distinction is the whole of
+  // this section, and it is not pedantry: absence was first spelled as a layer two billion
+  // below everything, on the reasoning that such a cell loses every overlap and the world
+  // takes its space with no new mechanism. It cost two bugs - the renderer read "something
+  // outranks this cell" as "a higher layer takes the space from here on" and ENDED the cell
+  // march, deleting the whole phantom behind the first absent cell; and the same rank dragged
+  // the cover scan's minimum to the bottom, admitting every volume in the scene. A cell that
+  // is not there does not lose an overlap. It does not take part in one.
+  //
+  // So the assertion is about ownership, which is where every other consequence comes from:
+  // locate cannot return a volume for a point in one of its absent cells, and therefore the
+  // transport steps through as whatever does own it and no scorer on the grid ever sees it.
+  {
+    printf("\n== a voxel class can be absent from the scene ==\n");
+    constexpr int n = 16;
+    const real_t half = 80;
+    const real_t cell_h = 2 * half / n;
+    std::vector<short> cells(static_cast<std::size_t>(n), static_cast<short>(7));
+    std::vector<short> cls(static_cast<std::size_t>(n), 0);
+    for (int k = 0; k < n; ++k) { cls[static_cast<std::size_t>(k)] = (k % 2) ? 1 : 0; }
+    // Both classes on the volume's own layer, so nothing here is decided by a layer at all -
+    // which is the point. Class 1 is absent.
+    const int class_layers[2] = {1, 1};
+    const unsigned char class_absent[2] = {0u, 1u};
+
+    std::vector<Volume<real_t>> vols(2);
+    vols[0].solid = {SolidType::kBox, {400, 400, 400}};
+    vols[0].xform = make_translation<real_t>({0, 0, 0});
+    vols[0].layer = 0;
+    vols[0].material = 3;              // the world's material, distinct from the grid's
+    vols[1].solid = {SolidType::kVoxelGrid, {half, half, half, 1, 1, n}};
+    vols[1].solid.a = 0;
+    vols[1].solid.p[6] = 0;
+    vols[1].solid.p[7] = 2;
+    vols[1].xform = make_translation<real_t>({0, 0, 0});
+    vols[1].layer = 1;
+    vols[1].material = 7;
+    vols[1].has_class_layers = true;
+    vols[1].layer_lo = 1;
+    vols[1].layer_hi = 1;
+    vols[1].has_absent_classes = true;
+
+    Geometry<real_t> g{};
+    g.volumes = vols.data();
+    g.n_volumes = 2;
+    g.world = 0;
+    g.voxels.material = cells.data();
+    g.voxels.count = n;
+    g.voxels.cls = cls.data();
+    g.voxels.class_layer = class_layers;
+    g.voxels.class_absent = class_absent;
+
+    // 1. WHO OWNS EACH CELL. A class-1 cell is owned by the world - not by the grid on a
+    //    losing layer, by the WORLD, because the grid is not there.
+    int wrong_owner = 0, wrong_mat = 0, inside_absent = 0;
+    for (int k = 0; k < n; ++k) {
+      const real_t z = -half + (k + real_t(0.5)) * cell_h;
+      const Vec3<real_t> p{0, 0, z};
+      const int want = (k % 2) ? 0 : 1;          // class 1 absent -> the world owns it
+      if (locate(g, p) != want) { ++wrong_owner; }
+      const int want_mat = (k % 2) ? 3 : 7;      // and reports the world's material there
+      if (material_at(g, locate(g, p), p) != want_mat) { ++wrong_mat; }
+      // And the grid does not contain the point at all, which is the one line that says so.
+      if ((k % 2) && inside_volume(g, 1, p)) { ++inside_absent; }
+    }
+    printf("  %d cells: %d wrong owner, %d wrong material, %d absent cells still inside\n", n,
+           wrong_owner, wrong_mat, inside_absent);
+    check(wrong_owner == 0, "a cell of an absent class is owned by whatever contains it");
+    check(wrong_mat == 0, "and reports that owner's material, not the grid's");
+    check(inside_absent == 0, "and the grid does not contain it");
+
+    // 2. A STEP ENDS WHERE THE VOLUME STOPS. The material is 7 throughout and both classes
+    //    are on one layer, so a step that ended only on those would cross the whole grid and
+    //    carry the grid's material through space the grid does not occupy.
+    {
+      const VoxelGrid<real_t> grid = voxel_grid_of(vols[1].solid);
+      int changed_to = -1;
+      const real_t t = voxel_step(g.voxels, grid, {0, 0, -half + real_t(0.001)}, {0, 0, 1},
+                                  changed_to, false);
+      printf("  voxel_step from the near face: %g mm (one cell is %g)\n",
+             static_cast<double>(t), static_cast<double>(cell_h));
+      check(fabs(t - (cell_h - real_t(0.001))) < real_t(1e-6),
+            "a step ends at the boundary where the volume stops being there");
+    }
+
+    // 3. AND AN ABSENT CELL OUTRANKS NOTHING, which is what a volume outside the grid needs
+    //    when it asks where the grid starts winning. Against layer 0 - the world - the answer
+    //    is the first PRESENT cell, one cell in, and not the absent one it is standing in.
+    {
+      const VoxelGrid<real_t> grid = voxel_grid_of(vols[1].solid);
+      const Vec3<real_t> q{0, 0, -half + cell_h + real_t(0.001)};   // inside a class-1 cell
+      const real_t t = voxel_first_outranking(g.voxels, grid, q, {0, 0, 1}, 1, vols[1].layer,
+                                              volume_rank(0, 0), kInfinity<real_t>());
+      printf("  from inside an absent cell, the grid starts outranking the world at %g mm\n",
+             static_cast<double>(t));
+      check(t > real_t(0) && fabs(t - (cell_h - real_t(0.001))) < real_t(1e-6),
+            "an absent cell does not outrank the world, and the next cell does");
+    }
+
+    // 4. AND NONE OF IT HAPPENS WITHOUT THE FLAG. The same geometry with the absence withheld
+    //    is the old behaviour exactly: the grid owns every cell, because every class is there.
+    {
+      Geometry<real_t> g2 = g;
+      g2.voxels.class_absent = nullptr;
+      std::vector<Volume<real_t>> v2(vols);
+      v2[1].has_absent_classes = false;
+      g2.volumes = v2.data();
+      int owned_by_grid = 0;
+      for (int k = 0; k < n; ++k) {
+        const real_t z = -half + (k + real_t(0.5)) * cell_h;
+        if (locate(g2, {0, 0, z}) == 1) { ++owned_by_grid; }
+      }
+      check(owned_by_grid == n, "with the absence withheld the grid owns every cell, as before");
+    }
+  }
+
   printf("\n%s (%d failures)\n", fails ? "FAILED" : "ALL PASS", fails);
   return fails;
 }

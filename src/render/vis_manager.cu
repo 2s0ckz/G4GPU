@@ -181,10 +181,12 @@ static std::string Fmt(const char* fmt, ...) {
 static vis::Camera CurrentCamera(const App& a) {
   const float el = std::max(-1.5f, std::min(1.5f, a.elevation));
   const int view_w = std::max(1, a.width - kSidebarW);
+  // +Z IS UP; see the builder's CurrentCamera for why, and they have to agree - the two draw
+  // the same scene and a screenshot from one is compared against the other by eye.
   const vis::Vec3f eye{a.target.x + a.distance * std::cos(el) * std::sin(a.azimuth),
-                       a.target.y + a.distance * std::sin(el),
-                       a.target.z + a.distance * std::cos(el) * std::cos(a.azimuth)};
-  return vis::make_camera(eye, a.target, vis::Vec3f{0.f, 1.f, 0.f}, 45.0f, view_w, a.height);
+                       a.target.y + a.distance * std::cos(el) * std::cos(a.azimuth),
+                       a.target.z + a.distance * std::sin(el)};
+  return vis::make_camera(eye, a.target, vis::Vec3f{0.f, 0.f, 1.f}, 45.0f, view_w, a.height);
 }
 
 // ---------------------------------------------------------------- transport

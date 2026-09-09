@@ -129,6 +129,11 @@ enum : int {
   kIdPickRow = 9000000,
   /// + solid * kIdClassStride + class, like the two above: the layer menu on each class row.
   kIdClassLayer = 10000000,
+  /// The layer menu on each SOLID row, one per solid. Above kIdClassLayer's whole span rather
+  /// than a million past it: that block is strided by class, so at 200 solids it already
+  /// reaches 10,819,200 and a million would not have cleared it. tests/test_ui_layout.cu
+  /// enumerates both.
+  kIdSolidLayer = 11000000,
   /// One block per solid inside kIdClassRow and kIdClassEye. Equal to the importer's
   /// kMaxClasses; tests/test_ui_layout.cu checks the two have not drifted apart.
   kIdClassStride = 4096,
@@ -145,7 +150,9 @@ enum class Popup {
   kPick,
   kOverlap,
   kPhysics, kVisAttributes,
-  kWorld
+  kWorld,
+  /// Confirming a change to the WORLD's layer. See SetSolidLayer.
+  kWorldLayer
 };
 
 /// Visualization settings that are not part of the model.
@@ -285,6 +292,9 @@ struct App {
   /// by then. One list serves every row, since the choices do not depend on the class.
   std::vector<std::string> layer_opt_text;
   std::vector<const char*> layer_opt;
+  /// The layer the world would be moved to, held while Popup::kWorldLayer asks. See
+  /// SetSolidLayer for why moving the world is worth a question.
+  int pending_world_layer = 0;
   /// The float copy of the scene the render pass walks. See render/float_geometry.cuh: the
   /// transport stays double because the dose depends on it, and the picture does not.
   vis::FloatGeometry render_geom;
@@ -628,10 +638,21 @@ static void UpdateSplitters(App& a) {
 static vis::Camera CurrentCamera(const App& a) {
   const float el = std::max(-1.5f, std::min(1.5f, a.elevation));
   const ui::Rect v = ViewRect(a);
+  // +Z IS UP, and elevation lifts out of the x-y plane rather than out of x-z.
+  //
+  // Not a preference: a detector is described in beam coordinates, where z is the beam axis
+  // and the transverse plane is x-y. A viewer with y up shows a linac gantry lying on its
+  // side and a phantom's axial slices edge-on, and every dimension typed into the panels
+  // then has to be mentally rotated to match what is on screen. It also makes
+  // /vis/viewer/set/viewpointThetaPhi mean what Geant4 means by it, since that command's
+  // theta is measured from +z.
+  //
+  // Elevation stays clamped short of straight down the axis, which is also what keeps
+  // make_camera's cross(forward, up) from degenerating.
   const vis::Vec3f eye{a.target.x + a.distance * std::cos(el) * std::sin(a.azimuth),
-                       a.target.y + a.distance * std::sin(el),
-                       a.target.z + a.distance * std::cos(el) * std::cos(a.azimuth)};
-  return vis::make_camera(eye, a.target, vis::Vec3f{0.f, 1.f, 0.f}, 45.0f,
+                       a.target.y + a.distance * std::cos(el) * std::cos(a.azimuth),
+                       a.target.z + a.distance * std::sin(el)};
+  return vis::make_camera(eye, a.target, vis::Vec3f{0.f, 0.f, 1.f}, 45.0f,
                           std::max(1, v.w), std::max(1, v.h));
 }
 
@@ -791,6 +812,7 @@ static void RebuildScene(App& a) {
     vf.count = gd.voxels.count;
     vf.cls = gd.voxels.cls;
     vf.class_layer = gd.voxels.class_layer;
+    vf.class_absent = gd.voxels.class_absent;
     a.render_geom.Build(hg, vf);
   }
 
@@ -1440,7 +1462,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 76;
+      selftest_frames = 92;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1949,13 +1971,24 @@ int main(int argc, char** argv) {
       //     transparent object placed over a phantom disappears.
       if (frame == 49) {
         InsertSelftestCoveredVoxels(a);
-        // Straight down -z, so every ray that reaches the far side of the grid crosses the
-        // slab: the eye is on the grid's axis and the slab is wider than the grid, so a ray
-        // is closer to the axis at the slab than at anything behind it.
+        // NEARLY straight down -z, so every ray that reaches the far side of the grid crosses
+        // the slab: the eye is close to the grid's axis and the slab is wider than the grid,
+        // so a ray is closer to the axis at the slab than at anything behind it.
+        //
+        // Elevation 1.5 and not 0, because +z is up: elevation lifts out of the x-y plane, so
+        // looking down the z axis is the top of the range rather than the middle of it. 1.5 rad
+        // is the clamp CurrentCamera applies, 4.1 degrees off the axis - which is deliberate,
+        // since exactly on it is where cross(forward, up) has no answer. The margin is not
+        // tight: the slab overhangs the grid by 20 mm on each side and 4.1 degrees over the
+        // grid's 80 mm depth is a lateral 5.7 mm.
+        //
+        // This check reads the geometry rather than a flag, so it is the one place in the
+        // selftest that the up direction could quietly invalidate - and it did, by pointing
+        // the camera ACROSS the classes the slab is meant to hide instead of through them.
         a.target = vis::Vec3f{0.f, 250.f, 0.f};
         a.distance = 260.f;
         a.azimuth = 0.f;
-        a.elevation = 0.f;
+        a.elevation = 1.5f;
       }
       static unsigned long long cover_base = 0;
       static unsigned long long cover_hidden = 0;
@@ -2280,6 +2313,224 @@ int main(int argc, char** argv) {
         // Back on, so the frame that writes the PNG below is this frame's render and not one
         // that happened to be in flight.
         a.sync_render = true;
+      }
+
+      // ---- THE NULL LAYER: a solid on it is not in the scene, and can come back.
+      //
+      // EVERY ONE OF THESE OPENS BY PROVING THE FIXTURE IS ON SCREEN, because every assertion
+      // below is of the form "removing it changed the picture" and all of them are satisfied
+      // by a volume that was never drawn. That is not a hypothetical: both fixtures were first
+      // placed at y = 600, outside the 500 mm world, where nothing is drawn at all - and the
+      // solid check passed. Recolouring is the operation that can only show up if the thing is
+      // being painted, so it goes first and the rest depends on it.
+      static unsigned long long nb_base = 0, nb_recol = 0, nb_with = 0;
+      static int nb_vols = 0;
+      if (frame == 75) {
+        InsertSelftestNullLayer(a);
+        a.target = vis::Vec3f{250.f, 0.f, 0.f};
+        a.distance = 220.f;
+        a.azimuth = 0.6f;
+        a.elevation = 0.3f;
+      }
+      if (frame == 76) {
+        nb_base = ViewportChecksum(a);
+        RecolourSolid(a, "Nullable", 0.1f, 0.3f, 0.95f);
+      }
+      if (frame == 77) {
+        nb_recol = ViewportChecksum(a);
+        RecolourSolid(a, "Nullable", 0.95f, 0.75f, 0.15f);   // back as it was
+      }
+      if (frame == 78) {
+        nb_with = ViewportChecksum(a);
+        nb_vols = SceneVolumeCount(a);
+        SetSolidLayer(a, ModelIndexByName(a, "Nullable"), kNullLayer);
+      }
+      if (frame == 79) {
+        const unsigned long long got = ViewportChecksum(a);
+        const int vols = SceneVolumeCount(a);
+        // FOUR SEPARATE CLAIMS, and they fail separately. That the box is on screen at all.
+        // That putting its colour back restores the picture, so the baseline is a baseline.
+        // That one volume fewer reaches the flattened scene, which is what makes the transport
+        // and the tally ignore it - there is nothing to step into and nothing to attach a
+        // detector to. And that the picture changed. None of them implies another: a volume can
+        // be absent from the scene and still leave its last render on screen, and it can be
+        // invisible and still be transported through, which is what `visible` already does.
+        if (nb_recol == nb_base) {
+          std::printf("selftest: FAILED - the Nullable box is not on screen (recolouring it "
+                      "changed nothing, %llu), so nothing below means anything\n", nb_base);
+        } else if (nb_with != nb_base) {
+          std::printf("selftest: FAILED - putting the box colour back did not restore the "
+                      "picture (%llu -> %llu)\n", nb_base, nb_with);
+        } else if (vols != nb_vols - 1) {
+          std::printf("selftest: FAILED - a solid on the null layer is still in the scene "
+                      "(%d volumes, was %d)\n", vols, nb_vols);
+        } else if (got == nb_with) {
+          std::printf("selftest: FAILED - removing a solid to the null layer changed nothing "
+                      "in the picture (%llu)\n", nb_with);
+        } else {
+          std::printf("selftest: a solid on the null layer leaves the scene (%d volumes, was "
+                      "%d) and leaves the picture\n", vols, nb_vols);
+        }
+        SetSolidLayer(a, ModelIndexByName(a, "Nullable"), 5);
+      }
+      if (frame == 80) {
+        // AND COMES BACK IDENTICAL. Without this the check above is satisfied by a fixture
+        // that merely broke: "the picture changed" is also what a crash that draws nothing
+        // does.
+        const unsigned long long back = ViewportChecksum(a);
+        if (back != nb_with) {
+          std::printf("selftest: FAILED - a solid put back from the null layer drew a "
+                      "different picture (%llu -> %llu)\n", nb_with, back);
+        } else {
+          std::printf("selftest: and comes back to exactly the picture it left\n");
+        }
+      }
+
+      // ---- THE WORLD IS ASKED ABOUT, AND CANNOT BE REMOVED AT ALL.
+      if (frame == 81) {
+        const int w0 = a.model.solids[0].layer;
+        a.popup = Popup::kNone;
+        SetSolidLayer(a, 0, 3);
+        const bool asked = (a.popup == Popup::kWorldLayer)
+                           && (a.model.solids[0].layer == w0);
+        a.popup = Popup::kNone;
+        SetSolidLayer(a, 0, kNullLayer);
+        const bool refused = (a.model.solids[0].layer == w0) && (a.popup == Popup::kNone);
+        // And the answer is allowed to be yes, which is what makes it a question rather than a
+        // refusal - so the confirmed path is exercised too, and then put back.
+        SetSolidLayer(a, 0, 3, true);
+        const bool moved = (a.model.solids[0].layer == 3);
+        SetSolidLayer(a, 0, 0, true);
+        if (!asked) {
+          std::printf("selftest: FAILED - moving the world off layer 0 was not confirmed\n");
+        } else if (!refused) {
+          std::printf("selftest: FAILED - the world was allowed onto the null layer\n");
+        } else if (!moved) {
+          std::printf("selftest: FAILED - confirming the world layer change did not apply it\n");
+        } else {
+          std::printf("selftest: the world layer is confirmed before it moves, and the null "
+                      "layer is refused for it outright\n");
+        }
+      }
+
+      // ---- A VOXEL CLASS ON THE NULL LAYER IS NOT DRAWN.
+      //
+      // The "Uncovered" grid, whose near half faces the camera with NOTHING over it. That is
+      // the point of it: in the "Covered" fixture a null class is removed by the CLAMP - a cell
+      // ranked below everything is covered by the first thing that outranks it and the march
+      // ends before reaching it - so breaking the paint skip there left the check passing. It
+      // was tried. With no cover the clamp never fires, and refusing to paint the cell is the
+      // only thing left that can remove it.
+      static unsigned long long vc_base = 0, vc_recol = 0, vc_with = 0, vc_without = 0;
+      static unsigned long long vc_far = 0, vc_far_back = 0;
+      if (frame == 82) {
+        a.target = vis::Vec3f{0.f, 400.f, 0.f};
+        a.distance = 160.f;
+        a.azimuth = 0.f;
+        a.elevation = 1.5f;   // down the z axis, so "near" is between the eye and "far"
+      }
+      if (frame == 83) {
+        vc_base = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Uncovered", 0, 0.1f, 0.2f, 0.95f);
+      }
+      if (frame == 84) {
+        vc_recol = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Uncovered", 0, 0.9f, 0.3f, 0.3f);   // back as it was
+      }
+      if (frame == 85) {
+        vc_with = ViewportChecksum(a);
+        SetVoxelClassLayer(a, "Uncovered", 0, kNullLayer);
+      }
+      if (frame == 86) {
+        vc_without = ViewportChecksum(a);
+        // THE FAR CLASS FIRST, because "the near class is gone" and "the whole grid is gone"
+        // both change the picture and only one of them is the feature. Nulling one class
+        // must leave the rest of the grid exactly where it was, and the way to ask is to
+        // recolour a class that should have survived and require the picture to move.
+        RecolourVoxelClass(a, "Uncovered", 1, 0.95f, 0.9f, 0.1f);
+      }
+      if (frame == 87) {
+        vc_far = ViewportChecksum(a);
+        RecolourVoxelClass(a, "Uncovered", 1, 0.2f, 0.8f, 0.9f);   // back as it was
+      }
+      if (frame == 88) {
+        vc_far_back = ViewportChecksum(a);
+        // Recolouring an ABSENT class must do nothing. This is the sharp half: "the picture
+        // changed when I nulled it" is also satisfied by a class drawn in a different colour,
+        // and only a recolour that changes NOTHING says the cells are gone.
+        RecolourVoxelClass(a, "Uncovered", 0, 0.05f, 0.95f, 0.35f);
+      }
+      if (frame == 89) {
+        const unsigned long long after = ViewportChecksum(a);
+        if (vc_recol == vc_base) {
+          std::printf("selftest: FAILED - the uncovered grid near class is not on screen "
+                      "(recolouring it changed nothing, %llu), so nothing below means "
+                      "anything\n", vc_base);
+        } else if (vc_with != vc_base) {
+          std::printf("selftest: FAILED - putting the near class colour back did not restore "
+                      "the picture (%llu -> %llu)\n", vc_base, vc_with);
+        } else if (vc_without == vc_with) {
+          std::printf("selftest: FAILED - a voxel class on the null layer is still drawn "
+                      "(%llu)\n", vc_with);
+        } else if (vc_far == vc_without) {
+          std::printf("selftest: FAILED - nulling one class took the whole grid with it: "
+                      "recolouring the far class changed nothing (%llu)\n", vc_without);
+        } else if (vc_far_back != vc_without) {
+          std::printf("selftest: FAILED - putting the far class colour back did not restore "
+                      "the picture (%llu -> %llu)\n", vc_without, vc_far_back);
+        } else if (after != vc_without) {
+          std::printf("selftest: FAILED - recolouring a class on the null layer changed the "
+                      "picture (%llu -> %llu), so its cells are still being painted\n",
+                      vc_without, after);
+        } else {
+          std::printf("selftest: a voxel class on the null layer is not drawn even with "
+                      "nothing over it, and recolouring it changes nothing\n");
+        }
+        SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
+      }
+
+      // ---- AND THE EMPTY-SET GLYPH IS ACTUALLY IN THE ATLAS.
+      //
+      // The layer menu's null entry is one byte that indexes a slot rasterised from U+2205 by
+      // the wide GDI call. A face without that code point rasterises its notdef box, and a
+      // face that failed to rasterise at all leaves the slot blank - which would make the
+      // most important entry in the menu an empty gap. Ink, not identity: this cannot tell a
+      // circle-with-a-stroke from a notdef box, and says so.
+      if (frame == 90) {
+        // Ink, AND INK IN THE MIDDLE. Total coverage alone cannot tell the glyph from the
+        // notdef box a face without U+2205 would rasterise instead - and a box is exactly what
+        // would appear, in the one menu entry it matters most for. A notdef box is a hollow
+        // rectangle: ink around the border, none across the centre. An empty set is a circle
+        // with a stroke through it, and the stroke crosses the middle. So the middle is the
+        // question.
+        //
+        // This still cannot name the glyph. It rules out blank and it rules out hollow, which
+        // are the two ways this goes wrong in practice.
+        long long ink = 0, mid = 0;
+        const int gw = a.font.glyph_w, gh = a.font.glyph_h;
+        const std::size_t base = static_cast<std::size_t>(ui::Font::kEmptySet) * gw * gh;
+        for (int gy = 0; gy < gh; ++gy) {
+          for (int gx = 0; gx < gw; ++gx) {
+            const std::size_t at = base + static_cast<std::size_t>(gy) * gw + gx;
+            if (at >= a.font.coverage.size()) { continue; }
+            const int v = a.font.coverage[at];
+            ink += v;
+            if (gx >= gw / 3 && gx < gw - gw / 3 && gy >= gh / 3 && gy < gh - gh / 3) {
+              mid += v;
+            }
+          }
+        }
+        if (ink <= 0) {
+          std::printf("selftest: FAILED - the empty-set glyph is blank, so the layer menu's "
+                      "null entry draws nothing\n");
+        } else if (mid <= 0) {
+          std::printf("selftest: FAILED - the empty-set glyph is hollow (%lld coverage, none "
+                      "in the middle), which is what a notdef box looks like\n", ink);
+        } else {
+          std::printf("selftest: the empty-set glyph is drawn and is not hollow (%lld "
+                      "coverage, %lld of it across the middle, over %dx%d)\n", ink, mid, gw,
+                      gh);
+        }
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

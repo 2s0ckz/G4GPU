@@ -344,6 +344,11 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     // mesh_inside parity count, the one traversal the nearest-hit walk exists to avoid. It was
     // being paid once per composited layer, which an opaque volume hides (the walk stops at
     // its first surface) and a translucent one does not. See geom::owns_contained_point.
+    // No special case for an absent entering cell, and there was one while absence was a
+    // layer. An absent cell now reports the volume's own layer here - the layer array holds
+    // that for a class the scene does not contain, since the number is never read as a
+    // priority - so the question asked at the grid's surface is the one it was before the
+    // feature existed, and the march below skips the cells that are not there.
     if (!geom::owns_contained_point(geometry, best_vol, hit + kNudge * dir)) { continue; }
 
     const Vec3<real_t> local_dir = geom::dir_to_local(vol.xform, dir);
@@ -410,7 +415,9 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       int n_cov = 0;
       {
         // The lowest rank any cell here can have. A volume that cannot beat this cannot cover
-        // any cell of the grid, and for a uniform grid that is the whole test.
+        // any cell of the grid, and for a uniform grid that is the whole test. Absent classes
+        // contribute no layer to this minimum, because they contribute no layer at all -
+        // G4Flatten computes the range over the classes that are present.
         const long long lo_rank = geom::volume_rank(geom::layer_lo_of(geometry, best_vol),
                                                     best_vol);
         for (int v = 0; v < geometry.n_volumes; ++v) {
@@ -460,6 +467,30 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
           // number for every cell.
           const int cell_layer =
               geom::voxel_cell_layer(geometry.voxels, grid, walk.Index(grid));
+
+          // A CELL THAT IS NOT THERE IS SKIPPED, AND THE MARCH GOES ON.
+          //
+          // Skipped, not "covered". Both leave it unpainted and only one of them is right:
+          // `covered` BREAKS the march - it means "a higher layer takes the space from here
+          // on, hand the ray back to the outer search" - so ending the walk at the first
+          // absent cell takes every cell behind it too. A phantom whose front class was nulled
+          // disappeared entirely, far side included. That is what absence-as-a-low-layer did
+          // all by itself, with no line of code saying so: the cell ranked below everything,
+          // the first candidate cover outranked it, and the clamp fired. Asked as "is this
+          // cell there" instead, it cannot happen.
+          if (geom::voxel_cell_absent(geometry.voxels, grid, walk.Index(grid))) {
+            more = walk.Next(grid);
+            if (more) {
+              Vec3<real_t> ln{real_t(0), real_t(0), real_t(0)};
+              const real_t sgn = (walk.step[walk.axis] > 0) ? real_t(-1) : real_t(1);
+              if (walk.axis == 0) { ln.x = sgn; }
+              else if (walk.axis == 1) { ln.y = sgn; }
+              else { ln.z = sgn; }
+              face_n = geom::dir_to_global(vol.xform, ln);
+            }
+            continue;
+          }
+
           const long long cell_rank = geom::volume_rank(
               (cell_layer == geom::kNoClassLayer) ? vol.layer : cell_layer, best_vol);
           real_t t_own = geom::kInfinity<real_t>();
@@ -486,6 +517,7 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
             break;
           }
           const int idx = walk.Index(grid);
+          // Null cells never reach here; they were skipped above, before the clamp.
           if (idx >= 0 && idx < geometry.voxels.count) {
             const int cls = static_cast<int>(voxel_class[idx]);
             if (cls >= 0 && cls < ccount) {

@@ -759,22 +759,32 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
       // The colour is filled in after this loop, not here: where a class lands in the
       // colormap depends on the RANGE of the values, and the last value is not known until
       // the loop has finished.
-      // Index 0 invisible, and everything else nearly so.
+      // EVERY CLASS THE SAME, INCLUDING INDEX 0.
       //
-      // In every segmentation convention 0 is "nothing here" - air, background, outside the
-      // patient - and it is also the most common value in the file, so a phantom imported
-      // opaque is a solid block with the anatomy hidden inside it. Opening it means finding
-      // the class list and turning one slider down before anything can be seen at all.
+      // Index 0 used to arrive at zero opacity, on the reasoning that in every segmentation
+      // convention 0 is "nothing here" - air, background, outside the patient. That is usually
+      // true and it is not this code's call to make: the convention is the file's, index 0 is
+      // sometimes a real structure, and a class that arrives invisible without being asked for
+      // is a class the user has to discover before they can wonder where it went. Anything not
+      // wanted in the scene now has a way to say so that means it - the null layer - and it
+      // applies to any class, not to whichever one happens to be numbered zero.
       //
-      // The rest at a tenth, because the renderer composites front to back and a phantom of
-      // opaque cells shows only the first surface a ray meets - which for a segmentation is
-      // the skin, and the skin is the one structure nobody imports a phantom to look at. At
-      // a tenth, thirty cells of tissue accumulate to about 96% and the interior reads
-      // through: bone shows inside soft tissue rather than behind it.
+      // A tenth for all of them, because the renderer composites front to back and a phantom
+      // of opaque cells shows only the first surface a ray meets - which for a segmentation is
+      // the skin, and the skin is the one structure nobody imports a phantom to look at. At a
+      // tenth, thirty cells of tissue accumulate to about 96% and the interior reads through.
+      c.opacity = 0.1f;
+      // THE CONTAINER'S MATERIAL, not nothing.
       //
-      // Opacity, not `visible`: a class stays in the list, keeps its material assignment, and
-      // is transported exactly as before. Only the picture changes, and one drag puts it back.
-      c.opacity = (c.value == 0.0) ? 0.0f : 0.1f;
+      // A class with no material assigned makes the whole volume unbuildable - build_scene
+      // refuses to place a volume whose material is missing - so an import used to arrive in a
+      // state where the scene could not be built until every one of what may be two hundred
+      // rows had been visited. The volume's own material is the honest default: it is what a
+      // cell that matches no class already falls back to, so this makes the classes agree with
+      // the rest of the grid rather than inventing a value. Wrong for most classes on a
+      // segmentation, and visibly wrong in one place - the material column - rather than
+      // invisibly absent.
+      c.material = s.material;
       s.voxel_classes.push_back(c);
     }
 
@@ -799,10 +809,10 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
       }
     }
     std::snprintf(buf, sizeof buf,
-                  "%d distinct values, one material class each, coloured by %s%s",
+                  "%d distinct values, one material class each on the volume's material, "
+                  "coloured by %s",
                   static_cast<int>(s.voxel_classes.size()),
-                  ColormapNames()[static_cast<int>(cmap)],
-                  (dlo <= 0.0 && dhi >= 0.0) ? "; index 0 hidden" : "");
+                  ColormapNames()[static_cast<int>(cmap)]);
     note = buf;
     return;
   }
@@ -836,6 +846,7 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
     c.r = b.r;
     c.g = b.g;
     c.b = b.b;
+    c.material = s.material;   // the container's, as in the discrete case above
     s.voxel_classes.push_back(c);
   }
   std::snprintf(buf, sizeof buf,

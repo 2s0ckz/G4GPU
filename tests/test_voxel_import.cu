@@ -92,50 +92,64 @@ int main() {
           "200 distinct indices give 200 classes rather than a refusal");
   }
 
-  // ---- 3. Index 0 is hidden, because 0 means "nothing here" in every segmentation
-  //         convention and is also the commonest value, so an opaque import is a solid block.
+  // ---- 3. EVERY INDEX ARRIVES THE SAME, index 0 included.
   //
-  //         The rest are faint rather than opaque, for the reason ClassifyVoxels states: the
-  //         renderer composites front to back, so a phantom of opaque cells shows only the
-  //         skin. This asserts the value, not just that it is below one, because the whole
-  //         effect depends on how many cells deep the accumulation reaches - and a "less than
-  //         one" test would pass at 0.99, which shows the skin.
+  //         It did not. Index 0 came in at zero opacity, on the reasoning that 0 means
+  //         "nothing here" in every segmentation convention and is also the commonest value,
+  //         so an opaque import is a solid block. Usually true - and not this code's call: the
+  //         convention belongs to the file, index 0 is sometimes a real structure, and a class
+  //         that arrives invisible without being asked for has to be discovered before it can
+  //         be wondered about. Wanting something out of the scene now has a control that means
+  //         exactly that (the null layer) and it applies to any class rather than to whichever
+  //         one happens to be numbered zero.
+  //
+  //         A tenth, not opaque, for the reason ClassifyVoxels states: the renderer composites
+  //         front to back, so a phantom of opaque cells shows only the skin. Asserted as a
+  //         value and not as "below one", because the effect depends on how many cells deep
+  //         the accumulation reaches and a "less than one" test would pass at 0.99.
   {
     Solid s;
+    s.material = 7;   // the container's, which every class should now start on
     std::string note;
     ClassifyVoxels(Indexed(5), VoxelKind::kDiscrete, s, note);
-    bool zero_hidden = false, others_faint = true;
+    bool all_faint = true, zero_present = false, all_have_material = true;
     for (const auto& c : s.voxel_classes) {
-      if (c.value == 0.0) {
-        zero_hidden = (c.opacity == 0.0f);
-      } else if (c.opacity != 0.1f) {
-        others_faint = false;
-      }
-    }
-    Check(zero_hidden, "index 0 is imported with zero opacity");
-    Check(others_faint, "and every other index at a tenth, so the interior reads through");
-    // Hidden, not removed: it still has to be assignable to a material.
-    bool zero_present = false;
-    for (const auto& c : s.voxel_classes) {
+      if (c.opacity != 0.1f) { all_faint = false; }
       if (c.value == 0.0) { zero_present = true; }
+      if (c.material != 7) { all_have_material = false; }
     }
-    Check(zero_present, "index 0 is still a class, so it can still be given a material");
+    Check(all_faint, "every index arrives at a tenth, index 0 no different from the rest");
+    Check(zero_present, "index 0 is a class like any other, and can be given a material");
+    // ---- and each one starts on the container's material rather than on nothing.
+    //
+    //      A class with none makes the whole volume unbuildable - build_scene refuses to place
+    //      a volume whose material is missing - so an import used to arrive in a state where
+    //      the scene could not be built until every one of what may be two hundred rows had
+    //      been visited. The volume's own material is what a cell matching no class already
+    //      falls back to, so this agrees with the rest of the grid rather than inventing a
+    //      value: wrong for most classes on a segmentation, and wrong in a column the user can
+    //      see rather than absent.
+    Check(all_have_material, "and on the container's material, not on nothing");
   }
 
-  // ---- 4. A volume with no zero is untouched by that rule.
+  // ---- 4. A volume with no zero in it is no different either, which is the same assertion
+  //         from the other side: there is no rule about index 0 left to be exempt from.
   {
     Solid s;
+    s.material = 3;
     std::string note;
     VoxelData v;
     v.nx = 3; v.ny = 1; v.nz = 1;
     v.value = {7.0f, 8.0f, 9.0f};
     ClassifyVoxels(v, VoxelKind::kDiscrete, s, note);
-    bool all_faint = true;
+    bool all_faint = true, all_have_material = true;
     for (const auto& c : s.voxel_classes) {
       if (c.opacity != 0.1f) { all_faint = false; }
+      if (c.material != 3) { all_have_material = false; }
     }
     Check(s.voxel_classes.size() == 3, "indices need not start at zero");
-    Check(all_faint, "and with no index 0 present, nothing is fully hidden");
+    Check(all_faint, "and with no index 0 present, nothing is treated differently");
+    Check(all_have_material, "the container's material reaches these classes too");
   }
 
   // ---- 5. Values that are not whole numbers are not indices, and saying so is the one

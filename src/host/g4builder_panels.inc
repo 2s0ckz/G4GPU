@@ -898,8 +898,36 @@ static void SetSolidMaterial(App& a, int solid, int material) {
 /// inherits IS on the volume's layer, so one number moves the whole phantom. The exceptions
 /// are then set one row at a time, which is the order the work actually happens in - you
 /// discover that the bone has to win after you have placed the phantom, not before.
-static void SetSolidLayer(App& a, int solid, int layer) {
+/// Sets a solid's layer, and puts every one of its voxel classes back to inheriting it.
+///
+/// THE WORLD IS ASKED ABOUT FIRST. Layer 0 is not one choice among forty for the world: it is
+/// the floor every other volume is measured against, and the world is the only volume that
+/// contains everything. Move it to 3 and every volume on 1 and 2 stops existing - the world
+/// outranks them everywhere - so the detector empties out, silently, in response to a
+/// one-click menu change on a row that looks like every other row. That is worth a question.
+/// Answering it is allowed: a scene deliberately built above the world is a legitimate thing
+/// to want, and refusing outright would be this tool deciding what a detector may be.
+///
+/// The null layer is refused outright, though, and that is a different case: it is not a
+/// choice with consequences the user might accept, it is a scene with nothing to transport in.
+///
+/// @param confirmed  true when the user has already answered the question. The pop-up's Yes
+///                   button is the only caller that passes it.
+static void SetSolidLayer(App& a, int solid, int layer, bool confirmed = false) {
   if (solid < 0 || solid >= static_cast<int>(a.model.solids.size())) { return; }
+  if (solid == a.model.world()) {
+    if (layer == kNullLayer) {
+      a.status = "the world cannot be removed from the scene";
+      Log("the world has to be somewhere: there is nothing to transport in without it, so it "
+          "is the one volume the null layer is refused for");
+      return;
+    }
+    if (layer != 0 && !confirmed) {
+      a.pending_world_layer = layer;
+      a.popup = Popup::kWorldLayer;
+      return;
+    }
+  }
   Solid& s = a.model.solids[static_cast<std::size_t>(solid)];
   s.layer = layer;
   int changed = 0;
@@ -912,6 +940,10 @@ static void SetSolidLayer(App& a, int solid, int layer) {
   if (changed > 0) {
     Log(Fmt("%s: %d class%s put back on the volume's layer, now %d", s.name.c_str(), changed,
             changed == 1 ? "" : "es", layer));
+  }
+  if (layer == kNullLayer) {
+    Log(Fmt("%s is on the null layer: not placed, not transported through, not drawn, and "
+            "nothing scores it", s.name.c_str()));
   }
   a.model.Touch();
   a.scene_dirty = true;
@@ -2249,6 +2281,126 @@ static void InsertSelftestCoincidentFaces(App& a) {
   Log("selftest: added two boxes in exactly the same place, on layers 6 and 7");
 }
 
+/// The model index of the solid with this name, or -1.
+///
+/// By name because the selftest knows names and not indices, and because the indices shift as
+/// it inserts things. Distinct from ModelIndexOf, which converts a FLATTENED index back to a
+/// model one - see it for why the two are not the same number.
+static int ModelIndexByName(const App& a, const char* name) {
+  for (std::size_t i = 0; i < a.model.solids.size(); ++i) {
+    if (a.model.solids[i].name == name) { return static_cast<int>(i); }
+  }
+  return -1;
+}
+
+/// Puts one voxel class on a layer, by the volume's name and the class index.
+///
+/// Named so the selftest can call it: a dropdown is not callable, and the alternative is
+/// synthesising a click at a position computed from the panel layout - which tests the layout
+/// arithmetic and not the thing under test. The same reason SetSolidLayer and
+/// RecolourVoxelClass exist.
+static void SetVoxelClassLayer(App& a, const char* name, int cls, int layer) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    if (cls < 0 || cls >= static_cast<int>(s.voxel_classes.size())) { return; }
+    s.voxel_classes[static_cast<std::size_t>(cls)].layer = layer;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// One box, on its own layer, for the null-layer checks to remove and put back.
+///
+/// Away from everything else in y so no other volume's surface can be what changes when it
+/// goes: a checksum that moved because two things moved says nothing about either.
+static void InsertSelftestNullLayer(App& a) {
+  Solid b;
+  b.shape = Shape::kBox;
+  b.name = "Nullable";
+  b.p[0] = b.p[1] = b.p[2] = 40.0;
+  // INSIDE THE WORLD, which is a 500 mm half-extent cube by default. At y = 600 both of these
+  // fixtures sat outside it, where owns_contained_point refuses everything and nothing is
+  // drawn - so "removing it changed the picture" passed on a volume that was never on screen.
+  // Found by the visibility precondition the checks now open with, which is the only reason
+  // it was not shipped as a passing test of nothing.
+  b.pos[0] = 250;
+  b.pos[1] = 0;
+  b.pos[2] = 0;
+  b.layer = 5;
+  b.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  b.r = 0.95f;
+  b.g = 0.75f;
+  b.b = 0.15f;
+  b.opacity = 1.0f;
+  a.model.AddSolid(b);
+
+  // AND A GRID WITH NOTHING OVER IT, which is what isolates the renderer's null-cell rule.
+  //
+  // The "Covered" fixture has a slab across it, and a null class there is removed by the
+  // CLAMP - a cell ranked below everything is covered by the first thing that outranks it, and
+  // the march ends before reaching it. That is correct and it means that fixture cannot tell
+  // whether the paint skip works: breaking the skip deliberately left its check passing.
+  //
+  // Here nothing overlaps the grid, so no cover exists, the clamp never fires, and refusing to
+  // paint the cell is the only thing that can remove it.
+  const double gh = 30.0;
+  const int n = 8;
+  Solid g;
+  g.shape = Shape::kVoxelGrid;
+  g.name = "Uncovered";
+  g.p[0] = g.p[1] = g.p[2] = gh;
+  g.p[3] = g.p[4] = g.p[5] = n;
+  g.pos[0] = 0;
+  g.pos[1] = 400;
+  g.pos[2] = 0;
+  g.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  g.layer = 4;
+  g.voxel_kind = VoxelKind::kDiscrete;
+  g.voxel_meaning = VoxelMeaning::kIndices;
+  // Two halves along z, so the near one can be removed and the far one appears through the
+  // hole it leaves. CLASS 0 IS THE +Z HALF, because +z is the half facing an eye on the z
+  // axis - see the Covered fixture, which indexes cells the same way and calls +z "towards
+  // the camera". With the halves the other way round class 0 sits behind an opaque class 1,
+  // recolouring it changes nothing, and the visibility precondition fails - which is how the
+  // first version of this was found.
+  g.voxel_values.assign(static_cast<std::size_t>(n) * n * n, 0.0f);
+  for (int iz = 0; iz < n; ++iz) {
+    for (int iy = 0; iy < n; ++iy) {
+      for (int ix = 0; ix < n; ++ix) {
+        g.voxel_values[static_cast<std::size_t>((iz * n + iy) * n + ix)] =
+            (iz < n / 2) ? 1.0f : 0.0f;
+      }
+    }
+  }
+  for (int v = 0; v < 2; ++v) {
+    VoxelClass c;
+    c.value = v;
+    c.value_max = v + 1;
+    c.material = g.material;
+    c.opacity = 1.0f;   // OPAQUE, so a cell that is drawn is unmistakably drawn
+    c.r = (v == 0) ? 0.9f : 0.2f;
+    c.g = (v == 0) ? 0.3f : 0.8f;
+    c.b = (v == 0) ? 0.3f : 0.9f;
+    c.label = (v == 0) ? "near (+z)" : "far (-z)";
+    g.voxel_classes.push_back(c);
+  }
+  a.model.AddSolid(g);
+
+  a.model.Touch();
+  a.scene_dirty = true;
+  Log("selftest: added one opaque box on layer 5 and an 8^3 grid with nothing over it, for "
+      "the null layer to remove");
+}
+
+/// How many volumes the flattened scene holds. The null layer's claim, at its root: a solid on
+/// it is NOT PLACED, and everything else - not transported through, not drawn, not scored -
+/// follows from there being no volume rather than from three separate rules.
+static int SceneVolumeCount(const App& a) {
+  if (a.run_manager == nullptr) { return -1; }
+  return static_cast<int>(a.run_manager->GetScene().volumes.size());
+}
+
 /// FNV-1a over the 3D viewport's pixels. For asking whether the PICTURE changed.
 ///
 /// The viewport only: the panels carry a log that grows on its own, and a checksum that
@@ -2573,6 +2725,7 @@ static void DrawPopup(App& a) {
     case Popup::kPick: DrawPickPopup(a); break;
     case Popup::kOverlap: DrawOverlapPopup(a); break;
     case Popup::kWorld: DrawWorldPopup(a); break;
+    case Popup::kWorldLayer: DrawWorldLayerPopup(a); break;
     default: break;
   }
   // A click in the view while no popup is up selects a solid. Done here, after every panel

@@ -3464,3 +3464,101 @@ renders in tens of milliseconds and only ONE render completed in a four-frame wi
 machine, which is one bad day from zero and a gate reporting a failure that is not one. It
 carries a count of renders that actually completed, without which a matching picture would only
 prove it never changed.
+
+### V28: absence spelled as a very small number, and the two bugs that came free with it
+
+A volume or a voxel class can now be set to the null layer, ∅, meaning it is not in the scene:
+not transported through, not drawn, not scored. The feature is small. Getting it wrong was not.
+
+#### The first implementation made absence a number
+
+`kNullLayer = -2147483646`, a layer two billion below everything. The reasoning was that
+`volume_rank` packs the layer into the high half of a signed 64-bit word, so such a cell ranks
+below every ordinary cell AND below the world - which means `locate` hands its space to whatever
+else contains it, with no new mechanism at all. One constant, no new arrays, no new branches on
+the navigator's hot path. It looked like the cheap way to do it.
+
+Two bugs came with it, and neither was written down anywhere as a rule:
+
+**The renderer deleted the phantom.** The cell march asks, per cell, whether anything outranks
+it and clamps the walk at that distance - and setting `covered` there means "a higher layer takes
+the space from here on, hand the ray back to the outer search", which BREAKS the march. A cell
+ranked below everything is outranked by the first candidate cover in the list, which for the
+world is at zero distance. So nulling a phantom's front class ended the walk at the first cell
+and took every cell behind it: the phantom disappeared, far side included. No line of code said
+"stop here"; the rank said it.
+
+**The cover scan admitted every volume in the scene.** That scan runs once per ray and collects
+the volumes that could outrank the grid's LOWEST-ranked cell. With the null layer in that
+minimum the answer is "all of them", the world included at zero distance - nearest, and so never
+evicted from a list of four, where it can push out a cover that matters. The workaround was a
+second minimum computed over the non-null classes, `layer_lo_live`, carried on every Volume.
+
+That field is the tell. A feature that needs a parallel copy of an existing quantity, differing
+only in which values it pretends not to see, is a feature encoded in the wrong place.
+
+#### Absence is not a small number
+
+The second implementation says so directly: `VoxelStore::class_absent`, one flag per class, and
+one line in `inside_volume`:
+
+    if (!v.has_absent_classes || v.solid.type != SolidType::kVoxelGrid) { return true; }
+    return !voxel_absent_at(g.voxels, voxel_grid_of(v.solid), q);
+
+A cell of an absent class is not contained by the volume. Everything else follows from that
+rather than from rules of its own: `locate` cannot return the volume there, so the transport
+steps through as whatever does own the space, and no scorer attached to the grid ever sees it -
+the tally follows ownership and needed no code at all. A solid on the null layer is simply not
+placed, which is the same idea one level up.
+
+`layer_lo_live` was deleted. The renderer's special case at the grid's entry surface was deleted.
+The overlap checker's rule about two null classes not clashing was deleted - an absent cell is
+not inside either volume, so the sample loop never reaches the comparison. The correct model is
+SHORTER than the workaround it replaced, which is usually how this goes.
+
+One number remains, renamed `geom::kNullLayerTag`, and it is a tag rather than a layer: the value
+the model uses in its own layer FIELD, present in the geometry only so the flattener can refuse a
+placement that still carries it. Nothing computes a rank from it.
+
+#### What found the bug, and what did not
+
+Three checks were written for the voxel class, and the first two both passed on the broken
+version:
+
+  1. nulling a class changes the picture - passed, because deleting the whole grid changes it too
+  2. recolouring the nulled class changes nothing - passed, because it was not there to recolour
+  3. **recolouring a class that should have SURVIVED still changes the picture** - failed
+
+Only the third distinguishes "this class is gone" from "the grid is gone", and it was written
+last, after the first two were already green. Worth stating as a rule: a check that something is
+absent must be paired with a check that its neighbour is still present, or "absent" and
+"everything is absent" are the same answer.
+
+Two more things the fixtures taught, both of which passed for the wrong reason first:
+
+**A visibility precondition is not optional.** Every assertion of the form "removing it changed
+the picture" is satisfied by a volume that was never on screen. Both new fixtures were first
+placed at y = 600, outside a 500 mm world, where nothing is drawn at all - and the solid check
+passed. The checks now open by recolouring the fixture and requiring the picture to move, which
+is the one operation that can only show up if the thing is being painted.
+
+**The fixture has to be able to tell the mechanisms apart.** A null class over a COVERED grid is
+removed by the clamp whether the paint rule works or not, so breaking the paint rule deliberately
+left that check green. The check moved to a grid with nothing over it, where the clamp never
+fires. The same deliberate break now fails.
+
+#### And the up direction, which invalidated a fixture two hundred lines away
+
+The viewer's up axis moved from +y to +z, so that a detector described in beam coordinates - z
+the beam axis, x-y transverse - is drawn the way it is typed. Elevation now lifts out of the x-y
+plane, which also makes `/vis/viewer/set/viewpointThetaPhi` mean what Geant4 means by it, since
+that command's theta is measured from +z.
+
+It broke the covered-voxel check, which is the one selftest that reads GEOMETRY rather than a
+flag: its camera was aimed "straight down -z" as azimuth 0, elevation 0, and under the new
+convention that points down -y - across the classes the slab is meant to hide instead of through
+them. Aimed down z it wants elevation 1.5, the clamp, 4.1 degrees off the axis; the slab
+overhangs the grid by 20 mm on each side and 4.1 degrees over the grid's 80 mm depth is a lateral
+5.7 mm, so the margin is not tight. Recorded because "change the up vector" reads like a
+one-line change and had a consequence two hundred lines away in a file that does not mention
+cameras.

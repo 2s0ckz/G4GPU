@@ -639,7 +639,9 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // The class array is another short per cell - 268 MB for a 512^3 phantom, the same as the
     // materials - so a batch run whose classes all sit on one layer must not be made to carry
     // it. `any_class_layers` is the scene saying whether the navigator will ever look.
-    if (scene.pool.any_class_layers
+    // Either reason: a class can be absent without any class naming a layer, and the
+    // navigator still has to read the per-cell class array to know which cells are gone.
+    if ((scene.pool.any_class_layers || scene.pool.any_class_absent)
         && scene.pool.voxel_class_cells.size() == scene.pool.voxel_cells.size()
         && !scene.pool.voxel_class_layer.empty()) {
       G4GPU_CUDA_CHECK(cudaMalloc(&d_voxel_class_,
@@ -654,6 +656,17 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                                   cudaMemcpyHostToDevice));
       g.voxels.cls = d_voxel_class_;
       g.voxels.class_layer = d_class_layer_;
+      // One byte per CLASS, not per cell, so this is bounded by the class cap however large
+      // the phantom is - and it is uploaded only when some class is actually absent.
+      if (scene.pool.any_class_absent
+          && scene.pool.voxel_class_absent.size() == scene.pool.voxel_class_layer.size()) {
+        G4GPU_CUDA_CHECK(cudaMalloc(&d_class_absent_,
+                                    scene.pool.voxel_class_absent.size()));
+        G4GPU_CUDA_CHECK(cudaMemcpy(d_class_absent_, scene.pool.voxel_class_absent.data(),
+                                    scene.pool.voxel_class_absent.size(),
+                                    cudaMemcpyHostToDevice));
+        g.voxels.class_absent = d_class_absent_;
+      }
     }
     geom_ = g;
 
@@ -1345,6 +1358,7 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_voxels_);
     cudaFree(d_voxel_class_);
     cudaFree(d_class_layer_);
+    cudaFree(d_class_absent_);
     cudaFree(d_tri_);
     cudaFree(d_bvh_);
   }
