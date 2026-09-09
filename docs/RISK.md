@@ -3777,3 +3777,69 @@ zero and the signal is the whole count: **1119 against 0**.
 
 A box rather than a sphere, deliberately: its silhouette is four straight lines, which is the
 arrangement one ray per pixel turns into a staircase and the one anybody notices.
+
+### V31: the hole was the shape of the answer
+
+Two reports. One was a pass the builder never launched, and one was a flaw in the surface search
+that had been there all along and needed a very particular arrangement to show.
+
+#### Wireframe did nothing in the builder
+
+The builder's styles said `solid = visible && !wireframe`, which is right - a wireframe volume
+must not be ray cast as a surface. Nothing then drew its edges, because the builder never
+launched `render_edges` at all: `EdgeList`, which builds the twelve lines of a box, lived inside
+`vis_manager.cu` where only the viewer could reach it. So a volume set to wireframe was invisible
+in the builder, and the DEFAULT WORLD arrives with wireframe on and had no outline there ever.
+
+`EdgeList` moved to `src/render/edges.h` and both apps use it. One implementation rather than
+two, for the reason that keeps coming up here: a second copy is a second thing to fix, and the
+one nobody remembers is the one that is wrong.
+
+#### A volume overlapping a null voxel class drew as a hole
+
+Reported as not being rendered in the overlap region, and the shape of the failure is what named
+it: what appeared was a HOLE, exactly the silhouette of the volume that should have been there.
+Not a missing volume - a volume-shaped absence, which means the march was handing the ray back at
+the right place and the thing it handed to was never drawn.
+
+`box_dist_in` starts its `tmin` at zero and clamps, so from INSIDE a box it returns exactly 0,
+not infinity. A voxel grid is a box. The surface search therefore re-finds a grid the walk is
+already standing in, at distance nothing, on every iteration - and a comment in that very loop
+claimed the opposite ("a volume the ray is already inside has no entry surface ahead of it"),
+which is why it went unexamined.
+
+The tie rule normally hides it. The volume the march handed back to sits a nudge ahead, ties with
+the zero, and wins on rank because it is a higher layer - which is what a cover is. Put something
+on a LOWER layer inside the grid and the grid wins the tie, is re-entered, marches, clamps at
+that volume again, and the pixel goes round until `kMaxLayers` with nothing accumulated.
+
+A lower-layer volume inside a grid is exactly what a null class makes possible: while the class is
+present the grid owns that space and the volume is correctly hidden, so nobody had ever put one
+there. The fix is one line - a candidate at zero distance is a volume you are already inside, not
+a surface ahead - and it is a fix to the search, not to anything about absence.
+
+Two other things had to be true and were separately wrong:
+
+**The cover scan rejected it before considering it.** That scan collects the volumes that could
+outrank the grid's lowest-ranked cell, and a volume below the grid's lowest class layer fails
+that test. An absent cell has no business being compared against - nothing is there, so anything
+takes the space - so where the grid has absent classes every volume is a candidate.
+
+**And the world had to be excluded from that scan.** For the same `box_dist_in` reason: the world
+is a box the ray is always inside, so it enters the candidate list at distance zero, outranks an
+absent cell (which ranks below everything), and the clamp ends the march at the very first cell.
+Nulling one class deleted the whole phantom. That was caught by the check from V28 asking whether
+the FAR class still responds to a recolour - written for a different bug and it earned its place
+twice.
+
+#### What actually found it
+
+Three rounds of reading the code and reasoning about it produced three wrong diagnoses. What
+settled it in one step was a screenshot: the cyan far class visible THROUGH the nulled near class
+- so absence was working - with a black square in the middle the size of the box. Absence was
+never the problem, and every minute spent reading the absence machinery was spent in the wrong
+file.
+
+Before that, one experiment worth more than the reasoning: put the box on a HIGHER layer than the
+grid and it drew. That single bit - works above, fails below - is the whole signature of a rank
+tie-break, and it was available for the cost of one rebuild at any point.

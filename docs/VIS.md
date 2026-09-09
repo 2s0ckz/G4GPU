@@ -553,6 +553,51 @@ What is worth checking is not how it looks but that the menu maps it to the laye
 between the option INDEX and the layer NUMBER would put every solid one layer out, silently, and
 the option list is the only place that mapping exists.
 
+
+### A candidate at zero distance is a volume you are already inside
+
+`box_dist_in` starts its `tmin` at zero and clamps, so from inside a box it returns **exactly 0**,
+not infinity - and a voxel grid is a box. The surface search would otherwise re-find a grid the
+walk is standing in, at distance nothing, on every iteration.
+
+The tie rule hid that for a long time: the volume the march handed the ray back to sits a nudge
+ahead, ties with the zero, and wins on rank because it is a higher layer, which is what a cover
+is. A volume on a LOWER layer inside a grid loses that tie, so the grid is re-entered, marches,
+clamps at that volume again, and the pixel goes round until `kMaxLayers` with nothing accumulated
+- drawing as a HOLE the shape of the volume that should have been there.
+
+A lower-layer volume inside a grid is what a null class makes possible: while the class is present
+the grid owns that space and the volume is correctly hidden, so nobody had put one there before.
+The search now requires a strictly positive distance. Nothing legitimate sits at zero - the walk
+nudges past every surface it crosses - and a boolean or a mesh whose next crossing genuinely lies
+ahead reports that distance and is unaffected.
+
+Two things go with it, where a grid has absent classes:
+
+- **every volume is a candidate cover.** The scan normally rejects anything below the grid's
+  lowest class layer, and an absent cell has no business being compared against: nothing is
+  there, so anything takes the space.
+- **except the world.** Same `box_dist_in` reason - the world is a box the ray is always inside,
+  so it would enter the list at distance zero, outrank an absent cell, and end the march at the
+  first cell. It is also right on its own terms: the world contains everything by construction,
+  so it can never take space away in front of a cell.
+
+### The wireframe pass, which the builder never launched
+
+`EdgeList` - the twelve lines of a box - lived inside `vis_manager.cu`, so only the viewer could
+reach it. The builder's styles said `solid = visible && !wireframe`, which is right, and nothing
+drew the edges: a volume set to wireframe was **invisible** there, and the default world arrives
+with wireframe on, so it never had an outline in the builder at all.
+
+It is `src/render/edges.h` now and both apps use it. The pass runs AFTER the anti-aliasing -
+`refine_edges` retraces the geometry at the pixels it touches and would erase a line drawn under
+it, and these are lines one pixel wide by intent, with nothing in them to anti-alias.
+
+Edges are drawn for boxes and voxel grids only, using their real half-lengths. A bounding cube
+round a cone or a sphere is not a hint about its shape, it is a lie about it - and the curved
+solids are ray cast as surfaces anyway. A grid gets one because that is what shows where an
+imported phantom actually sits.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's

@@ -37,6 +37,7 @@
 #include "g4/G4RunManager.hh"
 #include "g4/G4UImanager.hh"
 #include "host/transport_run.cuh"
+#include "render/edges.h"
 #include "render/float_geometry.cuh"
 #include "render/png.h"
 #include "render/renderer.cuh"
@@ -282,6 +283,14 @@ struct App {
   // rendering
   vis::TrajectoryBuffer traj{};
   vis::VolumeStyle* d_styles = nullptr;
+  /// THE WIREFRAME EDGES, which the builder had none of. Its styles already said
+  /// `solid = visible && !wireframe` - right, since a wireframe volume must not be ray cast as
+  /// a surface - but nothing drew the edges, so such a volume was invisible, and the default
+  /// world arrives with wireframe on and had no outline at all.
+  float *d_ex0 = nullptr, *d_ey0 = nullptr, *d_ez0 = nullptr;
+  float *d_ex1 = nullptr, *d_ey1 = nullptr, *d_ez1 = nullptr;
+  unsigned int* d_ergb = nullptr;
+  int n_edges = 0;
   /// Per-cell class index, and the class colour table the renderer looks up in. Both
   /// render-only: the transport reads the per-cell MATERIAL, which is -1 until a class has one
   /// assigned, so a phantom nobody has assigned yet would be invisible if the picture came
@@ -763,6 +772,7 @@ static void RebuildScene(App& a) {
 
   if (a.d_styles != nullptr) { cudaFree(a.d_styles); }
   std::vector<vis::VolumeStyle> styles(scene.volumes.size());
+  vis::EdgeList edges;
   for (std::size_t i = 0; i < scene.volumes.size(); ++i) {
     const auto& st = scene.styles[i];
     styles[i].r = static_cast<unsigned char>(st.r * 255);
@@ -770,11 +780,46 @@ static void RebuildScene(App& a) {
     styles[i].b = static_cast<unsigned char>(st.b * 255);
     styles[i].a = static_cast<unsigned char>(st.opacity * 255 + 0.5f);
     styles[i].solid = st.visible && !st.wireframe;
+    // And its outline, when it is a wireframe volume and visible. Dimmer than its own colour,
+    // so a wireframe box behind a solid one reads as an outline rather than competing with it.
+    if (st.visible && st.wireframe) {
+      edges.AddVolume(scene.volumes[i],
+                      ui::rgb(static_cast<int>(st.r * 160), static_cast<int>(st.g * 160),
+                              static_cast<int>(st.b * 160)));
+    }
   }
   CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * std::max<size_t>(1, styles.size())));
   if (!styles.empty()) {
     CUDA_CHECK(cudaMemcpy(a.d_styles, styles.data(), sizeof(vis::VolumeStyle) * styles.size(),
                           cudaMemcpyHostToDevice));
+  }
+
+  // The wireframe edges, uploaded with the styles because the flag that decides them is there.
+  {
+    float** dst[6] = {&a.d_ex0, &a.d_ey0, &a.d_ez0, &a.d_ex1, &a.d_ey1, &a.d_ez1};
+    for (float** p : dst) {
+      if (*p != nullptr) {
+        cudaFree(*p);
+        *p = nullptr;
+      }
+    }
+    if (a.d_ergb != nullptr) {
+      cudaFree(a.d_ergb);
+      a.d_ergb = nullptr;
+    }
+    a.n_edges = static_cast<int>(edges.Size());
+    if (a.n_edges > 0) {
+      const std::size_t nb = sizeof(float) * a.n_edges;
+      const std::vector<float>* src[6] = {&edges.x0, &edges.y0, &edges.z0,
+                                          &edges.x1, &edges.y1, &edges.z1};
+      for (int k = 0; k < 6; ++k) {
+        CUDA_CHECK(cudaMalloc(dst[k], nb));
+        CUDA_CHECK(cudaMemcpy(*dst[k], src[k]->data(), nb, cudaMemcpyHostToDevice));
+      }
+      CUDA_CHECK(cudaMalloc(&a.d_ergb, sizeof(unsigned int) * a.n_edges));
+      CUDA_CHECK(cudaMemcpy(a.d_ergb, edges.rgb.data(), sizeof(unsigned int) * a.n_edges,
+                            cudaMemcpyHostToDevice));
+    }
   }
 
   // The two render-only voxel arrays. Freed and reuploaded with the scene, because both are
@@ -1176,6 +1221,14 @@ static void IssueRender(App& a, int w, int h) {
         a.render_geom.geometry(), a.d_styles, cam, a.d_fb, a.d_edge, a.d_edge_count,
         a.vis_attr.voxel_grid_lines, a.d_voxel_class, a.d_class_rgba);
   }
+  // The wireframe outlines. AFTER the anti-aliasing, because refine_edges retraces the
+  // geometry at the pixels it touches and would erase a line drawn under it; and these are
+  // lines, one pixel wide by intent, so there is nothing in them to anti-alias.
+  if (a.vis_attr.show_wireframe && a.n_edges > 0) {
+    vis::render_edges<<<(a.n_edges + 63) / 64, 64, 0, a.render_stream>>>(
+        a.d_ex0, a.d_ey0, a.d_ez0, a.d_ex1, a.d_ey1, a.d_ez1, a.d_ergb, a.n_edges, cam,
+        a.d_fb, 0);
+  }
   if (a.show_tracks && a.n_segments > 0) {
     const int thick = static_cast<int>(a.vis_attr.track_width) - 1;
     vis::render_trajectories<<<(a.n_segments + 127) / 128, 128, 0, a.render_stream>>>(
@@ -1514,7 +1567,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 97;
+      selftest_frames = 106;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -2723,6 +2776,100 @@ int main(int argc, char** argv) {
         }
         a.model.Touch();
         a.scene_dirty = true;
+      }
+
+      // ---- A VOLUME IN A NULL CLASS'S SPACE IS DRAWN THERE.
+      //
+      // Reported: a volume on a non-null layer overlapping a voxel class set to null was not
+      // rendered in the overlap region, while two ordinary volumes were fine.
+      //
+      // The cell march walks the grid's whole depth in one go and hands the ray back to the
+      // outer search where something outranks a cell. An absent cell was SKIPPED before that
+      // clamp was consulted, so nothing stopped the march inside a hole - it ran to the far
+      // side of the grid and the search resumed beyond it, where a volume sitting in the hole
+      // can never be found: a grid is not re-enterable from inside itself. And the scan that
+      // collects candidate covers rejected any volume below the grid's lowest class before it
+      // was considered at all, which an absent cell has no business being compared against.
+      //
+      // InHole is inside the grid's near half, on a LOWER layer than the grid - so while the
+      // class is present the grid correctly hides it, and when the class is null it has to
+      // appear.
+      static unsigned long long hole_base = 0, hole_recol = 0;
+      if (frame == 98) {
+        a.target = vis::Vec3f{0.f, 400.f, 0.f};
+        a.distance = 160.f;
+        a.azimuth = 0.f;
+        a.elevation = 1.5f;   // down the z axis, so the near half is in front
+        SetVoxelClassLayer(a, "Uncovered", 0, kNullLayer);
+      }
+      if (frame == 99) {
+        hole_base = ViewportChecksum(a);
+        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
+      }
+      if (frame == 100) {
+        hole_recol = ViewportChecksum(a);
+        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);   // back as it was
+      }
+      if (frame == 101) {
+        const unsigned long long back = ViewportChecksum(a);
+        // RECOLOURING IS THE QUESTION. "The picture changed when the class was nulled" is also
+        // satisfied by the class vanishing and nothing taking its place; only a box that
+        // responds to its own colour is a box that is being drawn.
+        if (hole_recol == hole_base) {
+          std::printf("selftest: FAILED - a volume inside a null voxel class is not drawn "
+                      "there (recolouring it changed nothing, %llu)\n", hole_base);
+        } else if (back != hole_base) {
+          std::printf("selftest: FAILED - putting the box's colour back did not restore the "
+                      "picture (%llu -> %llu)\n", hole_base, back);
+        } else {
+          std::printf("selftest: a volume overlapping a null voxel class is drawn in the "
+                      "overlap\n");
+        }
+        // And with the class back, the grid owns that space again and hides it.
+        SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
+      }
+      if (frame == 102) {
+        const unsigned long long with_class = ViewportChecksum(a);
+        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
+        hole_base = with_class;
+      }
+      if (frame == 103) {
+        const unsigned long long after = ViewportChecksum(a);
+        // THE OTHER HALF OF THE RULE: with the class present the grid outranks the box
+        // everywhere it covers, so recolouring the box changes nothing. Without this, "drawn
+        // in the hole" would be satisfied by a renderer that ignores the layer rule entirely.
+        if (after != hole_base) {
+          std::printf("selftest: FAILED - the grid does not hide the box when its class is "
+                      "present (%llu -> %llu)\n", hole_base, after);
+        } else {
+          std::printf("selftest: and hidden again when the class is put back\n");
+        }
+        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);
+      }
+
+      // ---- AND THE WIREFRAME PASS RUNS AT ALL.
+      //
+      // The builder never launched one. Its styles said `solid = visible && !wireframe`, which
+      // is right, so a volume set to wireframe was not ray cast - and nothing drew its edges
+      // either, which made it invisible. The default world arrives with wireframe on, so the
+      // world had no outline in the builder at all. Reported as wireframe rendering not
+      // working.
+      //
+      // Turning the display of it off has to change the picture: if no edge is being drawn,
+      // nothing changes.
+      static unsigned long long wire_on = 0;
+      if (frame == 104) { wire_on = ViewportChecksum(a); }
+      if (frame == 105) { a.vis_attr.show_wireframe = false; }
+      if (frame == 106) {
+        const unsigned long long wire_off = ViewportChecksum(a);
+        if (wire_off == wire_on) {
+          std::printf("selftest: FAILED - turning the wireframe off changed nothing, so no "
+                      "edge was being drawn (%llu)\n", wire_on);
+        } else {
+          std::printf("selftest: the wireframe pass draws edges (%d in this scene)\n",
+                      a.n_edges);
+        }
+        a.vis_attr.show_wireframe = true;
       }
 
       if (frame >= selftest_frames) {

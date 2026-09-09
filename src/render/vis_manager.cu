@@ -36,6 +36,7 @@
 #include "g4/G4RunManager.hh"
 #include "g4/G4UImanager.hh"
 #include "host/transport_run.cuh"
+#include "render/edges.h"
 #include "render/float_geometry.cuh"
 #include "render/png.h"
 #include "render/renderer.cuh"
@@ -58,45 +59,7 @@ using real_t = double;
 // ---------------------------------------------------------------- wireframe edges
 
 /// Wireframe for the volumes, so a transparent or hidden solid still reads as a shape.
-struct EdgeList {
-  std::vector<float> x0, y0, z0, x1, y1, z1;
-  std::vector<unsigned int> rgb;
-
-  void Add(float ax, float ay, float az, float bx, float by, float bz, unsigned int c) {
-    x0.push_back(ax); y0.push_back(ay); z0.push_back(az);
-    x1.push_back(bx); y1.push_back(by); z1.push_back(bz);
-    rgb.push_back(c);
-  }
-
-  /// The twelve edges of an axis-aligned box, transformed by a volume's placement.
-  void AddBox(const geom::Transform<real_t>& xf, real_t hx, real_t hy, real_t hz,
-              unsigned int c) {
-    const real_t sx[2] = {-hx, hx}, sy[2] = {-hy, hy}, sz[2] = {-hz, hz};
-    auto pt = [&](real_t x, real_t y, real_t z) {
-      // Local to world: the stored matrix is world -> local, so the inverse is its transpose.
-      const g4gpu::Vec3<real_t> l{x, y, z};
-      const real_t* r = xf.rot;
-      return g4gpu::Vec3<real_t>{r[0] * l.x + r[3] * l.y + r[6] * l.z + xf.trans.x,
-                                 r[1] * l.x + r[4] * l.y + r[7] * l.z + xf.trans.y,
-                                 r[2] * l.x + r[5] * l.y + r[8] * l.z + xf.trans.z};
-    };
-    for (int i = 0; i < 2; ++i) {
-      for (int j = 0; j < 2; ++j) {
-        const auto a1 = pt(sx[0], sy[i], sz[j]), b1 = pt(sx[1], sy[i], sz[j]);
-        const auto a2 = pt(sx[i], sy[0], sz[j]), b2 = pt(sx[i], sy[1], sz[j]);
-        const auto a3 = pt(sx[i], sy[j], sz[0]), b3 = pt(sx[i], sy[j], sz[1]);
-        Add(static_cast<float>(a1.x), static_cast<float>(a1.y), static_cast<float>(a1.z),
-            static_cast<float>(b1.x), static_cast<float>(b1.y), static_cast<float>(b1.z), c);
-        Add(static_cast<float>(a2.x), static_cast<float>(a2.y), static_cast<float>(a2.z),
-            static_cast<float>(b2.x), static_cast<float>(b2.y), static_cast<float>(b2.z), c);
-        Add(static_cast<float>(a3.x), static_cast<float>(a3.y), static_cast<float>(a3.z),
-            static_cast<float>(b3.x), static_cast<float>(b3.y), static_cast<float>(b3.z), c);
-      }
-    }
-  }
-
-  std::size_t Size() const { return rgb.size(); }
-};
+using vis::EdgeList;   // src/render/edges.h, shared with the builder
 
 // ---------------------------------------------------------------- application
 
@@ -945,12 +908,9 @@ bool Open(const Options& opt) {
       // Wireframe only for boxes, using their real half-lengths. A bounding cube drawn round
       // a cone or a sphere is not a hint about its shape, it is a lie about it - and the
       // curved solids are ray-cast as surfaces anyway, so they need no outline.
-      const auto& v = scene.volumes[i];
-      if (v.solid.type == geom::SolidType::kBox) {
-        edges.AddBox(v.xform, v.solid.p[0], v.solid.p[1], v.solid.p[2],
-                     ui::rgb(static_cast<int>(st.r * 160), static_cast<int>(st.g * 160),
-                             static_cast<int>(st.b * 160)));
-      }
+      edges.AddVolume(scene.volumes[i],
+                      ui::rgb(static_cast<int>(st.r * 160), static_cast<int>(st.g * 160),
+                              static_cast<int>(st.b * 160)));
     }
     CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * styles.size()));
     CUDA_CHECK(cudaMemcpy(a.d_styles, styles.data(),

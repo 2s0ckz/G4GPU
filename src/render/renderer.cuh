@@ -221,7 +221,28 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
   // treats two surfaces as one - the higher-ranked volume wins. The rank used is the volume's
   // highest possible one, because the hit point is not known yet; `locate` below still has the
   // last word, so a grid whose class loses at that point behaves exactly as it did.
+  // A CANDIDATE AT EXACTLY ZERO IS A VOLUME THE RAY IS ALREADY INSIDE, and it is not a
+  // surface ahead.
+  //
+  // box_dist_in starts its tmin at zero and clamps, so from inside a box it returns exactly 0
+  // rather than infinity - and a voxel grid is a box. The search therefore re-finds a grid the
+  // walk is standing in, at distance nothing, on every iteration.
+  //
+  // Usually the tie rule below hides that: the volume the walk was handed back to sits a nudge
+  // ahead, ties with the zero, and wins on rank because it is the higher layer - which is what
+  // a cover is. Put something on a LOWER layer inside the grid, which is exactly what a null
+  // class makes possible, and the grid wins the tie, is re-entered, marches, clamps at that
+  // volume again, and the pixel goes round until the layer cap with nothing accumulated. It
+  // draws as a hole in the shape of the volume that should have been there - which is what
+  // "volumes overlapping a null voxel class are not rendered in the overlap region" was, and
+  // the hole was the shape of the box.
+  //
+  // Strictly ahead, then. Nothing legitimate sits at zero: the walk nudges past every surface
+  // it crosses, so a zero distance means "you are in it already". A boolean or a mesh whose
+  // next crossing genuinely lies ahead reports that distance and is unaffected.
+  auto entered_already = [](real_t tv) { return tv <= real_t(0); };
   auto better = [&](int v, real_t tv, int best_vol, real_t best_t) {
+    if (entered_already(tv)) { return false; }
     if (best_vol < 0 || tv < best_t - kNudge) { return true; }
     if (tv > best_t + kNudge) { return false; }
     return geom::volume_rank(geom::layer_hi_of(geometry, v), v)
@@ -435,13 +456,32 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
       int n_cov = 0;
       {
         // The lowest rank any cell here can have. A volume that cannot beat this cannot cover
-        // any cell of the grid, and for a uniform grid that is the whole test. Absent classes
-        // contribute no layer to this minimum, because they contribute no layer at all -
-        // G4Flatten computes the range over the classes that are present.
-        const long long lo_rank = geom::volume_rank(geom::layer_lo_of(geometry, best_vol),
-                                                    best_vol);
+        // any cell of the grid, and for a uniform grid that is the whole test.
+        //
+        // EXCEPT WHERE THE GRID HAS HOLES IN IT, and then every volume is a candidate. An
+        // absent cell is not the grid's at all, so a volume of ANY layer takes that space -
+        // including one below the grid's lowest class, which this rank would otherwise reject
+        // before it was ever considered. Reported as a volume overlapping a null voxel class
+        // not being drawn in the overlap region.
+        const long long lo_rank =
+            geometry.volumes[best_vol].has_absent_classes
+                ? (-9223372036854775807LL - 1)
+                : geom::volume_rank(geom::layer_lo_of(geometry, best_vol), best_vol);
         for (int v = 0; v < geometry.n_volumes; ++v) {
-          if (v == best_vol || !geom::could_outrank(geometry, v, lo_rank)) { continue; }
+          // NOT THE WORLD, and this is load-bearing rather than an optimisation. box_dist_in
+          // starts its tmin at zero and clamps, so from INSIDE a box it returns 0 - not
+          // infinity - and the world is a box the ray is always inside. Admit it and it enters
+          // this list at distance zero, outranks an absent cell (which ranks below everything),
+          // and the clamp below ends the march at the very first cell: nulling one class of a
+          // phantom deleted the whole phantom. That is what happened, and the check that
+          // caught it is the one asking whether the FAR class still responds to a recolour.
+          //
+          // It is also right on its own terms. The world contains everything by construction,
+          // so it can never take space away in front of a cell - which is what a cover is - and
+          // it is drawn as a wireframe outline rather than ray cast, so there is nothing of it
+          // to composite there anyway.
+          if (v == best_vol || v == geometry.world) { continue; }
+          if (!geom::could_outrank(geometry, v, lo_rank)) { continue; }
           const real_t t = entry_ahead(v, hit);
           if (t >= geom::kInfinity<real_t>()) { continue; }
           const long long r = geom::volume_rank(geom::layer_hi_of(geometry, v), v);
@@ -488,31 +528,28 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
           const int cell_layer =
               geom::voxel_cell_layer(geometry.voxels, grid, walk.Index(grid));
 
-          // A CELL THAT IS NOT THERE IS SKIPPED, AND THE MARCH GOES ON.
+          // A CELL THAT IS NOT THERE OWNS NOTHING, so anything at all takes its space.
           //
-          // Skipped, not "covered". Both leave it unpainted and only one of them is right:
-          // `covered` BREAKS the march - it means "a higher layer takes the space from here
-          // on, hand the ray back to the outer search" - so ending the walk at the first
-          // absent cell takes every cell behind it too. A phantom whose front class was nulled
-          // disappeared entirely, far side included. That is what absence-as-a-low-layer did
-          // all by itself, with no line of code saying so: the cell ranked below everything,
-          // the first candidate cover outranked it, and the clamp fired. Asked as "is this
-          // cell there" instead, it cannot happen.
-          if (geom::voxel_cell_absent(geometry.voxels, grid, walk.Index(grid))) {
-            more = walk.Next(grid);
-            if (more) {
-              Vec3<real_t> ln{real_t(0), real_t(0), real_t(0)};
-              const real_t sgn = (walk.step[walk.axis] > 0) ? real_t(-1) : real_t(1);
-              if (walk.axis == 0) { ln.x = sgn; }
-              else if (walk.axis == 1) { ln.y = sgn; }
-              else { ln.z = sgn; }
-              face_n = geom::dir_to_global(vol.xform, ln);
-            }
-            continue;
-          }
-
-          const long long cell_rank = geom::volume_rank(
-              (cell_layer == geom::kNoClassLayer) ? vol.layer : cell_layer, best_vol);
+          // Its rank is the lowest a signed 64-bit number holds, which makes every candidate
+          // cover outrank it and the clamp below fire at whichever starts nearest. That is what
+          // hands the space to a volume sitting in the hole - reported as a volume overlapping
+          // a null voxel class not being drawn where they overlap. Skipping the clamp and
+          // walking on, which is what this did first, marches straight past that volume and
+          // resumes the outer search beyond the whole grid, where it can never be found: the
+          // grid is not re-enterable from inside itself.
+          //
+          // It is NOT "covered" on its own account, though. `covered` breaks the march, and
+          // ending the walk at the first absent cell with nothing in the hole would take every
+          // cell behind it too - a phantom whose front class was nulled would disappear
+          // entirely, far side included, which is what absence-as-a-low-layer did by itself.
+          // So the rank is the lowest and the clamp decides: something in the hole stops the
+          // march there, and an empty hole does not stop it at all.
+          const bool gone = geom::voxel_cell_absent(geometry.voxels, grid, walk.Index(grid));
+          const long long cell_rank =
+              gone ? (-9223372036854775807LL - 1)
+                   : geom::volume_rank((cell_layer == geom::kNoClassLayer) ? vol.layer
+                                                                          : cell_layer,
+                                       best_vol);
           real_t t_own = geom::kInfinity<real_t>();
           for (int k = 0; k < n_cov; ++k) {
             if (cov_rank[k] > cell_rank && cov_t[k] < t_own) { t_own = cov_t[k]; }
@@ -537,8 +574,9 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
             break;
           }
           const int idx = walk.Index(grid);
-          // Null cells never reach here; they were skipped above, before the clamp.
-          if (idx >= 0 && idx < geometry.voxels.count) {
+          // An absent cell reaches here - it has to, so the clamp above can see it - and this
+          // is where it stops: not part of the volume, so nothing of it is painted.
+          if (!gone && idx >= 0 && idx < geometry.voxels.count) {
             const int cls = static_cast<int>(voxel_class[idx]);
             if (cls >= 0 && cls < ccount) {
               const unsigned int rgba = class_rgba[cbase + cls];

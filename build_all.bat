@@ -450,6 +450,37 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the world's layer is confirmed.
   exit /b 1
 )
+rem A VOLUME IN A NULL CLASS'S SPACE IS DRAWN THERE, and hidden again when the class is back.
+rem
+rem Reported: a volume on a non-null layer overlapping a voxel class set to null was not drawn
+rem in the overlap region. It drew as a HOLE in the shape of that volume, which is the tell -
+rem box_dist_in returns exactly 0 from inside a box, so the search re-found the grid the walk
+rem was standing in, and on a tie it preferred the higher layer. A volume on a LOWER layer
+rem inside a grid - which is what a null class makes possible - therefore lost the tie to the
+rem grid, which was re-entered and clamped at that volume again until the layer cap.
+rem
+rem The second line is the other half of the rule: with the class present the grid outranks the
+rem box and hides it. Without it, "drawn in the hole" would pass on a renderer that had stopped
+rem honouring layers at all.
+findstr /C:"a volume overlapping a null voxel class is drawn in the overlap" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove a volume in a null class is drawn.
+  exit /b 1
+)
+findstr /C:"hidden again when the class is put back" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the grid still hides it when present.
+  exit /b 1
+)
+rem AND THE WIREFRAME PASS RUNS. The builder never launched one: its styles said
+rem `solid = visible && !wireframe`, which is right, and nothing drew the edges - so a volume
+rem set to wireframe was invisible, and the default world arrives with wireframe on and had no
+rem outline at all.
+findstr /C:"the wireframe pass draws edges" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove the wireframe pass draws anything.
+  exit /b 1
+)
 rem ANTI-ALIASING puts partial coverage where a surface ends, and nowhere else.
 rem
 rem One ray per pixel makes a silhouette a staircase: the pixel is the surface or it is not, so

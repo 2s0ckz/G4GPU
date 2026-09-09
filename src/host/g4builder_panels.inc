@@ -2550,10 +2550,32 @@ static void InsertSelftestNullLayer(App& a) {
   }
   a.model.AddSolid(g);
 
+  // AND A BOX INSIDE THE GRID'S NEAR HALF, which is the class the checks null.
+  //
+  // On a LOWER layer than the grid, deliberately: while a class is present the grid owns that
+  // space and the box is correctly hidden, and when the class is null the box has to appear -
+  // it is not that it outranks anything, it is that nothing is there any more. A box on a
+  // lower layer is also the case the cover scan used to reject before it was ever considered,
+  // which is what made a volume overlapping a null class invisible.
+  Solid h;
+  h.shape = Shape::kBox;
+  h.name = "InHole";
+  h.p[0] = h.p[1] = h.p[2] = 8.0;
+  h.pos[0] = 0;
+  h.pos[1] = 400;
+  h.pos[2] = 15;          // inside z 0..30, the +z half, which is class 0
+  h.layer = 2;            // below the grid's 4
+  h.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  h.r = 0.15f;
+  h.g = 0.95f;
+  h.b = 0.55f;
+  h.opacity = 1.0f;
+  a.model.AddSolid(h);
+
   a.model.Touch();
   a.scene_dirty = true;
-  Log("selftest: added one opaque box on layer 5 and an 8^3 grid with nothing over it, for "
-      "the null layer to remove");
+  Log("selftest: added one opaque box on layer 5, an 8^3 grid with nothing over it, and a box "
+      "inside the grid's near half, for the null layer to remove");
 }
 
 /// A volume put on the WORLD'S layer clashes with the world, and the run is refused.
