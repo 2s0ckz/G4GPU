@@ -338,7 +338,13 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     // If a higher layer covers this region, the answer is no, and the surface is not there as
     // far as the transport is concerned - so it is not drawn either. The search then carries
     // on from just inside, which finds the covering volume's own surface next.
-    if (geom::locate(geometry, hit + kNudge * dir) != best_vol) { continue; }
+    //
+    // NOT `locate(...) == best_vol`, though that is the same answer. The walk has just crossed
+    // into this volume, so its containment is already known - and asking a mesh again is a
+    // mesh_inside parity count, the one traversal the nearest-hit walk exists to avoid. It was
+    // being paid once per composited layer, which an opaque volume hides (the walk stops at
+    // its first surface) and a translucent one does not. See geom::owns_contained_point.
+    if (!geom::owns_contained_point(geometry, best_vol, hit + kNudge * dir)) { continue; }
 
     const Vec3<real_t> local_dir = geom::dir_to_local(vol.xform, dir);
     const Vec3<real_t> hit_local = geom::to_local(vol.xform, hit);

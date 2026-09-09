@@ -140,6 +140,52 @@ __host__ __device__ inline int locate(const Geometry<real_t>& g, const Vec3<real
   return best;
 }
 
+/// True if volume @p i owns @p p, GIVEN THAT IT CONTAINS IT.
+///
+/// The same question as `locate(g, p) == i` restricted to a point already known to be inside
+/// volume i - locate returns the highest-ranked volume containing the point, and this one
+/// contains it, so locate returns something else exactly when something that outranks it
+/// contains the point too.
+///
+/// It exists separately because locate also asks volume i whether it contains the point, and
+/// for a mesh that is mesh_inside: a parity count, which has no best-so-far to reject a
+/// subtree against and so visits every leaf along the ray. It is the expensive traversal that
+/// the renderer's nearest-hit walk exists to avoid, and the renderer already knows the answer -
+/// it just crossed the surface into the volume.
+///
+/// An OPAQUE volume hid the cost: the front-to-back walk stops at its first surface, so there
+/// was one layer and one parity count. A TRANSLUCENT one does not stop, so a ray crossing
+/// eight surfaces of a CAD import paid eight.
+///
+/// In a scene where nothing outranks the volume being asked about - one imported part in a
+/// world, the common case - this does no containment tests at all.
+///
+/// @pre inside_volume(g, i, p)
+template <typename real_t>
+__host__ __device__ inline bool owns_contained_point(const Geometry<real_t>& g, int i,
+                                                     const Vec3<real_t>& p) {
+  // Outside the world is owned by nothing, which is locate's first answer as well. Without
+  // this a volume poking out through the world face would draw the part that is not there.
+  if (!inside_volume(g, g.world, p)) { return false; }
+  // Per POINT, not per volume - on BOTH sides. A grid's class decides its rank, and the whole
+  // point of per-class layers is that the answer differs cell to cell.
+  const long long own = volume_rank_at(g, i, p);
+  for (int v = 0; v < g.n_volumes; ++v) {
+    // could_outrank is the cheap rejection and it has to be conservative: it uses the
+    // candidate's HIGHEST layer, so a grid whose bone class outranks everything and whose air
+    // class outranks nothing cannot be dismissed on one number. For every ordinary volume
+    // layer_hi == layer_lo and this is exact, which is why a mesh costs one comparison here.
+    if (v == i || !could_outrank(g, v, own)) { continue; }
+    if (!inside_volume(g, v, p)) { continue; }
+    // AND THEN THE RANK AT THE POINT, which is the half that conservative rejection cannot
+    // supply. Skipping it says a grid covers whatever its top class could cover: a box
+    // coincident with a phantom lost its surface inside every air cell, because air is in the
+    // same volume as bone. locate does this comparison too, after the same rejection.
+    if (volume_rank_at(g, v, p) > own) { return false; }
+  }
+  return true;
+}
+
 /// True if entering volume @p i would take ownership away from volume @p cur.
 ///
 /// Layers only, no point: for two ordinary volumes that is the whole answer, and for anything

@@ -1252,10 +1252,19 @@ int main(int argc, char** argv) {
   /// milliseconds per frame. A performance claim about the viewer needs a number from the
   /// viewer, not from a micro-benchmark of one function.
   int bench_mesh = 0;
+  double bench_opacity = 1.0;
+  int bench_shells = 1;
   std::string open_path;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-benchmesh") == 0) {
       bench_mesh = (i + 1 < argc) ? std::atoi(argv[i + 1]) : 200000;
+      // An optional second number: the opacity to place it at. A translucent volume does not
+      // let the front-to-back walk stop at its first surface, so it is a different
+      // measurement and it is the one a report about a slow GUI turned out to be about.
+      if (i + 2 < argc && argv[i + 2][0] != '-') { bench_opacity = std::atof(argv[i + 2]); }
+      // And a third: how many concentric shells the one mesh holds, which is how many
+      // surfaces a ray crosses. See InsertBenchMesh for why one sphere is not representative.
+      if (i + 3 < argc && argv[i + 3][0] != '-') { bench_shells = std::atoi(argv[i + 3]); }
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
@@ -1365,7 +1374,7 @@ int main(int argc, char** argv) {
         // The generator lands on the next whole UV sphere, so what it built is what gets
         // reported - quoting the request would put a number in the log that is not the number
         // that was rendered.
-        bench_actual = InsertBenchMesh(a, bench_mesh, 60.0);
+        bench_actual = InsertBenchMesh(a, bench_mesh, 60.0, bench_opacity, bench_shells);
         a.scene_dirty = true;
       }
       if (frame == 6) {
@@ -1398,9 +1407,10 @@ int main(int argc, char** argv) {
         // in the message loop waiting for a frame count it will never reach. This is a batch
         // mode; it has no window anyone is watching.
         if (t_n > 40 || frame > 200) {
-          std::printf("benchmesh: %d triangles, %.2f ms per frame (%.1f fps) at %dx%d\n",
-                      bench_actual, t_sum / (t_n - 1), 1000.0 * (t_n - 1) / t_sum, a.width,
-                      a.height);
+          std::printf("benchmesh: %d triangles, opacity %.2f, %d shells, %.2f ms per frame "
+                      "(%.1f fps) at %dx%d\n",
+                      bench_actual, bench_opacity, bench_shells, t_sum / (t_n - 1),
+                      1000.0 * (t_n - 1) / t_sum, a.width, a.height);
           if (a.t_frames > 0) {
             const double n = a.t_frames;
             std::printf("  per frame: cuda %.2f ms, readback %.2f ms, ui %.2f ms, "

@@ -3309,3 +3309,84 @@ spare alpha byte. Worth noting: three resolve kernels had the same arithmetic an
 on-screen one was fixed at first, so the two used for offscreen export would have written a
 different picture from the one on screen. They share one function now.
 
+
+### V26: a cheaper equivalent that was not equivalent, and the assertion that said so first run
+
+"The speed thing is still a problem for large CAD files. Particularly when opacity is set to
+anything less than 100." The word that mattered was `opacity`.
+
+The render walks surfaces front to back and stops accumulating at 99.5% coverage, so an OPAQUE
+volume ends the walk at its first surface: one surface, one ownership test. A TRANSLUCENT one
+does not end it, so the walk runs up to `kMaxLayers` = 8 surfaces and pays the ownership test
+eight times. And the ownership test was `locate(hit + nudge * dir) == best_vol`, which asks every
+volume - including this one - whether it contains the point. For a mesh that is `mesh_inside`: a
+parity count, which unlike a nearest-hit walk has no best-so-far to reject a subtree against and
+so visits every leaf along the ray. It is the one traversal the whole BVH fast path exists to
+avoid, and it was being paid per composited layer.
+
+The renderer already knows the answer to the part that costs: its walk just crossed the surface
+INTO the volume, so containment is established. What it actually needs is "does anything that
+outranks this volume contain this point", with the volume's own test left out - `locate` restricted
+to a point already known to be inside.
+
+#### The half of the comparison that got left behind
+
+`locate` does two things per candidate, and the replacement copied one of them:
+
+    if (volume_rank(layer_hi_of(g, i), i) < best_rank) { continue; }   // cheap rejection
+    if (!inside_volume(g, i, p)) { continue; }
+    const long long rank = volume_rank_at(g, i, p);                    // and then AT THE POINT
+    if (rank < best_rank) { continue; }
+
+`layer_hi_of` is the candidate's HIGHEST possible layer, and it has to be: a phantom whose bone
+class outranks everything and whose air class outranks nothing cannot be dismissed on one number.
+That makes it right for rejection and wrong for acceptance, which is why `locate` follows it with
+`volume_rank_at`. The replacement kept the rejection and dropped the comparison, so it read "a
+grid covers whatever its top class could cover". A box coincident with a phantom lost its surface
+inside every AIR cell, because air is in the same volume as bone.
+
+This is V24's pattern for the third time: a rule that is per-point applied on one side of a
+comparison and left behind on the other.
+
+#### What found it, and what would not have
+
+The equivalence was asserted rather than argued: over a jittered lattice, for EVERY volume
+containing each point - which is the helper's precondition - owning the point and being what
+`locate` returns must be the same thing. 528 of 6295 (point, containing volume) pairs disagreed,
+on the first run, before any measurement was taken.
+
+Nothing else in the suite would have caught it. `-benchmesh` builds one mesh in a world and has no
+voxel grid. The coincident-face selftest is two boxes, and also has no grid. Both would have
+passed, and the picture would have been wrong only for the one scene the feature was added for:
+an object on the same layer as one class of a phantom.
+
+The lesson is about how to choose the scene. When a function is replaced by a cheaper one CLAIMED
+to be equivalent, assert the equivalence - and pick the scene by asking what could make the two
+differ. Here the difference is a volume whose rank varies point to point, so the scene has to
+contain one. A scene without one agrees for the wrong reason and says nothing.
+
+#### What it was worth
+
+Paired, two reps per arm in one session, `-benchmesh 1600000 <opacity> <shells>` - 3.2 million
+triangles at 1680x960, the only difference between the arms being that one line:
+
+```
+                              locate()          owns_contained_point()      ratio
+  opacity 1.00, 5 shells    12.92 12.09 ms          5.74  5.65 ms           2.20x
+  opacity 0.40, 5 shells    81.92 82.18 ms         20.68 19.08 ms           4.13x
+  opacity 0.40, 1 shell     27.00 28.95 ms         11.94 11.37 ms           2.40x
+```
+
+86.4 ms per frame to 24.2 ms on the case that was reported: 11.6 fps to 41.3. Within-arm spread
+is 0.3% to 8%, so the ratios are well clear of it - which is the only reason two reps were run,
+per V10 and V21.
+
+The OPAQUE row was not predicted. An opaque volume ends the walk at its first surface, so the
+saving was expected to be one parity count out of one - and it is, and one out of one is still
+2.2x, because a `mesh_inside` over 3.2 million triangles is most of what the pixel costs.
+
+What is NOT fixed: each composited surface restarts the whole search from a new origin, so a
+five-shell mesh does eight separate BVH nearest-hit descents per pixel. A multi-hit traversal
+collecting the first N hits in one descent would replace eight with one, and it is a larger win
+than this. It is also a restructuring of the search rather than a fix to it, which is why it is
+recorded here rather than attempted alongside.

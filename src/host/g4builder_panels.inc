@@ -2424,31 +2424,49 @@ static void InsertSelftestCoveredVoxels(App& a) {
 ///
 /// Binary STL rather than ASCII: a 200,000-triangle ASCII file is 40 MB of text and the point
 /// here is to measure the render, not the parser.
-static int InsertBenchMesh(App& a, int want, double radius) {
+/// @param opacity  what to place the mesh at. Anything under 1 stops the front-to-back walk
+///        from terminating at the first surface, which is a different cost entirely - see
+///        -benchmesh, which times both.
+/// @param shells   how many concentric shells to write into the one mesh.
+///
+/// One shell is a sphere, and a ray crosses a sphere twice - so the walk runs out of surfaces
+/// after two layers whatever the opacity is, and a benchmark built on one UNDERSTATES a
+/// translucent import by a factor of four. A real CAD part is not a sphere: an assembly, a
+/// housing, a body panel with ribs behind it all present many surfaces along one ray, and it is
+/// the number of surfaces the walk composites that decides what a translucent volume costs.
+/// Nested shells are the shortest way to say "many surfaces along every ray" and they stay one
+/// volume, which is what an import is.
+static int InsertBenchMesh(App& a, int want, double radius, double opacity = 1.0,
+                           int shells = 1) {
   const char* path = "D:/g4gpu/out/benchmesh.stl";
+  if (shells < 1) { shells = 1; }
   int bands = 4;
-  while (2 * bands * bands < want) { ++bands; }
+  while (2 * bands * bands * shells < want) { ++bands; }
   const int nu = bands * 2, nv = bands;
   std::vector<float> tri;
-  tri.reserve(static_cast<std::size_t>(nu) * nv * 2 * 9);
+  tri.reserve(static_cast<std::size_t>(nu) * nv * 2 * 9 * shells);
+  double shell_r = radius;
   auto at = [&](int i, int j, double out[3]) {
     const double u = 2.0 * 3.14159265358979 * i / nu;
     const double v = 3.14159265358979 * j / nv;
-    out[0] = radius * std::sin(v) * std::cos(u);
-    out[1] = radius * std::sin(v) * std::sin(u);
-    out[2] = radius * std::cos(v);
+    out[0] = shell_r * std::sin(v) * std::cos(u);
+    out[1] = shell_r * std::sin(v) * std::sin(u);
+    out[2] = shell_r * std::cos(v);
   };
-  for (int j = 0; j < nv; ++j) {
-    for (int i = 0; i < nu; ++i) {
-      double p[4][3];
-      at(i, j, p[0]);
-      at(i + 1, j, p[1]);
-      at(i + 1, j + 1, p[2]);
-      at(i, j + 1, p[3]);
-      const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
-      for (const auto& q : idx) {
-        for (int k = 0; k < 3; ++k) {
-          for (int c = 0; c < 3; ++c) { tri.push_back(static_cast<float>(p[q[k]][c])); }
+  for (int sh = 0; sh < shells; ++sh) {
+    shell_r = radius * (1.0 - 0.7 * sh / static_cast<double>(shells));
+    for (int j = 0; j < nv; ++j) {
+      for (int i = 0; i < nu; ++i) {
+        double p[4][3];
+        at(i, j, p[0]);
+        at(i + 1, j, p[1]);
+        at(i + 1, j + 1, p[2]);
+        at(i, j + 1, p[3]);
+        const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+        for (const auto& q : idx) {
+          for (int k = 0; k < 3; ++k) {
+            for (int c = 0; c < 3; ++c) { tri.push_back(static_cast<float>(p[q[k]][c])); }
+          }
         }
       }
     }
@@ -2475,7 +2493,11 @@ static int InsertBenchMesh(App& a, int want, double radius) {
     Log("benchmesh: import failed");
     return 0;
   }
-  Log(Fmt("benchmesh: %u triangles", n_tri));
+  if (a.sel_solid >= 0 && a.sel_solid < static_cast<int>(a.model.solids.size())) {
+    a.model.solids[static_cast<std::size_t>(a.sel_solid)].opacity =
+        static_cast<float>(opacity);
+  }
+  Log(Fmt("benchmesh: %u triangles at opacity %.2f, %d shells", n_tri, opacity, shells));
   return static_cast<int>(n_tri);
 }
 

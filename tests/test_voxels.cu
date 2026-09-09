@@ -478,6 +478,63 @@ int main() {
       }
       check(owned_by_grid == 0, "with no per-class layers the box owns every cell, as before");
     }
+
+    // 5. THE RENDERER ASKS THE SAME QUESTION A CHEAPER WAY, AND MUST GET THE SAME ANSWER.
+    //
+    // owns_contained_point exists so the renderer does not call locate once per composited
+    // surface - locate would re-test the volume's own containment, which for a mesh is the
+    // parity count the nearest-hit walk exists to avoid. The saving is only allowed if the two
+    // agree, so that is asserted directly rather than argued: over a lattice, for EVERY volume
+    // containing each point (which is the helper's precondition), owning the point and being
+    // what locate returns are the same thing.
+    //
+    // This scene is the one that can tell them apart. A per-volume rank would put the grid at
+    // layer 1 everywhere, so the box on 3 would appear to cover the class-1 cells that in fact
+    // outrank it - the helper has to ask at the point, and asserting over the lattice is what
+    // says it does.
+    {
+      int checked = 0, disagree = 0;
+      unsigned seed = 20260908u;
+      auto jitter = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return real_t(seed >> 8) / real_t(1 << 24) - real_t(0.5);
+      };
+      for (int ix = -6; ix <= 6; ++ix) {
+        for (int iy = -6; iy <= 6; ++iy) {
+          for (int iz = -12; iz <= 12; ++iz) {
+            const Vec3<real_t> p{ix * real_t(20) + jitter() * real_t(3),
+                                 iy * real_t(20) + jitter() * real_t(3),
+                                 iz * real_t(10) + jitter() * real_t(3)};
+            const int owner = locate(g, p);
+            for (int v = 0; v < g.n_volumes; ++v) {
+              if (!inside_volume(g, v, p)) { continue; }   // the precondition
+              ++checked;
+              if (owns_contained_point(g, v, p) != (owner == v)) { ++disagree; }
+            }
+          }
+        }
+      }
+      printf("  %d (point, containing volume) pairs: %d disagree with locate\n", checked,
+             disagree);
+      check(checked > 3000, "the lattice reaches enough of the scene to be worth asserting");
+      check(disagree == 0, "owning a contained point and being what locate returns agree");
+    }
+
+    // AND OUTSIDE THE WORLD NOTHING OWNS ANYTHING, which is locate's first answer too. A
+    // volume poking out through the world face still has surfaces out there, and without the
+    // guard the renderer would draw them.
+    {
+      std::vector<Volume<real_t>> v3(vols);
+      v3[0].solid = {SolidType::kBox, {half, half, half}};        // world shrunk to the grid
+      v3[2].solid = {SolidType::kBox, {half, half, half}};        // and the box moved outside
+      v3[2].xform = make_translation<real_t>({0, 0, 2 * half});
+      Geometry<real_t> g3 = g;
+      g3.volumes = v3.data();
+      const Vec3<real_t> out{0, 0, half + 10};
+      check(inside_volume(g3, 2, out), "the probe point is inside the box");
+      check(locate(g3, out) == kOutsideWorld, "and outside the world, so locate owns nothing");
+      check(!owns_contained_point(g3, 2, out), "so the box does not own it either");
+    }
   }
 
   printf("\n%s (%d failures)\n", fails ? "FAILED" : "ALL PASS", fails);

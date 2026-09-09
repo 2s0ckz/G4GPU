@@ -225,6 +225,31 @@ with an empty scene too, and that is the half of the report that made it findabl
 against triangle count is what named the culprit: a cost that does not move when the geometry
 grows a hundredfold is not the geometry.
 
+
+### And a translucent volume is a different measurement entirely
+
+The four numbers above are all OPAQUE. The front-to-back walk stops accumulating at 99.5%
+coverage, so an opaque volume ends the walk at its first surface: one surface per pixel whatever
+is behind it. Set the opacity below 1 and the walk does not stop, and the cost is no longer
+about the triangle count at all - it is about **how many surfaces a ray crosses**:
+
+```
+  3,200,000 tri   opacity 1.00, 5 shells    cuda 12.92 ms    17.5 ms/frame   57 fps
+  3,200,000 tri   opacity 0.40, 5 shells    cuda 81.92 ms    86.3 ms/frame   12 fps
+```
+
+Same geometry, same camera, one number different - and 12 fps is the report: "particularly when
+opacity is set to anything less than 100, the GUI becomes super slow; hovering over a button
+that should change colour, it only changes about a full second later."
+
+Note what the benchmark had to change to see this. A sphere is crossed TWICE by any ray, so the
+walk runs out of surfaces after two layers whatever the opacity is, and a benchmark built on one
+understates a translucent import fourfold. `-benchmesh N opacity shells` writes concentric shells
+into the one mesh, because a real CAD part is not a sphere: an assembly, a housing, a panel with
+ribs behind it all present many surfaces along one ray. `kMaxLayers` = 8 in `render_geometry` is
+the cap on how many are composited - which is a limit on the PICTURE as well as the cost, since
+a translucent assembly with more than eight walls loses the ones past the eighth.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's
