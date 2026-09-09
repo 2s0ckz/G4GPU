@@ -3224,3 +3224,88 @@ this one had been read and reproduced rather than tested. And it surfaced becaus
 made to say something specific: "[class 1]" was wrong in a way "[the phantom]" could never have
 been. A message that names the thing it is about is a test that runs every time anyone looks.
 
+
+### V25: five reports, and the one that was flat against the thing it was blamed on
+
+Five things reported after the float render pass went in. Two were regressions it caused, two
+were older bugs it exposed, and one was not about the thing it looked like.
+
+#### The one worth the entry: a cost that did not move
+
+"The GUI slows down dramatically when I load a large CAD file, even for tasks that have nothing
+to do with rendering, like adding a new element." Then, unprompted: "even something like opening
+a dropdown menu, not even making any changes."
+
+That second sentence is the whole diagnosis. Adding an element rebuilds the scene, so a slow
+edit could be a slow rebuild; opening a dropdown changes nothing at all, so whatever is slow is
+PER FRAME. So the frame was split into its four parts and measured:
+
+```
+   triangles      cuda   readback     ui   present
+       4,096   5.82 ms   16.45 ms   2.80    1.13 ms
+     401,956  14.03 ms   16.38 ms   2.78    1.22 ms
+   1,607,824  31.32 ms   16.34 ms   2.81    1.16 ms
+```
+
+16.4 milliseconds of read-back, and IT DOES NOT MOVE. A cost that is identical at four thousand
+triangles and at one million six hundred thousand is not the geometry, whatever the report was
+about. It was a loop of `cudaMemcpy`, one per scanline: 960 calls, each carrying about ten
+microseconds of launch and synchronisation cost whatever it moves. Six megabytes the hardware
+copies in under a millisecond, charged 16 ms because it was asked 960 times.
+
+`cudaMemcpy2D` takes both pitches and does it once. 16.4 ms became 0.97 ms, and all three sizes
+went to 60.0 fps - vsync-limited rather than work-limited.
+
+Three lessons, in order of how much they were worth:
+
+* **the flat column is the answer.** Not the growing one. The instinct was to look at `cuda`,
+  which does grow with triangles and which had just been changed; the bug was in the column
+  that ignored the variable entirely.
+* **the second sentence of a report is often the diagnosis.** "Adding an element is slow" is
+  consistent with a dozen causes. "Opening a dropdown is slow" eliminates all but one class.
+* and the earlier float-vs-double benchmark was measured on frames that BOTH carried this
+  16.4 ms. The paired comparison was still valid as a frame-time comparison, and the ratio it
+  reported - 1.86 to 2.21x - understated the render pass itself. Subtracting the read-back from
+  both arms puts the render-only figure near 3.5x. Quoted here as an inference, because it is
+  one: the two were never measured with the read-back removed.
+
+#### The two the float pass caused
+
+Both were arithmetic assumptions that double had been carrying silently, and both appeared as
+missing pixels rather than as wrong ones - which is why they read as "artifacts".
+
+`b^2 - 4ac` for a 60 mm sphere seen from 1500 mm is 9.00e6 - 8.99e6 = 1.44e4. Three digits
+cancel; float has seven, so four are left. The root is about 0.004 mm out, `is_crossing_to`
+probes 0.001 mm either side of it, both probes land the same side of the surface, and the
+crossing is not seen. The hit rate is 100% at 200 mm, 47% at 1500 and 10% at 4000 - and the
+DEFAULT camera distance in the builder is 1500, which is why it read as "the sphere renders with
+speckle". Starting the ray at the solid's bounding sphere makes b and c both O(radius).
+
+The second was in the same file and older than the float pass: `quadric_inside` compared the raw
+quadric value against `kSurfTolerance`, which its own documentation calls a half-width in
+millimetres. An orb is written with gradient 120 per mm and an ellipsoid with 0.04, so one
+tolerance is a band 8e-7 mm wide on one and 2.5e-3 mm on the other - and the second is wider
+than the probe, so both sides of every crossing reported "on the surface" and the ellipsoid had
+no surfaces at all. `quadric_normal`, twenty lines above it, had always divided by the gradient
+and says in its own comment why. The containment test never did.
+
+What identified both without a debugger: the SHAPE of the failure against camera distance.
+Falling from 100% to 10% is a cancellation; 0.1% everywhere is a unit error. The test asserts
+the sweep rather than a single number, for that reason.
+
+#### And the two older ones
+
+Two coincident faces on different layers drew NEITHER. The search took whichever volume it found
+first at the nearest distance, the ownership test threw it away because the other owned the space
+behind it, and the next iteration started just inside both - where both are "already inside" and
+neither is entered again. The fix is a tie rule in the search; the test recolours the top box and
+requires the picture to change, which is what fails on the bug, and recolours the bottom one and
+requires it not to, which is what says the layer rule still applies.
+
+And a nearly transparent volume looked black. The geometry pass accumulates PREMULTIPLIED colour,
+so 3% opacity leaves 3% of the colour and nothing else; written out that is dark, when what it
+means is "3% of this and 97% of what is behind". The coverage now travels in the framebuffer's
+spare alpha byte. Worth noting: three resolve kernels had the same arithmetic and only the
+on-screen one was fixed at first, so the two used for offscreen export would have written a
+different picture from the one on screen. They share one function now.
+

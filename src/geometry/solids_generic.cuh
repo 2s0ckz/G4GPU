@@ -450,13 +450,44 @@ __host__ __device__ inline bool theta_ok(const QuadricShape<real_t>& q, const Ve
   if (r <= tol) { return true; }  // the origin is in every theta band
   return (v.z <= r * q.cos_lo + tol) && (v.z >= r * q.cos_hi - tol);
 }
+
+/// The quadric's residual AS A DISTANCE IN MILLIMETRES: |Q| / |grad Q| is the first-order
+/// distance to the surface Q = 0.
+///
+/// The tolerance a containment test compares against is a length - kSurfTolerance is
+/// documented as "half-width of the surface band, in mm" - so what it is compared to has to be
+/// one too, and a quadric's raw value is not. The scale depends on how the shape was written:
+///
+///   orb        x^2 + y^2 + z^2 - r^2      gradient 2r      = 120 per mm at r = 60
+///   ellipsoid  x^2/a^2 + ... - 1          gradient 2/c     = 0.04 per mm at c = 50
+///
+/// a factor of three thousand between two shapes in the same engine. So one fixed tolerance is
+/// a band 8e-7 mm wide on the orb and 2.5e-3 mm wide on the ellipsoid, and the second is WIDER
+/// THAN THE PROBE `is_crossing_to` steps by: both sides of a real crossing then report "on the
+/// surface", the crossing is not seen, and the ellipsoid became invisible. In float, where the
+/// tolerance is 1e-4; in double, where it is 1e-9, both bands sit far below the probe and
+/// nothing changed - which is why this went unnoticed until the render pass became float.
+///
+/// quadric_normal directly above has always divided by the gradient, for the same reason
+/// stated in its own comment. This is that division, in the test that decides what is solid.
+template <typename real_t>
+__host__ __device__ inline real_t quadric_residual(const Quadric<real_t>& s,
+                                                   const Vec3<real_t>& v) {
+  const real_t f = quadric_eval(s, v);
+  const Vec3<real_t> g = quadric_grad(s, v);
+  const real_t gl = sqrt(dot(g, g));
+  // At the centre of a sphere the gradient vanishes and the point is not near any surface;
+  // the raw value is signed correctly there, which is all this is asked for.
+  return (gl > kTolerance<real_t>()) ? f / gl : f;
+}
+
 template <typename real_t>
 __host__ __device__ inline bool quadric_inside(const QuadricShape<real_t>& q,
                                                const Vec3<real_t>& v) {
   const real_t tol = kSurfTolerance<real_t>();
   if (v.z < q.zmin - tol || v.z > q.zmax + tol) { return false; }
-  if (quadric_eval(q.outer, v) > tol) { return false; }
-  if (q.has_inner && quadric_eval(q.inner, v) < -tol) { return false; }
+  if (quadric_residual(q.outer, v) > tol) { return false; }
+  if (q.has_inner && quadric_residual(q.inner, v) < -tol) { return false; }
   if (!phi_ok(v.x, v.y, q.sphi, q.dphi)) { return false; }
   return theta_ok(q, v);
 }

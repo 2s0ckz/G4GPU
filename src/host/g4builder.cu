@@ -225,6 +225,17 @@ struct App {
   bool press_on_split = false;
   bool running = true;
   bool resized = true;
+  /// WHERE A FRAME'S TIME GOES, accumulated while -benchmesh is running and printed with the
+  /// frame rate.
+  ///
+  /// "The GUI is slow with a large CAD file, even opening a dropdown" is a claim about the
+  /// frame, and a frame is four things: the CUDA passes, the read-back of the rendered
+  /// viewport, the UI drawn on the CPU, and the GL upload and swap. A total tells you the
+  /// interaction is slow; the split tells you which one to fix. Zero cost when the flag is
+  /// off, which it is unless a benchmark asked.
+  bool time_phases = false;
+  double t_cuda = 0, t_readback = 0, t_ui = 0, t_present = 0;
+  int t_frames = 0;
 
   // camera
   float azimuth = 0.7f, elevation = 0.35f, distance = 1500.0f;
@@ -972,7 +983,17 @@ static vis::Palette CurrentPalette(const App& a) {
   return p;
 }
 
+/// Milliseconds from the performance counter, for the phase timers.
+static double NowMs() {
+  static LARGE_INTEGER freq{};
+  if (freq.QuadPart == 0) { QueryPerformanceFrequency(&freq); }
+  LARGE_INTEGER n{};
+  QueryPerformanceCounter(&n);
+  return 1000.0 * static_cast<double>(n.QuadPart) / static_cast<double>(freq.QuadPart);
+}
+
 static void DrawFrame(App& a) {
+  const double t0 = a.time_phases ? NowMs() : 0.0;
   if (a.resized) { AllocSurface(a); }
   // Every frame, because a splitter drag resizes the viewport without resizing the window.
   // It returns immediately when the size has not moved, so this costs a comparison.
@@ -1001,14 +1022,29 @@ static void DrawFrame(App& a) {
   vis::resolve_to_rgba<<<grid, block>>>(a.d_fb, a.d_rgba, w, h, pal);
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaGetLastError());
+  const double t1 = a.time_phases ? NowMs() : 0.0;
 
   // Background for the panels, then the render blitted into the viewport rectangle.
+  //
+  // ONE STRIDED COPY, NOT ONE PER ROW.
+  //
+  // This was a loop of cudaMemcpy, one per scanline. Each carries a fixed launch and
+  // synchronisation cost of order ten microseconds whatever it moves, so 960 rows cost about
+  // 16 ms - measured, and flat against triangle count, which is what gave it away. That is the
+  // whole of the frame budget at 60 Hz spent on a copy of six megabytes that the hardware does
+  // in under a millisecond, and it was charged to EVERY frame: opening a dropdown, typing in a
+  // field, moving the mouse. Reported as the GUI being slow with a large CAD file loaded, which
+  // it was - but it was slow with an empty scene too, and that is the part the report made
+  // findable.
+  //
+  // cudaMemcpy2D takes the two pitches and does it in one call. The viewport is a window into
+  // a wider host buffer, hence the destination pitch of the whole row.
   std::fill(a.host_rgba.begin(), a.host_rgba.end(), ui::theme::kPanel);
-  for (int y = 0; y < h; ++y) {
-    CUDA_CHECK(cudaMemcpy(&a.host_rgba[static_cast<size_t>(v.y + y) * a.width + v.x],
-                          a.d_rgba + static_cast<size_t>(y) * w, sizeof(unsigned int) * w,
-                          cudaMemcpyDeviceToHost));
-  }
+  CUDA_CHECK(cudaMemcpy2D(&a.host_rgba[static_cast<size_t>(v.y) * a.width + v.x],
+                          sizeof(unsigned int) * a.width, a.d_rgba, sizeof(unsigned int) * w,
+                          sizeof(unsigned int) * w, h, cudaMemcpyDeviceToHost));
+
+  const double t2 = a.time_phases ? NowMs() : 0.0;
 
   a.uic.Begin(a.host_rgba.data(), a.width, a.height, &a.font, &a.input);
   DrawGizmo(a);
@@ -1049,6 +1085,7 @@ static void DrawFrame(App& a) {
     }
   }
   a.uic.End();
+  const double t3 = a.time_phases ? NowMs() : 0.0;
 
   glViewport(0, 0, a.width, a.height);
   glBindTexture(GL_TEXTURE_2D, a.tex);
@@ -1068,6 +1105,14 @@ static void DrawFrame(App& a) {
   glEnd();
   glDisable(GL_TEXTURE_2D);
   SwapBuffers(a.hdc);
+  if (a.time_phases) {
+    const double t4 = NowMs();
+    a.t_cuda += t1 - t0;
+    a.t_readback += t2 - t1;
+    a.t_ui += t3 - t2;
+    a.t_present += t4 - t3;
+    ++a.t_frames;
+  }
   a.input.EndFrame();
 }
 
@@ -1214,7 +1259,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 62;
+      selftest_frames = 67;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -1331,6 +1376,9 @@ int main(int argc, char** argv) {
         a.elevation = 0.35f;
       }
       if (frame >= 9) {
+        // From here and not earlier: the frames before this built the scene, and a BVH over a
+        // million triangles charged to "cuda" would have said the render was the problem.
+        a.time_phases = true;
         static double t_sum = 0;
         static int t_n = 0;
         static LARGE_INTEGER freq{}, prev{};
@@ -1353,6 +1401,12 @@ int main(int argc, char** argv) {
           std::printf("benchmesh: %d triangles, %.2f ms per frame (%.1f fps) at %dx%d\n",
                       bench_actual, t_sum / (t_n - 1), 1000.0 * (t_n - 1) / t_sum, a.width,
                       a.height);
+          if (a.t_frames > 0) {
+            const double n = a.t_frames;
+            std::printf("  per frame: cuda %.2f ms, readback %.2f ms, ui %.2f ms, "
+                        "present %.2f ms\n",
+                        a.t_cuda / n, a.t_readback / n, a.t_ui / n, a.t_present / n);
+          }
           std::fflush(stdout);
           a.running = false;
         }
@@ -1879,6 +1933,50 @@ int main(int argc, char** argv) {
         }
         SaveFramePng(a, "D:/g4gpu/out/g4builder_class_layer_menu.png");
         a.uic.open_select = 0;
+      }
+      // COINCIDENT FACES: THE HIGHER LAYER IS DRAWN, THE LOWER ONE IS NOT.
+      //
+      // Two boxes in exactly the same place. Recolouring the one on top must change the
+      // picture and recolouring the one underneath must not - and before the fix NEITHER did,
+      // because the pixel drew nothing at all. So the first check is the one that fails on the
+      // bug and the second is what says the layer rule is still being applied rather than the
+      // pair simply being drawn in index order.
+      if (frame == 61) {
+        InsertSelftestCoincidentFaces(a);
+        a.target = vis::Vec3f{0.f, -250.f, 0.f};
+        a.distance = 200.f;
+        a.azimuth = 0.6f;
+        a.elevation = 0.3f;
+      }
+      static unsigned long long coinc_base = 0;
+      static unsigned long long coinc_under = 0;
+      if (frame == 62) {
+        coinc_base = ViewportChecksum(a);
+        RecolourSolid(a, "Underneath", 0.1f, 0.9f, 0.9f);
+      }
+      if (frame == 63) {
+        coinc_under = ViewportChecksum(a);
+        RecolourSolid(a, "Underneath", 0.9f, 0.2f, 0.2f);   // back as it was
+        RecolourSolid(a, "OnTop", 0.9f, 0.9f, 0.1f);
+      }
+      if (frame == 64) {
+        const unsigned long long coinc_top = ViewportChecksum(a);
+        if (coinc_top == coinc_base) {
+          std::printf("selftest: FAILED - recolouring the top one of two coincident faces "
+                      "changed nothing (%llu), so neither is being drawn\n", coinc_base);
+        } else if (coinc_under != coinc_base) {
+          std::printf("selftest: FAILED - recolouring the box UNDERNEATH two coincident faces "
+                      "changed the picture (%llu -> %llu), so the lower layer is winning\n",
+                      coinc_base, coinc_under);
+        } else {
+          std::printf("selftest: where two faces coincide the higher layer is drawn and the "
+                      "lower one is not\n");
+        }
+        RecolourSolid(a, "OnTop", 0.2f, 0.9f, 0.3f);
+        a.target = vis::Vec3f{95.f, 0.f, 0.f};
+        a.distance = 900.f;
+        a.azimuth = 0.9f;
+        a.elevation = 0.25f;
       }
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);

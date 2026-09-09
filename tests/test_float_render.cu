@@ -31,11 +31,15 @@
 // asserting a known limit of ray_triangle.
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <type_traits>
 #include <vector>
 
 #include "geometry/bvh_build.hh"
 #include "geometry/mesh.cuh"
+#include "geometry/safety.cuh"
 #include "render/float_geometry.cuh"
+#include "render/renderer.cuh"
 
 using namespace g4gpu;
 using namespace g4gpu::geom;
@@ -270,6 +274,200 @@ int main() {
     Check(missing == 0, "no ray that hits in double misses in float");
     Check(extra == 0, "and none that misses in double hits in float");
     Check(worst < 1e-2, "the two precisions put the surface in the same place, to 0.01 mm");
+  }
+
+  // ---- 5. A CURVED SOLID MUST NOT LOSE RAYS IN FLOAT, AT ANY CAMERA DISTANCE.
+  //
+  // Reported as "sphere and orb render with ray tracing artifacts, and I can't see the
+  // ellipsoid at all". Two causes, both float-only, both invisible in double:
+  //
+  //   * the generic engine solves a quadratic whose discriminant is b^2 - 4ac. For a 60 mm
+  //     sphere seen from 1500 mm that is 9.00e6 - 8.99e6 = 1.44e4 - two numbers agreeing to
+  //     three digits, which in float leaves four. The root lands about 0.004 mm out,
+  //     `is_crossing_to` probes 0.001 mm either side of it, both probes fall on the same side
+  //     of the surface, and the crossing is not seen. The renderer therefore starts the ray at
+  //     the solid's bounding sphere, where b and c are both O(radius) and nothing cancels.
+  //
+  //   * `quadric_inside` compared the raw quadric value against a tolerance that is a LENGTH.
+  //     An orb is written x^2+y^2+z^2-r^2, gradient 120 per mm at r=60; an ellipsoid is
+  //     written x^2/a^2+...-1, gradient 0.04 per mm. One tolerance is a band 8e-7 mm wide on
+  //     one and 2.5e-3 mm on the other - wider than the probe - so on the ellipsoid BOTH sides
+  //     of a crossing reported "on the surface" and it had no surfaces at all. The residual is
+  //     now divided by the gradient, which is what quadric_normal beside it always did.
+  //
+  // The shape of the failure is what identifies it, so the sweep is over DISTANCE: 100% at
+  // 200 mm, 47% at 1500 and 10% at 4000 is a cancelling discriminant, and 0.1% everywhere is a
+  // tolerance in the wrong units.
+  {
+    std::printf("\n  curved solids, rays kept in float against double:\n");
+    auto orb = [](auto tag) {
+      using T = decltype(tag);
+      Solid<T> s{};
+      s.type = SolidType::kOrb;
+      s.p[0] = T(60);
+      return s;
+    };
+    auto sphere = [](auto tag) {
+      using T = decltype(tag);
+      Solid<T> s{};
+      s.type = SolidType::kSphere;
+      s.p[0] = T(0); s.p[1] = T(60); s.p[3] = T(360); s.p[5] = T(180);
+      return s;
+    };
+    auto ellipsoid = [](auto tag) {
+      using T = decltype(tag);
+      Solid<T> s{};
+      s.type = SolidType::kEllipsoid;
+      s.p[0] = T(60); s.p[1] = T(40); s.p[2] = T(50);
+      s.p[3] = T(-50); s.p[4] = T(50);
+      return s;
+    };
+    auto tubs = [](auto tag) {
+      using T = decltype(tag);
+      Solid<T> s{};
+      s.type = SolidType::kTubs;
+      s.p[0] = T(0); s.p[1] = T(60); s.p[2] = T(60); s.p[4] = T(6.28318530718);
+      return s;
+    };
+
+    // The renderer's own rule, so this measures what it measures. See render_geometry.
+    auto hits = [](const auto& s, double cam, int n) {
+      using T = std::decay_t<decltype(s.p[0])>;
+      int hit = 0;
+      for (int i = 0; i < n; ++i) {
+        // Uniform over a disc well inside the silhouette, at the golden angle so the rays do
+        // not fall on any lattice the shape might have.
+        const double r = 30.0 * std::sqrt((i + 0.5) / n);
+        const double ang = 2.399963229 * i;
+        const double tx = r * std::cos(ang), ty = r * std::sin(ang);
+        const double L = std::sqrt(tx * tx + ty * ty + cam * cam);
+        const Vec3<T> o{T(0), T(0), T(-cam)};
+        const Vec3<T> d{T(tx / L), T(ty / L), T(cam / L)};
+        const T reach = bounding_radius(s);
+        T skip = T(0);
+        if (reach > T(0)) {
+          const T approach = -dot(o, d);
+          skip = approach - reach * T(1.01) - T(1);
+          if (skip < T(0)) { skip = T(0); }
+        }
+        if (dist_in(s, o + skip * d, d) < kInfinity<T>()) { ++hit; }
+      }
+      return hit;
+    };
+
+    constexpr int kRays = 1500;
+    int worst_kept = kRays;
+    const char* worst_shape = "";
+    double worst_cam = 0;
+    for (double cam : {200.0, 600.0, 1500.0, 4000.0}) {
+      const int od = hits(orb(0.0), cam, kRays), of = hits(orb(0.0f), cam, kRays);
+      const int sd = hits(sphere(0.0), cam, kRays), sf = hits(sphere(0.0f), cam, kRays);
+      const int ed = hits(ellipsoid(0.0), cam, kRays), ef = hits(ellipsoid(0.0f), cam, kRays);
+      const int td = hits(tubs(0.0), cam, kRays), tf = hits(tubs(0.0f), cam, kRays);
+      std::printf("    %6.0f mm   orb %d/%d   sphere %d/%d   ellipsoid %d/%d   tubs %d/%d\n",
+                  cam, of, od, sf, sd, ef, ed, tf, td);
+      // Every shape must be found by double at all, or the row proves nothing.
+      char buf[120];
+      std::snprintf(buf, sizeof buf, "at %.0f mm every curved solid is hit in double", cam);
+      Check(od == kRays && sd == kRays && ed == kRays && td == kRays, buf);
+      const int pairs[4][2] = {{of, od}, {sf, sd}, {ef, ed}, {tf, td}};
+      const char* names[4] = {"orb", "sphere", "ellipsoid", "tubs"};
+      for (int k = 0; k < 4; ++k) {
+        if (pairs[k][0] < worst_kept) {
+          worst_kept = pairs[k][0];
+          worst_shape = names[k];
+          worst_cam = cam;
+        }
+      }
+    }
+    std::printf("    worst: %s at %.0f mm kept %d of %d\n", worst_shape, worst_cam,
+                worst_kept, kRays);
+    // 99%, not 100%: a ray exactly tangent to a surface is a genuine coin flip at any
+    // precision, and the sweep is dense enough to find a few.
+    Check(worst_kept >= kRays * 99 / 100,
+          "float keeps at least 99% of the rays double finds, on every curved solid at every "
+          "camera distance");
+  }
+
+  // ---- 6. A NEARLY TRANSPARENT SURFACE IS MOSTLY THE BACKGROUND, NOT MOSTLY BLACK.
+  //
+  // Reported as "when opacity is set to a very low value it looks like the background is
+  // black, rather than whatever the viewer background is".
+  //
+  // The geometry pass accumulates PREMULTIPLIED colour: each surface adds
+  // `alpha * (1 - alpha_so_far) * colour`, so a volume at 3% opacity leaves 3% of its colour
+  // in the framebuffer and nothing else. That was written straight out - a very dark pixel -
+  // when what it means is 3% of the colour and 97% of what is behind it. The coverage now
+  // rides in the framebuffer's spare alpha byte and vis::resolve_pixel finishes the job.
+  //
+  // Checked as an identity rather than by eye: a surface at coverage a over background B must
+  // resolve to premultiplied + (1-a)B, which at a = 0 is B exactly and at a = 255 is the
+  // surface exactly. The two ends are what the report was about and what a picture cannot be
+  // asked precisely.
+  {
+    std::printf("\n  compositing a partly covering surface over the background:\n");
+    const vis::Palette pal{};
+    // A framebuffer word with a given low half. vis::pack_pixel is device-only - it uses
+    // __float_as_uint - and resolve_pixel only compares the whole word against kEmptyPixel
+    // and reads the low half, so any depth that is not all-ones will do.
+    auto pix = [](unsigned int rgba) {
+      return (0x40000000ull << 32) | static_cast<unsigned long long>(rgba);
+    };
+    const int py = 137, ph = 400;
+    int br = 0, bg = 0, bb = 0;
+    vis::background(py, ph, pal, br, bg, bb);
+    std::printf("    the background there is (%d %d %d)\n", br, bg, bb);
+    Check(br + bg + bb > 0, "the background is not black, or this test is about nothing");
+
+    // An empty pixel is the background, which is the case that already worked.
+    {
+      int r = -1, g = -1, b = -1;
+      vis::resolve_pixel(vis::kEmptyPixel, py, ph, pal, r, g, b);
+      Check(r == br && g == bg && b == bb, "an empty pixel is exactly the background");
+    }
+
+    // A fully opaque surface is exactly itself, whatever is behind.
+    {
+      const unsigned long long v = pix(vis::pack_rgba(200, 100, 50, 255));
+      int r = 0, g = 0, b = 0;
+      vis::resolve_pixel(v, py, ph, pal, r, g, b);
+      Check(r == 200 && g == 100 && b == 50, "an opaque surface is exactly its own colour");
+    }
+
+    // And the case that was wrong: 3% coverage of a bright colour. Premultiplied that is 3%
+    // of 255 = 7, which written out is nearly black; resolved it has to be within a step of
+    // the background.
+    {
+      const int a = 8;   // about 3%
+      const int pr = 255 * a / 255, pg = 255 * a / 255, pb = 255 * a / 255;
+      const unsigned long long v = pix(vis::pack_rgba(pr, pg, pb, a));
+      int r = 0, g = 0, b = 0;
+      vis::resolve_pixel(v, py, ph, pal, r, g, b);
+      std::printf("    3%% white resolves to (%d %d %d); premultiplied alone it is (%d %d %d)"
+                  "\n", r, g, b, pr, pg, pb);
+      // Nearer the background than the premultiplied colour is, on every channel.
+      const int d_bg = std::abs(r - br) + std::abs(g - bg) + std::abs(b - bb);
+      const int d_raw = std::abs(pr - br) + std::abs(pg - bg) + std::abs(pb - bb);
+      Check(d_bg < d_raw,
+            "a barely covering surface resolves nearer the background than its premultiplied "
+            "colour does");
+      Check(r >= br && g >= bg && b >= bb,
+            "and it lightens the background rather than darkening it");
+    }
+
+    // Zero coverage is the background exactly - the limit the report was standing at.
+    {
+      const unsigned long long v = pix(vis::pack_rgba(0, 0, 0, 0));
+      int r = 0, g = 0, b = 0;
+      vis::resolve_pixel(v, py, ph, pal, r, g, b);
+      Check(r == br && g == bg && b == bb,
+            "a surface covering none of the pixel leaves the background untouched");
+    }
+
+    // And every writer that is not the geometry pass is opaque, or a wireframe edge would
+    // fade into the background too.
+    Check((vis::pack_rgb(1, 2, 3) >> 24) == 255u,
+          "pack_rgb, which the edge and trajectory passes use, is opaque");
   }
 
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "ALL PASS", g_fails);

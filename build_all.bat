@@ -359,6 +359,14 @@ findstr /C:"it clears when the class moves off that layer" "%TEMP%\g4gpu_builder
   type "%TEMP%\g4gpu_builder.txt"
   exit /b 1
 )
+rem Two faces in exactly the same place, on different layers: the higher one has to be drawn.
+rem Neither was - the surface search took whichever it found first, the ownership test threw it
+rem away, and the next iteration was already inside both. A hole where two faces meet.
+findstr /C:"where two faces coincide" "%TEMP%\g4gpu_builder.txt" >nul || (
+  echo FATAL: the builder selftest did not prove that coincident faces draw the higher layer.
+  type "%TEMP%\g4gpu_builder.txt"
+  exit /b 1
+)
 findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_builder.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the builder selftest logged a failure.

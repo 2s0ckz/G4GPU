@@ -2215,6 +2215,40 @@ static void SelftestPhantomClassLayers(App& a) {
           "now belong to the box", p.voxel_classes[1].layer, cover.layer));
 }
 
+/// Two boxes in exactly the same place, on different layers.
+///
+/// The fixture for coincident faces. The layer model says the higher one owns every point they
+/// share, so the lower one is entirely invisible and the higher one is entirely visible - and
+/// the renderer used to draw NEITHER: the surface search took whichever it found first, the
+/// ownership test threw it away when the other one owned the space behind it, and the next
+/// iteration started just inside both, where both are "already inside" and neither is ever
+/// entered again. A hole where two faces meet.
+///
+/// Placed clear of the rest of the scene and on layers nothing else uses, so what it tests is
+/// the coincidence and not some other pair.
+static void InsertSelftestCoincidentFaces(App& a) {
+  const double half = 30.0;
+  const double px = 0, py = -250, pz = 0;
+  for (int k = 0; k < 2; ++k) {
+    Solid b;
+    b.shape = Shape::kBox;
+    b.name = (k == 0) ? "Underneath" : "OnTop";
+    b.p[0] = b.p[1] = b.p[2] = half;   // EXACTLY the same extent, not nearly
+    b.pos[0] = px;
+    b.pos[1] = py;
+    b.pos[2] = pz;
+    b.layer = (k == 0) ? 6 : 7;
+    b.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+    b.r = (k == 0) ? 0.9f : 0.2f;
+    b.g = (k == 0) ? 0.2f : 0.9f;
+    b.b = (k == 0) ? 0.2f : 0.3f;
+    a.model.AddSolid(b);
+  }
+  a.model.Touch();
+  a.scene_dirty = true;
+  Log("selftest: added two boxes in exactly the same place, on layers 6 and 7");
+}
+
 /// FNV-1a over the 3D viewport's pixels. For asking whether the PICTURE changed.
 ///
 /// The viewport only: the panels carry a log that grows on its own, and a checksum that

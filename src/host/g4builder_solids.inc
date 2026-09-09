@@ -122,8 +122,14 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     //
     // The list runs from 0 to a little above the highest layer anything in the model uses,
     // which is the range a layer is ever chosen from: you put a class just above or just
-    // below some other volume. Entry 0 is the volume's own, which is what every class has
-    // until someone says otherwise.
+    // below some other volume.
+    //
+    // JUST NUMBERS. There is no "inherits the volume's layer" entry, and there should not be
+    // one: a class inheriting layer 2 and a class explicitly on layer 2 mean the same thing
+    // and cost the same nothing, because build_scene compares the VALUES rather than who
+    // typed them. Two entries that read differently for one state is a distinction the user
+    // has to learn and cannot use. So a class with no layer of its own shows the volume's
+    // number, and picking that number is a no-op.
     {
       int top = s.layer;
       for (const Solid& o : a.model.solids) {
@@ -135,12 +141,16 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       top += 2;
       if (top > 40) { top = 40; }
       a.layer_opt_text.clear();
-      a.layer_opt_text.push_back(Fmt("vol (%d)", s.layer));
       for (int L = 0; L <= top; ++L) { a.layer_opt_text.push_back(Fmt("%d", L)); }
       a.layer_opt.clear();
       for (const std::string& t : a.layer_opt_text) { a.layer_opt.push_back(t.c_str()); }
     }
-    const int lay_w = 9 * a.font.glyph_w + 16;
+    // "Layer" and then the number. The label is per row rather than a column header because
+    // the list has no header row to put one in, and a bare number beside a material reads as
+    // part of the material.
+    const std::string lay_label = "Layer";
+    const int lay_label_w = static_cast<int>(lay_label.size()) * a.font.glyph_w + 6;
+    const int lay_w = 4 * a.font.glyph_w + 20;
 
     for (std::size_t k = 0; k < s.voxel_classes.size(); ++k) {
       const VoxelClass& vc = s.voxel_classes[k];
@@ -171,27 +181,23 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       // ListRow claims everything inside its own rectangle.
       const ui::Rect vfull{panel.x + 8 + arrow_w + 12 + eye_w, y,
                            w - 32 - arrow_w - eye_w, row};
-      const ui::Rect vrow{vfull.x, vfull.y, vfull.w - lay_w - 4, row};
+      const ui::Rect vrow{vfull.x, vfull.y, vfull.w - lay_w - lay_label_w - 4, row};
       const ui::Rect lrow{vfull.x + vfull.w - lay_w, vfull.y, lay_w, row};
+      c.canvas.Text(lrow.x - lay_label_w, y + (row - lh) / 2, lay_label, ui::theme::kTextDim);
 
       // ITS LAYER, next to its material, because that is where the question is asked. It was
       // in the colour pop-up behind the swatch first, which is two clicks away from the row
       // it belongs to and behind a control that says "colour".
       //
-      // Entry 0 is the volume's own layer. A class set to the volume's NUMBER rather than to
-      // entry 0 means the same thing and costs the same nothing - build_scene compares the
-      // values, not who typed them - so the menu does not have to be careful about which of
-      // the two it leaves behind.
-      int lsel = 0;
-      if (vc.layer != kInheritLayer) {
-        const int idx = vc.layer + 1;
-        lsel = (idx >= 1 && idx < static_cast<int>(a.layer_opt.size())) ? idx : 0;
-      }
+      // The EFFECTIVE layer: the class's own, or the volume's where it has none. Which is why
+      // the menu is only numbers - see the note above the option list.
+      const int eff = (vc.layer == kInheritLayer) ? s.layer : vc.layer;
+      int lsel = (eff >= 0 && eff < static_cast<int>(a.layer_opt.size())) ? eff : 0;
       if (ui::Select(c, kIdClassLayer + static_cast<int>(i) * kIdClassStride
                             + static_cast<int>(k),
                      lrow, lsel, a.layer_opt.data(),
                      static_cast<int>(a.layer_opt.size()))) {
-        s.voxel_classes[k].layer = (lsel == 0) ? kInheritLayer : (lsel - 1);
+        s.voxel_classes[k].layer = lsel;
         a.model.Touch();
         a.scene_dirty = true;
       }

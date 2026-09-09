@@ -12,6 +12,7 @@
 #include <cmath>
 #include "core/vec3.cuh"
 #include "geometry/navigator.cuh"
+#include "geometry/safety.cuh"
 #include "render/trajectory.cuh"
 
 namespace g4gpu::vis {
@@ -20,9 +21,24 @@ using Vec3f = Vec3<float>;
 
 // ---------------------------------------------------------------- packed framebuffer
 
-__host__ __device__ inline unsigned int pack_rgb(int r, int g, int b) {
-  return (static_cast<unsigned int>(r & 0xFF) << 16) |
+/// Colour and COVERAGE in the framebuffer's low word: 0xAARRGGBB.
+///
+/// The alpha byte was spare, and its absence is why a nearly transparent volume looked black.
+/// The geometry pass accumulates PREMULTIPLIED colour - each surface contributes
+/// `alpha * (1 - alpha_so_far) * colour` - so a volume at 3% opacity writes about 3% of its
+/// colour and nothing else. Written straight out that is a very dark pixel; what it MEANS is
+/// "3% of this colour and 97% of whatever is behind", and behind it is the viewer's gradient.
+/// So the coverage travels with the colour and the resolve pass finishes the compositing.
+__host__ __device__ inline unsigned int pack_rgba(int r, int g, int b, int a) {
+  return (static_cast<unsigned int>(a & 0xFF) << 24) |
+         (static_cast<unsigned int>(r & 0xFF) << 16) |
          (static_cast<unsigned int>(g & 0xFF) << 8) | static_cast<unsigned int>(b & 0xFF);
+}
+
+/// Opaque, which is what every caller but the geometry pass means: a wireframe edge and a
+/// trajectory segment are lines, not glass.
+__host__ __device__ inline unsigned int pack_rgb(int r, int g, int b) {
+  return pack_rgba(r, g, b, 255);
 }
 
 __device__ inline unsigned long long pack_pixel(float depth, unsigned int rgb) {
@@ -177,6 +193,24 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
   // two binaries differing only in this file, t = 0.43 on 4 dof. Removing this shortcut did
   // not reduce the spilling either, and __noinline__ on the ownership helpers made it worse,
   // because an ABI call forces the caller to save its live registers. See docs/RISK.md V22.
+  // TWO FACES IN THE SAME PLACE: THE ONE THAT OWNS THE SPACE IS THE ONE TO DRAW.
+  //
+  // The search used to take the first volume found at the nearest distance, and the ownership
+  // test below then threw it away if a higher layer owned the space behind it - which for two
+  // coincident faces is exactly what happens. The next iteration starts just inside both, so
+  // both are "already inside" and neither is entered again: the pixel drew nothing at all.
+  // Reported as two perfectly overlapping faces rendering as a hole, even on different layers.
+  //
+  // So among surfaces within a nudge of each other - the distance at which this loop already
+  // treats two surfaces as one - the higher-ranked volume wins. The rank used is the volume's
+  // highest possible one, because the hit point is not known yet; `locate` below still has the
+  // last word, so a grid whose class loses at that point behaves exactly as it did.
+  auto better = [&](int v, real_t tv, int best_vol, real_t best_t) {
+    if (best_vol < 0 || tv < best_t - kNudge) { return true; }
+    if (tv > best_t + kNudge) { return false; }
+    return geom::volume_rank(geom::layer_hi_of(geometry, v), v)
+           > geom::volume_rank(geom::layer_hi_of(geometry, best_vol), best_vol);
+  };
   auto entry_ahead = [&](int v, const Vec3<real_t>& p) {
     const auto& u = geometry.volumes[v];
     return geom::dist_in(geometry.store, u.solid, geom::to_local(u.xform, p),
@@ -218,8 +252,8 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
             geometry.store, vol.solid, geom::to_local(vol.xform, from),
             geom::dir_to_local(vol.xform, dir), geom::kSurfTolerance<real_t>(),
             geom::kInfinity<real_t>(), edge, &tri);
-        if (t < best_t) {
-          best_t = t;
+        if (t < geom::kInfinity<real_t>() && better(v, t, best_vol, best_t)) {
+          if (t < best_t) { best_t = t; }
           best_vol = v;
           best_tri = tri;
         }
@@ -247,20 +281,48 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
         const real_t t = geom::dist_out(geometry.store, cov.solid,
                                         geom::to_local(cov.xform, from),
                                         geom::dir_to_local(cov.xform, dir));
-        if (t < best_t) {
-          best_t = t;
+        if (t < geom::kInfinity<real_t>() && better(v, t, best_vol, best_t)) {
+          if (t < best_t) { best_t = t; }
           best_vol = v;
           best_tri = -1;
         }
         continue;
       }
+      // THE RAY STARTS NEAR THE SOLID, NOT AT THE CAMERA.
+      //
+      // The generic engine solves a quadratic in the ray parameter, and its discriminant is
+      // b^2 - 4ac. For a 60 mm sphere seen from 1500 mm that is 9.00e6 - 8.99e6 = 1.44e4: a
+      // difference of two numbers that agree to three digits, which in float leaves four. The
+      // root comes out about 0.004 mm wrong, `is_crossing_to` probes 0.001 mm either side of
+      // it, both probes land on the same side of the surface, no crossing is seen, and the
+      // pixel draws nothing. Measured: an orb keeps 100% of its rays at 200 mm, 47% at 1500
+      // and 10% at 4000 - which is what "the sphere renders with speckle" was.
+      //
+      // Moving the origin to the solid's bounding sphere makes b and c both O(radius), so
+      // nothing cancels and the hit rate stops depending on where the camera is. The skip is
+      // sound because no surface of the solid lies before the bounding sphere; where no bound
+      // is known - a box, a boolean, a grid - bounding_radius returns 0, and those shapes have
+      // closed forms or flat faces and were never affected.
+      //
+      // A picture's arithmetic, not the transport's: the transport is double, where the same
+      // discriminant keeps twelve digits.
+      const Vec3<real_t> ql = geom::to_local(vol.xform, from);
+      const Vec3<real_t> dl = geom::dir_to_local(vol.xform, dir);
+      const real_t reach = geom::bounding_radius(vol.solid);
+      real_t skip = real_t(0);
+      if (reach > real_t(0)) {
+        // The closest the ray comes to the solid's own origin, less the bound. Never negative:
+        // a ray already inside the bounding sphere starts where it is.
+        const real_t approach = -dot(ql, dl);
+        skip = approach - reach * real_t(1.01) - real_t(1);
+        if (skip < real_t(0)) { skip = real_t(0); }
+      }
       // geometry.store, not the store-free overload. That overload passes an empty SolidStore,
       // whose `solids`, `aux`, `tri` and `bvh` are all null - so a boolean operand lookup
       // dereferences null and a mesh finds no triangles.
-      const real_t t = geom::dist_in(geometry.store, vol.solid, geom::to_local(vol.xform, from),
-                                     geom::dir_to_local(vol.xform, dir));
-      if (t < best_t) {
-        best_t = t;
+      const real_t t = geom::dist_in(geometry.store, vol.solid, ql + skip * dl, dl);
+      if (t < geom::kInfinity<real_t>() && better(v, skip + t, best_vol, best_t)) {
+        if (skip + t < best_t) { best_t = skip + t; }
         best_vol = v;
         best_tri = -1;
       }
@@ -563,7 +625,12 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
     const int ir = static_cast<int>(acc_r);
     const int ig = static_cast<int>(acc_g);
     const int ib = static_cast<int>(acc_b);
-    value = pack_pixel(first_t, pack_rgb(ir, ig, ib));
+    // The coverage as well as the colour. See pack_rgba: what is accumulated is premultiplied,
+    // so the resolve pass has to know how much of the pixel it covers to put the background
+    // behind the rest of it.
+    int ia = static_cast<int>(acc_a * 255.0f + 0.5f);
+    if (ia > 255) { ia = 255; }
+    value = pack_pixel(first_t, pack_rgba(ir, ig, ib, ia));
   }
   fb[py * cam.width + px] = value;
 }
@@ -656,8 +723,8 @@ __global__ void render_edges(const float* ex0, const float* ey0, const float* ez
 
 /// Background colour for pixels no surface or line reached: a vertical gradient between the
 /// palette's two ends, so the image does not read as flat black and the user can change it.
-__device__ inline void background(int py, int height, const Palette& pal, int& r, int& g,
-                                  int& b) {
+__host__ __device__ inline void background(int py, int height, const Palette& pal, int& r,
+                                          int& g, int& b) {
   const float t = static_cast<float>(py) / static_cast<float>(height > 0 ? height : 1);
   const int r0 = (pal.bg_top >> 16) & 0xFF, g0 = (pal.bg_top >> 8) & 0xFF;
   const int b0 = pal.bg_top & 0xFF;
@@ -669,22 +736,48 @@ __device__ inline void background(int py, int height, const Palette& pal, int& r
 }
 
 /// Unpacks to top-down 24-bit RGB, the layout write_png_rgb expects.
+/// One pixel of the framebuffer, finished: the accumulated colour over the background.
+///
+/// THE COLOUR IN THE FRAMEBUFFER IS PREMULTIPLIED AND MAY COVER ONLY PART OF THE PIXEL. The
+/// geometry pass adds `alpha * (1 - alpha_so_far) * colour` per surface, so a volume at 3%
+/// opacity leaves 3% of its colour there and nothing else. Written out as-is that is a nearly
+/// black pixel, which is what "a very low opacity looks like a black background" was. What it
+/// means is 3% of the colour and 97% of whatever is behind, and behind it is the viewer's
+/// gradient - so the rest of the pixel is filled in here.
+///
+/// One function rather than the same arithmetic in three kernels, because the three had already
+/// drifted: only one of them was fixed first time round, and the two used for offscreen export
+/// would have written a different picture from the one on screen.
+__host__ __device__ inline void resolve_pixel(unsigned long long v, int py, int height,
+                                              const Palette& pal, int& r, int& g, int& b) {
+  if (v == kEmptyPixel) {
+    background(py, height, pal, r, g, b);
+    return;
+  }
+  const unsigned int rgba = static_cast<unsigned int>(v & 0xFFFFFFFFull);
+  r = (rgba >> 16) & 0xFF;
+  g = (rgba >> 8) & 0xFF;
+  b = rgba & 0xFF;
+  const int a = static_cast<int>((rgba >> 24) & 0xFFu);
+  if (a >= 255) { return; }
+  int br, bg, bb;
+  background(py, height, pal, br, bg, bb);
+  r += br * (255 - a) / 255;
+  g += bg * (255 - a) / 255;
+  b += bb * (255 - a) / 255;
+  if (r > 255) { r = 255; }
+  if (g > 255) { g = 255; }
+  if (b > 255) { b = 255; }
+}
+
 __global__ void resolve_to_rgb(const unsigned long long* fb, unsigned char* rgb_out, int width,
                                int height, Palette pal = Palette{}) {
   const int px = blockIdx.x * blockDim.x + threadIdx.x;
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
-  const unsigned long long v = fb[py * width + px];
   int r, g, b;
-  if (v == kEmptyPixel) {
-    background(py, height, pal, r, g, b);
-  } else {
-    const unsigned int rgb = static_cast<unsigned int>(v & 0xFFFFFFFFull);
-    r = (rgb >> 16) & 0xFF;
-    g = (rgb >> 8) & 0xFF;
-    b = rgb & 0xFF;
-  }
+  resolve_pixel(fb[py * width + px], py, height, pal, r, g, b);
   unsigned char* p = rgb_out + (static_cast<size_t>(py) * width + px) * 3;
   p[0] = static_cast<unsigned char>(r);
   p[1] = static_cast<unsigned char>(g);
@@ -701,16 +794,8 @@ __global__ void resolve_to_rgba(const unsigned long long* fb, unsigned int* out,
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
-  const unsigned long long v = fb[py * width + px];
   int r, g, b;
-  if (v == kEmptyPixel) {
-    background(py, height, pal, r, g, b);
-  } else {
-    const unsigned int rgb = static_cast<unsigned int>(v & 0xFFFFFFFFull);
-    r = (rgb >> 16) & 0xFF;
-    g = (rgb >> 8) & 0xFF;
-    b = rgb & 0xFF;
-  }
+  resolve_pixel(fb[py * width + px], py, height, pal, r, g, b);
   out[static_cast<size_t>(py) * width + px] = 0xFF000000u
                                               | (static_cast<unsigned>(b) << 16)
                                               | (static_cast<unsigned>(g) << 8)
@@ -725,19 +810,8 @@ __global__ void resolve_to_bgr(const unsigned long long* fb, unsigned char* bgr,
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
-  const unsigned long long v = fb[py * width + px];
   int r, g, b;
-  if (v == kEmptyPixel) {
-    const float t = static_cast<float>(py) / static_cast<float>(height);
-    r = static_cast<int>(12 + 20 * t);
-    g = static_cast<int>(14 + 24 * t);
-    b = static_cast<int>(22 + 34 * t);
-  } else {
-    const unsigned int rgb = static_cast<unsigned int>(v & 0xFFFFFFFFull);
-    r = (rgb >> 16) & 0xFF;
-    g = (rgb >> 8) & 0xFF;
-    b = rgb & 0xFF;
-  }
+  resolve_pixel(fb[py * width + px], py, height, Palette{}, r, g, b);
   // BMP rows run bottom-up.
   const int row = height - 1 - py;
   unsigned char* p = bgr + (static_cast<size_t>(row) * width + px) * 3;

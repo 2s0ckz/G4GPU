@@ -147,6 +147,33 @@ the fixed controls use the low numbers. Two widgets sharing an id still draw and
 correctly on their own rectangles, so the symptom is not "the wrong button" but a rename
 typing into the wrong row, and nothing about that points at numbering.
 
+### Two faces in the same place
+
+The layer model gives every shared point to the higher layer, so of two coincident faces the
+higher one is entirely visible and the lower one entirely invisible. The renderer used to draw
+**neither**: the surface search took whichever volume it found first at the nearest distance,
+the ownership test threw it away because the other one owned the space behind it, and the next
+iteration started just inside both - where both are "already inside" and neither is ever
+entered again. A hole exactly where two faces meet.
+
+The search now prefers the higher-ranked volume among surfaces within one nudge of each other,
+which is the distance at which the walk already treats two surfaces as one. It uses the
+volume's highest possible rank, because the hit point is not known yet, and `locate` still has
+the last word - so a voxel grid whose class loses at that point behaves exactly as before.
+
+### A nearly transparent surface is mostly the background
+
+The geometry pass accumulates PREMULTIPLIED colour: each surface adds
+`alpha * (1 - alpha_so_far) * colour`. A volume at 3% opacity therefore leaves 3% of its colour
+in the framebuffer and nothing else, and writing that out is a nearly black pixel - reported as
+"a very low opacity looks like the background is black". What it means is 3% of the colour and
+97% of whatever is behind, and behind it is the viewer's gradient.
+
+The coverage now rides in the framebuffer word's spare alpha byte (`vis::pack_rgba`) and
+`vis::resolve_pixel` finishes the compositing. One function for all three resolve kernels,
+because the three had already drifted - only the on-screen one was fixed first, and the two
+used for offscreen export would have written a different picture from the one on screen.
+
 ### List rows are columns
 
 `ui::ListRow2` gives a row's two fields a fixed share of the width each, and ellipsizes both
@@ -168,6 +195,35 @@ overrides the angular shape and so would have a control that visibly does nothin
 normalises, so 0,0,2 and 0,0,1 are the same beam and the form shows the unit vector it will
 become. A zero direction falls back to +z in `G4ParticleGun::SetParticleMomentumDirection`
 rather than in the form, because a direction also arrives from a loaded project file.
+
+## Where a frame's time goes
+
+`-benchmesh N` reports it, because "the GUI is slow" is not a number and the four things a
+frame does have very different fixes:
+
+```
+   triangles      cuda   readback     ui   present     frame
+       4,096   4.91 ms    0.95 ms   2.73    8.08 ms   16.7 ms  (60.0 fps)
+     401,956   8.72 ms    1.03 ms   2.70    4.22 ms   16.7 ms  (60.0 fps)
+   1,607,824  11.60 ms    0.97 ms   2.74    1.32 ms   16.6 ms  (60.1 fps)
+```
+
+All three are at 60 fps because they are now VSYNC-limited rather than work-limited: `present`
+is SwapBuffers waiting for the refresh, and it shrinks as the render grows. The work is
+8.6 / 12.5 / 15.3 ms, all inside the 16.7 ms budget.
+
+**It was not.** The read-back of the rendered viewport into the host buffer was a loop of
+`cudaMemcpy`, one per scanline. Each carries a fixed launch and synchronisation cost of order
+ten microseconds whatever it moves, so 960 rows cost **16.4 ms - a flat cost, every frame,
+whatever was in the scene**. That is the entire frame budget spent on a six-megabyte copy the
+hardware does in under a millisecond, and it was charged to opening a dropdown as much as to
+orbiting the camera. `cudaMemcpy2D` takes the two pitches and does it in one call: 16.4 ms
+became 0.97 ms.
+
+Reported as the GUI slowing down with a large CAD file loaded, which it did - but it was slow
+with an empty scene too, and that is the half of the report that made it findable. The flatness
+against triangle count is what named the culprit: a cost that does not move when the geometry
+grows a hundredfold is not the geometry.
 
 ## The control bar
 
@@ -269,6 +325,30 @@ The voxel arrays are shared rather than copied - cells are shorts, class layers 
 
 **What it costs in the picture**: the viewer's selftest counts the pixels solid geometry
 covers, and it moved from 57768 to 57766. Two pixels of silhouette in fifty-seven thousand.
+
+**And what it cost before it was measured properly.** Float exposed two arithmetic assumptions
+that double had been carrying, and both showed up as missing pixels:
+
+* the generic engine solves a quadratic whose discriminant is `b^2 - 4ac`. For a 60 mm sphere
+  seen from 1500 mm that is 9.00e6 - 8.99e6 = 1.44e4 - two numbers agreeing to three digits,
+  which in float leaves four. The root lands about 0.004 mm out, `is_crossing_to` probes
+  0.001 mm either side of it, both probes fall on the same side, and the crossing is not seen.
+  Measured: an orb keeps 100% of its rays at 200 mm, **47% at 1500** and 10% at 4000. The
+  renderer therefore starts each ray at the solid's bounding sphere (`geom::bounding_radius`),
+  where b and c are both O(radius) and nothing cancels. Closed-form solids - box, trd, cons -
+  never went through that path and were never affected, which is what the shape of the
+  measurement said before any code was changed.
+* `quadric_inside` compared the raw quadric value against `kSurfTolerance`, which is a LENGTH.
+  An orb is written `x^2+y^2+z^2-r^2`, gradient 120 per mm at r = 60; an ellipsoid is written
+  `x^2/a^2+...-1`, gradient 0.04 per mm. One tolerance is therefore a band 8e-7 mm wide on one
+  and 2.5e-3 mm on the other - wider than the probe - so on an ellipsoid **both** sides of a
+  crossing reported "on the surface" and it had no surfaces at all, at any distance.
+  `quadric_residual` divides by the gradient, which is exactly what `quadric_normal` beside it
+  had always done, and for the stated reason.
+
+Both are asserted in `tests/test_float_render.cu` as a sweep over camera distance, because the
+SHAPE of the failure is what identifies it: 100% at 200 mm falling to 10% at 4000 is a
+cancelling discriminant, and 0.1% everywhere is a tolerance in the wrong units.
 
 ### A voxel volume is not one surface, and the layer rule still applies to it
 
