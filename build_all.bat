@@ -450,13 +450,21 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the world's layer is confirmed.
   exit /b 1
 )
-rem The null entry in every layer menu is one byte indexing a glyph rasterised from U+2205. A
-rem face without that code point rasterises its notdef box instead, which is a hollow
-rem rectangle - so the check is for ink AND for ink across the middle, where a slashed circle
-rem has some and a box has none.
-findstr /C:"the empty-set glyph is drawn and is not hollow" "%TEMP%\g4gpu_builder.txt" >nul
+rem A VOLUME ON THE WORLD'S OWN LAYER clashes with the world, and the run is refused.
+rem
+rem The world used to be exempt from the overlap check, on the reasoning that it contains
+rem everything so an overlap with it is containment. True for layer 1 and above - and that case
+rem needs no exemption, since the layer-range test prunes it. What the exemption hid was a
+rem volume placed ON layer 0, which is a real same-layer overlap resolved only by "whichever was
+rem added later wins" - the tie-break this whole check exists to refuse.
+findstr /C:"a volume on the world's own layer clashes with the world" "%TEMP%\g4gpu_builder.txt" >nul
 if errorlevel 1 (
-  echo FATAL: the builder selftest did not prove the empty-set glyph renders.
+  echo FATAL: the builder selftest did not prove a layer-0 volume clashes with the world.
+  exit /b 1
+)
+findstr /C:"it clears when the volume moves off that layer" "%TEMP%\g4gpu_builder.txt" >nul
+if errorlevel 1 (
+  echo FATAL: the builder selftest did not prove that clash clears again.
   exit /b 1
 )
 rem The composited viewport must BE the device image - the blit's placement, stride and

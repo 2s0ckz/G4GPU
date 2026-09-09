@@ -445,6 +445,190 @@ int main() {
     font.coverage.assign(
         static_cast<std::size_t>(ui::Font::kCount) * font.glyph_w * font.glyph_h, 0);
     font.ready = true;
+
+    // ---- 10b. ∅ IS DRAWN, AND IT IS A RING WITH A STROKE.
+    //
+    // The null entry in every layer menu is this one byte. It used to be rasterised from
+    // U+2205 into an extra atlas slot, and the check for it read the ATLAS: ink present, and
+    // ink across the middle where a notdef box has none. Both passed and it still looked
+    // wrong, because a face missing the code point does not draw notdef - GDI font-links to
+    // another installed face at that face's metrics, so the glyph arrives the wrong size on
+    // the wrong baseline, which neither check could see.
+    //
+    // Canvas::Text draws it now, so the test draws it too and reads the PIXELS. Note that this
+    // font has an all-zero atlas: every real glyph here is blank, so any ink at all is the
+    // drawn one, and the assertions cannot be satisfied by the font.
+    {
+      // ∅ AT BOTH SIZES, and the property asserted is that IT HAS A HOLE.
+      //
+      // The null entry in every layer menu is this one byte, drawn by Canvas::EmptySet rather
+      // than rasterised - see Font::kEmptySetByte for why a font cannot be relied on for it.
+      //
+      // "Has a hole" rather than a probe at a point, because a point probe cannot express it
+      // at the size that matters. At eight pixels across the interior is about nine pixels and
+      // the stroke crosses most of them, so the obvious probe - straight up from the centre,
+      // half way to the ring - lands ON the stroke for a perfectly good glyph. The first
+      // version of this test therefore checked the shape only at 25 px, where the probe works,
+      // and passed happily on the 8 px glyph that was actually wrong: a fixed 0.9 px stroke
+      // half-width is a hairline at 25 px and thicker than the radius at 8, so the ring filled
+      // itself in and the menu showed a blob. Reported as the null symbol not looking right.
+      //
+      // An enclosed empty pixel is the thing a ring has and a blob does not, at any size.
+      auto render = [](const ui::Font& fnt, int at, std::vector<unsigned int>& px, int w, int h,
+                       int& adv) {
+        px.assign(static_cast<std::size_t>(w) * h, 0u);
+        ui::Input in;
+        ui::Context ctx;
+        ctx.Begin(px.data(), w, h, &fnt, &in);
+        ctx.canvas.clip = ui::Rect{0, 0, w, h};
+        adv = ctx.canvas.Text(at, at, std::string(1, ui::Font::kEmptySetByte), 0xFFFFFFFFu);
+        ctx.End();
+      };
+
+      // THE LARGEST hole the outside cannot reach, not the total.
+      //
+      // Total was tried and is too weak: an over-thick ring that has filled itself in still
+      // leaves a scatter of single empty pixels between the stroke and the ring - nine of them
+      // on the glyph that looked like a blob - and nine is greater than zero. A hole you can
+      // see is a hole of some SIZE, so the largest connected one is what gets measured.
+      //
+      // Four-connected, which is the strict reading: a hole a diagonal leaks through is not a
+      // hole you can see either.
+      auto largest_hole = [](const std::vector<unsigned int>& px, int w, int h) {
+        std::vector<unsigned char> seen(static_cast<std::size_t>(w) * h, 0u);
+        std::vector<int> stack;
+        auto is_empty = [&](int x, int y) {
+          return (px[static_cast<std::size_t>(y) * w + x] & 0x00FFFFFFu) == 0;
+        };
+        for (int x = 0; x < w; ++x) {
+          for (int y : {0, h - 1}) {
+            if (is_empty(x, y) && !seen[static_cast<std::size_t>(y) * w + x]) {
+              seen[static_cast<std::size_t>(y) * w + x] = 1u;
+              stack.push_back(y * w + x);
+            }
+          }
+        }
+        for (int y = 0; y < h; ++y) {
+          for (int x : {0, w - 1}) {
+            if (is_empty(x, y) && !seen[static_cast<std::size_t>(y) * w + x]) {
+              seen[static_cast<std::size_t>(y) * w + x] = 1u;
+              stack.push_back(y * w + x);
+            }
+          }
+        }
+        while (!stack.empty()) {
+          const int at = stack.back();
+          stack.pop_back();
+          const int x = at % w, y = at / w;
+          const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+          for (int k = 0; k < 4; ++k) {
+            const int nx = x + dx[k], ny = y + dy[k];
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) { continue; }
+            if (!is_empty(nx, ny) || seen[static_cast<std::size_t>(ny) * w + nx]) { continue; }
+            seen[static_cast<std::size_t>(ny) * w + nx] = 1u;
+            stack.push_back(ny * w + nx);
+          }
+        }
+        // What the flood did not reach is enclosed; measure each such region on its own.
+        int best = 0;
+        for (int sy = 0; sy < h; ++sy) {
+          for (int sx = 0; sx < w; ++sx) {
+            if (!is_empty(sx, sy) || seen[static_cast<std::size_t>(sy) * w + sx]) { continue; }
+            int size = 0;
+            seen[static_cast<std::size_t>(sy) * w + sx] = 1u;
+            stack.push_back(sy * w + sx);
+            while (!stack.empty()) {
+              const int at2 = stack.back();
+              stack.pop_back();
+              ++size;
+              const int x = at2 % w, y = at2 / w;
+              const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+              for (int k = 0; k < 4; ++k) {
+                const int nx = x + dx[k], ny = y + dy[k];
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) { continue; }
+                if (!is_empty(nx, ny) || seen[static_cast<std::size_t>(ny) * w + nx]) {
+                  continue;
+                }
+                seen[static_cast<std::size_t>(ny) * w + nx] = 1u;
+                stack.push_back(ny * w + nx);
+              }
+            }
+            if (size > best) { best = size; }
+          }
+        }
+        return best;
+      };
+
+      struct Size { const char* what; int gw, gh, asc; };
+      // The menu's own size, and one large enough that the shape is unambiguous. The drawing
+      // scales from the metrics, so both have to work.
+      static const Size kSizes[] = {{"menu", 8, 15, 12}, {"large", 25, 44, 35}};
+      for (const Size& sz : kSizes) {
+        ui::Font fnt;
+        fnt.glyph_w = sz.gw;
+        fnt.glyph_h = sz.gh;
+        fnt.ascent = sz.asc;
+        // An ALL-ZERO atlas, so every real glyph here is blank and any ink at all is the drawn
+        // one. Nothing below can be satisfied by the font.
+        fnt.coverage.assign(
+            static_cast<std::size_t>(ui::Font::kCount) * fnt.glyph_w * fnt.glyph_h, 0);
+        fnt.ready = true;
+
+        const int kW = sz.gw * 4 + 16, kH = sz.gh * 3 + 16;
+        std::vector<unsigned int> px;
+        int adv = 0;
+        const int at = 8;
+        render(fnt, at, px, kW, kH, adv);
+        auto lit = [&](int x, int y) {
+          return (x >= 0 && y >= 0 && x < kW && y < kH)
+                 && (px[static_cast<std::size_t>(y) * kW + x] & 0x00FFFFFFu) != 0;
+        };
+        int ink = 0, outside = 0, x0 = kW, x1 = -1, y0 = kH, y1 = -1;
+        for (int y = 0; y < kH; ++y) {
+          for (int x = 0; x < kW; ++x) {
+            if (!lit(x, y)) { continue; }
+            ++ink;
+            if (x < x0) { x0 = x; }
+            if (x > x1) { x1 = x; }
+            if (y < y0) { y0 = y; }
+            if (y > y1) { y1 = y; }
+            // A glyph that overhangs collides with the digit beside it in the menu, which is
+            // exactly what a font-linked glyph at another face's metrics does.
+            if (x < at - 1 || x > at + sz.gw || y < at - 1 || y > at + sz.gh) { ++outside; }
+          }
+        }
+        const int hole = largest_hole(px, kW, kH);
+        const int box = (x1 - x0 + 1) * (y1 - y0 + 1);
+        const int cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        char buf[160];
+
+        std::snprintf(buf, sizeof buf, "%s: the null glyph advances exactly one glyph", sz.what);
+        Check(adv == sz.gw, buf);
+        std::snprintf(buf, sizeof buf, "%s: the null glyph draws something", sz.what);
+        Check(ink > 0, buf);
+        std::snprintf(buf, sizeof buf, "%s: every pixel of it is inside its own glyph cell",
+                      sz.what);
+        Check(outside == 0, buf);
+        // HAS A HOLE YOU CAN SEE: a ring does, a filled blob does not. This is the one that
+        // fails on an unscaled stroke width, at the size where that actually happened. 6% of
+        // the glyph's own box, so the bar scales with it - and at least four pixels, so a
+        // single speck cannot satisfy it at any size.
+        std::snprintf(buf, sizeof buf,
+                      "%s: the null glyph holds an open space of its own, so it reads as a "
+                      "ring and not a blob", sz.what);
+        Check(hole >= 4 && hole * 100 >= box * 6, buf);
+        // STRUCK THROUGH: something crosses the middle. A bare O does not, and nor does a
+        // hollow notdef rectangle.
+        std::snprintf(buf, sizeof buf, "%s: and it is struck through the centre, not a bare O",
+                      sz.what);
+        Check(lit(cx, cy) || lit(cx, cy - 1) || lit(cx, cy + 1) || lit(cx - 1, cy)
+                  || lit(cx + 1, cy),
+              buf);
+        std::printf("  null glyph %s (%dx%d): %d pixels, box %dx%d, largest hole %d (%d%% of "
+                    "the box)\n", sz.what, sz.gw, sz.gh, ink, x1 - x0 + 1, y1 - y0 + 1, hole,
+                    (box > 0) ? hole * 100 / box : 0);
+      }
+    }
     {
       constexpr int kW = 640, kH = 600;
       std::vector<unsigned int> px(static_cast<std::size_t>(kW) * kH, 0u);

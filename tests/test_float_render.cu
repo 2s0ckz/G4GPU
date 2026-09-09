@@ -298,95 +298,404 @@ int main() {
   // The shape of the failure is what identifies it, so the sweep is over DISTANCE: 100% at
   // 200 mm, 47% at 1500 and 10% at 4000 is a cancelling discriminant, and 0.1% everywhere is a
   // tolerance in the wrong units.
+  //
+  // EVERY SOLID THE RENDERER CAN DRAW, and not the four that were suspected. The first version
+  // of this swept orb, sphere, ellipsoid and tubs, and a note beside it said box, trd and cons
+  // use closed forms and "were never affected - which the measurement said before anything was
+  // changed". The measurement said nothing of the kind: those three were not in it. A cone with
+  // an inner radius or a phi wedge does not take the closed form at all (see G4Cons::Build) and
+  // goes through the same generic path the quadrics do - reported as the cone showing the same
+  // artifact as the sphere, at some zooms and not others, which is this failure's signature.
+  //
+  // So the list is the enum, not a hunch.
   {
-    std::printf("\n  curved solids, rays kept in float against double:\n");
-    auto orb = [](auto tag) {
-      using T = decltype(tag);
-      Solid<T> s{};
-      s.type = SolidType::kOrb;
-      s.p[0] = T(60);
-      return s;
+    std::printf("\n  every solid, rays kept in float against double:\n");
+    struct Case {
+      const char* name;
+      SolidType type;
+      double aim_lo, aim_hi;   ///< where to aim, so the shape is hit where it has material
+      double p[8];
     };
-    auto sphere = [](auto tag) {
-      using T = decltype(tag);
-      Solid<T> s{};
-      s.type = SolidType::kSphere;
-      s.p[0] = T(0); s.p[1] = T(60); s.p[3] = T(360); s.p[5] = T(180);
-      return s;
-    };
-    auto ellipsoid = [](auto tag) {
-      using T = decltype(tag);
-      Solid<T> s{};
-      s.type = SolidType::kEllipsoid;
-      s.p[0] = T(60); s.p[1] = T(40); s.p[2] = T(50);
-      s.p[3] = T(-50); s.p[4] = T(50);
-      return s;
-    };
-    auto tubs = [](auto tag) {
-      using T = decltype(tag);
-      Solid<T> s{};
-      s.type = SolidType::kTubs;
-      s.p[0] = T(0); s.p[1] = T(60); s.p[2] = T(60); s.p[4] = T(6.28318530718);
-      return s;
+    // p[] in each solid's own order - see the make(...) calls in src/g4/G4Solids.hh, which is
+    // the only place that order is written down. aim_lo/aim_hi matter as much: a ray down the
+    // axis of a HOLLOW tube never enters the material, so double misses it too and the row
+    // says nothing. Each shape is aimed where it actually is.
+    static const Case kCases[] = {
+        {"box",          SolidType::kBox,             0, 30, {60, 50, 40}},
+        {"cons",         SolidType::kCons,            0, 20, {60, 30, 50}},
+        {"trd",          SolidType::kTrd,             0, 20, {60, 30, 50, 25, 40}},
+        {"tubs",         SolidType::kTubs,            0, 40, {0, 60, 60, 0, 6.28318530718}},
+        {"tubs-hollow",  SolidType::kTubs,           28, 52, {20, 60, 60, 0, 6.28318530718}},
+        {"conesection",  SolidType::kConeSection,     0, 20,
+                                                     {0, 60, 0, 30, 50, 0, 6.28318530718}},
+        {"conesec-ann",  SolidType::kConeSection,    24, 40,
+                                                     {20, 60, 10, 30, 50, 0, 6.28318530718}},
+        {"orb",          SolidType::kOrb,             0, 40, {60}},
+        {"sphere",       SolidType::kSphere,          0, 40, {0, 60, 0, 6.28318530718, 0,
+                                                              3.14159265359}},
+        {"sphere-shell", SolidType::kSphere,         45, 57, {40, 60, 0, 6.28318530718, 0,
+                                                              3.14159265359}},
+        {"torus",        SolidType::kTorus,           0, 30, {0, 25, 20, 0, 6.28318530718}},
+        {"para",         SolidType::kPara,            0, 30, {50, 40, 45, 0.2, 0.1, 0.15}},
+        {"elliptube",    SolidType::kEllipticalTube,  0, 30, {50, 35, 45}},
+        {"ellipsoid",    SolidType::kEllipsoid,       0, 30, {60, 40, 50, -50, 50}},
+        {"ellipcone",    SolidType::kEllipticalCone,  0, 15, {0.5, 0.4, 100, 40}},
+        {"paraboloid",   SolidType::kParaboloid,      0, 30, {45, 10, 55}},
+        {"hype",         SolidType::kHype,            0, 30, {0, 40, 0.15, 0.25, 45}},
     };
 
     // The renderer's own rule, so this measures what it measures. See render_geometry.
-    auto hits = [](const auto& s, double cam, int n) {
-      using T = std::decay_t<decltype(s.p[0])>;
+    auto hits = [](const Case& c, double cam, int n, bool as_float) {
       int hit = 0;
       for (int i = 0; i < n; ++i) {
-        // Uniform over a disc well inside the silhouette, at the golden angle so the rays do
-        // not fall on any lattice the shape might have.
-        const double r = 30.0 * std::sqrt((i + 0.5) / n);
+        // Uniform over the aim annulus, at the golden angle so the rays do not fall on any
+        // lattice the shape might have.
+        const double f = (i + 0.5) / n;
+        const double r = std::sqrt(c.aim_lo * c.aim_lo
+                                   + f * (c.aim_hi * c.aim_hi - c.aim_lo * c.aim_lo));
         const double ang = 2.399963229 * i;
         const double tx = r * std::cos(ang), ty = r * std::sin(ang);
         const double L = std::sqrt(tx * tx + ty * ty + cam * cam);
-        const Vec3<T> o{T(0), T(0), T(-cam)};
-        const Vec3<T> d{T(tx / L), T(ty / L), T(cam / L)};
-        const T reach = bounding_radius(s);
-        T skip = T(0);
-        if (reach > T(0)) {
-          const T approach = -dot(o, d);
-          skip = approach - reach * T(1.01) - T(1);
-          if (skip < T(0)) { skip = T(0); }
+        if (as_float) {
+          Solid<float> s{};
+          s.type = c.type;
+          for (int k = 0; k < 8; ++k) { s.p[k] = static_cast<float>(c.p[k]); }
+          const Vec3<float> o{0.f, 0.f, static_cast<float>(-cam)};
+          const Vec3<float> d{static_cast<float>(tx / L), static_cast<float>(ty / L),
+                              static_cast<float>(cam / L)};
+          const float reach = bounding_radius(s);
+          float skip = 0.f;
+          if (reach > 0.f) {
+            const float approach = -dot(o, d);
+            skip = approach - reach * 1.01f - 1.f;
+            if (skip < 0.f) { skip = 0.f; }
+          }
+          if (dist_in(s, o + skip * d, d) < kInfinity<float>()) { ++hit; }
+        } else {
+          Solid<double> s{};
+          s.type = c.type;
+          for (int k = 0; k < 8; ++k) { s.p[k] = c.p[k]; }
+          const Vec3<double> o{0.0, 0.0, -cam};
+          const Vec3<double> d{tx / L, ty / L, cam / L};
+          const double reach = bounding_radius(s);
+          double skip = 0.0;
+          if (reach > 0.0) {
+            const double approach = -dot(o, d);
+            skip = approach - reach * 1.01 - 1.0;
+            if (skip < 0.0) { skip = 0.0; }
+          }
+          if (dist_in(s, o + skip * d, d) < kInfinity<double>()) { ++hit; }
         }
-        if (dist_in(s, o + skip * d, d) < kInfinity<T>()) { ++hit; }
       }
       return hit;
     };
 
-    constexpr int kRays = 1500;
-    int worst_kept = kRays;
+    constexpr int kRays = 1200;
+    double worst_ratio = 1.0;
     const char* worst_shape = "";
     double worst_cam = 0;
-    for (double cam : {200.0, 600.0, 1500.0, 4000.0}) {
-      const int od = hits(orb(0.0), cam, kRays), of = hits(orb(0.0f), cam, kRays);
-      const int sd = hits(sphere(0.0), cam, kRays), sf = hits(sphere(0.0f), cam, kRays);
-      const int ed = hits(ellipsoid(0.0), cam, kRays), ef = hits(ellipsoid(0.0f), cam, kRays);
-      const int td = hits(tubs(0.0), cam, kRays), tf = hits(tubs(0.0f), cam, kRays);
-      std::printf("    %6.0f mm   orb %d/%d   sphere %d/%d   ellipsoid %d/%d   tubs %d/%d\n",
-                  cam, of, od, sf, sd, ef, ed, tf, td);
-      // Every shape must be found by double at all, or the row proves nothing.
-      char buf[120];
-      std::snprintf(buf, sizeof buf, "at %.0f mm every curved solid is hit in double", cam);
-      Check(od == kRays && sd == kRays && ed == kRays && td == kRays, buf);
-      const int pairs[4][2] = {{of, od}, {sf, sd}, {ef, ed}, {tf, td}};
-      const char* names[4] = {"orb", "sphere", "ellipsoid", "tubs"};
-      for (int k = 0; k < 4; ++k) {
-        if (pairs[k][0] < worst_kept) {
-          worst_kept = pairs[k][0];
-          worst_shape = names[k];
-          worst_cam = cam;
+    int too_few = 0;
+    const char* too_few_shape = "";
+    for (double cam : {200.0, 600.0, 1500.0, 4000.0, 12000.0}) {
+      std::printf("    %7.0f mm ", cam);
+      for (const Case& c : kCases) {
+        const int nd = hits(c, cam, kRays, false);
+        const int nf = hits(c, cam, kRays, true);
+        // FLOAT AGAINST DOUBLE, per shape, and not against the ray count. What double finds
+        // is the truth this is measuring against; a shape double only partly hits - a wedge,
+        // a shell seen head-on - is still a valid comparison, and demanding double hit
+        // everything only tempts the fixture to be tuned until it does.
+        //
+        // Separately, double has to find ENOUGH for the ratio to mean something. A row where
+        // double hits nothing would otherwise pass with float hitting nothing either, which is
+        // how a torus aimed down its own hole came to look like a clean result.
+        if (nd < kRays / 4) {
+          ++too_few;
+          too_few_shape = c.name;
+        } else {
+          const double ratio = static_cast<double>(nf) / nd;
+          if (ratio < worst_ratio) {
+            worst_ratio = ratio;
+            worst_shape = c.name;
+            worst_cam = cam;
+          }
         }
+        std::printf(" %s %d/%d", c.name, nf, nd);
       }
+      std::printf("\n");
     }
-    std::printf("    worst: %s at %.0f mm kept %d of %d\n", worst_shape, worst_cam,
-                worst_kept, kRays);
+    if (too_few > 0) {
+      std::printf("    %d rows had too few double hits to compare (last: %s)\n", too_few,
+                  too_few_shape);
+    }
+    Check(too_few == 0, "every solid in the sweep is aimed at where it has material, so each "
+                        "row is a comparison and not a shrug");
+    std::printf("    worst: %s at %.0f mm kept %.4f of what double found\n", worst_shape,
+                worst_cam, worst_ratio);
     // 99%, not 100%: a ray exactly tangent to a surface is a genuine coin flip at any
     // precision, and the sweep is dense enough to find a few.
-    Check(worst_kept >= kRays * 99 / 100,
-          "float keeps at least 99% of the rays double finds, on every curved solid at every "
-          "camera distance");
+    Check(worst_ratio >= 0.99,
+          "float keeps at least 99% of the rays double finds, on every solid at every camera "
+          "distance");
+  }
+
+  // ---- 5b. AND THE TWO THAT KEEP THEIR SHAPE IN THE AUX POOL.
+  //
+  // kPolycone and kPolyhedra carry their z-sections outside p[], so they cannot be built as a
+  // bare Solid and were left out of the sweep above. That is exactly why they matter here: the
+  // builder's "Cone" primitive is a POLYCONE, not a G4Cons - see InsertPrimitive - so the cone
+  // in a selftest picture is the one solid family nothing had ever compared in float.
+  //
+  // Aimed across the whole silhouette out to 98% of the widest section, which is the other
+  // half of what the sweep above does not do: its rays are all near the axis, where every
+  // surface is nearly head-on. The sphere's cancelling discriminant showed up at the LIMB,
+  // where the surface is nearly parallel to the ray and the two roots are nearly equal - so a
+  // sweep that never goes near the limb is a sweep that cannot see it.
+  {
+    std::printf("\n  aux-pool solids, rays kept in float against double:\n");
+    // A cone: wide at -z, a point at +z, in three sections so the taper changes slope.
+    // THE BUILDER'S OWN Cone PRIMITIVE, which is a bicone: widest in the middle, so the
+    // surface has an outward CREASE at z = 0 where the slope reverses. A monotonic taper has
+    // no such edge, and a taper was what the first version of this swept.
+    const double sec[] = {-30, 0, 10,   0, 0, 25,   30, 0, 5};
+    const int n_sec = 3;
+
+    std::vector<double> aux_d(sec, sec + n_sec * 3);
+    std::vector<float> aux_f;
+    for (double v : aux_d) { aux_f.push_back(static_cast<float>(v)); }
+
+    SolidStore<double> sd{};
+    sd.aux = aux_d.data();
+    SolidStore<float> sf{};
+    sf.aux = aux_f.data();
+
+    struct Case { const char* name; SolidType type; double p2; };
+    static const Case kCases[] = {
+        {"polycone",  SolidType::kPolycone,  6.28318530718},
+        {"polyhedra", SolidType::kPolyhedra, 6.28318530718},
+    };
+
+    auto hits = [&](const Case& c, double cam, double aim, int n, bool as_float) {
+      int hit = 0;
+      for (int i = 0; i < n; ++i) {
+        const double r = aim * std::sqrt((i + 0.5) / n);
+        const double ang = 2.399963229 * i;
+        const double tx = r * std::cos(ang), ty = r * std::sin(ang);
+        const double L = std::sqrt(tx * tx + ty * ty + cam * cam);
+        if (as_float) {
+          Solid<float> s{};
+          s.type = c.type;
+          s.p[0] = 0.f;
+          s.p[1] = static_cast<float>(c.p2);
+          s.p[2] = 6.f;   // sides, for polyhedra; ignored by polycone
+          s.a = 0;
+          s.b = n_sec - 1;
+          const Vec3<float> o{0.f, 0.f, static_cast<float>(-cam)};
+          const Vec3<float> d{static_cast<float>(tx / L), static_cast<float>(ty / L),
+                              static_cast<float>(cam / L)};
+          const float reach = bounding_radius(sf, s);
+          float skip = 0.f;
+          if (reach > 0.f) {
+            const float approach = -dot(o, d);
+            skip = approach - reach * 1.01f - 1.f;
+            if (skip < 0.f) { skip = 0.f; }
+          }
+          if (dist_in(sf, s, o + skip * d, d) < kInfinity<float>()) { ++hit; }
+        } else {
+          Solid<double> s{};
+          s.type = c.type;
+          s.p[0] = 0.0;
+          s.p[1] = c.p2;
+          s.p[2] = 6.0;
+          s.a = 0;
+          s.b = n_sec - 1;
+          const Vec3<double> o{0.0, 0.0, -cam};
+          const Vec3<double> d{tx / L, ty / L, cam / L};
+          const double reach = bounding_radius(sd, s);
+          double skip = 0.0;
+          if (reach > 0.0) {
+            const double approach = -dot(o, d);
+            skip = approach - reach * 1.01 - 1.0;
+            if (skip < 0.0) { skip = 0.0; }
+          }
+          if (dist_in(sd, s, o + skip * d, d) < kInfinity<double>()) { ++hit; }
+        }
+      }
+      return hit;
+    };
+
+    constexpr int kRays = 2000;
+    double worst_ratio = 1.0;
+    const char* worst_shape = "";
+    double worst_cam = 0;
+    int too_few = 0;
+    for (double cam : {200.0, 600.0, 1500.0, 4000.0, 12000.0}) {
+      std::printf("    %7.0f mm ", cam);
+      for (const Case& c : kCases) {
+        for (double aim : {8.0, 24.5}) {   // near the axis, and out at the limb
+          const int nd = hits(c, cam, aim, kRays, false);
+          const int nf = hits(c, cam, aim, kRays, true);
+          if (nd < kRays / 4) {
+            ++too_few;
+          } else {
+            const double ratio = static_cast<double>(nf) / nd;
+            if (ratio < worst_ratio) {
+              worst_ratio = ratio;
+              worst_shape = c.name;
+              worst_cam = cam;
+            }
+          }
+          std::printf(" %s@%.1f %d/%d", c.name, aim, nf, nd);
+        }
+      }
+      std::printf("\n");
+    }
+    Check(too_few == 0, "both aux-pool solids are hit by enough rays in double to compare");
+    std::printf("    worst: %s at %.0f mm kept %.4f of what double found\n", worst_shape,
+                worst_cam, worst_ratio);
+    Check(worst_ratio >= 0.99,
+          "float keeps at least 99% of the rays double finds on a polycone and a polyhedra, "
+          "at the limb as well as near the axis");
+  }
+
+  // ---- 5c. AND A BOOLEAN, WHICH HANDS ITS CHILDREN THE ORIGIN IT WAS GIVEN.
+  //
+  // boolean_dist recurses with the same ray, so a union of two orbs solves the orbs'
+  // quadratics from wherever the caller started - and a boolean has no p[] extent, so it fell
+  // through bounding_radius to zero and the origin shift never happened. Same bug as the
+  // polycone above, reached through a different hole in the same function.
+  //
+  // Two orbs offset along x by more than their radius, so the union has a waist and its
+  // silhouette is not a circle: rays near the waist are the grazing ones.
+  {
+    std::printf("\n  a boolean of two orbs, rays kept in float against double:\n");
+    // Two pools rather than one generic builder: a lambda cannot take a container whose
+    // element type depends on an earlier `auto` parameter, and spelling it twice is shorter
+    // than the template that would.
+    auto hits = [&](SolidType op, double cam, double aim, int n, bool as_float) {
+      int hit = 0;
+      std::vector<Transform<float>> xff{make_translation<float>({-25.f, 0.f, 0.f}),
+                                        make_translation<float>({25.f, 0.f, 0.f})};
+      std::vector<Transform<double>> xfd{make_translation<double>({-25.0, 0.0, 0.0}),
+                                         make_translation<double>({25.0, 0.0, 0.0})};
+      std::vector<Solid<float>> pf(2);
+      std::vector<Solid<double>> pd(2);
+      for (int k = 0; k < 2; ++k) {
+        pf[k].type = SolidType::kOrb;
+        pf[k].p[0] = 40.f;
+        pf[k].xform = k;
+        pd[k].type = SolidType::kOrb;
+        pd[k].p[0] = 40.0;
+        pd[k].xform = k;
+      }
+      Solid<float> nf{};
+      nf.type = op;
+      nf.a = 0;
+      nf.b = 1;
+      nf.xform = -1;
+      Solid<double> nd2{};
+      nd2.type = op;
+      nd2.a = 0;
+      nd2.b = 1;
+      nd2.xform = -1;
+      SolidStore<float> sf{};
+      sf.solids = pf.data();
+      sf.xforms = xff.data();
+      SolidStore<double> sd{};
+      sd.solids = pd.data();
+      sd.xforms = xfd.data();
+      for (int i = 0; i < n; ++i) {
+        const double r = aim * std::sqrt((i + 0.5) / n);
+        const double ang = 2.399963229 * i;
+        const double tx = r * std::cos(ang), ty = r * std::sin(ang);
+        const double L = std::sqrt(tx * tx + ty * ty + cam * cam);
+        if (as_float) {
+          const Vec3<float> o{0.f, 0.f, static_cast<float>(-cam)};
+          const Vec3<float> d{static_cast<float>(tx / L), static_cast<float>(ty / L),
+                              static_cast<float>(cam / L)};
+          const float reach = bounding_radius(sf, nf);
+          float skip = 0.f;
+          if (reach > 0.f) {
+            const float approach = -dot(o, d);
+            skip = approach - reach * 1.01f - 1.f;
+            if (skip < 0.f) { skip = 0.f; }
+          }
+          if (dist_in(sf, nf, o + skip * d, d) < kInfinity<float>()) { ++hit; }
+        } else {
+          const Vec3<double> o{0.0, 0.0, -cam};
+          const Vec3<double> d{tx / L, ty / L, cam / L};
+          const double reach = bounding_radius(sd, nd2);
+          double skip = 0.0;
+          if (reach > 0.0) {
+            const double approach = -dot(o, d);
+            skip = approach - reach * 1.01 - 1.0;
+            if (skip < 0.0) { skip = 0.0; }
+          }
+          if (dist_in(sd, nd2, o + skip * d, d) < kInfinity<double>()) { ++hit; }
+        }
+      }
+      return hit;
+    };
+
+    // THE PROPERTY IS FLATNESS, not a perfect score. A boolean's surface has creases -
+    // where two orb surfaces meet, the two roots really are nearly equal - and a ray grazing
+    // one is a coin flip at any precision, which costs about 2% on this deliberately grazing
+    // aim. What the origin shift claims is that the hit rate STOPS DEPENDING ON WHERE THE
+    // CAMERA IS, so that is what is asserted: the ratio at 12 m must match the ratio up close.
+    //
+    // Without the boolean bound the same rows read 99.7% at 200 mm, 28% at 1500 - the default
+    // camera distance - and 0.26% at 12 m. That is the measurement the flatness test is
+    // standing in for, and it was taken by deleting the bound.
+    constexpr int kRays = 2000;
+    double worst_ratio = 1.0;
+    double worst_cam = 0;
+    double near[3] = {0, 0, 0};      ///< each op's ratio up close
+    double worst_drop = 0;           ///< and the largest fall from it, for that same op
+    const char* drop_name = "";
+    int too_few = 0;
+    for (double cam : {200.0, 600.0, 1500.0, 4000.0, 12000.0}) {
+      std::printf("    %7.0f mm ", cam);
+      const SolidType ops[3] = {SolidType::kUnion, SolidType::kSubtraction,
+                                SolidType::kIntersection};
+      const char* names[3] = {"union", "subtract", "intersect"};
+      for (int k = 0; k < 3; ++k) {
+        // 39 mm: just inside each orb's own radius, so the rays graze the union's waist.
+        const int nd = hits(ops[k], cam, 39.0, kRays, false);
+        const int nf = hits(ops[k], cam, 39.0, kRays, true);
+        if (nd < kRays / 4) {
+          ++too_few;
+        } else {
+          const double ratio = static_cast<double>(nf) / nd;
+          if (ratio < worst_ratio) {
+            worst_ratio = ratio;
+            worst_cam = cam;
+          }
+        }
+        std::printf(" %s %d/%d", names[k], nf, nd);
+        // PER OP, because the three have different silhouettes: an intersection of two orbs
+        // offset by more than a radius is a thin lens, and comparing its worst row against the
+        // union's best is a comparison of two shapes rather than of two distances.
+        if (nd >= kRays / 4) {
+          const double ratio = static_cast<double>(nf) / nd;
+          if (cam < 300.0) {
+            near[k] = ratio;
+          } else if (near[k] > 0 && near[k] - ratio > worst_drop) {
+            worst_drop = near[k] - ratio;
+            drop_name = names[k];
+          }
+        }
+      }
+      std::printf("\n");
+    }
+    Check(too_few == 0, "each boolean is hit by enough rays in double to compare");
+    std::printf("    worst: at %.0f mm kept %.4f; largest fall from the close-up rate is "
+                "%.4f (%s)\n", worst_cam, worst_ratio, worst_drop, drop_name);
+    Check(worst_ratio >= 0.97,
+          "float keeps at least 97% of the rays double finds through a boolean - the rest is "
+          "the crease where two surfaces meet");
+    Check(worst_drop <= 0.01,
+          "and no boolean's hit rate falls off with camera distance, which is the property the "
+          "origin shift exists for");
   }
 
   // ---- 6. A NEARLY TRANSPARENT SURFACE IS MOSTLY THE BACKGROUND, NOT MOSTLY BLACK.

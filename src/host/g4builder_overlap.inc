@@ -112,12 +112,23 @@ static std::vector<SameLayerOverlap> FindSameLayerOverlaps(const App& a) {
     }
   }
 
+  // THE WORLD IS NOT EXEMPT, and it used to be.
+  //
+  // The reasoning for skipping it was that the world contains everything by construction, so
+  // an overlap with it is containment rather than a clash. True for a volume on layer 1 or
+  // above - and that case needs no exemption, because the layer-range test two lines below
+  // already prunes it: the world spans layer 0 alone, so it cannot meet layer 1 anywhere.
+  //
+  // What the exemption actually hid is a volume placed ON LAYER 0. That is a genuine
+  // same-layer overlap with the world, resolved only by "whichever was added later wins" -
+  // which is the tie-break this whole check exists to refuse, because it makes the answer
+  // depend on the order the detector was built in. Reported as setting an object to layer zero
+  // and getting no overlap error against the world that is already there.
+  //
+  // So the general rule decides, and the world is one more volume to it. The cost is nothing
+  // in the common case: layer 1 against layer 0 fails the range test before any sampling.
   for (int i = 0; i < n; ++i) {
-    // The world is layer 0 and contains everything by construction; an overlap with it is not
-    // an overlap, it is containment.
-    if (i == scene.world) { continue; }
     for (int j = i + 1; j < n; ++j) {
-      if (j == scene.world) { continue; }
       // Could they be on the same layer ANYWHERE: do the two layer ranges meet. Identical to
       // comparing the two layers for every volume that has only one, which is all of them
       // until a voxel class is given one of its own.

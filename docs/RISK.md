@@ -3562,3 +3562,132 @@ overhangs the grid by 20 mm on each side and 4.1 degrees over the grid's 80 mm d
 5.7 mm, so the margin is not tight. Recorded because "change the up vector" reads like a
 one-line change and had a consequence two hundred lines away in a file that does not mention
 cameras.
+
+### V29: the same bug in two more places, found by looking at the picture instead of the test
+
+Three reports. The interesting one is the first, because the fix for it had already been written
+and the test that verified it had been written too - and both had a hole in the same shape.
+
+#### "The cone has the same artifact we solved for the sphere"
+
+It did, and it was the same bug, reached through a function that had never heard of two of the
+solid types.
+
+V25 fixed a cancelling discriminant by starting each ray at the solid's bounding sphere, so that
+the quadratic the generic engine solves has coefficients of order the solid's size rather than of
+order the camera distance. The shift is gated on `geom::bounding_radius` returning something
+positive - and that function is a switch over solid types with `default: return 0`. kPolycone and
+kPolyhedra keep their (z, rmin, rmax) sections in the AUX POOL, which the p[]-only form cannot
+see, so they fell to the default. Zero does not mean "no bound needed"; it means the shift is
+silently off.
+
+The builder's "Cone" primitive is a POLYCONE. Measured at its limb:
+
+```
+      camera     rays kept
+      200 mm     100%
+      600 mm      93%
+     1500 mm      39%     <- the default camera distance
+     4000 mm      22%
+    12000 mm      17%
+```
+
+That is V25's signature exactly, in a solid V25 never looked at.
+
+Booleans have the same hole and it is worse. `boolean_dist` hands each child the ray origin it
+was given, so a union of two orbs solves the orbs' quadratics from wherever the caller started -
+and a boolean node has no p[] extent either. At 1500 mm a union of two orbs kept 28% of its rays,
+and at 12 m it kept 0.26%. The selftest scene has a subtraction in it, and it was speckled the
+whole time.
+
+Both are fixed by a store-aware overload: kPolycone and kPolyhedra read their planes out of the
+aux pool, and a boolean takes the larger of its children's bounds plus their frame offsets. The
+p[]-only form is left alone deliberately - it is on the transport's safety path, where returning
+a larger number is a physics change, and this is a rendering question asked by code that has the
+store in hand.
+
+#### What the old test could not see, and why
+
+The sweep that verified V25 covered orb, sphere, ellipsoid and tubs, and a note beside it said
+box, trd and cons use closed forms and "were never affected - which the measurement said before
+anything was changed". The measurement said nothing of the kind: those three were not in it. A
+comment claiming a measurement that was never taken is worse than no comment, because the next
+reader stops there.
+
+Two things were wrong with the sweep and both had to be fixed before it could see anything:
+
+**It swept a hand-picked list.** It now sweeps the enum - seventeen solids from p[], plus the two
+aux-pool ones and the three booleans in blocks of their own. The list is the type list, not a
+hunch about which types are quadratic.
+
+**Its rays were all near the axis.** The first attempt at a polycone kept 100% of 2000 rays at
+every distance out to 12 m, which said the shape was fine. It was not: the aim disc was 20 mm on
+a 60 mm solid, and a cancelling discriminant shows at the LIMB, where the two roots are nearly
+equal. Aimed at 98% of the silhouette the same shape lost 61% of its rays. The sweep now aims at
+each shape's own material - an annulus per case, since a ray down the axis of a hollow tube never
+enters it and double misses too - and out to the limb.
+
+And the profile mattered. A monotonic taper kept everything; the builder's own Cone is a BICONE,
+widest in the middle, with an outward crease where the slope reverses. The fixture is the
+builder's own numbers now, for that reason.
+
+#### The assertion for a boolean is FLATNESS, not a score
+
+A boolean's surface has creases - where two orb surfaces meet, the roots really are nearly equal -
+and a ray grazing one is a coin flip at any precision, worth about 2% on a deliberately grazing
+aim. What the origin shift claims is not perfection, it is that the hit rate STOPS DEPENDING ON
+WHERE THE CAMERA IS. So that is what is asserted, per operation: the ratio at 12 m must match the
+ratio up close. Comparing the worst row against the best was tried first and compared two
+different shapes rather than two distances.
+
+#### The null symbol did not look right, and the test said it did
+
+∅ is drawn rather than rasterised, because the atlas is indexed by byte and a three-byte UTF-8
+character cannot reach it. The first version rasterised U+2205 into an extra atlas slot with the
+wide GDI call, and the check for it read the ATLAS: ink present, and ink across the middle where
+a notdef box has none. Both passed, and the glyph still looked wrong - twice.
+
+First because a face missing the code point does not draw notdef. GDI FONT-LINKS to some other
+installed face at that face's metrics, so the glyph arrives the wrong size on the wrong baseline,
+which neither check could see. Canvas::EmptySet draws it now, out of an ellipse and a stroke, the
+way EyeToggle draws its eye.
+
+Then twice more, and each time the test was the problem:
+
+  * clipping the stroke to the ring left a glyph indistinguishable from the 0 directly beneath it
+    in the same menu. A circle with an invisible stroke is a zero. The stroke has to OVERSHOOT.
+  * a fixed 0.9 px stroke half-width is a hairline at 25 px and thicker than the radius at 8,
+    where the ring filled itself in and the menu showed a blob. Width scales with the glyph now.
+
+The blob passed three successive tests. A probe straight up from the centre landed on the
+feathered stroke, because at eight pixels across the interior is nine pixels and the stroke
+crosses most of them - so the shape check was moved to 25 px, where the probe works and the
+8 px glyph that was actually broken was never looked at. Then "encloses an empty pixel" passed
+too: an over-thick ring leaves a scatter of single empty pixels, and nine is greater than zero.
+
+What works is the LARGEST enclosed empty region, as a fraction of the glyph's own box, asserted
+at both sizes: 14% for the drawn glyph at 8 px, 3% for the blob. A hole you can see is a hole of
+some size.
+
+#### A volume on layer 0 did not clash with the world
+
+The overlap check skipped the world outright, on the reasoning that the world contains everything
+by construction, so an overlap with it is containment rather than a clash. That is true for a
+volume on layer 1 or above - and that case never needed the exemption, because the layer-range
+test prunes it: the world spans layer 0 alone and cannot meet layer 1 anywhere.
+
+What the exemption hid is a volume placed ON layer 0. That is a genuine same-layer overlap with
+the world, resolved only by "whichever was added later wins" - which is the tie-break this whole
+check exists to refuse, because it makes the answer depend on the order the detector was built
+in. The world is one more volume to the general rule now, and the rule was already right.
+
+#### The lesson that ties the three together
+
+All three had a test that passed. The float sweep passed because it swept the wrong list with the
+wrong rays; the glyph checks passed because they read the atlas and then probed the wrong pixel;
+the overlap check passed because the case was excluded by name before the rule could see it. In
+each case the code was believed because a green check was pointed at something adjacent to it.
+
+What found all three was looking at the artefact - the render, the menu, the scene - which is
+what the reports were. A test is evidence about the thing it measures, and every one of these was
+measuring something else.

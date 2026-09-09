@@ -120,6 +120,72 @@ __host__ __device__ inline real_t bounding_radius(const Solid<real_t>& s) {
   }
 }
 
+/// The same bound for a solid whose extent lives in the AUX POOL, which the p[]-only form
+/// above cannot see.
+///
+/// kPolycone and kPolyhedra keep their (z, rmin, rmax) sections there, so they fall through
+/// that switch to zero - and zero does not mean "no bound needed", it means "no bound". The
+/// renderer starts each ray at the solid's bounding sphere so that the quadratic it solves has
+/// coefficients of order the solid's size rather than of order the camera distance; a zero
+/// bound turns that off silently.
+///
+/// It cost 61% of the rays at the limb of the builder's own Cone primitive at 1500 mm - the
+/// default camera distance - and the shape of the loss is the same signature as the sphere's
+/// cancelling discriminant that the origin shift was written for: 100% kept at 200 mm, 93% at
+/// 600, 39% at 1500, 17% at 12000. Reported as the cone showing ray-tracing artifacts that
+/// depend on the zoom, and it was the SAME BUG as the sphere, reached through a function that
+/// had never heard of two of the solid types.
+///
+/// Separate from the p[]-only form rather than replacing it, because that one is on the
+/// transport's safety path and returning a larger number there is a physics change. This is
+/// the renderer asking a rendering question, and it has the store in hand.
+template <typename real_t>
+__host__ __device__ inline real_t bounding_radius(const SolidStore<real_t>& store,
+                                                  const Solid<real_t>& s, int depth = 0) {
+  if (s.type == SolidType::kPolycone || s.type == SolidType::kPolyhedra) {
+    if (store.aux == nullptr || s.b < 0) { return real_t(0); }
+    real_t r2 = real_t(0);
+    // s.b is the number of SEGMENTS, so there are s.b + 1 planes. A bound that read only the
+    // segments would miss the last plane, which on a bicone is one of the two widest.
+    for (int i = 0; i <= s.b; ++i) {
+      const real_t z = store.aux[s.a + 3 * i];
+      const real_t rmax = store.aux[s.a + 3 * i + 2];
+      const real_t q = z * z + rmax * rmax;
+      if (q > r2) { r2 = q; }
+    }
+    return sqrt(r2);
+  }
+  // A BOOLEAN IS BOUNDED BY ITS CHILDREN, and it has to be: boolean_dist hands each child the
+  // SAME ray origin it was given, so a union of two spheres solves the children's quadratics
+  // from wherever the caller started - and with no bound of its own the origin shift never
+  // happens. The bound is each child's own bound plus how far its frame is offset, which is an
+  // over-estimate for a rotated child and sound in the direction that matters: a shift that
+  // stops short of the real surface only leaves a little cancellation, while one that
+  // overshoots would skip past a hit.
+  if (s.type == SolidType::kUnion || s.type == SolidType::kSubtraction
+      || s.type == SolidType::kIntersection) {
+    if (store.solids == nullptr || depth >= 8) { return real_t(0); }
+    real_t best = real_t(0);
+    const int child[2] = {s.a, s.b};
+    for (int k = 0; k < 2; ++k) {
+      const Solid<real_t>& c = store.solids[child[k]];
+      const real_t rc = bounding_radius(store, c, depth + 1);
+      if (rc <= real_t(0)) { return real_t(0); }   // one unknown child is an unknown whole
+      real_t off = real_t(0);
+      if (c.xform >= 0 && store.xforms != nullptr) {
+        const Vec3<real_t>& t = store.xforms[c.xform].trans;
+        off = sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
+      }
+      const real_t r = rc + off;
+      if (r > best) { best = r; }
+    }
+    // A subtraction is bounded by its FIRST child alone, but taking the larger of the two is
+    // still sound and is one less rule to get wrong.
+    return best;
+  }
+  return bounding_radius(s);
+}
+
 /// Radius of the largest sphere centred on the solid's own origin that lies entirely inside
 /// it. Zero when there is no such sphere, or when it is not worth working out.
 ///

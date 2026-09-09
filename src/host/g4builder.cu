@@ -1462,7 +1462,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 92;
+      selftest_frames = 90;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -2489,49 +2489,11 @@ int main(int argc, char** argv) {
         SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
       }
 
-      // ---- AND THE EMPTY-SET GLYPH IS ACTUALLY IN THE ATLAS.
+      // ---- AND A VOLUME ON THE WORLD'S OWN LAYER CLASHES WITH THE WORLD.
       //
-      // The layer menu's null entry is one byte that indexes a slot rasterised from U+2205 by
-      // the wide GDI call. A face without that code point rasterises its notdef box, and a
-      // face that failed to rasterise at all leaves the slot blank - which would make the
-      // most important entry in the menu an empty gap. Ink, not identity: this cannot tell a
-      // circle-with-a-stroke from a notdef box, and says so.
-      if (frame == 90) {
-        // Ink, AND INK IN THE MIDDLE. Total coverage alone cannot tell the glyph from the
-        // notdef box a face without U+2205 would rasterise instead - and a box is exactly what
-        // would appear, in the one menu entry it matters most for. A notdef box is a hollow
-        // rectangle: ink around the border, none across the centre. An empty set is a circle
-        // with a stroke through it, and the stroke crosses the middle. So the middle is the
-        // question.
-        //
-        // This still cannot name the glyph. It rules out blank and it rules out hollow, which
-        // are the two ways this goes wrong in practice.
-        long long ink = 0, mid = 0;
-        const int gw = a.font.glyph_w, gh = a.font.glyph_h;
-        const std::size_t base = static_cast<std::size_t>(ui::Font::kEmptySet) * gw * gh;
-        for (int gy = 0; gy < gh; ++gy) {
-          for (int gx = 0; gx < gw; ++gx) {
-            const std::size_t at = base + static_cast<std::size_t>(gy) * gw + gx;
-            if (at >= a.font.coverage.size()) { continue; }
-            const int v = a.font.coverage[at];
-            ink += v;
-            if (gx >= gw / 3 && gx < gw - gw / 3 && gy >= gh / 3 && gy < gh - gh / 3) {
-              mid += v;
-            }
-          }
-        }
-        if (ink <= 0) {
-          std::printf("selftest: FAILED - the empty-set glyph is blank, so the layer menu's "
-                      "null entry draws nothing\n");
-        } else if (mid <= 0) {
-          std::printf("selftest: FAILED - the empty-set glyph is hollow (%lld coverage, none "
-                      "in the middle), which is what a notdef box looks like\n", ink);
-        } else {
-          std::printf("selftest: the empty-set glyph is drawn and is not hollow (%lld "
-                      "coverage, %lld of it across the middle, over %dx%d)\n", ink, mid, gw,
-                      gh);
-        }
-      }
+      // Uses the Nullable box from frame 75, which is inside the world and on layer 5.
+      if (frame == 88) { SelftestCheckWorldOverlapRefusal(a); }
+
       if (frame >= selftest_frames) {
         std::vector<unsigned char> rgb(static_cast<size_t>(a.width) * a.height * 3);
         for (size_t i = 0; i < static_cast<size_t>(a.width) * a.height; ++i) {

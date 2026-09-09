@@ -308,7 +308,11 @@ __global__ void render_geometry(geom::Geometry<real_t> geometry, const VolumeSty
       // discriminant keeps twelve digits.
       const Vec3<real_t> ql = geom::to_local(vol.xform, from);
       const Vec3<real_t> dl = geom::dir_to_local(vol.xform, dir);
-      const real_t reach = geom::bounding_radius(vol.solid);
+      // WITH THE STORE, because a polycone keeps its extent in the aux pool and the p[]-only
+      // form returns zero for it - which turns this whole shift off without saying so. See
+      // geom::bounding_radius(store, solid): it cost 61% of the rays at the limb of a cone at
+      // the default camera distance.
+      const real_t reach = geom::bounding_radius(geometry.store, vol.solid);
       real_t skip = real_t(0);
       if (reach > real_t(0)) {
         // The closest the ray comes to the solid's own origin, less the bound. Never negative:

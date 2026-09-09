@@ -2393,9 +2393,81 @@ static void InsertSelftestNullLayer(App& a) {
       "the null layer to remove");
 }
 
-/// How many volumes the flattened scene holds. The null layer's claim, at its root: a solid on
-/// it is NOT PLACED, and everything else - not transported through, not drawn, not scored -
-/// follows from there being no volume rather than from three separate rules.
+/// A volume put on the WORLD'S layer clashes with the world, and the run is refused.
+///
+/// The world was exempt from the overlap check on the reasoning that it contains everything by
+/// construction, so an overlap with it is containment rather than a clash. That is true for a
+/// volume on layer 1 or above - and that case needs no exemption, because the layer-range test
+/// prunes it: the world spans layer 0 alone and cannot meet layer 1 anywhere. What the
+/// exemption hid was a volume placed ON layer 0, which is a real same-layer overlap resolved
+/// only by "whichever was added later wins" - the tie-break the whole check exists to refuse.
+///
+/// Reported as setting an object to layer zero and getting no overlap error against the world
+/// that is already there.
+static void SelftestCheckWorldOverlapRefusal(App& a) {
+  const int box = ModelIndexByName(a, "Nullable");
+  if (box < 0) {
+    std::printf("FATAL: selftest could not find the Nullable box to test the world-layer\n"
+                "  refusal.\n");
+    std::exit(2);
+  }
+  Solid& s = a.model.solids[static_cast<std::size_t>(box)];
+  const int saved = s.layer;
+  const int world_layer = a.model.solids[0].layer;
+  if (saved == world_layer) {
+    std::printf("FATAL: the box is already on the world's layer, so this proves nothing.\n");
+    std::exit(2);
+  }
+
+  // FIRST, THAT IT IS CLEAN WHERE IT IS. Otherwise "the overlap list is not empty" below is
+  // satisfied by whatever else the scene already had wrong.
+  s.layer = saved;
+  a.model.Touch();
+  a.scene_dirty = true;
+  RebuildScene(a);
+  if (!a.overlaps.empty()) {
+    std::printf("FATAL: the scene already has a same-layer overlap before the box is moved,\n"
+                "  so this check cannot tell its own clash from that one.\n");
+    std::exit(2);
+  }
+
+  s.layer = world_layer;
+  a.model.Touch();
+  a.scene_dirty = true;
+  RebuildScene(a);
+  if (a.overlaps.empty()) {
+    std::printf("FATAL: a box was put on the world's layer, inside the world, and the\n"
+                "  detector found no overlap. The refusal cannot fire.\n");
+    std::exit(2);
+  }
+  const int events_before = a.last_events;
+  RunFromGui(a, 25);
+  if (a.last_events != events_before || a.popup != Popup::kOverlap) {
+    std::printf("FATAL: a run with a volume on the world's layer was NOT refused.\n"
+                "  last_events %d -> %d, popup %d\n",
+                events_before, a.last_events, static_cast<int>(a.popup));
+    std::exit(2);
+  }
+  Log("selftest: a volume on the world's own layer clashes with the world, and the run is "
+      "refused");
+
+  a.popup = Popup::kNone;
+  s.layer = saved;
+  a.model.Touch();
+  a.scene_dirty = true;
+  RebuildScene(a);
+  if (!a.overlaps.empty()) {
+    std::printf("FATAL: moving the box back off the world's layer left the clash behind.\n");
+    std::exit(2);
+  }
+  Log("selftest: and it clears when the volume moves off that layer");
+}
+
+/// How many volumes the flattened scene holds.
+///
+/// The null layer's claim, at its root: a solid on it is NOT PLACED, and everything else -
+/// not transported through, not drawn, not scored - follows from there being no volume
+/// rather than from three separate rules.
 static int SceneVolumeCount(const App& a) {
   if (a.run_manager == nullptr) { return -1; }
   return static_cast<int>(a.run_manager->GetScene().volumes.size());

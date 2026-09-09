@@ -402,6 +402,70 @@ measured from +z.
 Elevation stays clamped short of the axis, which is what keeps `make_camera`'s
 `cross(forward, up)` from degenerating - so looking exactly down z is 1.5 rad, not 1.5708.
 
+
+### The origin shift needs a bound, and two solid families had none
+
+`bounding_radius` is a switch over solid types with `default: return 0`, and zero turns the origin
+shift off rather than saying it is unnecessary. kPolycone and kPolyhedra keep their sections in
+the aux pool, which the p[]-only form cannot read, so both fell to the default - and a boolean
+node has no p[] extent either, while `boolean_dist` hands each child the origin it was given.
+
+Measured at the limb, rays kept in float against double:
+
+```
+   camera      polycone      union of two orbs
+   200 mm        100%              99.7%
+   600 mm         93%                94%
+  1500 mm         39%                28%      <- the default camera distance
+  4000 mm         22%                 7%
+ 12000 mm         17%              0.26%
+```
+
+The builder's own "Cone" primitive is a polycone and the selftest scene contains a subtraction, so
+both were speckled the whole time - the same cancelling discriminant as the sphere, reached
+through a function that had never heard of two of the types. A store-aware overload reads the
+polycone's planes out of the aux pool and gives a boolean the larger of its children's bounds plus
+their frame offsets; all of it goes to 100%, flat with distance.
+
+The p[]-only form is deliberately untouched: it is on the transport's safety path, where a larger
+number is a physics change. This is a rendering question asked by code that has the store.
+
+**What the sweep had to become to see it.** It swept four hand-picked shapes with rays 20 mm from
+the axis of a 60 mm solid - and a cancelling discriminant shows at the LIMB, where the two roots
+are nearly equal. The same polycone kept 100% near the axis and 39% at 98% of the silhouette. It
+sweeps the type list now, aims at each shape's own material, and goes out to the limb. See
+docs/RISK.md V29.
+
+### ∅ is drawn, not rasterised
+
+The atlas is indexed by byte and the strings drawn through it are `std::string`, so a three-byte
+UTF-8 character cannot reach it. The null entry gets a byte nothing else uses
+(`ui::Font::kEmptySetByte`, 0x01) and `ui::Canvas::EmptySet` draws an ellipse and a stroke, the way
+`EyeToggle` draws its eye - so nothing about it depends on which font was found.
+
+Rasterising U+2205 into an extra atlas slot was tried first and looked wrong, because a face
+missing the code point does not draw notdef: GDI font-links to another installed face at that
+face's metrics. Two things the drawing then has to get right, both of which were got wrong first:
+the stroke must OVERSHOOT the ring, or the glyph is a zero; and its width must scale with the
+glyph, or at eight pixels the ring fills itself in and the menu shows a blob.
+
+`tests/test_ui_layout.cu` draws it at the menu's size and at 25 px and measures the LARGEST
+enclosed empty region as a fraction of its own box - 14% drawn, 3% for the blob. Smaller measures
+all passed on the blob: a probe straight up from the centre lands on the stroke at eight pixels
+across, and "encloses an empty pixel" is satisfied by the scatter an over-thick ring leaves.
+
+### A volume on layer 0 clashes with the world
+
+The overlap check no longer exempts the world. It did, on the reasoning that the world contains
+everything so an overlap with it is containment - true for layer 1 and above, and that case never
+needed an exemption, because the layer-range test prunes it: the world spans layer 0 alone and
+cannot meet layer 1 anywhere.
+
+A volume placed ON layer 0 is a real same-layer overlap with the world, resolved only by
+"whichever was added later wins" - the tie-break the check exists to refuse, since it makes the
+dose depend on the order the detector was built in. The world is one more volume to the general
+rule now.
+
 ## The control bar
 
 An event count, Run, Reset, and an "accumulate across runs" toggle; below it the last run's
