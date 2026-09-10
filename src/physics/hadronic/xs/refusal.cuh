@@ -38,8 +38,20 @@ enum class XsRefusal : int {
   /// theZ[idx-1] with idx = 0 for Z = 1 and walks off the front of the table. The BGG pion
   /// classes never call it for hydrogen, and neither does this port.
   kUPiNuclearHydrogen,
-  /// G4ComponentAntiNuclNuclearXS - antiproton and anti-nucleus on nucleus.
+  /// G4ComponentAntiNuclNuclearXS - an ANTI-NUCLEUS on a nucleus. Reached in Geant4 only
+  /// through `G4HadProcesses::{Inelastic,Elastic}XS("AntiAGlauber")` and the FTFP/QGSP
+  /// anti-barion builders, none of which QBBC registers, so an anti-nucleus is P1's refused
+  /// set. It matters here because G4ComponentGGNuclNuclXsc would *answer* for one: it reads
+  /// the projectile's baryon number straight into `pTkin = kinEnergy/pA`, which for an
+  /// anti-deuteron is a division by -2. Geant4 avoids that by never calling it; this port
+  /// refuses instead of returning the number that comes out.
   kComponentAntiNuclNuclearXS,
+  /// G4IsotopeList.hh `aeff[]` indexed past its 95th entry. G4NeutronElasticXS's
+  /// ComputeIsoCrossSection is `ElementCrossSection(...)*A/aeff[Z]` at the UNCLAMPED Z, so for
+  /// Z >= 95 Geant4 reads off the end of the array - undefined behaviour, not a value this
+  /// port can reproduce. Unreachable through G4CrossSectionDataStore, whose IsIsoApplicable is
+  /// false for that class, but the method is public and this port's is callable.
+  kIsotopeListOutOfRange,
   /// A per-element G4PARTICLEXS data file that is not loaded. Missing data is fatal, never a
   /// silent zero (docs/HADRONIC_PLAN.md section 2, src/host/g4data.cuh).
   kMissingParticleXSData,
@@ -55,6 +67,8 @@ __host__ __device__ inline const char* xs_refusal_name(XsRefusal r) {
     case XsRefusal::kPhotoNuclearCrossSection: return "G4PhotoNuclearCrossSection";
     case XsRefusal::kUPiNuclearHydrogen: return "G4UPiNuclearCrossSection for Z = 1";
     case XsRefusal::kComponentAntiNuclNuclearXS: return "G4ComponentAntiNuclNuclearXS";
+    case XsRefusal::kIsotopeListOutOfRange:
+      return "G4IsotopeList.hh aeff[] beyond Z = 94";
     case XsRefusal::kMissingParticleXSData: return "a G4PARTICLEXS data file that is absent";
   }
   return "(unknown)";

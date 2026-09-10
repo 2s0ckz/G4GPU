@@ -28,13 +28,19 @@
 // Geant4 actually built - grid nodes included, since a wrong node count puts every interior
 // point in a different place while leaving the two ends exact.
 //
-// AND WHY A MISSING FILE IS TESTED ON PURPOSE
+// AND WHY TWO BAD DATASET FILES ARE TESTED ON PURPOSE
 //
-// A G4PARTICLEXS element file that will not open is a FatalException in Geant4. The failure
-// mode this guards is not a crash but its opposite: a reader that returns zero for a missing
-// element gives a particle that never interacts in that element, which is a wrong answer
-// shaped like a physics result. The last section builds a deliberately incomplete dataset
-// directory and requires the loader to refuse it.
+// Geant4 treats the two ways of failing to read one file DIFFERENTLY, and the difference is
+// easy to miss because it is a `warn` flag on one branch and no flag on the other: an element
+// file that will not OPEN is a FatalException, and ANY file that opens and will not PARSE is a
+// FatalException whether it is an element or an isotope. A MISSING isotope file is legitimate -
+// not every A in [amin, amax] ships one - and the readers fall back from it.
+//
+// The failure mode both guards is not a crash but its opposite: a reader that returns zero for
+// a missing element gives a particle that never interacts there, and one that treats a corrupt
+// isotope file as absent gives the element cross section times A/aeff[Z] - a plausible number
+// from a file Geant4 would have aborted on. The last section stages both directories and
+// requires the loader to refuse both.
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -51,6 +57,7 @@
 #include "host/g4data.cuh"
 #include "physics/hadronic/xs/neutron_general_xs.cuh"
 #include "physics/hadronic/xs/particlexs.cuh"
+#include "physics/hadronic/xs/refusal.cuh"
 #include "physics/hadronic/xs/sample_za.cuh"
 
 using namespace g4gpu;
@@ -523,19 +530,90 @@ int main() {
     report("SampleZandA", "cumulative[last]==total", draw, false);
   }
 
-  // ---------------------------------------------------------------- a missing element file
+  // ---------------------------------------------------------------- G4PhysicsVectorType
   //
-  // Built here rather than asserted in prose. The loader must return false and name the file;
-  // a reader that returned a zero cross section for a missing element would give a particle
-  // that never interacts there, and every check above would still pass.
+  // The enum must be Geant4's, because a value read from a Geant4 dump or a stored
+  // G4PhysicsVector would be Geant4's. It was free=0, log=1, linear=2 for a while, under a
+  // comment saying it was Geant4's encoding, and nothing failed because the port both wrote
+  // and read it. Asserted on the numbers so the comment cannot drift from them again.
+  if (kFreeVector != 0 || kLinearVector != 1 || kLogVector != 2) {
+    std::printf("  FAIL: PhysVecType is free=%d linear=%d log=%d; G4PhysicsVectorType.hh is "
+                "T_G4PhysicsFreeVector = 0, T_G4PhysicsLinearVector, T_G4PhysicsLogVector\n",
+                static_cast<int>(kFreeVector), static_cast<int>(kLinearVector),
+                static_cast<int>(kLogVector));
+    ++fails;
+  }
+  // And the types the loader actually assigned, since the two wrongs cancelled last time: the
+  // four hadronic sets are log vectors throughout, gamma's element files are linear except for
+  // freeVectorException, and every gamma isotope file is free.
+  {
+    const int hadronic_sets[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    for (int q = 0; q < 8; ++q) {
+      const int k = hadronic_sets[q];
+      for (int z = 1; z <= 92; ++z) {
+        if (L.table[k].element[z].n > 0 && L.table[k].element[z].type != kLogVector) {
+          std::printf("  FAIL: %s %s element Z=%d is vector type %d, expected kLogVector\n",
+                      kSets[k].dataset, kSets[k].particle, z, L.table[k].element[z].type);
+          ++fails;
+          break;
+        }
+      }
+    }
+    const int kg = 8;  // GammaNuclear
+    for (int z = 1; z <= 94; ++z) {
+      const int want = data::pxs_gamma_free_vector_exception(z) ? kFreeVector : kLinearVector;
+      if (L.table[kg].element[z].n > 0 && L.table[kg].element[z].type != want) {
+        std::printf("  FAIL: gamma element Z=%d is vector type %d, expected %d "
+                    "(freeVectorException = {4,6,7,8,27,39,45,65,67,69,73})\n", z,
+                    L.table[kg].element[z].type, want);
+        ++fails;
+        break;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- Z > 94 has no aeff
+  //
+  // G4NeutronElasticXS::ComputeIsoCrossSection divides by aeff[Z] at the UNCLAMPED Z, so for
+  // Z >= 95 Geant4 reads past the end of a 95-entry array. That is undefined behaviour and not
+  // a value to reproduce; the port must refuse rather than divide by the zero its accessor
+  // returns, which would be an inf handed to a caller as a cross section.
+  {
+    const XsValue<real_t> v =
+        pxs_iso_xs<real_t>(L.ds[6], real_t(1.0), std::log(real_t(1.0)), 95, 240);
+    if (v.ok()) {
+      std::printf("  FAIL: NeutronElastic isotope cross section at Z=95 answered %.17g instead "
+                  "of refusing - aeff[] has 95 entries and Geant4 reads past them\n",
+                  static_cast<double>(v.value));
+      ++fails;
+    } else if (v.refused != XsRefusal::kIsotopeListOutOfRange) {
+      std::printf("  FAIL: Z=95 refused with %s, expected the aeff range refusal\n",
+                  xs_refusal_name(v.refused));
+      ++fails;
+    }
+  }
+
+  // ---------------------------------------------------------------- two bad dataset files
+  //
+  // Built here rather than asserted in prose, and TWO of them, because Geant4 treats the two
+  // failures differently and the port used to treat them the same:
+  //
+  //   * an element file that will not OPEN     -> FatalException (warn = true)
+  //   * ANY file that opens and will not PARSE -> FatalException, unconditionally
+  //
+  // `warn` is false for an isotope file, so a missing isotope file is a legitimate null vector
+  // the readers fall back from - but a malformed one is not. The port returned one `false` for
+  // both and turned a corrupt isotope file into the element cross section times A/aeff[Z]: a
+  // plausible number, from a file Geant4 would have aborted on.
   {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path root = fs::temp_directory_path(ec) / "g4gpu_pxs_missing_test";
+    const fs::path root = fs::temp_directory_path(ec) / "g4gpu_pxs_bad_test";
+    const fs::path src = fs::path(host::g4particlexs_dir()) / "neutron";
+
+    // (a) el1 present, el2 deliberately absent. The loader walks Z upward and must stop at 2.
     fs::remove_all(root, ec);
     fs::create_directories(root / "neutron", ec);
-    const fs::path src = fs::path(host::g4particlexs_dir()) / "neutron";
-    // el1 present, el2 deliberately absent. The loader walks Z upward, so it must stop at 2.
     fs::copy_file(src / "el1", root / "neutron" / "el1", fs::copy_options::overwrite_existing,
                   ec);
     if (ec) {
@@ -544,15 +622,62 @@ int main() {
     } else {
       data::ParticleXsTable<real_t> t;
       PxsDataSet<real_t> ds;
-      std::printf("\n  -- expect one FATAL line below: the deliberately incomplete dataset --\n");
-      const bool loaded = pxs_load<real_t>(PxsKind::kNeutronElastic, neutron<real_t>(),
-                                           (root / "neutron").string(), t, ds);
-      if (loaded) {
+      std::printf("\n  -- expect a FATAL line below: element file absent --\n");
+      if (pxs_load<real_t>(PxsKind::kNeutronElastic, neutron<real_t>(),
+                           (root / "neutron").string(), t, ds)) {
         std::printf("  FAIL: pxs_load accepted a dataset directory with neutron/el2 missing - "
                     "a missing element file must be fatal, never a zero cross section\n");
         ++fails;
       } else {
         std::printf("  -- refused, as it must --\n");
+      }
+    }
+
+    // (b) a complete CAPTURE dataset with ONE isotope file replaced by garbage. Capture is used
+    // rather than elastic because G4NeutronElasticXS opens no isotope file at all, so the
+    // branch under test would never run.
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "cap", ec);
+    const fs::path csrc = fs::path(host::g4particlexs_dir()) / "neutron";
+    bool staged = true;
+    for (int z = 1; z <= 92 && staged; ++z) {
+      const std::string cn = "cap" + std::to_string(z);
+      fs::copy_file(csrc / cn, root / "cap" / cn, fs::copy_options::overwrite_existing, ec);
+      if (ec) { staged = false; }
+      for (int a = data::isotope_amin()[z]; a <= data::isotope_amax()[z]; ++a) {
+        const std::string in = cn + "_" + std::to_string(a);
+        std::error_code ec2;
+        fs::copy_file(csrc / in, root / "cap" / in, fs::copy_options::overwrite_existing, ec2);
+      }
+    }
+    if (!staged) {
+      std::printf("  FAIL: could not stage the corrupt-isotope dataset (%s)\n",
+                  ec.message().c_str());
+      ++fails;
+    } else {
+      // cap1_2 exists in G4PARTICLEXS4.0; overwrite it with a header that opens and does not
+      // parse - a node count of 1, which G4PhysicsVector::Retrieve rejects.
+      FILE* bad = std::fopen((root / "cap" / "cap1_2").string().c_str(), "w");
+      if (bad == nullptr) {
+        std::printf("  FAIL: could not write the corrupt isotope file\n");
+        ++fails;
+      } else {
+        std::fprintf(bad, "1e-06 20 1\n1\n1e-06 3.2e-25\n");
+        std::fclose(bad);
+        data::ParticleXsTable<real_t> t;
+        PxsDataSet<real_t> ds;
+        std::printf("\n  -- expect a FATAL line below: isotope file opens and does not parse "
+                    "--\n");
+        if (pxs_load<real_t>(PxsKind::kNeutronCapture, neutron<real_t>(),
+                             (root / "cap").string(), t, ds)) {
+          std::printf("  FAIL: pxs_load accepted a dataset whose neutron/cap1_2 opens and does "
+                      "not parse. Geant4's Retrieve failure is a FatalException and is NOT "
+                      "guarded by `warn` - only the open failure is. A corrupt isotope file "
+                      "must not become the element cross section times A/aeff[Z].\n");
+          ++fails;
+        } else {
+          std::printf("  -- refused, as it must --\n");
+        }
       }
     }
     fs::remove_all(root, ec);

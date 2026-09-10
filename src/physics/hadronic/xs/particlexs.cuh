@@ -22,13 +22,19 @@
 //   G4NeutronInelasticXS  coeff[Z] * GGHadronNucleus E <= 20 MeV              flat at v[0]
 //   G4NeutronElasticXS    coeff[Z] * GGHadronNucleus never (IsIsoApplicable   flat at v[0]
 //                                                     returns false)
-//   G4NeutronCaptureXS    zero at and above 20 MeV   always, if the file      v[1]*sqrt(E1/E)
-//                                                    exists                   below node 1,
-//                                                                             E floored at
+//   G4NeutronCaptureXS    element: zero at and above E <= 20 MeV, if the      v[1]*sqrt(E1/E)
+//                         20 MeV; isotope: zero      file exists              below node 1,
+//                         ABOVE 20 MeV only                                   E floored at
 //                                                                             1e-10 eV
 //   G4GammaNuclearXS      CHIPS above 150 MeV, and   E < 150 MeV              flat at v[0]
 //                         a straight line from the
 //                         table's top to 150 MeV
+//
+// The capture row is two rows because the same ceiling is spelled with two different operators
+// twenty lines apart: `if(ekin < emax)` guards GetElementCrossSection and `if(eKin > emax)
+// { return xs; }` guards IsoCrossSection. At exactly 20 MeV the element cross section is zero
+// and the isotope one is evaluated. Both are transcribed as written; had_particlexs_iso.csv
+// includes E = 20 MeV exactly, so the asymmetry is compared and not just described.
 //
 // `coeff[Z]` is the continuity factor, computed at initialisation as the table's *last value*
 // divided by the hand-over model's value *at the table's last energy*. It is not 1, and not
@@ -51,12 +57,29 @@
 // WHAT IS REFUSED
 //
 // G4GammaNuclearXS is PARTIAL. Below the data files' top energy - 130 MeV for most elements -
-// it is exact, element and isotope. Above it, and for hydrogen at any energy, Geant4 needs
-// G4PhotoNuclearCrossSection, the 1821-line CHIPS parameterisation, which is not ported: the
-// transition region between the table's top and 150 MeV is a straight line to `xs150[Z]`,
-// which is CHIPS at 150 MeV, so even the transition needs it. Refused by name
-// (XsRefusal::kPhotoNuclearCrossSection) at the point it would have been needed - which is
-// what makes the low-energy branch usable and the gap visible.
+// it is exact, element and isotope. Above it Geant4 needs G4PhotoNuclearCrossSection, the
+// 1821-line CHIPS parameterisation, which is not ported: the transition region between the
+// table's top and 150 MeV is a straight line to `xs150[Z]`, which is CHIPS at 150 MeV, so even
+// the transition needs it. Refused by name (XsRefusal::kPhotoNuclearCrossSection) at the point
+// it would have been needed - which is what makes the low-energy branch usable and the gap
+// visible.
+//
+// HYDROGEN IS AN ISOTOPE-PATH SPECIAL CASE ONLY
+//
+// GetElementCrossSection has no `Z == 1` branch at all: for `ekin <= emax` it returns
+// `pv->Value(ekin)` for hydrogen like any other Z, and `gamma/inel1` exists - it declares
+// `0 130 2` with both values zero, so Geant4 returns a tabulated exact zero and never reaches
+// CHIPS. The special case is in GetIsoCrossSection, which has `ekin <= emax && Z != 1` on the
+// element-scaled path and sends `Z == 1` to CHIPS with everything above 150 MeV. An earlier
+// version of this comment said "and for hydrogen at any energy", which was wrong for the
+// element path; the code was right on both.
+//
+// G4GammaNuclearXS DOES have a coeff array, and it is not the one the other classes have.
+// `static G4double coeff[3][3]` is indexed [Z][A - amin[Z]] - by ISOTOPE, not by particle -
+// filled only for Z <= 2 as CHIPS-iso(10 GeV) / CHIPS-element(10 GeV), and read only in the
+// `Z <= 2 && ekin > 10 GeV` isotope branch. That branch needs CHIPS on both sides of the
+// division, so it is inside the refusal and the array is not transcribed. Named here because
+// "G4GammaNuclearXS has xs150 instead of a coeff" is not the whole truth.
 #pragma once
 #include <cmath>
 #include <string>
@@ -254,6 +277,13 @@ __host__ __device__ inline XsValue<real_t> pxs_iso_xs(const PxsDataSet<real_t>& 
   const real_t af = static_cast<real_t>(A);
 
   if (ds.kind == PxsKind::kNeutronElastic) {
+    // `ElementCrossSection(...)*A/aeff[Z]` at the UNCLAMPED Z, as G4NeutronElasticXS.cc has
+    // it - unlike the two inelastic classes, which divide by aeff at the clamped Z. Above
+    // Z = 94 there is no aeff entry and Geant4 reads off the end of the array; refused by name
+    // rather than dividing by the zero isotope_aeff_of returns, which would be an inf.
+    if (ZZ > data::kIsotopeListMaxZ || ZZ < 1) {
+      return {real_t(0), XsRefusal::kIsotopeListOutOfRange};
+    }
     const XsValue<real_t> el = pxs_element_xs<real_t>(ds, ekin, loge, ZZ);
     return {el.value * af / data::isotope_aeff_of<real_t>(ZZ), el.refused};
   }
@@ -323,9 +353,14 @@ __host__ __device__ inline XsValue<real_t> pxs_iso_xs(const PxsDataSet<real_t>& 
 /// Initialise's "smooth transition": coeff[Z] = last table value / hand-over value at the
 /// table's last energy, or 1 when the hand-over is zero.
 ///
-/// Host-side, once per dataset. G4NeutronCaptureXS has no coeff at all and G4GammaNuclearXS
-/// has xs150 instead, which needs CHIPS - so both are left at 1 and the evaluation never
+/// Host-side, once per dataset. G4NeutronCaptureXS has no coeff at all; G4GammaNuclearXS's
+/// coeff[3][3] is a per-isotope CHIPS ratio used only above 10 GeV for Z <= 2, inside the
+/// refused region (see the file header). Both are left at 1 and the evaluation never
 /// multiplies by them.
+///
+/// G4ParticleInelasticXS's array is `coeff[MAXZINELP][5]` and the second index is the PARTICLE
+/// - 0 proton, 1 deuteron, 2 triton, 3 He3, 4 alpha, set once in its constructor - not an
+/// isotope. One PxsDataSet is one particle, so `coeff[Z]` here IS `coeff[Z][index]` there.
 template <typename real_t>
 __host__ inline void pxs_build_coeff(PxsDataSet<real_t>& ds) {
   const data::ParticleXsTable<real_t>& t = *ds.data;

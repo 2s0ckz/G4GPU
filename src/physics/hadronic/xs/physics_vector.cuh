@@ -45,8 +45,17 @@
 
 namespace g4gpu::hadronic::xs {
 
-/// G4PhysicsVectorType, in Geant4's own order and encoding (G4PhysicsVectorType.hh).
-enum PhysVecType { kFreeVector = 0, kLogVector = 1, kLinearVector = 2 };
+/// G4PhysicsVectorType, in Geant4's own order and encoding
+/// (source/global/management/include/G4PhysicsVectorType.hh):
+///
+///     T_G4PhysicsFreeVector = 0, T_G4PhysicsLinearVector, T_G4PhysicsLogVector
+///
+/// so LINEAR is 1 and LOG is 2. This enum had them the other way round, under a comment
+/// claiming it was Geant4's encoding. Nothing was numerically wrong - the port both writes and
+/// reads these values and never sees one produced by Geant4 - but it is a trap for any future
+/// path that ingests a `type` field from a Geant4 dump or a stored G4PhysicsVector, and a
+/// comment that says "Geant4's own encoding" has to be true or say nothing.
+enum PhysVecType { kFreeVector = 0, kLinearVector = 1, kLogVector = 2 };
 
 /// A read-only view of one G4PhysicsVector living in a flat table.
 ///

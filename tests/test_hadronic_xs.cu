@@ -512,6 +512,45 @@ int main() {
                 "middle band is its only oracle\n", bgg[4].n);
     ++fails;
   }
+  // AN ANTI-NUCLEUS IS NOT G4ComponentGGNuclNuclXsc'S PROJECTILE
+  //
+  // Geant4 sends one to G4ComponentAntiNuclNuclearXS, through "AntiAGlauber" in
+  // G4HadProcesses::{Inelastic,Elastic}XS or the FTFP/QGSP anti-barion builders - none of which
+  // QBBC registers. G4ComponentGGNuclNuclXsc has no guard against being handed an anti-nucleus
+  // because nothing in a physics list hands it one; it would compute
+  // `pTkin = kinEnergy/pA` with pA negative and ask G4NuclearRadii::Radius for a negative Z
+  // and A. This port is callable with any Projectile, so it must refuse - and the refusal must
+  // be reachable, or XsRefusal::kComponentAntiNuclNuclearXS is an enum value nothing returns.
+  {
+    Projectile<real_t> antid = deuteron<real_t>();
+    antid.pdg = -1000010020;
+    antid.charge = real_t(-1);
+    antid.baryon_number = -2;
+    const HadXs<real_t> x = ggnn_compute_cross_sections<real_t>(antid, real_t(1000), 26, 56);
+    if (x.ok()) {
+      std::printf("  FAIL: G4ComponentGGNuclNuclXsc answered %.17g for an anti-deuteron instead "
+                  "of refusing - pTkin = kinEnergy/pA divides by -2 below\n", x.total);
+      ++fails;
+    } else if (x.refused != XsRefusal::kComponentAntiNuclNuclearXS) {
+      std::printf("  FAIL: an anti-deuteron was refused with %s, expected "
+                  "G4ComponentAntiNuclNuclearXS\n", xs_refusal_name(x.refused));
+      ++fails;
+    }
+    // An ANTI-NUCLEON is a different case and must still be answered: G4HadronNucleonXsc has
+    // an explicit anti-proton / anti-neutron branch (HadronNucleonXscPDG), and
+    // G4ComponentGGHadronNucleusXsc has no anti-baryon special case at all - both of which the
+    // oracle above compares over 11,214 points. So the guard must be on the baryon NUMBER of a
+    // nucleus, not on the sign of a charge or a PDG code.
+    const HadXs<real_t> ap =
+        ggh_compute_cross_sections<real_t>(anti_proton<real_t>(), real_t(1000), 26, 56);
+    if (!ap.ok()) {
+      std::printf("  FAIL: an antiproton on Fe56 was refused with %s - G4ComponentGG"
+                  "HadronNucleusXsc has no anti-baryon branch and answers for one\n",
+                  xs_refusal_name(ap.refused));
+      ++fails;
+    }
+  }
+
   // THE REFUSAL ARM OF THE MASS TABLE
   //
   // had_radii.csv cannot exercise it: every (Z, A) with a G4PARTICLEXS file is inside AME2012,

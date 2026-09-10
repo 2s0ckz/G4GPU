@@ -62,6 +62,11 @@
 #include <vector>
 
 #include "data/isotope_list.hh"
+// For PhysVecType. The vector type is Geant4's own enum encoding and it is written here with
+// its NAMES rather than with 0/1/2: this file had `el.type = ... ? 0 : 2` and
+// `iso.type = ... ? 0 : 1` against an enum whose kLogVector and kLinearVector were themselves
+// transposed relative to G4PhysicsVectorType.hh. Two wrongs that cancelled. Names cannot.
+#include "physics/hadronic/xs/physics_vector.cuh"
 
 namespace g4gpu::data {
 
@@ -71,7 +76,8 @@ constexpr int kPxsMaxZ = 95;
 /// One vector's slice of the flat (energy, value) arrays, with the Initialise() results.
 ///
 /// `n == 0` means the file was absent, which for an isotope is legitimate and for an element
-/// is fatal. `type` is g4gpu::hadronic::xs::PhysVecType: 0 free, 1 log, 2 linear.
+/// is fatal. `type` is g4gpu::hadronic::xs::PhysVecType, i.e. Geant4's G4PhysicsVectorType:
+/// 0 free, 1 linear, 2 log.
 template <typename real_t>
 struct PxsSlice {
   int off = 0;
@@ -128,30 +134,55 @@ inline void pxs_initialise_slice(PxsSlice<real_t>& s, const std::vector<real_t>&
   s.edge_min = es[static_cast<std::size_t>(s.off)];
   s.edge_max = es[static_cast<std::size_t>(s.off + s.n - 1)];
   const real_t idxmax_plus1 = static_cast<real_t>(s.n - 1);
-  if (s.type == 1) {  // G4PhysicsLogVector::Initialise
+  if (s.type == hadronic::xs::kLogVector) {  // G4PhysicsLogVector::Initialise
     s.inv_dbin = idxmax_plus1 / std::log(s.edge_max / s.edge_min);
     s.log_emin = std::log(s.edge_min);
-  } else if (s.type == 2) {  // G4PhysicsLinearVector::Initialise
+  } else if (s.type == hadronic::xs::kLinearVector) {  // G4PhysicsLinearVector::Initialise
     s.inv_dbin = idxmax_plus1 / (s.edge_max - s.edge_min);
   }
 }
 
-/// Reads one file in G4PhysicsVector::Retrieve's ascii format. Returns false if it will not
-/// open or will not parse.
+/// The two ways reading one file can fail, which Geant4 treats DIFFERENTLY.
+///
+/// G4*XS::RetrieveVector is
+///
+///     std::ifstream filein(ost.str().c_str());
+///     if (!filein.is_open()) {
+///       if(warn) { G4Exception(... FatalException ...); }      // "is not opened!"
+///     } else {
+///       v = new G4PhysicsLogVector();
+///       if(!v->Retrieve(filein, true)) {
+///         G4Exception(... FatalException ...);                 // "is not retrieved!"
+///       }
+///     }
+///
+/// - identical in G4ParticleInelasticXS.cc, G4NeutronInelasticXS.cc, G4NeutronCaptureXS.cc and
+/// G4GammaNuclearXS.cc. Note where `warn` is and where it is not: the OPEN failure is
+/// conditional, and `warn` is false for an isotope file, so a missing isotope file is a null
+/// vector the caller falls back from. The RETRIEVE failure is not conditional at all. A file
+/// that exists and is malformed is fatal for an isotope exactly as for an element.
+///
+/// This mattered: `pxs_read_file` returned one `false` for both, and `load_particlexs` turned
+/// that into "no isotope data" for any isotope file - so a truncated or corrupted isotope file
+/// silently became the element cross section times A/aeff[Z]. A plausible number, from a file
+/// Geant4 would have aborted on.
+enum class PxsReadResult { kOk, kNotOpened, kNotRetrieved };
+
+/// Reads one file in G4PhysicsVector::Retrieve's ascii format.
 template <typename real_t>
-inline bool pxs_read_file(const std::string& path, std::vector<real_t>& es,
-                          std::vector<real_t>& vs, PxsSlice<real_t>& out) {
+inline PxsReadResult pxs_read_file(const std::string& path, std::vector<real_t>& es,
+                                   std::vector<real_t>& vs, PxsSlice<real_t>& out) {
   FILE* f = std::fopen(path.c_str(), "r");
-  if (f == nullptr) { return false; }
+  if (f == nullptr) { return PxsReadResult::kNotOpened; }
   double emin = 0, emax = 0;
   int nnodes = 0, siz = 0;
   if (std::fscanf(f, "%lf %lf %d", &emin, &emax, &nnodes) != 3 || nnodes < 2) {
     std::fclose(f);
-    return false;
+    return PxsReadResult::kNotRetrieved;
   }
   if (std::fscanf(f, "%d", &siz) != 1 || siz != nnodes) {
     std::fclose(f);
-    return false;
+    return PxsReadResult::kNotRetrieved;
   }
   const int off = static_cast<int>(es.size());
   for (int i = 0; i < siz; ++i) {
@@ -160,7 +191,7 @@ inline bool pxs_read_file(const std::string& path, std::vector<real_t>& es,
       std::fclose(f);
       es.resize(static_cast<std::size_t>(off));
       vs.resize(static_cast<std::size_t>(off));
-      return false;
+      return PxsReadResult::kNotRetrieved;
     }
     es.push_back(static_cast<real_t>(e));
     vs.push_back(static_cast<real_t>(v));
@@ -169,7 +200,7 @@ inline bool pxs_read_file(const std::string& path, std::vector<real_t>& es,
   out.off = off;
   out.n = siz;
   pxs_initialise_slice(out, es);
-  return true;
+  return PxsReadResult::kOk;
 }
 
 /// Loads one dataset.
@@ -182,7 +213,9 @@ inline bool pxs_read_file(const std::string& path, std::vector<real_t>& es,
 /// @param with_isotopes  also load the per-isotope files, as every reader but
 ///                       G4NeutronElasticXS does (its IsIsoApplicable returns false and it
 ///                       never opens one)
-/// @return false when an *element* file is missing, which is Geant4's FatalException.
+/// @return false when an element file will not open, OR when ANY file - element or isotope -
+///         opens and will not parse. Both are FatalException in Geant4; see PxsReadResult for
+///         why the isotope case is not the "missing isotope file" case.
 ///
 /// The slices point into `t.table_e` / `t.table_v`, so those two vectors must not be reserved
 /// or copied out from under a slice; everything is filled before any slice is read.
@@ -204,14 +237,20 @@ inline bool load_particlexs(const std::string& dir, const std::string& prefix, i
 
   for (int z = 1; z <= zmax; ++z) {
     PxsSlice<real_t> el;
-    el.type = is_gamma ? (pxs_gamma_free_vector_exception(z) ? 0 : 2) : 1;
+    el.type = is_gamma ? (pxs_gamma_free_vector_exception(z)
+                              ? hadronic::xs::kFreeVector
+                              : hadronic::xs::kLinearVector)
+                       : hadronic::xs::kLogVector;
     const std::string p = dir + "/" + prefix + std::to_string(z);
-    if (!pxs_read_file<real_t>(p, t.table_e, t.table_v, el)) {
-      std::printf("\nFATAL: G4PARTICLEXS element file <%s> is not opened.\n"
-                  "  Geant4 raises a FatalException here (G4*XS::RetrieveVector with"
-                  " warn=true).\n"
+    const PxsReadResult rel = pxs_read_file<real_t>(p, t.table_e, t.table_v, el);
+    if (rel != PxsReadResult::kOk) {
+      std::printf("\nFATAL: G4PARTICLEXS element file <%s> is %s.\n"
+                  "  Geant4 raises a FatalException here (G4*XS::RetrieveVector, \"is not"
+                  " %s!\").\n"
                   "  Missing data is fatal, never a silent zero - see src/host/g4data.cuh.\n",
-                  p.c_str());
+                  p.c_str(),
+                  (rel == PxsReadResult::kNotOpened) ? "not opened" : "not retrieved",
+                  (rel == PxsReadResult::kNotOpened) ? "opened" : "retrieved");
       return false;
     }
     t.element[z] = el;
@@ -225,10 +264,30 @@ inline bool load_particlexs(const std::string& dir, const std::string& prefix, i
       PxsSlice<real_t> iso;
       // Isotope files are free vectors for gamma and log vectors otherwise; the element's
       // linear/free choice does not apply to them.
-      iso.type = is_gamma ? 0 : 1;
+      iso.type = is_gamma ? hadronic::xs::kFreeVector : hadronic::xs::kLogVector;
       const std::string pi =
           dir + "/" + prefix + std::to_string(z) + "_" + std::to_string(a);
-      if (!pxs_read_file<real_t>(pi, t.table_e, t.table_v, iso)) { iso = PxsSlice<real_t>{}; }
+      const PxsReadResult ri = pxs_read_file<real_t>(pi, t.table_e, t.table_v, iso);
+      if (ri == PxsReadResult::kNotOpened) {
+        // `warn` is false for an isotope file, so Geant4's open failure is a null vector and
+        // the readers fall back to the element cross section. Not every A in [amin, amax] has
+        // a file; the absent ones are part of the format.
+        iso = PxsSlice<real_t>{};
+      } else if (ri == PxsReadResult::kNotRetrieved) {
+        // Opened and malformed. Geant4's Retrieve failure is NOT guarded by `warn`: it is a
+        // FatalException for an isotope file exactly as for an element one. This branch used
+        // to be the one above, which turned a corrupt file into the element cross section
+        // times A/aeff[Z] - a plausible number from a file Geant4 would have aborted on.
+        std::printf("\nFATAL: G4PARTICLEXS isotope file <%s> is not retrieved.\n"
+                    "  It opened and did not parse. Geant4 raises a FatalException here"
+                    " unconditionally\n"
+                    "  (G4*XS::RetrieveVector, \"is not retrieved!\") - the `warn` flag guards"
+                    " only the\n"
+                    "  open failure, and a file that exists and is malformed is fatal for an"
+                    " isotope too.\n",
+                    pi.c_str());
+        return false;
+      }
       t.isotopes.push_back(iso);
     }
   }

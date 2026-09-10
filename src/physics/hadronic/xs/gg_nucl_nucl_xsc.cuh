@@ -95,6 +95,17 @@ __host__ __device__ inline HadXs<real_t> ggnn_compute_cross_sections(
   const bool pHN = p.is_hypernucleus();
   constexpr real_t cHN = real_t(0.88);
 
+  // An ANTI-nucleus is not this model's projectile, and the failure is silent rather than
+  // loud: `pTkin = kinEnergy/pA` below would divide by a negative baryon number and
+  // `nr_radius(pZ, pA)` would be asked for a negative Z and A. Geant4 never calls
+  // G4ComponentGGNuclNuclXsc for one - an anti-nucleus goes to G4ComponentAntiNuclNuclearXS
+  // through "AntiAGlauber" - and it has no guard here because nothing in a physics list
+  // reaches it. This port is callable with any Projectile, so it refuses by name.
+  if (pA < 1) {
+    out.refused = XsRefusal::kComponentAntiNuclNuclearXS;
+    return out;
+  }
+
   // hydrogen: a proton of the same velocity on the projectile nucleus
   if (1 == Z && 1 == A) {
     const real_t e = kin_energy * units::proton_mass_c2<real_t>() / p.mass;
