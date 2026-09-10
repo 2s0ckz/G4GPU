@@ -130,7 +130,28 @@ __host__ __device__ inline real_t hadron_ioni_dedx(const data::Material<real_t>&
   if (pd.mass <= real_t(0) || kinetic <= real_t(0)) { return real_t(0); }
   switch (hadron_ioni_model(type, pd, kinetic)) {
     case HadronIoniModel::kMuBetheBloch:
-      return mu_bethe_bloch_dedx(m, type, kinetic, cut);
+      // `shell`, WHICH THIS DID NOT PASS. mu_bethe_bloch_dedx defaults it to null, and a null
+      // shell pointer switches off two things inside it: the shell correction, which
+      // G4MuBetheBlochModel subtracts as `dedx -= 2.0*corr->ShellCorrection(...)`, and
+      // G4EmCorrections::HighOrderCorrections, which the same function adds as its last line.
+      // So the muon's range table, and every dE/dx the muon was transported with, was the
+      // Bethe-Bloch bracket with the radiative correction and nothing else.
+      //
+      // The half of that which announced itself is the HIGH-ORDER term, because it is
+      // CHARGE-ODD: high_order_bracket is 2*(Barkas + Bloch) + Mott, and Barkas goes as z^3.
+      // Without it mu+ and mu- have identical stopping power, and the port transported them
+      // to a bit-identical B1 dose - 23.8377 nGy for both - where Geant4 gives 23.11 for mu-
+      // and 24.1721 for mu+, a 4.6% asymmetry at 8 sigma. A single number for two particles
+      // that the reference separates is the shape of a missing odd term, and it is why this
+      // was found by a like-for-like run rather than by tests/test_muon.cu: that file calls
+      // mu_bethe_bloch_dedx directly and passes the tables, so it agreed to 0.0000% on 1392
+      // points while the transport was reading a different function.
+      //
+      // A defaulted parameter is what made it possible. Every other branch here passes what
+      // it was given; this one silently took a different meaning for the same call. The
+      // default is left in place because tests call the model with no tables on purpose, but
+      // no transport path may rely on it - see the measurement in docs/RISK.md.
+      return mu_bethe_bloch_dedx(m, type, kinetic, cut, shell);
     case HadronIoniModel::kBetheBloch:
       return bethe_bloch_dedx(m, type, kinetic, cut, shell);
     case HadronIoniModel::kBraggIon:

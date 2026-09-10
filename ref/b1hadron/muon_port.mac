@@ -1,0 +1,37 @@
+# The port's half of the mu- like-for-like. Run it with examples/B1/exampleB1.exe; its partner
+# is muon_emonly.mac, run with ref/run/runb1.bat against the real Geant4 build of B1.
+#
+# No /process/inactivate lines, because there is nothing here to inactivate: this port gives a
+# muon Transportation, multiple scattering and continuous ionisation and nothing else, which is
+# what muon_emonly.mac reduces QBBC to. (The port's G4UImanager reports an unknown command
+# rather than ignoring it, so the two files cannot be the same file.)
+#
+# MEASURED, 20,000 events each, six random seeds on the Geant4 side and the printed rms on this
+# one:
+#
+#   mu-   port 23.8091 +/- 0.126 nGy   Geant4 23.0992 +/- 0.037   +3.07%, 5.4 sigma
+#   mu+   port 23.8629 +/- 0.127 nGy   Geant4 23.9259 +/- 0.056   -0.26%, 0.45 sigma
+#
+# So mu+ agrees and mu- does not, and the two numbers together are the finding rather than
+# either alone. Geant4's own mu+ minus mu- is 0.827 +/- 0.067 nGy - 3.58% at 12 sigma, and 3.94%
+# with nothing inactivated at all - while its own restricted dE/dx and range tables for the two
+# differ by 0.23% and 0.30% (ref/oracle/hadron_tables.csv, G4_WATER at 199.526 MeV). The port
+# reproduces THOSE to 0.05% and separates its two muons by 0.24%. A dose asymmetry fifteen
+# times larger than the stopping-power asymmetry that is supposed to cause it is not in the
+# tables, and what is left charge-odd in a 200 MeV mu- once ionisation is excluded is multiple
+# scattering - G4MuMultipleScattering with G4WentzelVIModel, whose single-scattering tail runs
+# through G4WentzelOKandVIxSection. Open; see docs/RISK.md V36.
+#
+# 200 MeV: a mu- range of 861 mm in water against B1's ~360 mm of world, so nothing stops and
+# this is a plateau dose. Confirmed rather than assumed - the Geant4 run with
+# muMinusCaptureAtRest left ACTIVE gives a bit-identical 22.9917 nGy, so no muon reached rest.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle mu-
+/gun/energy 200 MeV
+
+/run/printProgress 5000
+/run/beamOn 20000

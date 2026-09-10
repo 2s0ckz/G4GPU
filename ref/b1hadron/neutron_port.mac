@@ -1,0 +1,25 @@
+# The port's half of the neutron check; its partner is neutron_nogeneral.mac.
+#
+# MEASURED, 2,000 events of 100 MeV:
+#
+#   neutron   port 0 pGy exactly   Geant4 0 pGy exactly
+#
+# Both zero, and the zero is the point: a neutron with no cross section is a
+# G4Transportation-only track, so it crosses the world in straight lines and leaves with its
+# energy. The same Geant4 run with NeutronGeneralProc ACTIVE is what the neutron's hadronic
+# physics is worth for this geometry, and that number belongs to P8.
+#
+# A dose of zero cannot tell "streamed out" from "never stepped", so the streaming itself is
+# asserted in tests/test_neutron.cu instead: one step of 200 mm + the navigator's push, a clock
+# advanced by L/(beta c) to 1.5589200855 ns, energy unchanged, edep exactly zero, and the track
+# leaving the world. That test also covers the 10 us time cut, which no shower here can reach.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 500
+/run/beamOn 2000

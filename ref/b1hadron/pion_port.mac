@@ -1,0 +1,19 @@
+# The port's half of the pi+ like-for-like; its partner is pion_emonly.mac. See muon_port.mac
+# for why the two files differ only by the inactivations.
+#
+# MEASURED, 20,000 events:
+#
+#   pi+   port 25.1815 +/- 0.133 nGy   Geant4 25.2319 +/- 0.134   -0.20%, 0.27 sigma
+#
+# The cleanest of the four: a species whose transport this package added, agreeing with Geant4
+# to two parts in a thousand on a dose, with no free parameter between them.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle pi+
+/gun/energy 200 MeV
+
+/run/printProgress 5000
+/run/beamOn 20000

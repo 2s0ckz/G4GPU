@@ -4863,3 +4863,61 @@ The partials also swap order at 20 MeV: `PostStepDoIt` tests elastic first below
 first above it, so the high zone's single stored partial is the inelastic one. Getting that
 backwards exchanges two cross sections that differ by a factor of a few and still looks like a
 plausible neutron.
+
+#### The muon was transported with a different function from the one its test checks
+
+The like-for-like run that P1 exists to make - example B1 with a mu- beam, against Geant4 QBBC
+with everything a muon has and this port does not switched off - came out **3.2% high at 5
+sigma**. And the same run with mu+ came out 1.4% LOW. The port's two answers were not merely
+close: they were **bit-identical**, 23.8377 nGy for both, where Geant4 gives 23.11 nGy for mu-
+and 24.1721 for mu+ - a 4.6% asymmetry at 8 sigma between two particles of the same mass and
+opposite charge.
+
+One number where the reference has two is the shape of a **missing charge-odd term**, and there
+is exactly one in the chain: `high_order_bracket` is `2*(Barkas + Bloch) + Mott` and the Barkas
+correction goes as z^3. `G4MuBetheBlochModel::ComputeDEDXPerVolume`'s last line is
+
+    //High order corrections
+    dedx += corr->HighOrderCorrections(p,material,kineticEnergy,cutEnergy);
+
+and eighteen lines above it, `dedx -= 2.0*corr->ShellCorrection(p,material,kineticEnergy);`.
+Both are in the port's `mu_bethe_bloch_dedx`, both guarded by `if (shell != nullptr)`, and
+`shell` is a **defaulted parameter**. `hadron_ioni_dedx` dispatches five models and passes the
+tables to four of them:
+
+    case HadronIoniModel::kMuBetheBloch: return mu_bethe_bloch_dedx(m, type, kinetic, cut);
+    case HadronIoniModel::kBetheBloch:   return bethe_bloch_dedx(m, type, kinetic, cut, shell);
+
+So every dE/dx the muon was transported with, and the whole muon range table, was the
+Bethe-Bloch bracket plus Kokoulin's radiative term and nothing else. One argument.
+
+**Why no test caught it.** `tests/test_muon.cu` compares `mu_bethe_bloch_dedx` against Geant4's
+model over 1392 points and reports `0.0000%`. It passes the tables, because it calls the model
+directly - which is the right thing for a test of a model, and is why it was checking a function
+the transport did not use. `tests/test_hadron_range.cu` builds its table through
+`hadron_total_dedx`, so it DID see it, as a mu- dE/dx error of 10.2% and a mu+ of 6.4% - and
+those numbers were sitting in its table as *recorded measurements of a species with no kernel*,
+which is exactly the licence a recorded measurement gives you and exactly what it costs. mu-
+was four times worse than pi- in the same column and nothing asked why.
+
+Measured, after passing the argument: mu+ dE/dx worst 6.397% -> **0.861%** and range 3.213% ->
+**0.447%**; mu- 10.176% -> **2.209%** and 6.015% -> **1.500%**. What remains for mu- is the same
+~2% every negative hadron carries in `G4_AIR` (pi- is 2.367% in the same column), so the muon
+has stopped being an outlier - which is the shape the table should have had from the start.
+
+Three things worth keeping:
+
+- **A defaulted parameter let one call site mean something different from its four neighbours.**
+  Nothing in the signature says the transport may not use the default; nothing in the call site
+  says it did. The default is still there, because a test that wants the bare model has a
+  legitimate reason to pass nothing - but the diagnosis is that a dispatcher which forwards
+  four of five arguments is not obviously wrong at a glance, and no compiler warning exists for
+  it.
+- **A model test and a transport test are different tests, and 0.0000% on the first says
+  nothing about the second.** This project has both disciplines and they met at a function
+  boundary neither of them crossed.
+- **"Two particles, one answer" is a diagnostic.** The port's mu+ and mu- doses agreeing to the
+  last bit was more informative than either of them being 3% out, and it named the term before
+  any source was read: charge-even where the reference is charge-odd.
+
+The B1 numbers after the fix are in the commit that made it.

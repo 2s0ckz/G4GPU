@@ -1,0 +1,21 @@
+# The port's half of the kaon+ like-for-like; its partner is kaon_emonly.mac.
+#
+# MEASURED, 2,000 events (the kaon's dose per event is twice the pion's, so the same relative
+# uncertainty comes at a tenth the count):
+#
+#   kaon+  port 4.91817 +/- 0.0829 nGy   Geant4 4.9184 +/- 0.0817   -0.005%, 0.002 sigma
+#
+# Agreement to five parts in a hundred thousand, which at this count is luck as much as
+# physics - the honest statement is "well inside one combined sigma". What it establishes is
+# that the Bragg / Bethe-Bloch chain and the range table generalise to a mass and a lifetime
+# nothing in this project had transported before.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/gun/particle kaon+
+/gun/energy 200 MeV
+
+/run/printProgress 500
+/run/beamOn 2000

@@ -222,14 +222,25 @@ const Species kSpecies[] = {
      {0.080, 0.020, 0.200, 0.100, 0.030},
      {0.030, 0.010, 0.100, 0.090, 0.030}, 0.003},
     // Muons: a flat 200 keV boundary rather than the mass-scaled 225 keV, and
-    // G4MuBetheBlochModel above it. mu+ agrees exactly below 100 keV now; the 0.1-2 MeV band
-    // straddles the boundary and mu- carries the air anomaly on top.
+    // G4MuBetheBlochModel above it. mu+ agrees exactly below 100 keV; the 0.1-2 MeV band
+    // straddles the boundary and mu- carries the charge-odd air anomaly on top.
+    //
+    // **These rows were four to eight times wider until the muon got a transport.** The
+    // kMuBetheBloch branch of hadron_ioni_dedx did not pass the shell tables through, so the
+    // muon's dE/dx and range came out of G4MuBetheBlochModel's bracket without the shell
+    // correction and without G4EmCorrections::HighOrderCorrections - and this file could not
+    // see it, because it builds the table through hadron_total_dedx while tests/test_muon.cu
+    // calls the model directly WITH the tables and agreed to 0.0000% on 1392 points. The
+    // measured improvement: mu+ dE/dx 6.397% -> 0.861% and range 3.213% -> 0.447%; mu-
+    // 10.176% -> 2.209% and 6.015% -> 1.500%. What is left for mu- is the same 2% every
+    // negative hadron carries in air (pi- is 2.367%), which is the story those numbers should
+    // have told all along - mu- was the outlier and is not one now.
     {"mu+", ParticleType::kMuonPlus,
-     {0.002, 0.002, 0.080, 0.010, 0.005},
-     {0.002, 0.002, 0.040, 0.020, 0.005}, 0.001},
+     {0.002, 0.002, 0.010, 0.002, 0.002},
+     {0.002, 0.002, 0.005, 0.002, 0.002}, 0.001},
     {"mu-", ParticleType::kMuonMinus,
-     {0.030, 0.030, 0.120, 0.030, 0.010},
-     {0.020, 0.020, 0.080, 0.040, 0.010}, 0.002},
+     {0.025, 0.025, 0.025, 0.025, 0.010},
+     {0.010, 0.010, 0.016, 0.015, 0.010}, 0.001},
     // The base particle every non-alpha ion scales from. Charge 1, mass 938.2723 - and not
     // units::proton_mass_c2, which is 938.272013. Exact below 100 keV.
     {"GenericIon", ParticleType::kGenericIon,
