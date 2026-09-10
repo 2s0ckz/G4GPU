@@ -4505,3 +4505,79 @@ and the only nonzero number in a block of twenty. Writing every mass and width a
 source writes it, product and all, takes every deterministic comparison in the file to exactly
 zero. The same class of error as V8, one ulp instead of 1e-8, and the tell was the same: one
 number in a table that should have been zero and was not.
+
+---
+
+### V39: a constant written the short way, three times, and the subtraction that noticed
+
+Three findings from the P2 hadronic cross sections (`phys/xs`), and they are one finding: **a
+physical constant that Geant4 computes must be computed the same way, not pasted as the decimal
+it comes to.** Each of the three was invisible to every test that multiplied by it and visible
+to the first one that subtracted.
+
+#### `0.493677*GeV` is not `493.677`
+
+They are adjacent doubles - 493.67699999999996 and 493.67700000000002. `G4KaonPlus.cc` writes
+the first. `projectile.cuh` wrote the second, and every Coulomb factor for a kaon disagreed with
+Geant4 by **1.4e-12**, a thousand times the comparison tolerance.
+
+The amplifier is `G4NuclearRadii::CoulombFactor`, which computes
+
+```
+totTcm = sqrt(pM*pM + tM*tM + 2*pElab*tM) - pM - tM;
+return (totTcm > bC) ? 1. - bC/totTcm : 0.0;
+```
+
+At 1 MeV that subtracts 1432 MeV from 1432 MeV to get 0.65 - a cancellation of about 2200 - and
+then `1 - bC/totTcm` near its threshold divides by 0.11, another factor of 8. One ulp in, 1.4e-12
+out. Every hadron mass in the port is now spelled `x.yz * GeV` as its `G4*.cc` does. Only the
+kaon actually differed; the pion, the lambda, the neutral kaons and the four light ions come to
+the same double either way. They are written that way so that the next one cannot.
+
+#### `barn` was the literal 1e-22 and CLHEP derives it
+
+CLHEP: `meter = 1000.*millimeter; meter2 = meter*meter; barn = 1.e-28*meter2`. That is
+9.9999999999999993e-23. The literal `1e-22` is 1.0000000000000000385e-22 - one double higher,
+1.148e-16 relative.
+
+`ref/oracle/constants.csv` has carried CLHEP's own value from the beginning and
+`tests/test_constants.cu` compares against it **at 1e-15**, which is exactly loose enough not to
+notice. Four call sites used the constant and none of them could see it: they all multiply a
+tabulated cross section by it.
+
+The fifth was `G4ComponentGGHadronNucleusXsc`, whose elastic cross section is
+`fTotalXsc - fInelasticXsc`. For a pi- on Li7 at 121 keV that difference is 1/371 of either
+term, so 1.148e-16 in the millibarn scaling both came out as **2.2e-12** in the elastic - and
+read exactly like a wrong per-Z bar-correction table, which is what it was blamed on for an
+hour. Found by inverting Geant4's own published total for the `sigma` it must have had and
+substituting the CLHEP-derived millibarn: bit-exact.
+
+`src/core/units.cuh` is shared, so the fix was verified rather than argued: all 28 host tests
+that exist were rebuilt and rerun, and all pass.
+
+**The generalisation.** A tolerance is only a tolerance for the quantity it is applied to. A
+1e-15 gate on a constant is a 1e-12 gate on anything that subtracts two numbers built from it,
+and the tolerance that catches a constant should be the tightest one downstream of it, not a
+comfortable one. Where a comparison is a difference of two nearly equal numbers - GG elastic,
+`hpInXsc = total - elastic`, `difratio - log(1+difratio)` - the honest thing is to say so and
+compare the inputs too; `tests/test_hadronic_xs.cu` compares all five GG columns for that
+reason, and its worst residual (3.5e-13) is a cancellation with bit-exact inputs.
+
+#### And a Geant4 asymmetry that is not arithmetic at all
+
+`G4BGGNucleonElasticXS::CoulombFactor(kinEnergy, Z)` is a member function that branches on
+`isProton` - a per-instance flag - and takes no particle argument. `BuildPhysicsTable` divides
+**both** `theCoulombFacP[]` and `theCoulombFacN[]` by it. Those arrays are `static`, and the
+build returns early once `theA[0]` is set, so exactly one instance ever fills them: the first
+one initialised, with its own `isProton`.
+
+So a neutron instance whose tables a proton instance built returns
+`barashenkov_n(14 MeV) / CoulombFactor_proton(14 MeV, Z)` below 14 MeV - a factor 2.13 at
+Z = 92, and a factor of ten for the inelastic class's neutron at 1.8 keV. The port divided each
+column by its own projectile's factor, which is what the code looks like it means, and was 53%
+and 90% wrong there. `bgg_build_nucleon_table` now takes `built_for_proton`.
+
+**Worth generalising:** where a Geant4 class has static per-Z tables and a per-instance flag,
+the tables belong to whichever instance was constructed first, and *which* instance that is
+belongs in the port's interface rather than in a comment. QBBC constructs the proton one; the
+default says so and the argument makes it changeable.

@@ -153,6 +153,28 @@ physics lists.
 | G4ComponentBarNucleonNucleusXsc | **P** | `hadronic/barashenkov_xs.cuh` |
 | G4PiData (the interpolation it calls) | **T** | same |
 | G4BarashenkovData (the tables) | **T** | `data/barashenkov.hh`, 17 elements, 776 points |
+| G4NuclearRadii (all 7 radii + both CoulombFactor) | **V** | `hadronic/xs/nuclear_radii.cuh` |
+| G4NucleiPropertiesTableAME12 / G4NucleiProperties | **P** | `data/nuclei_mass_ame12.hh`, 3353 nuclides |
+| G4PhysicsVector / LogVector / LinearVector (evaluation) | **V** | `hadronic/xs/physics_vector.cuh` |
+| G4HadronNucleonXsc (PDG, NS, all three Kaon* forms) | **P** | `hadronic/xs/hadron_nucleon_xsc.cuh` |
+| G4ComponentGGHadronNucleusXsc | **V** | `hadronic/xs/gg_hadron_nucleus_xsc.cuh` |
+| G4ComponentGGNuclNuclXsc | **V** | `hadronic/xs/gg_nucl_nucl_xsc.cuh` |
+| G4UPiNuclearCrossSection | **V** | `hadronic/xs/upi_nuclear_xs.cuh`, `data/upi_nuclear.hh` |
+| G4BGGNucleonElasticXS | **V** | `hadronic/xs/bgg_nucleon_xs.cuh` |
+| G4BGGNucleonInelasticXS | **V** | same |
+| G4BGGPionElasticXS | **V** | `hadronic/xs/bgg_pion_xs.cuh` |
+| G4BGGPionInelasticXS | **V** | same |
+| G4IsotopeList (amin/amax/aeff) | **T** | `data/isotope_list.hh` |
+| G4PhysicsVector::Retrieve (the G4PARTICLEXS format) | **T** | `data/particlexs_data.cuh` |
+| G4ParticleInelasticXS (p, d, t, He3, alpha) | **V** | `hadronic/xs/particlexs.cuh` |
+| G4NeutronInelasticXS | **V** | same |
+| G4NeutronElasticXS | **V** | same |
+| G4NeutronCaptureXS | **V** | same |
+| G4GammaNuclearXS | **P** | same - below 130 MeV only, see below |
+| G4NeutronGeneralProcess (its five tables and grid) | **V** | `hadronic/xs/neutron_general_xs.cuh` |
+| G4CrossSectionDataStore (ComputeCrossSection, SampleZandA) | **V** | `hadronic/xs/sample_za.cuh` |
+| G4ComponentSAIDTotalXS | **-** | not reachable - see below |
+| G4ComponentAntiNuclNuclearXS | **-** | refused by name in `hadronic/xs/refusal.cuh` |
 
 Nucleon-nucleus total, inelastic and elastic, Z = 2..92, 14 MeV - 1 TeV, protons and neutrons,
 agreeing with Geant4 to **2e-15 over 10,738 points** (`tests/test_nucleon_xs.cu`).
@@ -165,6 +187,99 @@ cover, each refused loudly in the file header rather than approximated:
   parameterisation, not a limiting case of this one. Matters most for water.
 - **below 14 MeV** -> the Coulomb-barrier form.
 - **above 91 GeV** -> Glauber-Gribov.
+
+**Those three branches are now complete**, in `hadronic/xs/bgg_nucleon_xs.cuh`, which sits
+above `barashenkov_xs.cuh` and calls it for the middle band. The file header of
+`barashenkov_xs.cuh` still refuses them because *that file* still does not have them; the class
+Geant4 puts above it does. `tests/test_hadronic_xs.cu` compares all four BGG data sets end to
+end over Z = 1..92 and 1 keV to 100 TeV.
+
+#### 2.1.1 P2 - the hadronic cross sections (added by the P2 branch)
+
+**1.34 million points against Geant4 11.1.1 at 1e-12 relative**, two tests:
+
+| test | oracle | points | worst |
+|---|---|--:|--:|
+| `tests/test_hadronic_xs.cu` | `had_radii`, `had_coulomb`, `had_hnxsc`, `had_ggcomp`, `had_bgg` | 1,127,000 | 3.5e-13 |
+| `tests/test_particlexs.cu` | `had_particlexs`, `had_particlexs_iso`, `had_neutron_general`, `had_matelem` | 212,000 | **0** (bit-exact) |
+
+The 3.5e-13 is a cancellation and not a disagreement: the Glauber-Gribov elastic cross section
+is `fTotalXsc - fInelasticXsc`, and for a pi- on Li7 at 121 keV that difference is 1/371 of
+either term, so an agreement of 1e-16 in each shows as 4e-14 in the difference. Every input to
+it agrees to the last bit.
+
+**V and not T** for all of it, for the same reason `barashenkov_xs.cuh` is: these are cross
+sections with no process attached. P5 and P8 wire them.
+
+**`G4GammaNuclearXS` is P.** Below its data files' top energy - 130 MeV for most elements -
+element and isotope are exact. Above it, and for hydrogen at any energy, Geant4 needs
+`G4PhotoNuclearCrossSection`, the 1821-line CHIPS parameterisation, which is not ported; the
+transition region between the table top and 150 MeV needs it too, because it is a straight line
+to `xs150[Z]` = CHIPS at 150 MeV. Refused by name (`XsRefusal::kPhotoNuclearCrossSection`) at
+the point it would have been needed. 1,128 of the test's element points and 760 of its isotope
+points land in that gap and are counted as refusals rather than passes.
+
+**`G4HadronNucleonXsc` is P** for two branches nothing in QBBC reaches: `HyperonNucleonXscNS`
+(s/c/b hyperons) and `SCBMesonNucleonXscNS` (s/c/b mesons). Both are refused by name.
+`G4NucleiProperties` is **P** because `G4NucleiPropertiesTheoreticalTable` and the Cameron
+formula behind it are not ported, so a nuclide outside AME2012 refuses rather than being given
+a neighbour's mass. P3 has committed its own AME12 table as `src/data/ame12_masses.hh`; the two
+want unifying at integration.
+
+**`G4ComponentSAIDTotalXS` is not reachable and no `G4SAIDDATA` reader is needed.** Checked
+rather than assumed: in the whole 11.1.1 source tree the class is *mentioned* in exactly one
+place outside its own two files - an `#include` at line 47 of `G4BGGNucleonInelasticXS.cc` -
+and never constructed. Nothing in `physics_lists` names it. `G4SAIDXSDATA` is read only by
+`G4ComponentSAIDTotalXS.cc` itself.
+
+**`G4HadronicProcess` does not tabulate the cross section.** It holds no `G4PhysicsVector` and
+no `G4PhysicsTable` of it - grep the header and the source, there are none -
+`PostStepGetPhysicalInteractionLength` calls `UpdateCrossSectionAndMFP`, and every arm of that
+ends in `theCrossSectionDataStore->ComputeCrossSection(dp, currentMat)`. So for a charged
+hadron the transport evaluates the model, not a table: the exact opposite of the neutron
+(section 2.1.2) and of every EM process.
+
+What `BuildPhysicsTable` does build, when the integral method is on
+(`EnableIntegralInelasticXS` and `EnableIntegralElasticXS` both default true) and the particle
+is charged, is the *shape* of the cross section per material: `G4HadXSHelper::FillPeaksStructure`
+scans `nbin = G4lrint(log(emax/emin)*10/log(10))` points - ten per decade - from the process's
+`minKinEnergy` (1 MeV, a private member with no getter) to 100 TeV and records up to three peak
+energies and two dip energies. `UpdateCrossSectionAndMFP` uses them only to decide whether the
+cached cross section may be reused, with `lambdaFactor = 0.8`. `fXSType` is `fHadTwoPeaks` for
+pi+-, pi- and protons, `fHadOnePeak` for K+, and increasing/decreasing by charge otherwise.
+`ref/oracle/had_xspeaks.csv` carries those five energies per material for protonInelastic,
+hadElastic on a proton, and pi+-Inelastic; P5 owns using them.
+
+#### 2.1.2 THE NEUTRON GRID
+
+`ref/oracle/hadronic_params.csv` says `EnableNeutronGeneralProcess = 1`, so a neutron in QBBC
+has ONE discrete process. `G4NeutronGeneralProcess` builds a combined per-material table and
+the transport reads that, not the three data sets:
+
+| table | grid | contents |
+|--:|---|---|
+| 0 | 401 nodes, 1 keV - 20 MeV | `sigEl + sigInel + sigCap`, macroscopic, 1/mm |
+| 1 | same | `sigEl / sum` |
+| 2 | same | `(sigEl + sigInel) / sum` |
+| 3 | 71 nodes, 20 MeV - 100 TeV | `sigEl + sigInel` (capture is exactly zero there) |
+| 4 | same | `sigInel / sum` |
+
+The node counts are the load-bearing part: `nLowE = 100*G4lrint(log10(20 MeV / 1 keV))` is
+`100*lrint(4.301) = 400` **bins** over 4.301 decades - 93 per decade, not 100 - and
+`nHighE = 10*G4lrint(log10(100 TeV / 20 MeV)) = 10*lrint(6.699) = 70`. Reading the 100 and the
+10 as bins-per-decade gives 431 and 67 nodes, which leaves both ends exact and moves every
+interior node. `tests/test_particlexs.cu` compares the 9,415 node energies as well as the 6,608
+values, and asserts 401 + 71 on the arithmetic as well, so it fails even if a future dumper
+drops the grid column. This is docs/RISK.md V5 applied before a number was compared.
+
+The oracle for it is the process's own `StorePhysicsTable` output, read back in binary
+(`ref/dump/dump_hadronic_xs.cc`) - Geant4's `binVector`, not a second implementation of the
+same arithmetic that could be wrong the same way.
+
+`fTimeLimit = 10 us` lives in this process too: `G4NeutronTrackingCut::ConstructProcess`
+returns immediately when a `G4NeutronGeneralProcess` exists, so QBBC's neutron time cut is that
+member and not a `G4NeutronKiller`. Carried as a constant in `neutron_general_xs.cuh` for
+P1/P8, which is where the row above says `G4NeutronTrackingCut` is absent.
 
 ### 2.2 What QBBC needs and is not there
 

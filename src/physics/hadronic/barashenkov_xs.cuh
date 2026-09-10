@@ -18,13 +18,17 @@
 // The elastic cross section is total minus inelastic. It is not tabulated anywhere - not here,
 // not in Geant4 - and the subtraction is the definition.
 //
-// What is NOT here, and is refused rather than approximated:
+// What is NOT here, because it is a different function and not a limiting case of this one:
 //   * Z = 1. G4BGGNucleonElasticXS sends hydrogen to G4HadronNucleonXsc::HadronNucleonXscNS,
-//     a nucleon-nucleon parameterisation, and multiplies by 1.0115. Different function, not a
-//     limiting case of this one.
+//     a nucleon-nucleon parameterisation, and multiplies by 1.0115.
 //   * below 14 MeV, where G4BGGNucleonElasticXS switches to a Coulomb-barrier form, and above
 //     91 GeV, where it switches to Glauber-Gribov.
-// See nucleon_elastic_xs.cuh, which owns those branches and calls this one for the middle.
+//
+// All three are now DONE, in physics/hadronic/xs/bgg_nucleon_xs.cuh, which is
+// G4BGGNucleon{Elastic,Inelastic}XS end to end and calls this file for the middle band. They
+// are still listed here because they are still not in THIS file: a caller that wants a nucleon
+// cross section at any energy wants that one, not this one. (An earlier version of this comment
+// pointed at `nucleon_elastic_xs.cuh`, a file that was never written.)
 #pragma once
 #include <cmath>
 
