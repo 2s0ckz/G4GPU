@@ -920,9 +920,12 @@ bool Open(const Options& opt) {
       styles[i].solid = st.visible && !st.wireframe && static_cast<int>(i) != scene.world;
       // Every solid that can be said in lines, in the volume's OWN colour - see
       // vis::EdgeList::AddVolume for both. It drew boxes only, and at 63% brightness.
+      //
+      // vis::pack_rgb, not ui::rgb: ui::rgb builds 0xAABBGGRR for the UI canvas and the
+      // framebuffer word is 0xAARRGGBB, so that spelling exchanged red and blue.
       edges.AddVolume(scene.volumes[i],
-                      ui::rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
-                              static_cast<int>(st.b * 255)),
+                      vis::pack_rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
+                                    static_cast<int>(st.b * 255)),
                       scene.pool.aux.empty() ? nullptr : scene.pool.aux.data());
     }
     CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * styles.size()));

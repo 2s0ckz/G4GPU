@@ -779,6 +779,73 @@ int main() {
           "pack_rgb, which the edge and trajectory passes use, is opaque");
   }
 
+  // ------------------------------------------------------------------ the limb, against truth
+  //
+  // AN ORB HAS AN EXACT ORACLE, and this is the only test here that uses one: a ray hits a
+  // sphere iff its perpendicular distance from the centre is under the radius. Everything above
+  // compares float against double, which cannot see a ray that BOTH precisions lose - and that
+  // is what the limb loss was.
+  //
+  // The mechanism is in geom::kProbe, and the reason it needs a test of its own is that it is
+  // invisible to every other check here: a step along a near-tangent ray leaves the surface by
+  // only step * h / R, so where the half-chord h is small the probe lands inside the surface
+  // band and is_crossing_to reports no crossing. Rays four millimetres deep into a 40 mm sphere
+  // were being lost, and the width of the band is (tol/probe)^2 * R / 2 - PROPORTIONAL TO R, so
+  // zooming does not escape it and it grows in pixels as you zoom in.
+  //
+  // Asserted as a fraction of the radius, because that is the form the failure takes. It was
+  // 5.3e-3 and it is 4.6e-5.
+  {
+    std::printf("\n== a sphere's limb, against the exact answer ==\n");
+    Solid<float> sf{};
+    sf.type = SolidType::kOrb;
+    SolidStore<float> st{};
+    double worst_frac = 0;
+    double worst_R = 0;
+    int total_false_pos = 0;
+    for (double R : {2.0, 10.0, 40.0, 200.0, 1000.0}) {
+      sf.p[0] = static_cast<float>(R);
+      // Five camera distances, because the ORIGIN SHIFT is what makes this independent of them
+      // and a regression there would show up here as a distance-dependent band.
+      for (double D : {R * 1.05, R * 2, R * 5, R * 40, R * 300}) {
+        double furthest = 0;
+        for (int i = 0; i < 4000; ++i) {
+          const double q = R * 1.02 * (i + 0.5) / 4000;
+          if (q >= D) { continue; }
+          const double a = std::asin(q / D);
+          const Vec3<float> eye{0.0f, 0.0f, static_cast<float>(D)};
+          const Vec3<float> dir{static_cast<float>(std::sin(a)), 0.0f,
+                                static_cast<float>(-std::cos(a))};
+          // Exactly the renderer's own ray setup, origin shift included.
+          const float reach = bounding_radius(st, sf);
+          float skip = -(eye.z * dir.z) - reach * 1.01f - 1.0f;
+          if (skip < 0.0f) { skip = 0.0f; }
+          const Vec3<float> from{eye.x + skip * dir.x, eye.y + skip * dir.y,
+                                 eye.z + skip * dir.z};
+          const bool hit = dist_in(st, sf, from, dir) < kInfinity<float>();
+          const bool want = q < R;
+          if (hit == want) { continue; }
+          if (!want) { ++total_false_pos; }
+          const double gap = std::fabs(R - q);
+          if (gap > furthest) { furthest = gap; }
+        }
+        const double frac = furthest / R;
+        if (frac > worst_frac) {
+          worst_frac = frac;
+          worst_R = R;
+        }
+      }
+    }
+    std::printf("    worst limb band %.2e of the radius (R = %.0f mm)\n", worst_frac, worst_R);
+    Check(worst_frac < 5e-4,
+          "float loses rays only within 5e-4 of a sphere's radius of its limb, at every "
+          "camera distance");
+    // A ray that misses and is reported as a hit would be a surface drawn outside the solid,
+    // which is a different failure and has never happened - so it is worth pinning at zero
+    // rather than folding into the band above.
+    Check(total_false_pos == 0, "and never reports a hit for a ray that misses");
+  }
+
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "ALL PASS", g_fails);
   return g_fails ? 1 : 0;
 }

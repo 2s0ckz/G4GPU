@@ -785,15 +785,21 @@ static void RebuildScene(App& a) {
     styles[i].b = static_cast<unsigned char>(st.b * 255);
     styles[i].a = static_cast<unsigned char>(st.opacity * 255 + 0.5f);
     styles[i].solid = st.visible && !st.wireframe;
-    // And its outline, when it is a wireframe volume and visible. ITS OWN COLOUR: this used to
-    // scale by 160/255 on the theory that a dimmer line reads as an outline rather than
-    // competing with a solid volume, which is a defensible look and is not what a colour
-    // picker is for - the user picks a colour and the volume comes out at 63% of it, reported
-    // as the wireframe colour not matching the object colour.
+    // And its outline, when it is a wireframe volume and visible. ITS OWN COLOUR, and
+    // vis::pack_rgb rather than ui::rgb: the two pack the CHANNELS IN OPPOSITE ORDERS. ui::rgb
+    // builds 0xAABBGGRR for the UI canvas, which is what an OpenGL RGBA upload wants on a
+    // little-endian host, while the framebuffer word this ends up in is 0xAARRGGBB - so an
+    // outline drawn through ui::rgb came out with its red and blue exchanged.
+    //
+    // Reported twice as the wireframe colour not matching the object's. The first time it was
+    // also scaled to 160/255, which is a defensible look and is not what a colour picker is
+    // for; removing that left the swap, and the check written for it - "recolouring the volume
+    // changes the picture" - is satisfied by any colour at all, which is why it passed. See
+    // the selftest, which now names the channel values it expects.
     if (st.visible && st.wireframe) {
       edges.AddVolume(scene.volumes[i],
-                      ui::rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
-                              static_cast<int>(st.b * 255)),
+                      vis::pack_rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
+                                    static_cast<int>(st.b * 255)),
                       scene.pool.aux.empty() ? nullptr : scene.pool.aux.data());
     }
   }
@@ -1585,7 +1591,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 112;
+      selftest_frames = 115;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -2798,23 +2804,29 @@ int main(int argc, char** argv) {
 
       // ---- A VOLUME IN A NULL CLASS'S SPACE IS DRAWN THERE.
       //
-      // A NULL CLASS IS DRAWN EXACTLY AS A HIDDEN ONE IS, pixel for pixel.
+      // A NULLED CELL IS NOBODY'S SPACE, AND A HIDDEN ONE IS STILL THE GRID'S.
       //
-      // That is the requirement in its own words - "turning off an object's visibility renders
-      // it exactly how I want something in a null layer to be rendered" - and it is the reason
-      // the renderer has no null-layer rule of its own any more. It used to: an absent cell
-      // ranked below everything, so any cover clamped the march there and a volume sitting in
-      // the hole was drawn. That is a second rendering of the same scene, reachable only
-      // through the null layer, and it is not the one that was wanted.
+      // The distinction this turns on, and it has been got wrong in both directions. A voxel
+      // is its own volume as far as owning space goes: its class's layer is its layer, and a
+      // class that is not in the scene has no layer at all. So
       //
-      // Both pictures are produced HERE, in one session, and compared. Nothing else can
-      // establish "exactly": a rule restated in the checker is a rule that agrees with itself.
+      //   hidden class    the cells are still there and still the grid's. Nothing of them is
+      //                   painted, and a volume inside them stays hidden, because the grid
+      //                   goes on outranking it.
+      //   nulled class    the cells are gone. Whatever is in that space owns it - INCLUDING a
+      //                   volume on a lower layer than the grid, which is what makes this
+      //                   different from every other overlap in the scene.
       //
-      // InHole sits inside the class's cells on a LOWER layer than the grid, so it is the
-      // volume that would appear if the grid ever stopped owning that space. Under both
-      // renderings it stays hidden, which is what the recolour below asks.
-      static unsigned long long hole_shown = 0, hole_hidden = 0, hole_nulled = 0;
-      static unsigned long long hole_nulled_recol = 0;
+      // The two therefore do NOT produce the same picture wherever something is inside the
+      // cells, and a previous version of this check asserted that they did. InHole is exactly
+      // that something: inside the class's cells, on a lower layer than the grid.
+      //
+      // Both halves are needed. "Drawn in the hole" alone is satisfied by a renderer that has
+      // stopped honouring layers at all, and "hidden when the class is back" alone is
+      // satisfied by one that never draws it.
+      static unsigned long long hole_shown = 0, hole_hidden = 0;
+      static unsigned long long hole_nulled = 0, hole_nulled_recol = 0;
+      static unsigned long long hole_present = 0, hole_present_recol = 0;
       if (frame == 98) {
         a.target = vis::Vec3f{0.f, 400.f, 0.f};
         a.distance = 160.f;
@@ -2823,40 +2835,50 @@ int main(int argc, char** argv) {
       }
       if (frame == 99) {
         hole_shown = ViewportChecksum(a);
-        SetVoxelClassVisible(a, "Uncovered", 0, false);
+        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
       }
       if (frame == 100) {
+        hole_present_recol = ViewportChecksum(a);
+        hole_present = hole_shown;
+        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);   // back as it was
+        SetVoxelClassVisible(a, "Uncovered", 0, false);
+      }
+      if (frame == 101) {
         hole_hidden = ViewportChecksum(a);
         SetVoxelClassVisible(a, "Uncovered", 0, true);
         SetVoxelClassLayer(a, "Uncovered", 0, kNullLayer);
       }
-      if (frame == 101) {
+      if (frame == 102) {
         hole_nulled = ViewportChecksum(a);
         RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
       }
-      if (frame == 102) {
+      if (frame == 103) {
         hole_nulled_recol = ViewportChecksum(a);
-        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);   // back as it was
+        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);
         SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
       }
-      if (frame == 103) {
+      if (frame == 104) {
         const unsigned long long restored = ViewportChecksum(a);
         if (hole_hidden == hole_shown) {
-          std::printf("selftest: FAILED - hiding the near class changed nothing (%llu), so "
-                      "there is no reference to compare the null layer against\n", hole_shown);
-        } else if (hole_nulled != hole_hidden) {
-          std::printf("selftest: FAILED - a null class is not drawn the way a hidden one is "
-                      "(hidden %llu, null %llu)\n", hole_hidden, hole_nulled);
-        } else if (hole_nulled_recol != hole_nulled) {
-          std::printf("selftest: FAILED - recolouring a volume inside a null class changed the "
-                      "picture (%llu -> %llu), so the grid stopped owning that space\n",
-                      hole_nulled, hole_nulled_recol);
+          std::printf("selftest: FAILED - hiding the near class changed nothing (%llu), so it "
+                      "was never on screen and nothing below means anything\n", hole_shown);
+        } else if (hole_present_recol != hole_present) {
+          std::printf("selftest: FAILED - a volume inside a class that IS in the scene is "
+                      "drawn there (%llu -> %llu); the grid should outrank it\n", hole_present,
+                      hole_present_recol);
+        } else if (hole_nulled == hole_hidden) {
+          std::printf("selftest: FAILED - nulling a class and hiding it gave the same picture "
+                      "(%llu), so the nulled cells are still owning their space\n",
+                      hole_hidden);
+        } else if (hole_nulled_recol == hole_nulled) {
+          std::printf("selftest: FAILED - a volume inside a nulled class is not drawn there "
+                      "(recolouring it changed nothing, %llu)\n", hole_nulled);
         } else if (restored != hole_shown) {
           std::printf("selftest: FAILED - putting the class layer back did not restore the "
                       "picture (%llu -> %llu)\n", hole_shown, restored);
         } else {
-          std::printf("selftest: a null voxel class draws exactly as a hidden one does, and "
-                      "the volume inside it stays the grid's either way\n");
+          std::printf("selftest: a nulled voxel class gives its space to the volume inside it, "
+                      "and a hidden one keeps it\n");
         }
       }
 
@@ -2871,9 +2893,9 @@ int main(int argc, char** argv) {
       // Turning the display of it off has to change the picture: if no edge is being drawn,
       // nothing changes.
       static unsigned long long wire_on = 0;
-      if (frame == 104) { wire_on = ViewportChecksum(a); }
-      if (frame == 105) { a.vis_attr.show_wireframe = false; }
-      if (frame == 106) {
+      if (frame == 105) { wire_on = ViewportChecksum(a); }
+      if (frame == 106) { a.vis_attr.show_wireframe = false; }
+      if (frame == 107) {
         const unsigned long long wire_off = ViewportChecksum(a);
         if (wire_off == wire_on) {
           std::printf("selftest: FAILED - turning the wireframe off changed nothing, so no "
@@ -2902,34 +2924,64 @@ int main(int argc, char** argv) {
       //               half, an x-ray line pass that ignores depth entirely would pass too.
       static int wire_edges_off = 0, wire_edges_on = 0;
       static unsigned long long wg_base = 0, wg_recol = 0, wg_op = 0, wg_op_recol = 0;
-      if (frame == 107) {
+      if (frame == 108) {
         InsertSelftestWireframe(a);
         a.target = vis::Vec3f{0.f, -400.f, 0.f};
         a.distance = 200.f;
         a.azimuth = 0.f;
         a.elevation = 1.5f;   // down the z axis, so the pane is between the eye and the orb
       }
-      if (frame == 108) {
+      if (frame == 109) {
         wire_edges_off = a.n_edges;
         SetSolidWireframe(a, "WireOrb", true);
       }
-      if (frame == 109) {
+      if (frame == 110) {
         wire_edges_on = a.n_edges;
         wg_base = ViewportChecksum(a);
         RecolourSolid(a, "WireOrb", 0.2f, 0.95f, 0.3f);
       }
-      if (frame == 110) {
+      if (frame == 111) {
         wg_recol = ViewportChecksum(a);
         RecolourSolid(a, "WireOrb", 0.95f, 0.25f, 0.85f);   // back as it was
         SetSolidOpacity(a, "Glass", 1.0f);
       }
-      if (frame == 111) {
+      if (frame == 112) {
         wg_op = ViewportChecksum(a);
         RecolourSolid(a, "WireOrb", 0.2f, 0.95f, 0.3f);
       }
-      if (frame == 112) {
+      if (frame == 113) {
         wg_op_recol = ViewportChecksum(a);
+        RecolourSolid(a, "WireOrb", 0.95f, 0.25f, 0.85f);   // back as it was
+        SetSolidOpacity(a, "Glass", 0.35f);
+        // Out of the way, so the next frame sees the orb's lines over the background rather
+        // than composited with a pane.
+        SetSolidVisible(a, "Glass", false);
+      }
+      // AND THE EDGES ARE THE COLOUR THAT WAS ASKED FOR, named channel by channel.
+      //
+      // A line is opaque, so a pixel one covers carries its colour through resolve_pixel
+      // exactly - which means this can be an equality rather than a comparison. The expected
+      // channels are taken from the MODEL, the same floats the style loop converts, so what is
+      // being checked is the packing and not the arithmetic.
+      //
+      // The second count is the same colour with red and blue exchanged, and it has to be
+      // zero. That is the failure this exists for: ui::rgb packs 0xAABBGGRR for the UI canvas
+      // and the framebuffer word is 0xAARRGGBB, so an outline drawn through the wrong one is
+      // the right colour reversed - and "recolouring it changed the picture", which is what
+      // was checked before, passes on every colour there is.
+      if (frame == 114) {
+        const int oi = ModelIndexByName(a, "WireOrb");
         const int added = wire_edges_on - wire_edges_off;
+        long long right = -1, swapped = -1;
+        int er = 0, eg = 0, eb = 0;
+        if (oi >= 0) {
+          const Solid& o = a.model.solids[static_cast<std::size_t>(oi)];
+          er = static_cast<int>(o.r * 255);
+          eg = static_cast<int>(o.g * 255);
+          eb = static_cast<int>(o.b * 255);
+          right = CountViewportColour(a, er, eg, eb);
+          swapped = CountViewportColour(a, eb, eg, er);
+        }
         if (added < 64) {
           std::printf("selftest: FAILED - a round solid in wireframe added %d edges (%d -> "
                       "%d); an orb is a stack of rings, not a box\n", added, wire_edges_off,
@@ -2941,13 +2993,23 @@ int main(int argc, char** argv) {
           std::printf("selftest: FAILED - the orb's edges still respond to its colour with an "
                       "OPAQUE pane in front (%llu -> %llu), so lines are ignoring depth "
                       "altogether\n", wg_op, wg_op_recol);
+        } else if (er == eb) {
+          std::printf("selftest: FAILED - the orb's red and blue are equal, so the colour "
+                      "check below cannot see them exchanged\n");
+        } else if (right <= 0) {
+          std::printf("selftest: FAILED - no pixel is the orb's own colour (%d %d %d); its "
+                      "outline is being drawn in something else\n", er, eg, eb);
+        } else if (swapped != 0) {
+          std::printf("selftest: FAILED - %lld pixels carry the orb's colour with red and blue "
+                      "exchanged (%d %d %d), so the outline is packed in the UI's channel "
+                      "order rather than the framebuffer's\n", swapped, eb, eg, er);
         } else {
-          std::printf("selftest: a round solid contributes %d wireframe edges, drawn in its "
-                      "own colour, visible through a translucent volume and hidden by an "
-                      "opaque one\n", added);
+          std::printf("selftest: a round solid contributes %d wireframe edges, %lld pixels of "
+                      "them exactly its own colour (%d %d %d) and none reversed, visible "
+                      "through a translucent volume and hidden by an opaque one\n", added,
+                      right, er, eg, eb);
         }
-        RecolourSolid(a, "WireOrb", 0.95f, 0.25f, 0.85f);
-        SetSolidOpacity(a, "Glass", 0.35f);
+        SetSolidVisible(a, "Glass", true);
       }
 
       if (frame >= selftest_frames) {

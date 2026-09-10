@@ -10,6 +10,7 @@
 // trajectory passes composite against the ray-cast surfaces with no separate z-buffer.
 #pragma once
 #include <cmath>
+#include <cstring>   // memcpy, for the host build of pack_pixel
 #include "core/vec3.cuh"
 #include "geometry/navigator.cuh"
 #include "geometry/safety.cuh"
@@ -41,9 +42,19 @@ __host__ __device__ inline unsigned int pack_rgb(int r, int g, int b) {
   return pack_rgba(r, g, b, 255);
 }
 
-__device__ inline unsigned long long pack_pixel(float depth, unsigned int rgb) {
+/// HOST AND DEVICE, so that the render path can be tested without a GPU or a window. Every
+/// renderer bug in this project so far was found by taking a screenshot and looking at it -
+/// three wrong diagnoses before the one that mattered, on more than one occasion - and the
+/// reason was that nothing below the kernel could be called from a test. resolve_pixel was
+/// already host-callable for exactly this reason; this and trace_pixel are the rest of it.
+__host__ __device__ inline unsigned long long pack_pixel(float depth, unsigned int rgb) {
   // Positive floats compare correctly as unsigned ints, so depth ordering is preserved.
+#ifdef __CUDA_ARCH__
   const unsigned int d = __float_as_uint(depth);
+#else
+  unsigned int d = 0;
+  std::memcpy(&d, &depth, sizeof(d));
+#endif
   return (static_cast<unsigned long long>(d) << 32) | rgb;
 }
 
@@ -159,7 +170,7 @@ struct VolumeStyle {
 /// @param class_rgba  0xAARRGGBB per class, concatenated over volumes. A voxel solid's
 ///        p[6] says where its own run starts and p[7] how many classes long it is.
 template <typename real_t>
-__device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry,
+__host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry,
                                           const VolumeStyle* styles, const Camera& cam,
                                           float fx, float fy, bool grid_lines,
                                           const short* voxel_class,
@@ -458,8 +469,15 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
       {
         // The lowest rank any cell here can have. A volume that cannot beat this cannot cover
         // any cell of the grid, and for a uniform grid that is the whole test.
+        //
+        // EXCEPT WHERE THE GRID HAS HOLES IN IT, and then every volume is a candidate. An
+        // absent cell is not the grid's at all, so a volume of ANY layer takes that space -
+        // including one below the grid's lowest class, which this rank would otherwise reject
+        // before it was ever considered.
         const long long lo_rank =
-            geom::volume_rank(geom::layer_lo_of(geometry, best_vol), best_vol);
+            geometry.volumes[best_vol].has_absent_classes
+                ? (-9223372036854775807LL - 1)
+                : geom::volume_rank(geom::layer_lo_of(geometry, best_vol), best_vol);
         for (int v = 0; v < geometry.n_volumes; ++v) {
           // NOT THE WORLD, and not as an optimisation. The world contains everything by
           // construction, so it can never take space away in front of a cell - which is what
@@ -474,6 +492,27 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
           if (!geom::could_outrank(geometry, v, lo_rank)) { continue; }
           const real_t t = entry_ahead(v, hit);
           if (t >= geom::kInfinity<real_t>()) { continue; }
+          // A COVER AT ZERO IS ONE THE RAY HAS JUST COME OUT OF, not one ahead.
+          //
+          // This is the same fact as the zero-distance rule in `better` above, reached from
+          // the other side. When a march is interrupted by a cover, the surface search draws
+          // that cover and hands the grid back at the cover's EXIT - so the resumed march
+          // begins standing exactly on the cover's far face, and box_dist_in, whose tmin
+          // starts at zero and clamps, reports the cover as starting right here. The clamp
+          // below then fires at once, the march ends having painted nothing, and the next
+          // iteration finds no candidate at all.
+          //
+          // What that looked like: a phantom with a translucent volume over it showed the
+          // volume and nothing behind it, however transparent the volume was - reported as not
+          // being able to see the non-overlapping parts of a phantom through an object on a
+          // higher layer. Opaque covers were fine, because there is nothing to see through
+          // them and the march is never resumed.
+          //
+          // Nothing legitimate sits at zero here. owns_contained_point has just confirmed that
+          // the grid owns the point a nudge ahead, so the ray is not inside any volume that
+          // outranks the cell there - a cover reporting an entry distance of zero is therefore
+          // one whose surface is behind the ray, not in front of it.
+          if (t <= real_t(0)) { continue; }
           const long long r = geom::volume_rank(geom::layer_hi_of(geometry, v), v);
           if (n_cov < kMaxCovers) {
             cov_t[n_cov] = t;
@@ -518,8 +557,25 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
           const int cell_layer =
               geom::voxel_cell_layer(geometry.voxels, grid, walk.Index(grid));
 
-          const long long cell_rank = geom::volume_rank(
-              (cell_layer == geom::kNoClassLayer) ? vol.layer : cell_layer, best_vol);
+          // A CELL THAT IS NOT THERE OWNS NOTHING, so anything at all takes its space -
+          // including a volume on a LOWER layer than the grid, which the rank below would
+          // otherwise beat. This is the whole of treating a voxel as its own volume: the
+          // grid's layer is a property of its cells, and a cell that has been deleted has no
+          // layer to compare.
+          //
+          // Its rank is the lowest a signed 64-bit number holds, so every candidate cover
+          // outranks it and the clamp fires at whichever starts nearest, which is what hands
+          // the space over. NOT `covered` on its own account, though: `covered` ends the
+          // march, and ending it at the first absent cell would take every cell behind it too
+          // - a phantom with its near class nulled would vanish, far side included. So the
+          // rank is the lowest and the clamp decides. Something in the hole stops the march
+          // there; an empty hole does not stop it at all.
+          const bool gone = geom::voxel_cell_absent(geometry.voxels, grid, walk.Index(grid));
+          const long long cell_rank =
+              gone ? (-9223372036854775807LL - 1)
+                   : geom::volume_rank((cell_layer == geom::kNoClassLayer) ? vol.layer
+                                                                           : cell_layer,
+                                       best_vol);
           real_t t_own = geom::kInfinity<real_t>();
           for (int k = 0; k < n_cov; ++k) {
             if (cov_rank[k] > cell_rank && cov_t[k] < t_own) { t_own = cov_t[k]; }
@@ -544,11 +600,12 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
             break;
           }
           const int idx = walk.Index(grid);
-          // A CELL WHOSE CLASS IS NOT DRAWN IS SKIPPED AND THE MARCH GOES ON, which is the one
-          // rule here - it is what the alpha test below says. A hidden class and a null class
-          // both arrive with zero alpha and both behave this way; the renderer has no separate
-          // notion of a cell that is not in the scene. See FloatGeometry::Build.
-          if (idx >= 0 && idx < geometry.voxels.count) {
+          // An absent cell reaches here - it has to, so the clamp above can see it - and this
+          // is where it stops: not part of the volume, so nothing of it is painted. A cell
+          // whose class is merely HIDDEN reaches the alpha test below and is skipped there,
+          // which looks the same and is a different statement: a hidden cell still owns its
+          // space, and the clamp above treats it as the grid's.
+          if (!gone && idx >= 0 && idx < geometry.voxels.count) {
             const int cls = static_cast<int>(voxel_class[idx]);
             if (cls >= 0 && cls < ccount) {
               const unsigned int rgba = class_rgba[cbase + cls];

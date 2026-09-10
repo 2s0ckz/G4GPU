@@ -2550,11 +2550,10 @@ static void InsertSelftestNullLayer(App& a) {
 
   // AND A BOX INSIDE THE GRID'S NEAR HALF, which is the class the checks null.
   //
-  // On a LOWER layer than the grid, deliberately: it is the volume that would appear if the
-  // grid ever stopped owning that space, so it is what says whether a null class is drawn as a
-  // hidden class or as a hole. A hidden class leaves the space the grid's and the box stays
-  // hidden; the renderer once had a second rule for a null class that handed the space over
-  // and drew the box, and a null class is meant to look like a hidden one.
+  // On a LOWER layer than the grid, deliberately, because that is what separates the two
+  // things a class can be: HIDDEN cells are still there and still outrank the box, so it stays
+  // invisible; NULLED cells are gone, so the box owns that space whatever its layer and has to
+  // be drawn. A box on a higher layer would be drawn either way and would say nothing.
   Solid h;
   h.shape = Shape::kBox;
   h.name = "InHole";
@@ -2703,6 +2702,45 @@ static unsigned long long ViewportChecksum(const App& a) {
     }
   }
   return h;
+}
+
+/// How many viewport pixels are exactly this colour.
+///
+/// FOR CHECKING WHAT A COLOUR IS, not that it changed. "Recolouring the volume changed the
+/// picture" is satisfied by every colour there is, and it passed over a wireframe drawn with its
+/// red and blue exchanged - `ui::rgb` packs 0xAABBGGRR for the UI canvas and the framebuffer
+/// word is 0xAARRGGBB. Third time in this project an "it changed" check has stood over a wrong
+/// value, so where the answer is a number the check names the number.
+///
+/// Exact rather than near, and it can be: a pixel wholly covered by a line carries the line's
+/// own colour through resolve_pixel untouched, because a line is opaque.
+///
+/// host_rgba is 0xAABBGGRR - the layout the UI draws in and OpenGL uploads - so the channels
+/// come out in that order here, which is itself the thing being checked.
+static long long CountViewportColour(const App& a, int r, int g, int b) {
+  const ui::Rect v = ViewRect(a);
+  const unsigned int want = 0xFF000000u | (static_cast<unsigned>(b & 255) << 16)
+                            | (static_cast<unsigned>(g & 255) << 8)
+                            | static_cast<unsigned>(r & 255);
+  long long n = 0;
+  for (int y = 0; y < v.h; ++y) {
+    for (int x = 0; x < v.w; ++x) {
+      const std::size_t i = static_cast<std::size_t>(v.y + y) * a.width + (v.x + x);
+      if (i < a.host_rgba.size() && a.host_rgba[i] == want) { ++n; }
+    }
+  }
+  return n;
+}
+
+/// Shows or hides a named solid.
+static void SetSolidVisible(App& a, const char* name, bool visible) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    s.visible = visible;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
 }
 
 /// Repaints one voxel class of a named solid and marks the scene for rebuild.

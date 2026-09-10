@@ -3949,3 +3949,106 @@ Two smaller notes from the removal:
 One thing the removal costs, stated so it is not rediscovered as a bug: a volume inside a nulled
 class's cells on a lower layer than the grid is not drawn there. The grid still owns that space as
 far as the picture is concerned - exactly as it does for a hidden class, which is the whole point.
+
+### V33: hidden is not deleted, and zero distance from a boundary for the third time
+
+Five reports. Two of them were mine from the commit immediately before, one had been mistaken for
+a camera-distance problem and was not one, and the pair that looked like a single bug were two.
+
+#### The check that could not see the value
+
+The wireframe came out with red and blue exchanged, because `ui::rgb` packs `0xAABBGGRR` - which
+is what an OpenGL RGBA upload wants on a little-endian host - and the framebuffer word is
+`0xAARRGGBB`. One spelling, `vis::pack_rgb`, fixes it.
+
+The interesting part is that this shipped with a test written for it. The test asked whether
+recolouring the volume **changed the picture**, and every colour changes the picture. The user had
+already reported "the wireframe colour does not match" once; I removed a brightness scale, wrote a
+check for it, and shipped the swap underneath.
+
+Third time in this project that an "it changed" check has passed over a wrong value: the empty-set
+glyph was a blob that changed when recoloured, the anti-aliasing count moved for a scene full of
+translucent volumes, and now this. **A check that something changed cannot check what it changed
+to.** Where the right answer is a number - a colour, a radius, a count - the check has to name the
+number.
+
+#### A failure invisible to every check that compares two precisions
+
+"The sphere still has speckling around the edges when I zoom in close." It is not about zoom, and
+it is not about the origin shift that V30 added for the far field.
+
+Float loses rays in a band at the limb whose width is a **fixed fraction of the radius**, at every
+camera distance: 0.2 mm on a 40 mm sphere, measured at eleven distances from 1.02 R to 300 R with
+no trend. Since the band scales with R, it occupies a fixed fraction of the drawn disc, so zooming
+in makes it a wider ribbon of pixels - which is why it reads as a zoom problem.
+
+The mechanism is a step along a ray not being a step away from a surface. At impact parameter q the
+half-chord is `h = sqrt(R^2 - q^2)`, and stepping `d` back along the ray from the entry point
+leaves the surface by only `d * h / R`. Where h is small that is less than `kSurfTolerance`, the
+"before" probe reports **inside**, and `is_crossing_to` concludes there was no crossing. These are
+not grazes: at the outer edge of the band the half-chord is 4.1 mm, so rays whose CHORD through a
+40 mm sphere is eight millimetres long were being dropped.
+
+    band  =  (kSurfTolerance / kProbe)^2  *  R / 2
+
+What matters is the RATIO, not either constant. In double it is 1e-3 and the band is twenty
+nanometres; in float it was 1e-1 and the band was 0.005 R. Raising `kProbe<float>` from 1e-3 to
+1e-2 takes it to 2e-5 R - a tenth of a pixel with the sphere filling the window - and touches only
+float, so the transport cannot move.
+
+**None of the existing float-render checks could see it, and they all passed.** Every one of them
+compares float against double, and a ray that BOTH precisions lose looks like agreement. What was
+needed was an oracle, and an orb has one in closed form: a ray hits a sphere iff its perpendicular
+distance from the centre is under the radius. That is the only test in this project that checks the
+renderer against truth rather than against another implementation of itself, and it took twelve
+lines.
+
+#### Hidden is not deleted
+
+Two reports that looked like one. A phantom on layer 1 under a translucent volume on layer 2 showed
+the volume and nothing behind it; and a volume overlapping cells whose class was nulled was not
+drawn. The second was a consequence I had documented in the previous commit as a deliberate cost.
+It should not have been one.
+
+The user named the invariant: *treat voxel volumes as independent voxels rather than a collection
+unified under a mother volume.* Which is right, and it is what the ownership rule already half
+said - a cell's rank comes from its class's layer - with the other half withheld. I had stopped
+telling the renderer which classes are absent, on the reading that a nulled class should be drawn
+the way a hidden one is.
+
+It is. **A nulled cell and a hidden cell paint identically, and they say opposite things about the
+SPACE.** A hidden cell is still the grid's and still outranks whatever is inside it; a deleted cell
+is nobody's, so anything there owns it - including a volume on a *lower* layer, which is what makes
+this unlike every other overlap in the scene. I collapsed the two because their appearance is the
+same, and appearance was the only thing I checked.
+
+The general form is worth keeping: when two states look alike, that is not evidence that they mean
+alike. The question to ask is what each one claims about something other than its own pixels.
+
+#### And `box_dist_in` returns zero from a boundary, for the third time
+
+The translucent-cover bug is not about null at all. When a cell march is interrupted by a cover,
+the surface search draws that cover and hands the grid back at the cover's **exit** - so the
+resumed march begins standing exactly on the cover's far face. `box_dist_in` starts its `tmin` at
+zero and clamps, so it reports the cover as beginning right there, the clamp fires immediately, the
+march paints nothing, and the next iteration finds no candidate at all. The pixel keeps the cover
+and nothing else. Opaque covers were unaffected, because the march is never resumed through one.
+
+That single fact has now produced three separate bugs: the volume-shaped hole and the world
+entering the cover scan (both V31), and this. It is not a subtlety, it is a **hazard class** in
+this codebase, and it has the same shape every time - a distance of zero read as "starts here"
+when it means "you are standing on it". Anywhere a distance is asked from a point that was derived
+from a surface, zero means behind, not ahead. Both places that ask now say so in one line.
+
+#### What made the difference: the renderer became testable
+
+Every renderer bug in this project so far was found by taking a screenshot and looking at it. That
+worked, and V31 records what it cost: three wrong diagnoses in a row, each a ten-minute GUI rebuild
+apart, all of them in machinery that was working.
+
+`vis::trace_pixel` is `__host__ __device__` now - two words, plus a `memcpy` for the bit cast that
+`__float_as_uint` did - and `tests/test_render_layers.cu` builds a scene by hand, traces one ray,
+and reads the colour as a number. Both of these reports reproduced there in a millisecond, and the
+translucent-cover mechanism fell out of tracing the numbers by hand against the code, which is not
+something a screenshot can support. It should have happened three bugs earlier; the reason it did
+not is that the kernel being a kernel felt like a fact rather than a choice.

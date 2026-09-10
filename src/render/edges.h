@@ -43,13 +43,19 @@ struct EdgeList {
   std::vector<float> x0, y0, z0, x1, y1, z1;
   std::vector<unsigned int> rgb;
 
-  /// How finely a curve is drawn. A ring of 32 reads as a circle at the sizes a detector is
-  /// looked at, and the cost is one GPU thread per segment.
-  static constexpr int kRingSegments = 32;
-  /// Rings along the length of a curved solid, and the meridians joining them. Enough to read
-  /// as a surface rather than as a stack of loose hoops.
-  static constexpr int kProfileLevels = 5;
-  static constexpr int kMeridians = 8;
+  /// How finely a curve is drawn. The cost is one GPU thread per segment and a line pass that
+  /// was already running, so these are set by legibility rather than by budget: 32 segments
+  /// and 5 levels drew a sphere as three loose hoops, which is what "not enough vertices and
+  /// edges, e.g. the sphere and the torus" was.
+  static constexpr int kRingSegments = 48;
+  /// Rings along the length of a curved solid, and the meridians joining them. Nine levels
+  /// puts seven rings on a sphere (its two poles have no radius), which reads as a surface.
+  static constexpr int kProfileLevels = 9;
+  static constexpr int kMeridians = 12;
+  /// A torus is swept round its own circle, so it needs both families: cross-sections at
+  /// intervals of the major angle, and rings at intervals of the minor one.
+  static constexpr int kTorusMajor = 16;
+  static constexpr int kTorusMinor = 8;
 
   void Add(float ax, float ay, float az, float bx, float by, float bz, unsigned int c) {
     x0.push_back(ax); y0.push_back(ay); z0.push_back(az);
@@ -263,6 +269,24 @@ struct EdgeList {
         level(zz, a, b);
       }
     };
+    // A SPHERE'S LATITUDES ARE SPACED BY ANGLE, not by height. Equal steps in z put the rings
+    // where the surface is turning fastest - two of them within a few degrees of a pole, where
+    // they are tiny and add nothing - and leave the equator bare. Equal steps in the polar
+    // angle is what a globe does, and it is the difference between a sphere and a stack of
+    // hoops. Returns the rings for radius @p R.
+    auto polar = [&](real_t R) {
+      const double pi = 3.141592653589793;
+      for (int k = 0; k < kProfileLevels; ++k) {
+        const double th = pi * k / (kProfileLevels - 1);
+        // THE POLES ARE EXACTLY ZERO, and sin(pi) is not: it is 1.2e-16, so the south pole
+        // came out as a ring of radius 5e-15 and AddRing - which only rejects a radius that is
+        // not positive - drew all 48 segments of it. Invisible in the picture and not
+        // invisible in the count, which is how it was found.
+        const bool pole = (k == 0 || k == kProfileLevels - 1);
+        const real_t rr = pole ? real_t(0) : static_cast<real_t>(R * std::sin(th));
+        level(static_cast<real_t>(R * std::cos(th)), rr, rr);
+      }
+    };
 
     switch (s.type) {
       case geom::SolidType::kBox:
@@ -304,26 +328,21 @@ struct EdgeList {
         return;
 
       case geom::SolidType::kOrb:
-        sweep(-p[0], p[0], [&](real_t zz, real_t& a, real_t& b) {
-          const real_t q = p[0] * p[0] - zz * zz;
-          a = b = (q > real_t(0)) ? static_cast<real_t>(std::sqrt(q)) : real_t(0);
-        });
+        polar(p[0]);
         break;
 
       case geom::SolidType::kSphere:
-        // p[1] is rmax; a hollow sphere's inner surface gets its own rings below.
+        // p[1] is rmax; a hollow sphere's inner surface gets its own rings, on the same
+        // latitudes so the two read as one shell with a hole rather than as two objects.
         phi0 = p[2];
-        sweep(-p[1], p[1], [&](real_t zz, real_t& a, real_t& b) {
-          const real_t q = p[1] * p[1] - zz * zz;
-          a = b = (q > real_t(0)) ? static_cast<real_t>(std::sqrt(q)) : real_t(0);
-        });
+        polar(p[1]);
         if (p[0] > real_t(0)) {
-          for (int k = 0; k < kProfileLevels; ++k) {
-            const real_t t = static_cast<real_t>(k) / static_cast<real_t>(kProfileLevels - 1);
-            const real_t zz = -p[0] + real_t(2) * p[0] * t;
-            const real_t q = p[0] * p[0] - zz * zz;
-            const real_t r = (q > real_t(0)) ? static_cast<real_t>(std::sqrt(q)) : real_t(0);
-            AddRing(v.xform, zz, r, r, kRingSegments, phi0, c);
+          const double pi = 3.141592653589793;
+          for (int k = 1; k + 1 < kProfileLevels; ++k) {   // not the poles: no ring there
+            const double th = pi * k / (kProfileLevels - 1);
+            const real_t r = static_cast<real_t>(p[0] * std::sin(th));
+            AddRing(v.xform, static_cast<real_t>(p[0] * std::cos(th)), r, r, kRingSegments,
+                    phi0, c);
           }
         }
         break;
@@ -417,23 +436,41 @@ struct EdgeList {
 
       case geom::SolidType::kTorus: {
         // Not a surface of revolution in the profile sense - its own axis is a circle - so it
-        // does not go through AddProfile. Two rings in the z = 0 plane say where it is, and a
-        // ring of tube circles says what it is.
-        const real_t rin = p[2] - p[1], rout = p[2] + p[1];
-        AddRing(v.xform, real_t(0), rin, rin, kRingSegments, p[3], c);
-        AddRing(v.xform, real_t(0), rout, rout, kRingSegments, p[3], c);
+        // does not go through AddProfile, and it needs BOTH families of curve to read as a
+        // torus. Cross-sections alone are a fan of loose loops, which is what it was: two
+        // rings in the z = 0 plane and eight tube circles.
+        //
+        // Every point on it is (rtor + rmin_t cos(b)) * (cos(a), sin(a)) + rmin_t sin(b) z,
+        // with a the major angle round the axis and b the minor angle round the tube. Holding
+        // b fixed and sweeping a gives a ring the long way round; holding a fixed and sweeping
+        // b gives a cross-section. Both are drawn.
         const double two_pi = 6.283185307179586;
-        for (int m = 0; m < kMeridians; ++m) {
-          const double a = p[3] + two_pi * m / kMeridians;
-          const double ca = std::cos(a), sa = std::sin(a);
-          for (int i = 0; i < kRingSegments; ++i) {
-            const double b0 = two_pi * i / kRingSegments;
-            const double b1 = two_pi * (i + 1) / kRingSegments;
-            const double r0 = p[2] + p[1] * std::cos(b0), r1 = p[2] + p[1] * std::cos(b1);
-            AddSegment(v.xform, static_cast<real_t>(r0 * ca), static_cast<real_t>(r0 * sa),
-                       static_cast<real_t>(p[1] * std::sin(b0)), static_cast<real_t>(r1 * ca),
-                       static_cast<real_t>(r1 * sa), static_cast<real_t>(p[1] * std::sin(b1)),
-                       c);
+        const double rt = static_cast<double>(p[2]), rm = static_cast<double>(p[1]);
+        auto at = [&](double a, double b, real_t& x, real_t& y, real_t& z) {
+          const double r = rt + rm * std::cos(b);
+          x = static_cast<real_t>(r * std::cos(a));
+          y = static_cast<real_t>(r * std::sin(a));
+          z = static_cast<real_t>(rm * std::sin(b));
+        };
+        // Rings the long way round, at kTorusMinor stations of the minor angle - so the outer
+        // equator, the inner one, the top and the bottom are all among them.
+        for (int j = 0; j < kTorusMinor; ++j) {
+          const double b = two_pi * j / kTorusMinor;
+          for (int i = 0; i < kTorusMajor; ++i) {
+            real_t x0, y0, z0v, x1, y1, z1v;
+            at(p[3] + two_pi * i / kTorusMajor, b, x0, y0, z0v);
+            at(p[3] + two_pi * (i + 1) / kTorusMajor, b, x1, y1, z1v);
+            AddSegment(v.xform, x0, y0, z0v, x1, y1, z1v, c);
+          }
+        }
+        // And the cross-sections, at kTorusMajor stations of the major angle.
+        for (int i = 0; i < kTorusMajor; ++i) {
+          const double a = p[3] + two_pi * i / kTorusMajor;
+          for (int j = 0; j < kTorusMinor; ++j) {
+            real_t x0, y0, z0v, x1, y1, z1v;
+            at(a, two_pi * j / kTorusMinor, x0, y0, z0v);
+            at(a, two_pi * (j + 1) / kTorusMinor, x1, y1, z1v);
+            AddSegment(v.xform, x0, y0, z0v, x1, y1, z1v, c);
           }
         }
         return;

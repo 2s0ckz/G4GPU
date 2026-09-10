@@ -36,6 +36,7 @@
 
 using namespace g4gpu;
 using real_t = double;
+using E = vis::EdgeList;
 
 static int fails = 0;
 static void check(bool ok, const char* what) {
@@ -96,14 +97,17 @@ int main() {
     geom::SolidStore<real_t> st{};
     geom::Volume<real_t> v = identity_volume();
 
-    // An orb: 5 levels, the two poles at r = 0 and so undrawn, 3 rings of 32 plus 8 meridians
-    // of 4 segments each.
+    // An orb. Its latitudes are spaced by ANGLE, not by height - equal steps in z crowd two
+    // rings within a few degrees of each pole, where they are tiny, and leave the equator bare
+    // - so the two poles are the only levels with no radius and every other one is a ring.
     v.solid = geom::Solid<real_t>{};
     v.solid.type = geom::SolidType::kOrb;
     v.solid.p[0] = 40;
     vis::EdgeList orb;
     orb.AddVolume(v, 0u);
-    on_surface("orb", orb, st, v.solid, 3 * 32 + 8 * 4);
+    on_surface("orb", orb, st, v.solid,
+               (E::kProfileLevels - 2) * E::kRingSegments
+                   + E::kMeridians * (E::kProfileLevels - 1));
 
     // A hollow cylinder. Its inner rings are on the rmin surface, where the bracket points the
     // wrong way by construction - so they are checked separately, against rmin's own solid.
@@ -126,7 +130,7 @@ int main() {
     printf("  %-14s %zu segments: %d on rmax, %d on rmin, %d on neither\n", "hollow tubs",
            tubs.Size(), outer, inner, neither);
     check(neither == 0, "every vertex of a hollow tube is on one of its two radii");
-    check(inner == 2 * 32, "the inner surface gets a ring at each end");
+    check(inner == 2 * E::kRingSegments, "the inner surface gets a ring at each end");
     check(outer > 0, "and the outer surface is drawn too");
 
     // A cone: rmax differs at the two ends, so a table that reads one radius for both puts
@@ -138,7 +142,7 @@ int main() {
     v.solid.p[2] = 25;   // dz
     vis::EdgeList cons;
     cons.AddVolume(v, 0u);
-    on_surface("cons", cons, st, v.solid, 2 * 32 + 8 * 1);
+    on_surface("cons", cons, st, v.solid, 2 * E::kRingSegments + E::kMeridians);
 
     // A paraboloid, whose r^2 is linear in z rather than r. Drawn as a cone, the mid levels
     // sit inside the surface - the one case where only the INTERMEDIATE levels are wrong, so
@@ -150,7 +154,8 @@ int main() {
     v.solid.p[2] = 25;   // r at +dz
     vis::EdgeList par;
     par.AddVolume(v, 0u);
-    on_surface("paraboloid", par, st, v.solid, 5 * 32 + 8 * 4);
+    on_surface("paraboloid", par, st, v.solid,
+               E::kProfileLevels * E::kRingSegments + E::kMeridians * (E::kProfileLevels - 1));
 
     // An elliptical tube: rx and ry differ, so a table that carries one radius per level puts
     // every vertex but four off the surface.
@@ -161,7 +166,39 @@ int main() {
     v.solid.p[2] = 20;
     vis::EdgeList etub;
     etub.AddVolume(v, 0u);
-    on_surface("elliptical tube", etub, st, v.solid, 2 * 32 + 8 * 1);
+    on_surface("elliptical tube", etub, st, v.solid, 2 * E::kRingSegments + E::kMeridians);
+
+    // A TORUS GETS ITS OWN CHECK, because on_surface's bracket cannot express it. That bracket
+    // scales a vertex radially, which is "outward" only for a solid built about the z axis; on
+    // a torus, scaling a point on the INNER half of the tube moves it INTO the material. So the
+    // implicit function is used directly: (sqrt(x^2 + y^2) - rtor)^2 + z^2 = rmin^2, which is
+    // exact and needs no direction at all.
+    //
+    // It also needs both FAMILIES of curve. Cross-sections alone are a fan of loose loops -
+    // which is what it was, two rings in the z = 0 plane and eight tube circles - so the count
+    // is what says the rings the long way round are there.
+    v.solid = geom::Solid<real_t>{};
+    v.solid.type = geom::SolidType::kTorus;
+    v.solid.p[0] = 0;    // rmin of the tube: solid
+    v.solid.p[1] = 8;    // tube radius
+    v.solid.p[2] = 40;   // rtor
+    v.solid.p[4] = kFullTurn;
+    vis::EdgeList tor;
+    tor.AddVolume(v, 0u);
+    int off_tube = 0;
+    real_t worst = 0;
+    for (std::size_t i = 0; i < tor.Size(); ++i) {
+      const real_t x = tor.x0[i], y = tor.y0[i], z = tor.z0[i];
+      const real_t q = std::sqrt(x * x + y * y) - real_t(40);
+      const real_t d = std::sqrt(q * q + z * z) - real_t(8);
+      if (std::fabs(d) > worst) { worst = std::fabs(d); }
+      if (std::fabs(d) > real_t(1e-3)) { ++off_tube; }
+    }
+    printf("  %-14s %zu segments, %d off the tube, worst %.2e mm\n", "torus", tor.Size(),
+           off_tube, static_cast<double>(worst));
+    check(tor.Size() == 2 * E::kTorusMajor * E::kTorusMinor,
+          "a torus is drawn as rings the long way round AND cross-sections");
+    check(off_tube == 0, "every drawn vertex of a torus is on its tube");
   }
 
   // ---------------------------------------------------------------- 2. the aux-pool solids
@@ -183,7 +220,7 @@ int main() {
     v.solid.p[1] = kFullTurn;
     vis::EdgeList pc;
     pc.AddVolume(v, 0u, aux.data());
-    on_surface("polycone", pc, st, v.solid, 3 * 32 + 8 * 2);
+    on_surface("polycone", pc, st, v.solid, 3 * E::kRingSegments + E::kMeridians * 2);
 
     vis::EdgeList none;
     none.AddVolume(v, 0u);

@@ -44,7 +44,7 @@ if "%MODE%"=="" set MODE=all
 set SRC=%~dp0src
 set NV=nvcc -std=c++17 -O2 -I "%SRC%"
 set NVG=nvcc -std=c++17 -O2 -arch=sm_86 -I "%SRC%"
-set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle test_track_arena test_voxel_import test_ui_layout test_float_render test_wireframe
+set TESTS=test_core test_geometry test_navigation test_solids test_voxels test_mesh test_gamma_xs test_electron test_photoelectric test_brems test_rayleigh test_rayleigh_angular test_cuts test_general test_msc test_annihilation test_brems_rel test_hadron test_hadron_range test_hadron_delta test_fluctuation test_density_effect test_corrections test_muon test_hadron_radiative test_wentzel test_bragg test_ion_charge test_constants test_icru90 test_mott test_material_build test_all_materials test_nuclear_stopping test_wentzel_msc test_icru73qo test_nucleon_xs test_ion_fluctuation test_urban_general test_gun_position test_vs_oracle test_track_arena test_voxel_import test_ui_layout test_float_render test_wireframe test_render_layers
 
 rem Tests that launch real kernels rather than calling __host__ __device__ code on the
 rem host. They need the arch flag: StepTally reduces with atomicAdd on a double, which
@@ -450,21 +450,21 @@ if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the world's layer is confirmed.
   exit /b 1
 )
-rem A NULL CLASS IS DRAWN EXACTLY AS A HIDDEN ONE IS, pixel for pixel.
+rem A NULLED CELL IS NOBODY'S SPACE, AND A HIDDEN ONE IS STILL THE GRID'S.
 rem
-rem The renderer used to have a rule of its own for a null class: an absent cell ranked below
-rem every volume, so any cover clamped the march there and a volume sitting inside the hole was
-rem drawn in it. That is a second rendering of the same scene, reachable only through the null
-rem layer, and it is not the one that was asked for - turning an object's visibility off is.
+rem A voxel is its own volume as far as owning space goes, so a class that is not in the scene
+rem has no layer to compare and whatever is in those cells owns them - including a volume on a
+rem LOWER layer than the grid, which is what makes this unlike every other overlap. Hiding a
+rem class is a different statement: the cells are still there and still outrank what is inside
+rem them. A previous version of this check asserted the two gave the same picture; they do not,
+rem wherever something is inside the cells.
 rem
-rem So the claim is an equality between two pictures produced in the same session, not a
-rem restatement of a rule: hide the class and checksum the viewport, put it back and null it
-rem instead, and require the two checksums to match. The selftest's own precondition is that
-rem hiding it changed the picture at all, without which everything below passes on a class that
-rem was never on screen.
-findstr /C:"a null voxel class draws exactly as a hidden one does" "%TEMP%\g4gpu_builder.txt" >nul
+rem Both halves are checked, because each alone is satisfied by a broken renderer: drawn in the
+rem hole by one that has stopped honouring layers, hidden when the class is back by one that
+rem never draws it.
+findstr /C:"gives its space to the volume inside it" "%TEMP%\g4gpu_builder.txt" >nul
 if errorlevel 1 (
-  echo FATAL: the builder selftest did not prove a null class draws as a hidden one.
+  echo FATAL: the builder selftest did not prove a nulled class hands over its space.
   exit /b 1
 )
 rem AND THE WIREFRAME PASS RUNS. The builder never launched one: its styles said
@@ -480,11 +480,16 @@ rem AND A ROUND SOLID HAS ONE, IN ITS OWN COLOUR, VISIBLE THROUGH GLASS.
 rem
 rem The line above passes on a box and the world is a box, which is why it passed while a
 rem sphere set to wireframe was invisible: the pass drew boxes and voxel grids and nothing
-rem else. One fixture answers all three of the reports - an orb contributes 128 segments where
+rem else. One fixture answers all four of the reports - an orb contributes 432 segments where
 rem a box contributes twelve, recolouring it moves the picture, and it sits wholly behind a
 rem translucent pane so every edge that reaches the screen came through it. The opaque half of
 rem that pair is what stops an x-ray line pass passing as compositing.
-findstr /C:"visible through a translucent volume and hidden by an" "%TEMP%\g4gpu_builder.txt" >nul
+rem
+rem And the COLOUR, channel by channel, against the model's own floats - not "recolouring it
+rem changed the picture", which passes on every colour there is and did pass over an outline
+rem drawn with its red and blue exchanged. The check counts pixels that are exactly the orb's
+rem colour and requires the reversed colour to appear zero times.
+findstr /C:"pixels of them exactly its own colour" "%TEMP%\g4gpu_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a round solid has a wireframe.
   exit /b 1

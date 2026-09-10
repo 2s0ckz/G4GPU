@@ -582,6 +582,78 @@ Two things go with it, where a grid has absent classes:
   first cell. It is also right on its own terms: the world contains everything by construction,
   so it can never take space away in front of a cell.
 
+
+### A voxel is its own volume, as far as owning space goes
+
+The grid is one solid for containment and entry - that is what makes a 25-million-cell phantom
+affordable to ray cast - but **which volume owns a given point is a question about the cell there**:
+its class's layer, and whether that class is in the scene at all.
+
+Both halves matter and they are different statements:
+
+- a **hidden** class (the eye toggle, or zero opacity) is still there. Nothing of it is painted,
+  and it goes on outranking whatever is inside it, so a volume buried in hidden cells stays
+  buried.
+- a **nulled** class is gone. Its cells own nothing, so whatever occupies that space owns it -
+  *including a volume on a lower layer than the grid*, which is what makes this unlike every other
+  overlap in the scene. An absent cell's rank is the lowest a signed 64-bit number holds, so every
+  candidate cover outranks it and the march's clamp hands the space over at whichever starts
+  nearest.
+
+It is the clamp rather than `covered` that does the handing over, and that distinction is load
+bearing: `covered` ends the march, so ending it at the first absent cell would take every cell
+behind it as well and a phantom with its near class nulled would vanish, far side included.
+Something in the hole stops the march there; an empty hole does not stop it at all.
+
+Where a grid has any absent class, the cover scan admits **every** volume rather than pruning on
+the grid's lowest class layer - a volume below that layer would otherwise be rejected before it
+was ever considered, and an absent cell has no business being compared against anything.
+
+### A cover at zero distance is one the ray has come out of
+
+When a cell march is interrupted by a covering volume, the surface search draws that cover and
+hands the grid back at the cover's **exit** - so the resumed march begins standing exactly on the
+cover's far face. `box_dist_in` starts its `tmin` at zero and clamps, so it reports that cover as
+beginning right there; the clamp fires immediately, the march paints nothing, and the next
+iteration finds no candidate at all. The pixel keeps the cover and nothing else.
+
+What that looked like: a phantom under a **translucent** volume on a higher layer showed the volume
+and nothing behind it, however transparent it was. Opaque covers were fine, because there is
+nothing to see through them and the march is never resumed.
+
+Nothing legitimate sits at zero there. `owns_contained_point` has just confirmed the grid owns the
+point a nudge ahead, so the ray is not inside anything that outranks the cell - a cover reporting
+zero is one whose surface is behind the ray. This is the third bug from `box_dist_in` returning
+exactly zero from a boundary; see docs/RISK.md V33 for the other two.
+
+### The limb, and why the probe is a hundred tolerances
+
+`is_crossing_to` tests containment a fixed `kProbe` either side of a candidate crossing, and a step
+along a ray is not a step away from a surface. At impact parameter q on a sphere of radius R the
+half-chord is `h = sqrt(R^2 - q^2)`, and stepping `d` back along the ray leaves the surface by only
+`d * h / R`. Where h is small that falls inside `kSurfTolerance`, the "before" probe reports inside,
+and the crossing is discarded. Not grazes: at the outer edge of the band the half-chord is 4.1 mm,
+so rays whose chord through a 40 mm sphere is eight millimetres long were being lost.
+
+    band width  =  (kSurfTolerance / kProbe)^2  *  R / 2
+
+Proportional to R, so it is a fixed fraction of the drawn disc and zooming in makes it a wider
+ribbon of pixels - reported as speckling at the edges that gets worse close up. What matters is the
+RATIO: 1e-3 in double, where the band is twenty nanometres, and 1e-1 in float, where it was
+0.005 R. `kProbe<float>` is 1e-2 now rather than 1e-3, which takes it to 2e-5 R. The cost is that a
+float render steps over a feature thinner than 20 microns; the transport is double and untouched.
+
+### The renderer is testable without a GPU or a window
+
+`vis::trace_pixel` and `vis::pack_pixel` are `__host__ __device__`, so a ray can be traced against
+a hand-built scene on the host and the resulting pixel inspected as a number.
+
+This is worth its own note because of what it replaced. Every renderer bug in this project was
+found by taking a screenshot and looking at it - which works, and cost three consecutive wrong
+diagnoses on one occasion, each a ten-minute GUI rebuild apart. `tests/test_render_layers.cu`
+builds a phantom and a box, traces the axis, and asserts the colour: the overlap rules are four
+rays and four expected colours. Both of the layer bugs above reproduced there in a millisecond.
+
 ### The wireframe pass, which the builder never launched
 
 `EdgeList` - the twelve lines of a box - lived inside `vis_manager.cu`, so only the viewer could

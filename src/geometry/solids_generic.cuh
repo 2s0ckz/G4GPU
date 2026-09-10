@@ -26,8 +26,31 @@ namespace g4gpu::geom {
 /// How far past a candidate crossing to test containment. Must exceed the surface tolerance
 /// by enough to land decisively on one side, and stay far below any real feature size.
 /// Geometry here is in mm, so 1e-6 mm is 10 nm - smaller than anything anyone models.
+///
+/// "BY ENOUGH" IS NOT A FIXED MARGIN, because a step along the ray is not a step away from the
+/// surface. At impact parameter q on a sphere of radius R the half-chord is h = sqrt(R^2 - q^2),
+/// and a step d back along the ray from the entry point leaves the surface by only d * h / R -
+/// so near the limb, where h is small, the probe lands INSIDE the surface band and
+/// is_crossing_to sees no crossing. Every ray in that band is lost, and lost rays at a limb are
+/// what "the sphere has speckling around the edges" is.
+///
+/// The band is where d * h / R < kSurfTolerance, which is h < tol * R / d, which in impact
+/// parameter is
+///
+///     R - q  <  h^2 / 2R  =  (tol / d)^2 * R / 2
+///
+/// - proportional to R, so it does not go away by zooming, and it grows in PIXELS as you zoom
+/// in, which is how it was reported. What matters is the RATIO tol/d, not either alone: in
+/// double it is 1e-3 and the band is 5e-7 * R, twenty nanometres on a 40 mm sphere. In float it
+/// was 1e-1 and the band was 0.005 * R - 0.2 mm on that sphere, measured, and the measurement
+/// agrees with the formula to one part in a hundred.
+///
+/// So the float probe is a hundred times the float surface tolerance rather than ten, which
+/// takes the band to 2e-5 * R: a thousandth of a millimetre on a 40 mm sphere, or a tenth of a
+/// pixel with the sphere filling the window. What it costs is that a float render steps over a
+/// feature thinner than 20 microns; the transport, which is double, is untouched.
 template <typename real_t> __host__ __device__ constexpr real_t kProbe() {
-  return (sizeof(real_t) == 4) ? real_t(1e-3) : real_t(1e-6);
+  return (sizeof(real_t) == 4) ? real_t(1e-2) : real_t(1e-6);
 }
 
 /// Largest number of candidate crossings any single shape can produce in one query.
