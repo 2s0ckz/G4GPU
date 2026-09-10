@@ -11,8 +11,10 @@ set "SRC=%~dp0"
 set "BLD=%~dp0..\dumpbuild"
 if not exist "%BLD%\CMakeCache.txt" (
   echo configuring %BLD%
-  cmake -S "%SRC%" -B "%BLD%" -G "Visual Studio 16 2019" -A x64 ^
-    -DGeant4_DIR="D:/Documents/Geant4/Windows/geant4-v11.1.1-install/lib/cmake/Geant4" || exit /b 1
+  rem One line on purpose: a caret continuation inside this block fails under a CRLF checkout -
+  rem which is what a fresh worktree gets with core.autocrlf - and cmd then passes the tail of
+  rem the command as the source directory. The main checkout has LF endings and never showed it.
+  cmake -S "%SRC%" -B "%BLD%" -G "Visual Studio 16 2019" -A x64 -DGeant4_DIR="D:/Documents/Geant4/Windows/geant4-v11.1.1-install/lib/cmake/Geant4" || exit /b 1
 )
 cmake --build "%BLD%" --config Release
 exit /b %errorlevel%
