@@ -10,8 +10,27 @@ template <typename T> __host__ __device__ constexpr T keV() { return T(1e-3); }
 template <typename T> __host__ __device__ constexpr T eV()  { return T(1e-6); }
 template <typename T> __host__ __device__ constexpr T GeV() { return T(1e3); }
 
-// 1 barn = 1e-28 m^2 = 1e-22 mm^2
-template <typename T> __host__ __device__ constexpr T barn() { return T(1e-22); }
+// 1 barn = 1e-28 m^2 = 1e-22 mm^2, and the two spellings are NOT the same double.
+//
+// CLHEP derives it: `meter = 1000.*millimeter; meter2 = meter*meter; barn = 1.e-28*meter2`.
+// That is 1.e-28 rounded to a double, times an exact 1e6, rounded again: 9.9999999999999993e-23.
+// The literal `1e-22` is 1.0000000000000000385e-22, one double higher - a relative difference
+// of 1.148e-16. ref/oracle/constants.csv carries CLHEP's own value and tests/test_constants.cu
+// compares against it at 1e-15, which is exactly loose enough not to notice.
+//
+// It was the literal until G4ComponentGGHadronNucleusXsc was compared. The elastic cross
+// section there is `fTotalXsc - fInelasticXsc`, and for a pi- on Li7 at 121 keV that difference
+// is 1/371 of either term, so 1.148e-16 in the millibarn that scales both came out as 2.2e-12
+// in the elastic - two thousand times the tolerance, and looking exactly like a wrong
+// bar-correction table. Every other user of this constant multiplies a tabulated cross section
+// by it and cannot see 1e-16; the Glauber-Gribov elastic subtracts two numbers built from it.
+//
+// So it is derived here the way CLHEP derives it. Same doctrine as classic_electron_radius and
+// twopi_mc2_rcl2 below: where CLHEP computes a constant, this file computes it the same way
+// rather than pasting a rounded decimal.
+template <typename T> __host__ __device__ constexpr T barn() {
+  return T(1.e-28) * (m<T>() * m<T>());
+}
 
 // Time, and the speed that ties it to length. CLHEP has nanosecond as the unit of time and
 // derives c_light from the SI value; both are done the same way here rather than pasting
