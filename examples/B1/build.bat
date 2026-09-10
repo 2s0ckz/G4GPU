@@ -21,15 +21,15 @@ rem
 rem -c, not -dc: these files launch no kernels (the launches live in transport_run.cu), so they
 rem need no relocatable device code, and mixing -dc objects with the engine object - which is
 rem compiled without it - would fail at device link.
-call "D:/g4gpu/setupenv.bat" || exit /b 1
-call "D:/g4gpu/build_engine.bat" || exit /b 1
-call "D:/g4gpu/build_vis.bat" || exit /b 1
+call "%~dp0../../setupenv.bat" || exit /b 1
+call "%~dp0../../build_engine.bat" || exit /b 1
+call "%~dp0../../build_vis.bat" || exit /b 1
 rem pushd, not cd: build_all.bat calls this, and a permanent directory change would leave the
 rem caller compiling tests\*.cu relative to this directory.
 pushd "%~dp0"
-set OBJ=D:\g4gpu\out\B1
+set OBJ=%~dp0../../out/B1
 if not exist "%OBJ%" mkdir "%OBJ%"
-set INC=-I "%~dp0include" -I D:\g4gpu\src -I D:\g4gpu\src\g4
+set INC=-I "%~dp0include" -I "%~dp0../../src" -I "%~dp0../../src/g4"
 set SRCS=exampleB1 ActionInitialization DetectorConstruction EventAction PrimaryGeneratorAction RunAction SteppingAction
 
 for %%F in (%SRCS%) do (

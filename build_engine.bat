@@ -10,7 +10,7 @@ rem environment variable. An "if defined, skip" guard is a cache with no invalid
 rem right within one pipeline run and wrong the moment anyone sets the variable by hand, at
 rem which point the build links an engine compiled before the change under test and the run
 rem prints a plausible number for physics that was never compiled. See docs/RISK.md S4.
-call "D:/g4gpu/setupenv.bat" || exit /b 1
+call "%~dp0setupenv.bat" || exit /b 1
 pushd "%~dp0"
 if not exist out mkdir out
 set G4GPU_ENGINE_OBJ=%~dp0out\transport_run.obj

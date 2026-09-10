@@ -8,8 +8,8 @@ rem
 rem The viewer's translation unit is *not* linked here: the builder has its own render path
 rem and its own panels, and pulling in vis_manager.obj would give it a second window
 rem implementation it never opens.
-call "D:/g4gpu/setupenv.bat" || exit /b 1
-call "D:/g4gpu/build_engine.bat" || exit /b 1
+call "%~dp0setupenv.bat" || exit /b 1
+call "%~dp0build_engine.bat" || exit /b 1
 
 rem A running executable cannot be relinked, and the linker says only
 rem "LNK1104: cannot open file 'g4builder.exe'" with no hint that a window is open. The same

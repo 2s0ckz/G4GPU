@@ -6,9 +6,9 @@ rem compiled once by build_vis.bat and linked into whatever needs it - g4view, e
 rem generated project - for the same reason Geant4 ships libG4vis rather than a header: it
 rem pulls in Win32, WGL, GDI and the CUDA renderer, and every program that included it would
 rem pay to compile all of that again.
-call "D:/g4gpu/setupenv.bat" || exit /b 1
-call "D:/g4gpu/build_engine.bat" || exit /b 1
-call "D:/g4gpu/build_vis.bat" || exit /b 1
+call "%~dp0setupenv.bat" || exit /b 1
+call "%~dp0build_engine.bat" || exit /b 1
+call "%~dp0build_vis.bat" || exit /b 1
 
 rem A running executable cannot be relinked, and the linker says only
 rem "LNK1104: cannot open file 'g4view.exe'" with no hint that a window is open. The same

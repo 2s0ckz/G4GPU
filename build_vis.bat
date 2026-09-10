@@ -8,7 +8,7 @@ rem /vis/open reaches the same code.
 rem
 rem The skip is a timestamp comparison, not an environment variable - see build_engine.bat
 rem and docs/RISK.md S4 for why that distinction is not pedantry.
-call "D:/g4gpu/setupenv.bat" || exit /b 1
+call "%~dp0setupenv.bat" || exit /b 1
 pushd "%~dp0"
 if not exist out mkdir out
 set G4GPU_VIS_OBJ=%~dp0out\vis_manager.obj

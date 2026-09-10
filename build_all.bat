@@ -22,7 +22,7 @@ rem
 rem It runs the whole pipeline because building alone proved not to be evidence of anything:
 rem a driver that compiled and printed a dose had two physics processes silently switched off.
 setlocal EnableDelayedExpansion
-call "D:/g4gpu/setupenv.bat" || exit /b 1
+call "%~dp0setupenv.bat" || exit /b 1
 cd /d "%~dp0"
 
 rem A running executable cannot be relinked, and the error the linker gives is
