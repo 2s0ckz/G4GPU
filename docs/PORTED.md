@@ -307,6 +307,40 @@ returns immediately when a `G4NeutronGeneralProcess` exists, so QBBC's neutron t
 member and not a `G4NeutronKiller`. Carried as a constant in `neutron_general_xs.cuh` for
 P1/P8, which is where the row above says `G4NeutronTrackingCut` is absent.
 
+#### 2.1.3 de_excitation - the shared tail of every inelastic model (P3)
+
+`G4ExcitationHandler` and everything 11.1.1's defaults dispatch to, from the AME2012 mass table
+up to a device-callable `deex::deexcite()`. The defaults are not assumed: they are dumped from
+the install into `ref/oracle/deex_params.csv` and every dispatch decision below is made from
+one of them. `V` and not `T` throughout because no inelastic model hands this module a fragment
+during transport yet - the entry point exists, its caller does not.
+
+| Geant4 class | | Where |
+|---|:--:|---|
+| G4DeexPrecoParameters (`SetDefaults`) | **V** | `deexcitation/deex_params.cuh`; 32 values compared exactly |
+| G4Fragment | **V** | `deexcitation/fragment.cuh` |
+| G4NucleiProperties, G4NucleiPropertiesTableAME12, G4NucleiPropertiesTheoreticalTable | **V** | `deexcitation/nuclear_masses.cuh`, `data/ame12_masses.hh` (3,353), `data/nuclei_theoretical.hh` (8,979); 18,407 (Z, A), all four dispatch branches, worst 0 |
+| G4PairingCorrection, G4ShellCorrection, G4CameronGilbertPairingCorrections, G4CameronGilbertShellCorrections, G4CookPairingCorrections, G4CookShellCorrections, G4CameronTruranHilfPairingCorrections | **V** | `deexcitation/corrections.cuh`, `data/shell_pairing.hh`; 18,407 (Z, A), worst 0 |
+| G4CameronTruranHilfShellCorrections, G4CameronShellPlusPairingCorrections | **V** | same files. Their tables are private statics behind a header-inline accessor this Windows Geant4 does not export, so neither can be dumped directly; the shell-plus-pairing table is checked through `G4FissionBarrier`, its only default consumer, over 4,963 (Z, A) at worst 2.1e-14 |
+| G4EvaporationLevelDensityParameter, G4NuclearLevelData::GetLevelDensity | **V** | `deexcitation/corrections.cuh` |
+| G4NuclearRadii, G4VCoulombBarrier, G4CoulombBarrier + its six ejectile subclasses, G4FermiCoulombBarrier, G4GEMCoulombBarrier | **V** | `deexcitation/coulomb_barrier.cuh`; 612 points, worst 4.0e-15 |
+| G4NuclearLevelData, G4LevelReader, G4LevelManager, G4NucLevel | **V** | `data/level_data.cuh`, `data/level_index.hh`; the whole PhotonEvaporation5.7 dataset - 3,110 files, 3,108 managers, 174,411 levels, 268,190 transitions - reproduced bit for bit |
+| G4KalbachCrossSection, G4ChatterjeeCrossSection, G4VEmissionProbability, G4EvaporationProbability + its six subclasses, G4EvaporationChannel | **V** | `deexcitation/evaporation.cuh`; 2,600 points, worst 4.4e-16 |
+| G4GEMChannel, G4GEMProbability and the 60 `G4<Xx>GEMChannel` / `G4<Xx>GEMProbability` pairs | **V** | `deexcitation/gem.cuh`, `data/gem_levels.hh` (60 channels, 1,617 excited states); 4,320 probabilities, worst 0 |
+| G4CompetitiveFission, G4FissionBarrier, G4FissionProbability, G4FissionParameters, G4FissionLevelDensityParameter | **V** | `deexcitation/fission.cuh`; 20,000-odd points, worst 2.1e-14. `EmittedFragment`'s exception after 100 failed splits is refused by name on the output, because a kernel cannot throw |
+| G4PhotonEvaporation, G4GammaTransition | **V** | `deexcitation/photon_evaporation.cuh`; 112 probabilities, worst 5.2e-16 |
+| G4FermiBreakUpVI, G4FermiFragmentsPoolVI, G4FermiFragment, G4FermiPair, G4FermiChannels, G4FermiDecayProbability | **V** | `deexcitation/fermi_breakup.cuh`; pool of 991 fragments, 450 pairs and 4,679 channels, 2,802 predicate rows and every cumulative probability at worst 0 |
+| G4UnstableFragmentBreakUp | **V** | `deexcitation/excitation_handler.cuh` |
+| G4Evaporation, G4EvaporationDefaultGEMFactory (the 68-channel order) | **V** | `deexcitation/excitation_handler.cuh` |
+| G4NistManager::GetIsotopeAbundance, as the predicate the handler and G4Evaporation use it as | **V** | `data/natural_isotopes.hh`; 311 (Z, A) of 2,908 tabulated |
+| **G4ExcitationHandler** | **P** | `deexcitation/excitation_handler.cuh`, entry point `deex::deexcite()`. Statistically validated on 17 campaigns x 20,000 events, 2.48M products, worst 4.1 sigma. **Refused by name:** the hyper-nucleus path (`nL != 0`), and the PDG code of an excited heavy ion - `G4IonTable::GetIon` snaps E* to G4ENSDFSTATE and puts a *run-dependent* isomer index in the code's last digit, so the module emits (Z, A, E*, floating level) and a PDG code only for the eight species with a fixed definition |
+| G4StatMF and its nine helpers | **-** | unreachable: `fMinExPerNucleounForMF` is 200 GeV per nucleon. The handler's condition is reproduced and refuses by name, so raising the parameter is reported rather than silently evaporated |
+| G4NuclearPolarization, G4PolarizationTransition | **-** | `fCorrelatedGamma` is false by default; refused by name in `photon_evaporation.cuh` |
+| G4FermiPhaseSpaceDecay | **-** | not a gap: `G4FermiBreakUpVI` is a cascade of two-body decays and never constructs it. Only `G4BinaryCascade` does |
+
+Tests: `test_deex_nuclear.cu`, `test_deex_levels.cu`, `test_deex_probs.cu`,
+`test_deex_models.cu` (all exact) and `test_deex_breakup.cu` (statistical).
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |
@@ -321,9 +355,11 @@ P1/P8, which is where the row above says `G4NeutronTrackingCut` is absent.
 
 ### 2.3 The model tree, by size
 
-Every one of these is at zero. `de_excitation`, `cascade` and `binary_cascade` are the ones
-QBBC actually runs for a proton in water; `particle_hp`, `inclxx`, `lend`, `im_r_matrix`,
-`qmd`, `abla`, `parton_string` are alternatives other lists select.
+`de_excitation` is section 2.1.3 - its default-configuration subset is transcribed and
+validated. Every other one of these is at zero. `de_excitation`, `cascade` and
+`binary_cascade` are the ones QBBC actually runs for a proton in water; `particle_hp`,
+`inclxx`, `lend`, `im_r_matrix`, `qmd`, `abla`, `parton_string` are alternatives other lists
+select.
 
 ```
   de_excitation      232      particle_hp        250      inclxx             163

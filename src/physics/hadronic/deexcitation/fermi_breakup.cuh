@@ -64,9 +64,18 @@ namespace u = g4gpu::units;
 constexpr int kFermiMaxZ = 9;
 constexpr int kFermiMaxA = 17;
 
-/// The largest work list one break-up can produce. G4FermiBreakUpVI reserves 10 and caps the
-/// loop at i == 100, so no more than 102 entries are ever read.
-constexpr int kFermiMaxWork = 104;
+/// The largest work list one break-up can produce. Every decay splits a mass number into two
+/// POSITIVE parts, so the binary tree over a fragment of A nucleons has at most A leaves and
+/// A - 1 internal nodes, and the work list gets two entries per internal node: 2*(A - 1), which
+/// for the largest A this model accepts (16) is 30. G4FermiBreakUpVI reserves 10 and caps its
+/// loop at 100 instead of bounding it; 34 is above that bound, and an overflow of it is
+/// reported by name rather than truncating the cascade silently.
+///
+/// The validated grid does not reach it and cannot test it: cutting this constant to Geant4's
+/// own reserve of 10 leaves tests/test_deex_breakup.cu byte-for-byte unchanged, so the deepest
+/// cascade in 340,000 de-excitations uses fewer than ten entries. 30 is an argument about the
+/// arithmetic, not a measurement.
+constexpr int kFermiMaxWork = 34;
 
 /// G4FermiFragment.
 struct FermiFragment {

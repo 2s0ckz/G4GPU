@@ -29,7 +29,7 @@
 //
 // So the Be12 channel emits a Be12 with a Be9 channel's width, and the O17 channel emits an
 // O17 with the width of a channel whose residual has one proton fewer. They are reproduced
-// because they are what runs; RISK.md V37 records them. The two pairs are carried as separate
+// because they are what runs; RISK.md V41 records them. The two pairs are carried as separate
 // fields rather than one, so that a reader cannot use the wrong one by accident.
 #ifndef G4GPU_DEEX_GEM_CUH
 #define G4GPU_DEEX_GEM_CUH
@@ -172,6 +172,43 @@ __host__ __device__ inline double gem_alpha_param(int fragA, int fragZ, int ejA,
   return 1.0 + gem_c_coefficient(fragZ - ejZ, ejA);
 }
 
+/// `G4GEMProbability::GetCoulombBarrier(fragment)`, which returns **exactly zero for every one
+/// of the 60 GEM channels** because the pointer it needs is null. This is not a simplification;
+/// it is what the installed code computes, and the reason is a C++ initialisation order:
+///
+///     class G4Li6GEMChannel : public G4GEMChannel {
+///      public:
+///       explicit G4Li6GEMChannel() : G4GEMChannel(6, 3, "Li6", &theEvaporationProbability) {}
+///      private:
+///       G4Li6GEMProbability theEvaporationProbability;   // declared AFTER the initialiser
+///     };
+///
+/// The base `G4GEMChannel` constructor runs first, and its body does
+/// `theEvaporationProbabilityPtr->SetCoulomBarrier(theCoulombBarrierPtr)` - writing into
+/// storage whose object has not been constructed yet. The derived member is constructed next,
+/// and `G4GEMProbability`'s own constructor initialises `theCoulombBarrierPtr(nullptr)`,
+/// discarding the write. Every subsequent `GetCoulombBarrier(fragment)` therefore takes the
+/// `if (theCoulombBarrierPtr)` branch as false and returns 0. All 60 channels in the default
+/// factory are written this way, and so are the six GEM n/p/d/t/He3/alpha channels the
+/// full-GEM factory uses.
+///
+/// **It is invisible in the emission probability and load-bearing in the sampler.** In
+/// CalcProbability the barrier appears only as `(Beta + V)`, and Beta is `-GetCoulombBarrier`,
+/// so the pair is zero whether the pointer works or not; its other use, the energy argument of
+/// the level-density parameter, is inert because fLD makes that parameter energy-independent.
+/// That is why tests/test_deex_models.cu reproduces all 4,320 GEM emission probabilities
+/// exactly with either behaviour. But G4GEMChannel::SampleKineticEnergy uses **Beta alone** as
+/// the linear prefactor `ConstantFactor*(KineticEnergy + Beta)`, and there the difference
+/// between `KineticEnergy` and `KineticEnergy - CoulombBarrier` moves the mean kinetic energy
+/// of an emitted GEM nucleus by 9% to 36%: with the barrier subtracted the spectrum starts at
+/// zero at the barrier, without it there is finite weight at the barrier itself. Ca40 at
+/// E* = 80 MeV emits a Li6 with a mean of 10.19 MeV in Geant4 and 13.15 MeV if the barrier is
+/// subtracted, and the whole 60-channel set moves the same way.
+///
+/// Reproduced, because it is what runs and because `deex_channel_spectrum.csv` measures it
+/// channel by channel. RISK.md V42.
+__host__ __device__ inline double gem_probability_coulomb_barrier() { return 0.0; }
+
 // ---------------------------------------------------------------------------------------------
 // G4GEMProbability::CalcProbability - one width
 // ---------------------------------------------------------------------------------------------
@@ -308,13 +345,14 @@ __host__ __device__ inline double gem_emission_probability(const GemChannel& c,
                                                             const data::LevelTable& lt) {
   if (max_ke <= 0.0 || frag.excitation <= 0.0) { return 0.0; }
 
-  // GetCoulombBarrier(fragment): the barrier OBJECT is the channel's (its constructor took the
-  // channel's A and Z) but the residual it is asked about is the PROBABILITY's, and the
-  // excitation is reduced by the parent's pairing correction. For Be12 and O17 those are two
-  // different nuclides; see the file header.
-  const double cb = gem_coulomb_barrier(
-      c.chan_a, c.chan_z, frag.a - c.prob_a, frag.z - c.prob_z,
-      frag.excitation - deex::level_data_pairing_correction(frag.z, frag.a));
+  // `V` in CalcProbability is G4GEMProbability::GetCoulombBarrier(fragment), which is zero -
+  // see gem_probability_coulomb_barrier() for why. The call it stands for would have been
+  // `gem_coulomb_barrier(c.chan_a, c.chan_z, frag.a - c.prob_a, frag.z - c.prob_z,
+  //                      frag.excitation - level_data_pairing_correction(frag.z, frag.a))`,
+  // with the channel's barrier object and the PROBABILITY's residual - two different nuclides
+  // for Be12 and O17. It is written out here rather than deleted because a Geant4 release that
+  // fixes the initialisation order will need exactly that expression back.
+  const double cb = gem_probability_coulomb_barrier();
 
   double probability = gem_calc_probability(c, frag, c.spin, max_ke, cb, lt);
 
@@ -401,14 +439,13 @@ __host__ __device__ inline double gem_sample_kinetic_energy(const GemState& s,
   const GemChannel c = gem_channel(s.ch);
   const double U = frag.excitation;
   const double alpha = gem_alpha_param(frag.a, frag.z, c.prob_a, c.prob_z);
-  // CalcBetaParam again, and again through the PROBABILITY's pair: the barrier it negates is
-  // the one GetCoulombBarrier(fragment) returns, not the channel's s.coulomb_barrier.
-  const double cb_prob = gem_coulomb_barrier(
-      c.chan_a, c.chan_z, frag.a - c.prob_a, frag.z - c.prob_z,
-      U - deex::level_data_pairing_correction(frag.z, frag.a));
+  // CalcBetaParam again - and this is the one place where the null barrier pointer of
+  // G4GEMProbability changes an answer. `Beta` is `-GetCoulombBarrier(fragment)`, which is
+  // zero, so the linear prefactor below is the kinetic energy itself and NOT the kinetic
+  // energy above the barrier. See gem_probability_coulomb_barrier().
   const double beta = (c.prob_z == 0)
                           ? (1.66 / gem_z23(frag.a - c.prob_a) - 0.05) * u::MeV<double>() / alpha
-                          : -cb_prob;
+                          : -gem_probability_coulomb_barrier();
 
   //                             *** RESIDUAL *** (the channel's)
   const double delta0 = deex::level_data_pairing_correction(s.res_z, s.res_a);

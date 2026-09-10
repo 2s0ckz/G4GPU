@@ -61,6 +61,7 @@
 #include "G4FissionParameters.hh"
 #include "G4FissionProbability.hh"
 #include "G4Fragment.hh"
+#include "G4FragmentVector.hh"
 #include "G4He3CoulombBarrier.hh"
 #include "G4He3EvaporationChannel.hh"
 #include "G4KalbachCrossSection.hh"
@@ -637,6 +638,138 @@ struct Campaign {
   double pz;     ///< MeV/c along z
 };
 
+/// One CHANNEL's kinetic-energy sampler, alone.
+///
+/// deex_firststep.csv compares the first product of a whole BreakFragment call, which mixes
+/// the channel choice with the sampler; this file fixes the channel and samples only its
+/// EmittedFragment. Each of the 68 channels has its own sampler - G4VEmissionProbability's
+/// rejection against a two-region majorant for the six light ejectiles,
+/// G4GEMChannel::SampleKineticEnergy's rejection against the total width for the sixty GEM
+/// nuclei, and G4PhotonEvaporation's cumulative array for the gammas - so a disagreement in a
+/// cascade is otherwise ambiguous across three quite different algorithms.
+///
+/// GetEmissionProbability has to be called on the same fragment first, because EmittedFragment
+/// reads the residual, the barrier and the kinetic limit that call leaves behind. That
+/// coupling is why this cannot be dumped as a free function.
+void dump_channel_spectrum() {
+  G4PhotonEvaporation* photon = new G4PhotonEvaporation();
+  G4EvaporationDefaultGEMFactory factory(photon);
+  std::vector<G4VEvaporationChannel*>* ch = factory.GetChannel();
+  for (auto* c : *ch) { c->Initialise(); }
+
+  const int zas[][3] = {
+    {20, 40, 80}, {26, 56, 100}, {26, 56, 200}, {82, 208, 200}, {82, 208, 50},
+  };
+  const int kN = 20000;
+
+  FILE* f = std::fopen("deex_channel_spectrum.csv", "w");
+  std::fprintf(f, "Z,A,Eexc_MeV,channel,prodZ,prodA,N,count,mean_ekin_MeV,mean_ekin2_MeV2\n");
+  for (const auto& za : zas) {
+    for (std::size_t i = 1; i < ch->size(); ++i) {
+      if (i == 1) { continue; }   // fission splits the nucleus; its own file covers it
+      G4Fragment probe = make_fragment(za[0], za[1], za[2] * MeV, 0.0);
+      if ((*ch)[i]->GetEmissionProbability(&probe) <= 0.0) { continue; }
+      CLHEP::HepRandom::setTheSeed(20260912 + int(i) * 131 + za[0] * 7 + za[2]);
+      std::map<int, long long> count;
+      std::map<int, double> se, se2;
+      for (int n = 0; n < kN; ++n) {
+        G4Fragment frag = make_fragment(za[0], za[1], za[2] * MeV, 0.0);
+        // The probability call is per sample: it is what sets the state EmittedFragment reads,
+        // and for photon evaporation it also resets the cumulative array the gamma energy is
+        // drawn from.
+        (*ch)[i]->GetEmissionProbability(&frag);
+        G4Fragment* p = (*ch)[i]->EmittedFragment(&frag);
+        if (p == nullptr) { continue; }
+        const int key = 1000 * p->GetZ_asInt() + p->GetA_asInt();
+        const double ek = p->GetMomentum().e() - p->GetGroundStateMass();
+        ++count[key];
+        se[key] += ek;
+        se2[key] += ek * ek;
+        delete p;
+      }
+      for (const auto& kv : count) {
+        std::fprintf(f, "%d,%d,%d,%d,%d,%d,%d,%lld,%.17g,%.17g\n", za[0], za[1], za[2],
+                     static_cast<int>(i), kv.first / 1000, kv.first % 1000, kN, kv.second,
+                     se[kv.first] / double(kv.second), se2[kv.first] / double(kv.second));
+      }
+    }
+  }
+  std::fclose(f);
+  for (auto* c : *ch) { delete c; }
+  delete ch;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// ONE call of G4Evaporation::BreakFragment, and only its FIRST product.
+///
+/// deex_breakup.csv compares a whole cascade, and a whole cascade cannot say WHERE it went
+/// wrong: twenty-five emissions each 0.04% off look exactly like one emission 1% off. This
+/// file isolates the first step - which channel fired and with what kinetic energy - so a
+/// disagreement in the cascade can be attributed to the step or to the chain.
+///
+/// The whole call's product count and the residual it left are dumped too, because those are
+/// the two numbers that say whether the CHAIN inside one BreakFragment call agrees, separately
+/// from the handler's loop over the evaporation list.
+void dump_firststep() {
+  G4ExcitationHandler handler;
+  handler.Initialise();
+  G4VEvaporation* evap = handler.GetEvaporation();
+
+  const Campaign cs[] = {
+    {6, 12, 20.0, 0.0},   {13, 27, 30.0, 0.0},  {20, 40, 80.0, 0.0},
+    {26, 56, 20.0, 0.0},  {26, 56, 100.0, 0.0}, {26, 56, 200.0, 0.0},
+    {82, 208, 10.0, 0.0}, {82, 208, 50.0, 0.0}, {82, 208, 200.0, 0.0},
+    {92, 238, 30.0, 0.0},
+  };
+  const int kN = 20000;
+
+  FILE* f = std::fopen("deex_firststep.csv", "w");
+  std::fprintf(f, "Z,A,Eexc_MeV,N,firstZ,firstA,count,mean_ekin_MeV,mean_ekin2_MeV2\n");
+  FILE* g = std::fopen("deex_firststep_chain.csv", "w");
+  std::fprintf(g, "Z,A,Eexc_MeV,N,mean_nprod,mean_resZ,mean_resA,mean_res_exc_MeV\n");
+
+  for (const Campaign& c : cs) {
+    CLHEP::HepRandom::setTheSeed(20260911 + c.Z * 1000 + c.A * 7 + int(c.eexc));
+    std::map<int, long long> count;
+    std::map<int, double> sum_e, sum_e2;
+    double nprod = 0.0, rz = 0.0, ra = 0.0, rexc = 0.0;
+    for (int n = 0; n < kN; ++n) {
+      G4Fragment frag = make_fragment(c.Z, c.A, c.eexc * MeV, c.pz);
+      G4FragmentVector out;
+      evap->BreakFragment(&out, &frag);
+      nprod += double(out.size());
+      rz += double(frag.GetZ_asInt());
+      ra += double(frag.GetA_asInt());
+      rexc += frag.GetExcitationEnergy() / MeV;
+      if (!out.empty()) {
+        const G4Fragment* p = out[0];
+        // A gamma or a conversion electron is an A = 0 fragment; its charge distinguishes the
+        // two, so (Z, A) is a complete key here without the particle definition.
+        const int key = 1000 * p->GetZ_asInt() + p->GetA_asInt();
+        // A photon fragment carries no rest mass, so its "kinetic" energy is its total energy;
+        // for a nucleus it is the total minus the GROUND-STATE mass, which is what the port
+        // can reproduce without the ion table - deliberately not GetKineticEnergy(), which
+        // would bring G4IonTable's excitation snapping back in.
+        const double ek = p->GetMomentum().e() - p->GetGroundStateMass();
+        ++count[key];
+        sum_e[key] += ek;
+        sum_e2[key] += ek * ek;
+      }
+      for (G4Fragment* p : out) { delete p; }
+    }
+    for (const auto& kv : count) {
+      std::fprintf(f, "%d,%d,%.17g,%d,%d,%d,%lld,%.17g,%.17g\n", c.Z, c.A, c.eexc, kN,
+                   kv.first / 1000, kv.first % 1000, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second));
+    }
+    std::fprintf(g, "%d,%d,%.17g,%d,%.17g,%.17g,%.17g,%.17g\n", c.Z, c.A, c.eexc, kN,
+                 nprod / kN, rz / kN, ra / kN, rexc / kN);
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_breakup() {
   G4ExcitationHandler handler;
   handler.Initialise();
@@ -659,11 +792,26 @@ void dump_breakup() {
   std::fprintf(f, "Z,A,Eexc_MeV,pz_MeV,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2\n");
   FILE* g = std::fopen("deex_breakup_residual.csv", "w");
   std::fprintf(g, "Z,A,Eexc_MeV,pz_MeV,N,resZ,resA,count\n");
+  // The SPECTRUM, not its first two moments. A mean and a variance are two numbers per
+  // species; the de-excitation spectra that matter here are structured - a gamma cascade is a
+  // set of discrete lines and an evaporation spectrum is a Maxwellian with a barrier edge - and
+  // two distributions can share both moments and disagree about every line. So the kinetic
+  // energy is also histogrammed on a FIXED grid, 0.25 MeV per bin from 0, with bin 200 holding
+  // everything at or above 50 MeV, and only for the eight species whose rest mass is a constant
+  // (see deex_breakup.csv's note on G4IonTable): the port cannot reproduce an isomer's mass, so
+  // it cannot reproduce its kinetic energy either.
+  FILE* h = std::fopen("deex_spectra.csv", "w");
+  std::fprintf(h, "Z,A,Eexc_MeV,pz_MeV,N,pdg,bin,ekin_lo_MeV,count\n");
+  const double kBinWidth = 0.25;   // MeV
+  const int kOverflowBin = 200;    // >= 50 MeV
+  const int kSpectrumPdg[8] = {22, 11, 2112, 2212, 1000010020, 1000010030, 1000020030,
+                               1000020040};
 
   for (const Campaign& c : cs) {
     CLHEP::HepRandom::setTheSeed(20260910 + c.Z * 1000 + c.A * 7 + int(c.eexc));
     std::map<int, long long> count;
     std::map<int, double> sum_e, sum_e2;
+    std::map<long long, long long> spectrum;   // key = pdg * 1000LL + bin
     std::map<int, long long> residual;   // key = 1000*Z + A of the heaviest product
     for (int n = 0; n < kN; ++n) {
       G4Fragment frag = make_fragment(c.Z, c.A, c.eexc * MeV, c.pz * MeV);
@@ -677,6 +825,14 @@ void dump_breakup() {
         ++count[pdg];
         sum_e[pdg] += ekin;
         sum_e2[pdg] += ekin * ekin;
+        for (const int sp : kSpectrumPdg) {
+          if (sp != pdg) { continue; }
+          int bin = static_cast<int>(ekin / kBinWidth);
+          if (bin < 0) { bin = 0; }
+          if (bin > kOverflowBin) { bin = kOverflowBin; }
+          ++spectrum[static_cast<long long>(pdg) * 1000 + bin];
+          break;
+        }
         // Nuclear PDG codes are 10LZZZAAAI; light ions and nucleons are their own codes.
         int z = 0, a = 0;
         if (pdg > 1000000000) {
@@ -699,9 +855,15 @@ void dump_breakup() {
       std::fprintf(g, "%d,%d,%.17g,%.17g,%d,%d,%d,%lld\n", c.Z, c.A, c.eexc, c.pz, kN,
                    kv.first / 1000, kv.first % 1000, kv.second);
     }
+    for (const auto& kv : spectrum) {
+      const int bin = static_cast<int>(kv.first % 1000);
+      std::fprintf(h, "%d,%d,%.17g,%.17g,%d,%lld,%d,%.17g,%lld\n", c.Z, c.A, c.eexc, c.pz, kN,
+                   kv.first / 1000, bin, bin * kBinWidth, kv.second);
+    }
   }
   std::fclose(f);
   std::fclose(g);
+  std::fclose(h);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -717,6 +879,8 @@ void dump_deexcitation(const DumpContext&) {
   dump_gem();
   dump_fission();
   dump_fermi();
+  dump_channel_spectrum();
+  dump_firststep();
   dump_breakup();
 }
 
@@ -726,6 +890,7 @@ G4GPU_REGISTER_DUMP("deexcitation",
                     "deex_params.csv deex_masses.csv deex_corrections.csv deex_coulomb.csv "
                     "deex_levelmax.csv deex_levels.csv deex_probs.csv deex_invxs.csv "
                     "deex_gem.csv deex_fission_barrier.csv deex_fission_prob.csv "
-                    "deex_fermi_pool.csv "
-                    "deex_breakup.csv deex_breakup_residual.csv",
+                    "deex_fermi_pool.csv deex_channel_spectrum.csv "
+                    "deex_firststep.csv deex_firststep_chain.csv "
+                    "deex_breakup.csv deex_breakup_residual.csv deex_spectra.csv",
                     dump_deexcitation);

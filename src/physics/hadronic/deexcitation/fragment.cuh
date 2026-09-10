@@ -151,8 +151,19 @@ struct Fragment {
   }
 };
 
-/// A fragment built from (Z, A) and a 4-momentum, which is G4Fragment's main constructor.
-__host__ __device__ inline Fragment make_fragment(int Z, int A, const LorentzVector& lv) {
+/// A fragment built from (A, Z) and a 4-momentum: `G4Fragment(G4int A, G4int Z,
+/// const G4LorentzVector&)`, and the argument order is Geant4's, **A first**.
+///
+/// It was (Z, A) here for a day and every one of the five emitters in this module called it as
+/// (A, Z), because that is the order the Geant4 line beside them has. The result was that
+/// every ejectile came out with its charge and its mass number exchanged: a neutron became
+/// (Z = 1, A = 0), which the handler's final loop reads as `A == 0` and reports as a gamma; an
+/// alpha became (Z = 4, A = 2), for which G4UnstableFragmentBreakUp has no channel at all.
+/// tests/test_deex_breakup.cu found it in one run - 60,000 gammas where Geant4 makes 64,000
+/// and no neutrons at all where it makes 59,000 - and the refusal machinery named the
+/// unphysical fragment rather than reading its tables out of bounds. Matching Geant4's order
+/// is what stops it coming back.
+__host__ __device__ inline Fragment make_fragment(int A, int Z, const LorentzVector& lv) {
   Fragment f;
   f.z = Z;
   f.a = A;
@@ -162,11 +173,12 @@ __host__ __device__ inline Fragment make_fragment(int Z, int A, const LorentzVec
 }
 
 /// A fragment at rest with a given excitation, moving with momentum `pz` along z. The
-/// convenience the oracle's dump uses, reproduced here so a test builds the same input.
+/// convenience the oracle's dump uses, reproduced here so a test builds the same input - and
+/// with the dump's argument order, `(Z, A)`, which is NOT make_fragment's.
 __host__ __device__ inline Fragment make_excited_fragment(int Z, int A, double eexc,
                                                           double pz) {
   const double m = deex::ground_state_mass(Z, A) + eexc;
-  return make_fragment(Z, A, LorentzVector(0.0, 0.0, pz, std::sqrt(m * m + pz * pz)));
+  return make_fragment(A, Z, LorentzVector(0.0, 0.0, pz, std::sqrt(m * m + pz * pz)));
 }
 
 /// An isotropic direction, from G4RandomDirection() (global/HEPRandom).
