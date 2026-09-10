@@ -111,19 +111,42 @@ __host__ __device__ inline constexpr double decay_highest_value() { return 20.0;
 
 /// DBL_MAX and DBL_MIN as G4Decay uses them: DBL_MAX for "never decays" and DBL_MIN for "the
 /// particle stops here". They are sentinels rather than physical lengths and the caller has
-/// to treat them as such - a step limit of DBL_MIN is not a step, it is a decay now.
-///
-/// WITH real_t = float THE SENTINELS DEGRADE, and the caller has to know which way. DBL_MIN
-/// is below the smallest positive float and DBL_MAX above the largest, so a float
-/// instantiation returns 0 and +inf for them, and both `< DBL_MIN` tests inside
-/// `in_flight_mean_free_path` become `< 0` and never fire. A stopped particle then falls
-/// through to the momentum form and gets p/m*ctau with p = 0, which is 0 - the same answer
-/// the sentinel branch would have given to within a denormal, and the same meaning. So a
-/// caller must test `<= decay_zero_length()` rather than `== ` it, and `>=
-/// decay_infinite_length()` rather than `==`. Nothing is approximated; the double
-/// instantiation, which is what the oracle is compared at, returns Geant4's literal values.
+/// to treat them as such - a step limit of DBL_MIN is not a step, it is a decay now. These
+/// two are the literal double values, which is what ref/oracle/decay_process.csv carries.
 __host__ __device__ inline constexpr double decay_infinite_length() { return 1.7976931348623157e308; }
 __host__ __device__ inline constexpr double decay_zero_length() { return 2.2250738585072014e-308; }
+
+/// The same two sentinels IN THE ARITHMETIC TYPE ACTUALLY IN USE, which is not the same thing
+/// and is why these exist as specialisations rather than as a cast.
+///
+/// DBL_MIN is below the smallest normal float and DBL_MAX above the largest, so narrowing
+/// them gives 0 and +inf. Zero is a plausible-looking answer for "decay now" and +inf is not
+/// a step limit at all; worse, `ctau < 0` and `Ekin/mass < 0` can never be true, so a float
+/// instantiation would take neither sentinel branch and a stopped particle would reach the
+/// momentum form instead. nvcc says so directly - five `warning #221-D: floating-point value
+/// does not fit in required floating-point type` on the float instantiation, which is how
+/// this was found, from a translation unit written only to prove the package compiles for the
+/// device.
+///
+/// So the sentinel is what the TYPE means by largest and smallest, because that is what
+/// Geant4 means by DBL_MAX and DBL_MIN: this is the same statement in single precision, not
+/// an approximation of a double one. Written as explicit specialisations because
+/// `std::numeric_limits` is a constexpr host function that nvcc will not call from device
+/// code without --expt-relaxed-constexpr, and because a `static_cast` of the double literal
+/// warns even in a branch the compiler then discards.
+template <typename real_t>
+__host__ __device__ inline real_t decay_infinite();
+template <>
+__host__ __device__ inline double decay_infinite<double>() { return 1.7976931348623157e308; }
+template <>
+__host__ __device__ inline float decay_infinite<float>() { return 3.40282347e38f; }
+
+template <typename real_t>
+__host__ __device__ inline real_t decay_zero();
+template <>
+__host__ __device__ inline double decay_zero<double>() { return 2.2250738585072014e-308; }
+template <>
+__host__ __device__ inline float decay_zero<float>() { return 1.17549435e-38f; }
 
 /// G4Decay::IsApplicable, G4Decay.cc:88. Note it reads the LIFETIME, not the stable flag:
 /// a particle with a non-negative lifetime and a positive mass gets the process, so the
@@ -152,12 +175,13 @@ __host__ __device__ inline real_t at_rest_mean_life(int pdg) {
 ///
 /// Five branches, tested in this order, and the middle three are easy to get wrong:
 ///
-///   stable                       DBL_MAX
-///   c*tau below DBL_MIN          DBL_MIN - "very short life time", decay immediately.
-///                                pi0's c*tau is 2.55e-5 mm, nowhere near it; this guards a
-///                                short-lived resonance, not anything transported.
+///   stable                       DBL_MAX (decay_infinite<real_t>)
+///   c*tau below DBL_MIN          DBL_MIN (decay_zero<real_t>) - "very short life time",
+///                                decay immediately. pi0's c*tau is 2.55e-5 mm, nowhere near
+///                                it; this guards a short-lived resonance, not anything
+///                                transported.
 ///   Ekin/m > 20                  (Ekin/m + 1) * c*tau. That is gamma*c*tau, i.e. it drops
-///                                the beta factor because beta is within 1.3e-3 of one.
+///                                the beta factor because beta is within 1.13e-3 of one.
 ///   Ekin/m < DBL_MIN             DBL_MIN - "too slow particle", i.e. it stops here. This is
 ///                                the branch that hands a stopped pi- to the at-rest
 ///                                competition.
@@ -172,17 +196,13 @@ __host__ __device__ inline real_t in_flight_mean_free_path(int pdg, real_t mass,
                                                            real_t kinetic_energy) {
   const real_t life = static_cast<real_t>(particle_lifetime(pdg));
   const real_t ctau = units::c_light<real_t>() * life;
-  if (particle_is_stable(pdg)) { return static_cast<real_t>(decay_infinite_length()); }
-  if (ctau < static_cast<real_t>(decay_zero_length())) {
-    return static_cast<real_t>(decay_zero_length());
-  }
+  if (particle_is_stable(pdg)) { return decay_infinite<real_t>(); }
+  if (ctau < decay_zero<real_t>()) { return decay_zero<real_t>(); }
   const real_t r_kinetic = kinetic_energy / mass;
   if (r_kinetic > static_cast<real_t>(decay_highest_value())) {
     return (r_kinetic + real_t(1)) * ctau;
   }
-  if (r_kinetic < static_cast<real_t>(decay_zero_length())) {
-    return static_cast<real_t>(decay_zero_length());
-  }
+  if (r_kinetic < decay_zero<real_t>()) { return decay_zero<real_t>(); }
   // G4DynamicParticle::GetTotalMomentum: sqrt((Ekin + 2m)*Ekin), not sqrt(Ekin^2+2m*Ekin).
   const real_t p = sqrt((kinetic_energy + real_t(2) * mass) * kinetic_energy);
   return p / mass * ctau;
@@ -243,8 +263,8 @@ __host__ __device__ inline real_t in_flight_interaction_length(int pdg, real_t m
   const real_t mfp = in_flight_mean_free_path<real_t>(pdg, mass, kinetic_energy);
   // `if (currentInteractionLength < DBL_MAX) value = n * lambda; else value = DBL_MAX`.
   // Without the test a stable particle's DBL_MAX would be multiplied and overflow to infinity.
-  if (mfp < static_cast<real_t>(decay_infinite_length())) { return n_lengths_left * mfp; }
-  return static_cast<real_t>(decay_infinite_length());
+  if (mfp < decay_infinite<real_t>()) { return n_lengths_left * mfp; }
+  return decay_infinite<real_t>();
 }
 
 /// G4Decay::AtRestGetPhysicalInteractionLength, G4Decay.cc:477 (the pTime < 0 branch), ns.

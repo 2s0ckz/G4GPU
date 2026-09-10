@@ -445,6 +445,44 @@ bool within_sigma(double ours, double ref, double se_port, double k, double rel_
 
 }  // namespace
 
+/// COMPILE COVERAGE FOR THE DEVICE, in both arithmetic types. Never launched - this test is
+/// host-only by the plan's rule 2 and there is no GPU for this package - but it is compiled,
+/// and compiling it is the point: `sample_decay` is `__host__ __device__` and its tables are
+/// function-local `static const` arrays, which nvcc accepts in device code only because they
+/// are const with constant initialisers. A translation unit written purely to prove this much
+/// is what found the float sentinel defect below: five
+/// `warning #221-D: floating-point value does not fit in required floating-point type` on the
+/// float instantiation, because DBL_MAX and DBL_MIN narrow to +inf and 0.
+///
+/// P8 wires this into a kernel. Without this instantiation, "it builds" would mean "it builds
+/// on the host", and the two are not the same claim.
+__global__ void decay_device_instantiation_check(int* n_out, float* f_out, double* d_out) {
+  {
+    Philox<float> rng(1u, 2u, static_cast<unsigned>(threadIdx.x));
+    DecayProducts<float> out;
+    const float dir[3] = {0.0f, 0.0f, 1.0f};
+    sample_decay<float>(kPdgKaonPlus, static_cast<float>(particle_mass(kPdgKaonPlus)), 100.0f,
+                        dir, false, rng, out);
+    *n_out = out.n;
+    *f_out = in_flight_mean_free_path<float>(kPdgPiPlus, 139.5701f, 1000.0f) +
+             at_rest_interaction_length<float>(kPdgMuPlus, 1.0f) +
+             subtract_interaction_lengths<float>(1.0f, 0.5f, 1.0f) +
+             reset_number_of_interaction_lengths<float>(rng) +
+             (out.n > 0 ? out.p[0].ekin : 0.0f);
+  }
+  {
+    Philox<double> rng(3u, 4u, static_cast<unsigned>(threadIdx.x));
+    DecayProducts<double> out;
+    const double dir[3] = {0.0, 0.0, 1.0};
+    sample_decay<double>(kPdgPiZero, particle_mass(kPdgPiZero), 10.0, dir, true, rng, out);
+    *d_out = decay_local_energy_deposit<double>(10.0, true) +
+             kl3_dalitz_density<double>(493.677, 1.0, 2.0, 3.0, 134.9766, 0.511, 0.0, 0.0286,
+                                        -0.35) +
+             channel_slot_max_kinetic_energy<double>(channel_rows()[0], 105.6583715, 0) +
+             (out.n > 0 ? out.p[0].ekin : 0.0);
+  }
+}
+
 int main(int argc, char** argv) {
   for (int a = 1; a < argc; ++a) {
     if (std::strcmp(argv[a], "-perturb") == 0 && a + 1 < argc) { g_perturb = argv[++a]; }
@@ -1630,8 +1668,36 @@ int main(int argc, char** argv) {
               c.expect);
     }
     std::printf("  subtract-and-floor: %d cases, including a fully consumed length flooring "
-                "at %.0e rather than 0\n\n",
+                "at %.0e rather than 0\n",
                 static_cast<int>(sizeof(cases) / sizeof(cases[0])), per_million());
+
+    // THE SENTINELS IN SINGLE PRECISION. Every length above is a template, and the GPU will
+    // instantiate it at float. DBL_MAX narrows to +inf and DBL_MIN to 0, so the sentinels
+    // have to be the ones the TYPE means - and if they are not, a stable particle gets an
+    // infinite step limit (not a limit) and a stopped one gets 0 through a branch that never
+    // fires, because `ctau < 0` and `Ekin/mass < 0` cannot be true. Checked here on the host,
+    // where the float instantiation behaves exactly as it will in a kernel.
+    {
+      const float inf_f = in_flight_mean_free_path<float>(kPdgProton, 938.272013f, 100.0f);
+      require(inf_f == decay_infinite<float>() && std::isfinite(inf_f),
+              "a stable particle's float mean free path is %.9g, not the finite FLT_MAX "
+              "sentinel", static_cast<double>(inf_f));
+      const float stopped_f = in_flight_mean_free_path<float>(kPdgPiPlus, 139.5701f, 0.0f);
+      require(stopped_f == decay_zero<float>(),
+              "a stopped particle's float mean free path is %.9g, not the FLT_MIN sentinel - "
+              "the `Ekin/mass < DBL_MIN` branch cannot fire in single precision",
+              static_cast<double>(stopped_f));
+      const double inf_d = in_flight_mean_free_path<double>(kPdgProton, 938.272013, 100.0);
+      require(inf_d == decay_infinite_length(),
+              "a stable particle's double mean free path is %.17g, not DBL_MAX", inf_d);
+      require(decay_zero<double>() == decay_zero_length() &&
+                  decay_infinite<double>() == decay_infinite_length(),
+              "the typed sentinels disagree with Geant4's literals at double");
+      std::printf("  sentinels: double DBL_MAX/DBL_MIN as Geant4 writes them, float "
+                  "%.7g/%.7g - the type's own, not the double narrowed\n\n",
+                  static_cast<double>(decay_infinite<float>()),
+                  static_cast<double>(decay_zero<float>()));
+    }
   }
 
   // ==================================================================================
