@@ -1116,6 +1116,7 @@ static void DrawColorPopup(App& a) {
   float* po = &sol.opacity;
   bool* pvis = &sol.visible;
   bool* pwf = &sol.wireframe;   ///< null for a class, which has no wireframe of its own
+  int eff_layer = sol.layer;    ///< the class overrides this below; the eye is drawn from it
   std::string title = "color for " + sol.name;
   // Zero opacity is meaningful for a class and not for a solid. Index 0 of a segmentation is
   // background and is hidden on import, so a class has to be able to reach 0 and come back;
@@ -1131,6 +1132,7 @@ static void DrawColorPopup(App& a) {
     po = &vc.opacity;
     pvis = &vc.visible;
     pwf = nullptr;
+    eff_layer = (vc.layer == kInheritLayer) ? sol.layer : vc.layer;
     title = Fmt("color for %s, index %g", sol.name.c_str(), vc.value);
     min_opacity = 0.0;
   }
@@ -1233,13 +1235,29 @@ static void DrawColorPopup(App& a) {
     c.canvas.Text(box.x + 80, y + 3, "over dark and light", ui::theme::kTextDim);
   }
   y += a.font.glyph_h + 12;
-  bool vis = *pvis;
-  if (ui::Checkbox(c, 900, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "visible", vis)) {
+  // NOT THE USER'S TO ANSWER WHILE THE LAYER IS NULL, so it is shown unticked and inert - the
+  // same state as the eye in the solids list, which is drawn from the same layer.
+  //
+  // A volume on the null layer is not placed and a nulled voxel class has no cells, so nothing
+  // this said could be drawn either way; it used to show a tick, and take a click, for a
+  // volume that is not in the scene.
+  //
+  // The STORED flag is left alone rather than written to false. It is the user's answer to a
+  // different question, asked while the volume was in the scene, and it is wanted back intact
+  // the moment the layer stops being null - which forcing it would have thrown away.
+  const bool null_layer = (eff_layer == kNullLayer);
+  bool vis = *pvis && !null_layer;
+  if (ui::Checkbox(c, 900, {box.x + 10, y, box.w - 20, a.font.glyph_h + 4}, "visible", vis,
+                   !null_layer)) {
     *pvis = vis;
     a.model.Touch();
     a.scene_dirty = true;
   }
   y += a.font.glyph_h + 8;
+  if (null_layer) {
+    c.canvas.Text(box.x + 10, y, "on the null layer: not in the scene", ui::theme::kTextDim);
+    y += a.font.glyph_h + 8;
+  }
   // Wireframe belongs to a solid and not to a class: a class is a set of cells inside one
   // grid, and there is no surface of its own to draw as lines. Omitted rather than shown
   // inert, because a checkbox that does nothing is a worse answer than no checkbox.
@@ -2335,12 +2353,15 @@ static void InsertSelftestVoxels(App& a) {
   // Two discrete classes, one per value, both on the first material: what the classifier
   // would produce for this data, set directly because there is no file to classify.
   //
-  // Coloured differently and with value 0 hidden, which is what ClassifyVoxels does to a real
-  // import - and what makes this fixture exercise the renderer rather than only the transport.
-  // Two classes of the same grey at full opacity composite to a plain box, so the selftest
-  // capture would have looked identical whether the cell march worked or not. The transport is
-  // untouched by it: a class contributes its MATERIAL to the cells, and both still carry the
-  // same one.
+  // Coloured differently and one of them transparent, which is what makes this fixture
+  // exercise the renderer rather than only the transport: two classes of the same grey at full
+  // opacity composite to a plain box, and the selftest capture would have looked identical
+  // whether the cell march worked or not. The transport is untouched by it - a class
+  // contributes its MATERIAL to the cells, and both still carry the same one.
+  //
+  // SET HERE, not copied from what an import would do. ClassifyVoxels used to hide value 0 and
+  // does not any more - every class arrives visible at a tenth, index 0 included - so a comment
+  // claiming this mirrors an import would now be describing behaviour that is gone.
   s.voxel_classes.clear();
   for (int v = 0; v < 2; ++v) {
     VoxelClass c;

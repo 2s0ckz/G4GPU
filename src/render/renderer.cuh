@@ -313,7 +313,25 @@ __host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>&
       // re-finds the volume just entered, paints its front face again, and does that until
       // the accumulated alpha saturates. The effect is that a half-transparent box renders
       // fully opaque and nothing behind it is ever reached. That is the whole bug.
-      if (geom::inside_volume(geometry, v, from)) {
+      // STANDING INSIDE IT IS A QUESTION ABOUT THE BOX, for a grid drawn cell by cell.
+      //
+      // `inside_volume` is per CELL - a cell whose class is not in the scene is not part of the
+      // volume - and that is exactly right for ownership and exactly wrong for "have I already
+      // marched this grid". A ray that stopped inside a nulled cell is still standing in the
+      // grid as far as the march is concerned, and asking the per-cell question said no: the
+      // resume branch below was skipped, `dist_in` from inside the grid's own box returned
+      // zero, and the search rejected that as a volume it was already in. The grid could not
+      // be found again at all.
+      //
+      // What that looked like: a translucent box dropped into a CT's nulled air was composited
+      // over the BACKGROUND instead of over the tissue behind it, which against a dark
+      // background reads as the box having gone opaque. The two features are each right and it
+      // is their intersection that was wrong.
+      const bool standing_in =
+          per_cell_grid(v)
+              ? geom::inside(geometry.store, vol.solid, geom::to_local(vol.xform, from))
+              : geom::inside_volume(geometry, v, from);
+      if (standing_in) {
         // A GRID DRAWN CELL BY CELL IS THE EXCEPTION, because its interior is not one
         // surface. The walk below stops where a higher layer takes the space over, so the
         // cells BEYOND whatever covers the grid are still to be drawn - and the ray is inside
@@ -323,8 +341,14 @@ __host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>&
         // the grid, the grid has already been walked from here and there is nothing ahead of
         // it; if it is something else, that something outranks the grid (locate returns the
         // highest layer containing the point) and the grid resumes where it ends.
+        //
+        // NOT THE WORLD, for the reason the cover scan excludes it: the world contains
+        // everything, so it never takes space away from a cell, and resuming the grid at the
+        // world's far side would put it beyond the scene. A point in a nulled cell with
+        // nothing over it is owned by the world, and the answer there is that there is nothing
+        // left to march.
         const int own = geom::locate(geometry, from);
-        if (own < 0 || own == v) { continue; }
+        if (own < 0 || own == v || own == geometry.world) { continue; }
         const auto& cov = geometry.volumes[own];
         const real_t t = geom::dist_out(geometry.store, cov.solid,
                                         geom::to_local(cov.xform, from),

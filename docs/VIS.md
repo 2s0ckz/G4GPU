@@ -609,6 +609,16 @@ Where a grid has any absent class, the cover scan admits **every** volume rather
 the grid's lowest class layer - a volume below that layer would otherwise be rejected before it
 was ever considered, and an absent cell has no business being compared against anything.
 
+**"Standing inside it" is a question about the box, though.** `inside_volume` is per cell, and the
+march has a branch gated on it that means something else entirely: *have I already marched this
+grid?* Those are not the same question, and answering the second with the first broke a case that
+neither feature broke alone - a ray that stopped inside a translucent volume sitting in nulled air
+was told it was not inside the grid, took the not-inside path, asked `dist_in` from inside the
+grid's own box, got zero, and had it rejected as a volume it was already in. The grid could not be
+found again at all, so the translucent volume composited over the background rather than over the
+tissue behind it. So the resume test asks the solid's own containment, and ownership stays per
+cell.
+
 ### A cover at zero distance is one the ray has come out of
 
 When a cell march is interrupted by a covering volume, the surface search draws that cover and

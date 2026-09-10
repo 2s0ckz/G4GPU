@@ -114,7 +114,15 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
     const int eye_w = lh + 4;
     if (!editing) {
       const ui::Rect er{rr.x + arrow_w, rr.y, eye_w, row};
-      if (ui::EyeToggle(c, kIdSolidEye + static_cast<int>(i), er, s.visible)) {
+      // SHUT AND INERT ON THE NULL LAYER. A volume there is not placed at all, so no answer to
+      // this question could put it on screen, and the eye used to sit open and take clicks on
+      // a volume that is not in the scene.
+      //
+      // The STORED flag is not touched. It is the user's answer from when the volume was in
+      // the scene, and it is wanted back intact the moment the layer stops being null - which
+      // is why this shows `visible && live` rather than writing false into the model.
+      const bool live = s.layer != kNullLayer;
+      if (ui::EyeToggle(c, kIdSolidEye + static_cast<int>(i), er, s.visible && live, live)) {
         s.visible = !s.visible;
         a.model.Touch();
         a.scene_dirty = true;
@@ -206,13 +214,20 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
                                      : Fmt("%.0f..%.0f", vc.value, vc.value_max);
       const int id =
           kIdClassRow + static_cast<int>(i) * kIdClassStride + static_cast<int>(k);
+      // The EFFECTIVE layer: the class's own, or the volume's where it has none. Computed here
+      // rather than at the menu below, because the eye is drawn from it too.
+      const int eff = (vc.layer == kInheritLayer) ? s.layer : vc.layer;
       // A class gets an eye too. It is the same question one level down - what is behind the
       // skin - and on a segmentation it is the only practical way to look inside one, since
       // there may be two hundred classes and the answer is usually "hide all but three".
+      //
+      // Shut and inert on the null layer, for the volume's reason one level down: an absent
+      // class has no cells anywhere, so nothing this says could draw it.
       const ui::Rect cer{panel.x + 8 + arrow_w + 12, y, eye_w, row};
+      const bool clive = eff != kNullLayer;
       if (ui::EyeToggle(c, kIdClassEye + static_cast<int>(i) * kIdClassStride
                                + static_cast<int>(k),
-                        cer, vc.visible)) {
+                        cer, vc.visible && clive, clive)) {
         s.voxel_classes[k].visible = !s.voxel_classes[k].visible;
         a.model.Touch();
         a.scene_dirty = true;
@@ -229,9 +244,8 @@ static int DrawSolidsList(App& a, const ui::Rect& panel, int y) {
       // in the colour pop-up behind the swatch first, which is two clicks away from the row
       // it belongs to and behind a control that says "colour".
       //
-      // The EFFECTIVE layer: the class's own, or the volume's where it has none. Which is why
+      // The effective layer was computed above the eye, which is drawn from it. Which is why
       // the menu is only numbers - see the note above the option list.
-      const int eff = (vc.layer == kInheritLayer) ? s.layer : vc.layer;
       int lsel = LayerToOpt(a, eff);
       if (ui::Select(c, kIdClassLayer + static_cast<int>(i) * kIdClassStride
                             + static_cast<int>(k),

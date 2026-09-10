@@ -242,8 +242,43 @@ int main() {
     check(g < r, "and the cells beyond it are not what was drawn instead");
   }
 
-  // ---------------------------------------------------------------- 3. the rules that already
-  // held, so a fix to the two above cannot quietly undo them
+  // ---------------------------------------------------------------- 3. a translucent volume
+  // sitting IN the nulled cells is still translucent
+  //
+  // The two features together, which is where they interfere. A phantom whose air class is
+  // nulled, with a translucent box on a higher layer inside that air - the arrangement anyone
+  // gets by dropping a box into a CT - and the tissue behind it has to show through the box.
+  //
+  // What went wrong is the interaction and not either half. `inside_volume` is per CELL now, so
+  // a ray standing in a nulled cell is NOT inside the volume - correct for ownership, and the
+  // wrong question for "have I already marched this grid". The march's resume branch is gated
+  // on it, so a ray that stopped inside the box could not find the grid again: `dist_in` from
+  // inside the grid's own box returns zero and the search rejects that as a volume it is
+  // already in. The box was composited over the background instead of over the phantom, which
+  // with a dark background reads as the box having gone opaque.
+  printf("\n== a translucent volume inside nulled cells shows what is behind it ==\n");
+  {
+    Scene s;
+    add_world(s, 500);
+    const int layers[2] = {1, 1};
+    const unsigned int rgba[2] = {vis::pack_rgba(200, 200, 40, 255),   // class 0: nulled air
+                                  vis::pack_rgba(230, 40, 40, 255)};   // class 1: opaque red
+    const bool absent[2] = {true, false};
+    // Air above z = 0, tissue below it.
+    add_grid(s, 40, 8, 1, [](int k) { return (k < 4) ? 1 : 0; }, layers, rgba, absent);
+    // Wholly inside the air, and on a HIGHER layer, so it owns that space outright.
+    add_box(s, 20, 20, 10, 20, 2, 40, 80, 230, 77);   // translucent blue, z 10..30
+
+    int r = 0, g = 0, b = 0, a = 0;
+    trace_axis(s, r, g, b, &a);
+    printf("  rgb (%3d %3d %3d) coverage %3d -> %s\n", r, g, b, a, dominant(r, g, b));
+    check(r > 60, "the tissue beyond a translucent box in nulled air is drawn");
+    check(b > 20, "and the box is still drawn in front of it");
+    check(a > 250, "and the pixel ends up fully covered rather than showing background");
+  }
+
+  // ---------------------------------------------------------------- 4. the rules that already
+  // held, so a fix to the ones above cannot quietly undo them
   printf("\n== and the overlap rules that were already right ==\n");
   {
     // A higher layer still hides a lower one where it covers it.

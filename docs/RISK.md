@@ -4052,3 +4052,73 @@ and reads the colour as a number. Both of these reports reproduced there in a mi
 translucent-cover mechanism fell out of tracing the numbers by hand against the code, which is not
 something a screenshot can support. It should have happened three bugs earlier; the reason it did
 not is that the kernel being a kernel felt like a fact rather than a choice.
+
+### V34: one decision too many, at two points in the same pipeline
+
+Three reports, and the useful part is not any of the three fixes.
+
+#### The same mistake twice, and a grep that could not find the second one
+
+"Index 0 of a segmentation arrives non-visible" was reported, fixed, and reported again. The fix
+was real: `ClassifyVoxels` gives every value the same opacity and leaves `visible` alone, and
+`tests/test_voxel_import.cu` had already pinned it. The second report was a DIFFERENT piece of
+code doing the same thing one step later - the colour-table reader:
+
+    target->opacity = aa;
+    target->visible = (aa > 0.0f);   // and this
+
+An ICRP-style table gives air alpha 0, so importing a phantom with a table set index 0's opacity
+to zero *and* flipped the checkbox. Same symptom, different file, and the test file asserted the
+second one on purpose - "alpha 0 also clears visible" - with a comment explaining why it was
+right.
+
+Two things went wrong in the search, and both are repeatable:
+
+- **I grepped for the symptom, not the principle.** `visible = false` never appears; the code
+  says `visible = (aa > 0.0f)`. A literal search for the wrong state cannot find the general
+  expression that produces it.
+- **I looked for code that treats INDEX 0 specially, and there was none.** The reader hides any
+  class a table calls transparent; index 0 is merely the class that tables call transparent. The
+  bug was not "a rule about index 0", so a search framed that way was guaranteed to come up
+  empty - and it did, three times, which I reported as "I cannot reproduce it".
+
+The rule worth keeping: when a paternalistic default is removed, look for every place that makes
+a decision OF THAT KIND, not every place that makes that decision about that input.
+
+And the substance, which is the same both times: a table row gives an opacity. Zero opacity
+already draws nothing, so honouring the number costs nothing; also clearing a control the user
+owns means they have to discover it before raising the opacity appears to do anything.
+
+#### A precise question was worth more than three of my searches
+
+Having failed to find it, I wrote up a theory: the phantom probably came from a project saved
+before the first fix, since `visible` and `opacity` are both serialised. The user asked one
+question - *do you mean that the visibility toggle shows false when opacity is zero?* - and the
+theory died on the spot. It cannot: the old rule set OPACITY, and the eye is drawn from `visible`.
+The two are independent fields and I had written "keeps `visible = false` (or opacity 0)",
+merging them, which is what made the theory sound plausible to me.
+
+A conflated pair of fields in the explanation is a conflated pair in the reasoning. The tell was
+in my own sentence and I could not see it until someone asked which of the two I meant.
+
+#### When a predicate's meaning changes, every caller asked a different question
+
+`inside_volume` became per-CELL in V33 - a cell whose class is not in the scene is not part of the
+volume - which is right, and is what makes a nulled cell hand its space over. The renderer's cell
+march has a branch gated on it that means something else: *have I already marched this grid?*
+
+Those are not the same question, and after V33 one of them was being answered by the other. A ray
+that stopped inside a translucent box sitting in nulled air was told it was not inside the grid,
+took the not-inside path, asked `dist_in` from inside the grid's own box, got zero, and had it
+rejected as a volume it was already in. The grid could not be found again at all, so the box
+composited over the BACKGROUND instead of over the tissue - which against a dark background reads
+as the box having gone opaque. Both features were right; their intersection was not.
+
+The fix is to ask the question that was meant: for a grid drawn cell by cell, "standing inside it"
+is a question about its BOX, and the per-cell decisions belong to the march. Ownership stays per
+cell.
+
+What is general here: changing what a predicate MEANS is not a local edit, even when every call
+site still compiles and reads correctly. Each caller has to be re-read for which of the two
+questions it was asking - and a caller that wanted the old meaning is now silently wrong, because
+the name still describes what it does.

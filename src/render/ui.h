@@ -760,11 +760,14 @@ inline bool Button(Context& ctx, int id, const Rect& r, const std::string& label
 }
 
 /// A toggle. `value` is modified in place; returns true when it changed.
+/// @param enabled false draws the box and its label dimmed and takes no click, for a state that
+///        is not the user's to change. Shown inert rather than hidden, because the answer to
+///        "why can I not see this volume" has to be where the question is asked.
 inline bool Checkbox(Context& ctx, int id, const Rect& r, const std::string& label,
-                     bool& value) {
+                     bool& value, bool enabled = true) {
   const int box = ctx.canvas.font->glyph_h;
   const Rect box_r{r.x, r.y + (r.h - box) / 2, box, box};
-  const bool hover = ctx.Hovering(r);
+  const bool hover = enabled && ctx.Hovering(r);
   if (hover) { ctx.hot = id; }
   bool changed = false;
   if (hover && ctx.in->left_pressed) {
@@ -774,9 +777,11 @@ inline bool Checkbox(Context& ctx, int id, const Rect& r, const std::string& lab
   }
   ctx.canvas.FillRect(box_r, theme::kField);
   ctx.canvas.StrokeRect(box_r, hover ? theme::kAccentHot : theme::kBorder);
-  if (value) { ctx.canvas.FillRect(box_r.Inset(3), theme::kAccent); }
+  if (value) {
+    ctx.canvas.FillRect(box_r.Inset(3), enabled ? theme::kAccent : theme::kBorder);
+  }
   ctx.canvas.Text(r.x + box + 8, r.y + (r.h - ctx.canvas.font->glyph_h) / 2, label,
-                  theme::kText);
+                  enabled ? theme::kText : theme::kTextDim);
   return changed;
 }
 
@@ -1268,8 +1273,12 @@ inline double InUnit(double base_value, int unit_idx, const UnitTable& u) {
   return base_value / u.factors[i];
 }
 
-inline bool EyeToggle(Context& ctx, int id, const Rect& r, bool on) {
-  const bool hover = ctx.Hovering(r);
+/// @param enabled false draws the eye dimmed and takes no click, for a volume whose visibility
+///        is not the user's to set. The null layer is the case: a volume there is not placed at
+///        all, so no answer to this question could put it on screen. Shown inert rather than
+///        hidden, so the row still lines up and the state is still legible.
+inline bool EyeToggle(Context& ctx, int id, const Rect& r, bool on, bool enabled = true) {
+  const bool hover = enabled && ctx.Hovering(r);
   if (hover) { ctx.hot = id; }
   const bool clicked = hover && ctx.in != nullptr && ctx.in->left_pressed;
   const int s = ctx.canvas.GlyphH() - 3;
@@ -1277,8 +1286,9 @@ inline bool EyeToggle(Context& ctx, int id, const Rect& r, bool on) {
   const int y0 = r.y + (r.h - s) / 2;
   const int cx = x0 + s / 2;
   const int cy = y0 + s / 2;
-  const Color line = on ? (hover ? theme::kText : theme::kAccent)
-                        : (hover ? theme::kTextDim : theme::kBorder);
+  const Color line = !enabled ? theme::kBorder
+                              : (on ? (hover ? theme::kText : theme::kAccent)
+                                    : (hover ? theme::kTextDim : theme::kBorder));
   // The lens: two triangles meeting at the corners, which is a rhombus and reads as an eye
   // once there is a pupil in it.
   if (on) {

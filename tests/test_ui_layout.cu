@@ -685,6 +685,71 @@ int main() {
     Check(c_last < a_first, "a long name is cut off before the material's column");
   }
 
+  // ---- 13. A DISABLED TOGGLE TAKES NO CLICK, AND SAYS SO.
+  //
+  // The visibility eye and the visibility checkbox are greyed out while a volume's layer is
+  // null: the volume is not placed at all, so no answer to that question could put it on
+  // screen, and an eye that sits open and takes clicks on a volume that is not in the scene is
+  // an offer the program cannot keep.
+  //
+  // Two things have to hold, and only one of them is obvious. It must not report a click - and
+  // it must not claim the HOT id either, because `hot` is what the frame uses to decide what
+  // the cursor is over, so a disabled widget that grabs it steals hover from whatever is
+  // underneath. Both are asserted with the pointer squarely on the widget and the button down,
+  // which is the only state in which either could go wrong.
+  {
+    ui::Font font;
+    font.glyph_w = 8;
+    font.glyph_h = 15;
+    font.ascent = 12;
+    font.coverage.assign(
+        static_cast<std::size_t>(ui::Font::kCount) * font.glyph_w * font.glyph_h, 0);
+    font.ready = true;
+
+    constexpr int kW = 200, kH = 80;
+    std::vector<unsigned int> px(static_cast<std::size_t>(kW) * kH, 0u);
+    const ui::Rect r{10, 10, 120, 20};
+
+    for (int pass = 0; pass < 2; ++pass) {
+      const bool enabled = (pass == 1);
+      ui::Input in;
+      ui::Context ctx;
+      ctx.canvas.Reset(px.data(), kW, kH, &font);
+      ctx.in = &in;
+      in.mouse_x = r.x + r.w / 2;
+      in.mouse_y = r.y + r.h / 2;
+      in.left_pressed = true;
+
+      ctx.hot = 0;
+      const bool eye_clicked = ui::EyeToggle(ctx, 4242, r, true, enabled);
+      const int eye_hot = ctx.hot;
+
+      ctx.hot = 0;
+      bool value = true;
+      const bool box_clicked =
+          ui::Checkbox(ctx, 4243, r, "visible", value, enabled);
+      const int box_hot = ctx.hot;
+
+      std::printf("  %-8s eye: clicked %d hot %d   checkbox: clicked %d hot %d value %d\n",
+                  enabled ? "enabled" : "disabled", static_cast<int>(eye_clicked), eye_hot,
+                  static_cast<int>(box_clicked), box_hot, static_cast<int>(value));
+      if (enabled) {
+        // The other half, so the disabled assertions cannot pass on a widget that never
+        // reports anything: with the pointer in the same place and the same button down, both
+        // of these DO fire.
+        Check(eye_clicked, "an enabled eye reports the click it was given");
+        Check(box_clicked && !value, "and an enabled checkbox toggles its value");
+        Check(eye_hot == 4242 || box_hot == 4243, "and one of them claims the hot id");
+      } else {
+        Check(!eye_clicked, "a disabled eye reports no click");
+        Check(!box_clicked && value,
+              "a disabled checkbox reports no click and leaves its value alone");
+        Check(eye_hot == 0 && box_hot == 0,
+              "and neither claims the hot id, so hover still belongs to what is underneath");
+      }
+    }
+  }
+
   std::printf("\n%s (%d failures)\n", g_fails ? "FAILED" : "PASSED", g_fails);
   return g_fails ? 1 : 0;
 }

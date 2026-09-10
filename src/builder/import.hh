@@ -622,10 +622,18 @@ inline ColourTableResult ReadVoxelColourTable(const std::string& path, Solid& s,
     target->g = gg;
     target->b = bb;
     if (have_a) {
+      // THE NUMBER THE TABLE GIVES, AND NOTHING ELSE. This used to also clear `visible` when
+      // the alpha was zero, on the reasoning that a table calling a class transparent is
+      // saying it should not be drawn and the checkbox beside it would otherwise contradict
+      // the number. That is a second decision made on the user's behalf, and it is the same
+      // mistake as hiding index 0 on import: `visible` is a control the user owns, and a class
+      // whose eye is shut without them shutting it is a class they have to discover before
+      // they can wonder where it went.
+      //
+      // Zero opacity already draws nothing, so nothing is lost by leaving the checkbox alone -
+      // and raising the opacity then works on its own, instead of appearing to do nothing
+      // because a flag they never touched is still off.
       target->opacity = aa;
-      // A table that says a class is transparent is saying it should not be drawn; `visible`
-      // is the checkbox beside it and would otherwise contradict the number it was just given.
-      target->visible = (aa > 0.0f);
     }
     ++r.applied;
   }
@@ -808,11 +816,17 @@ inline void ClassifyVoxels(const VoxelData& v, VoxelKind kind, Solid& s, std::st
         SampleColormap(cmap, t, c.r, c.g, c.b);
       }
     }
+    // The initial state is SPELLED OUT, not just applied. "Index 0 is treated like every other
+    // class" has had to be asked for twice, and a log line that names the opacity and says all
+    // of them are visible is something the user can check against what they are looking at
+    // without reading this file.
     std::snprintf(buf, sizeof buf,
                   "%d distinct values, one material class each on the volume's material, "
-                  "coloured by %s",
+                  "coloured by %s; all visible at %.0f%% opacity and on the volume's layer, "
+                  "index 0 included",
                   static_cast<int>(s.voxel_classes.size()),
-                  ColormapNames()[static_cast<int>(cmap)]);
+                  ColormapNames()[static_cast<int>(cmap)],
+                  100.0 * (s.voxel_classes.empty() ? 0.0 : s.voxel_classes[0].opacity));
     note = buf;
     return;
   }

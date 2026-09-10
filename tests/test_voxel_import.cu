@@ -113,13 +113,22 @@ int main() {
     std::string note;
     ClassifyVoxels(Indexed(5), VoxelKind::kDiscrete, s, note);
     bool all_faint = true, zero_present = false, all_have_material = true;
+    bool all_visible = true, all_inherit = true;
     for (const auto& c : s.voxel_classes) {
       if (c.opacity != 0.1f) { all_faint = false; }
       if (c.value == 0.0) { zero_present = true; }
       if (c.material != 7) { all_have_material = false; }
+      if (!c.visible) { all_visible = false; }
+      if (c.layer != kInheritLayer) { all_inherit = false; }
     }
     Check(all_faint, "every index arrives at a tenth, index 0 no different from the rest");
     Check(zero_present, "index 0 is a class like any other, and can be given a material");
+    // AND VISIBLE, AND ON THE VOLUME'S LAYER. The opacity check above is not the whole claim:
+    // `visible` is a separate hard on/off, and a class arriving with it cleared is invisible
+    // whatever its opacity says. Reported as index 0 still coming in non-visible, so it is
+    // named here rather than left implied by the opacity.
+    Check(all_visible, "and every index arrives VISIBLE, index 0 included");
+    Check(all_inherit, "and on the volume's own layer rather than one of its own");
     // ---- and each one starts on the container's material rather than on nothing.
     //
     //      A class with none makes the whole volume unbuildable - build_scene refuses to place
@@ -224,10 +233,23 @@ int main() {
       Check(Near(s.voxel_classes[2].g, 128.0 / 255.0), "128 is about half");
       Check(Near(s.voxel_classes[1].opacity, 1.0), "alpha 255 is opaque");
       Check(Near(s.voxel_classes[3].opacity, 64.0 / 255.0), "alpha 64 is a quarter");
-      // The comment beside visible in the reader: a class given zero alpha is being told not
-      // to draw, and the checkbox beside it must agree with the number it was just given.
-      Check(!s.voxel_classes[0].visible, "alpha 0 also clears visible");
-      Check(s.voxel_classes[1].visible, "and a non-zero alpha sets it");
+      Check(Near(s.voxel_classes[0].opacity, 0.0), "and alpha 0 is transparent");
+      // AND IT LEAVES `visible` ALONE, which is the half this got wrong.
+      //
+      // A table row gives an opacity. It used to ALSO clear the `visible` checkbox when the
+      // alpha was zero, on the reasoning that a table calling a class transparent is saying it
+      // should not be drawn - and an ICRP-style table gives air alpha 0, so importing a
+      // phantom with one arrived with index 0's eye shut. Reported as index 0 still being
+      // automatically set to non-visible, which it was: not by the classifier, which this file
+      // already pinned, but by the table reader one step later.
+      //
+      // Zero opacity draws nothing on its own, so honouring the number costs nothing, and it
+      // leaves the control the user owns saying what they left it saying.
+      bool any_hidden = false;
+      for (const auto& c : s.voxel_classes) {
+        if (!c.visible) { any_hidden = true; }
+      }
+      Check(!any_hidden, "a colour table sets opacity and never clears `visible`");
     }
     std::remove(p.c_str());
   }
