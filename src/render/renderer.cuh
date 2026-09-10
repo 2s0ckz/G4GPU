@@ -296,10 +296,40 @@ __host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>&
       if (vol.solid.type == geom::SolidType::kMesh) {
         real_t edge = 0;
         int tri = -1;
+        const Vec3<real_t> dl_m = geom::dir_to_local(vol.xform, dir);
         const real_t t = geom::mesh_nearest_hit(
-            geometry.store, vol.solid, geom::to_local(vol.xform, from),
-            geom::dir_to_local(vol.xform, dir), geom::kSurfTolerance<real_t>(),
-            geom::kInfinity<real_t>(), edge, &tri);
+            geometry.store, vol.solid, geom::to_local(vol.xform, from), dl_m,
+            geom::kSurfTolerance<real_t>(), geom::kInfinity<real_t>(), edge, &tri);
+        // AN EXIT IS NOT AN ENTRY, and without the containment test this is the only thing
+        // left to tell them apart.
+        //
+        // Dropping the inside test is what made a 100k-triangle import usable, and the note
+        // above says a strictly-ahead hit cannot re-find the surface just crossed - which is
+        // true and is not the whole story. From INSIDE a closed mesh the nearest hit ahead is
+        // its far wall, and offered as an entry it is drawn as another surface of the mesh:
+        // the mesh composites twice, and worse, that phantom entry sits at exactly the
+        // distance at which whatever the mesh COVERS resumes owning the ray. Being the higher
+        // layer it wins that tie, the covered volume never resumes, and the next iteration
+        // finds it standing in space it owns and skips it for good.
+        //
+        // Which is why a phantom under a vest is visible only with the PHANTOM on the higher
+        // layer - a higher volume is never covered, so it never has to resume - and why a BOX
+        // cover has never shown this: a box the ray is inside is caught by the containment
+        // branch below and offers nothing.
+        //
+        // The winning triangle's own normal says which it is, and it is already being fetched
+        // to shade with - but only once the WINDING is known, because a mesh may be wound
+        // either way and both occur in real files. p[7] carries the sign, from the same
+        // divergence-theorem sum the volume comes from; `mesh_volume` used to take |V| and
+        // throw it away, with a note saying the winding may be either way, which is exactly
+        // the fact that makes it worth keeping.
+        //
+        // Zero means nobody filled it in, and then this cannot be answered - so the hit is
+        // taken as an entry, which is the behaviour before any of this.
+        if (tri >= 0 && vol.solid.p[7] != real_t(0)) {
+          const Vec3<real_t> fn = geom::mesh_triangle_normal<real_t>(geometry.store, tri);
+          if (vol.solid.p[7] * dot(fn, dl_m) > real_t(0)) { continue; }
+        }
         if (t < geom::kInfinity<real_t>() && better(v, t, best_vol, best_t)) {
           if (t < best_t) { best_t = t; }
           best_vol = v;
@@ -313,6 +343,14 @@ __host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>&
       // re-finds the volume just entered, paints its front face again, and does that until
       // the accumulated alpha saturates. The effect is that a half-transparent box renders
       // fully opaque and nothing behind it is ever reached. That is the whole bug.
+      // Containment, asked the way the volume needs it, so that the two questions below - "am
+      // I standing in this" and "is it still there when the cover ends" - cannot disagree.
+      auto contains = [&](int u, const Vec3<real_t>& p) {
+        const auto& uu = geometry.volumes[u];
+        return per_cell_grid(u)
+                   ? geom::inside(geometry.store, uu.solid, geom::to_local(uu.xform, p))
+                   : geom::inside_volume(geometry, u, p);
+      };
       // STANDING INSIDE IT IS A QUESTION ABOUT THE BOX, for a grid drawn cell by cell.
       //
       // `inside_volume` is per CELL - a cell whose class is not in the scene is not part of the
@@ -327,33 +365,45 @@ __host__ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>&
       // over the BACKGROUND instead of over the tissue behind it, which against a dark
       // background reads as the box having gone opaque. The two features are each right and it
       // is their intersection that was wrong.
-      const bool standing_in =
-          per_cell_grid(v)
-              ? geom::inside(geometry.store, vol.solid, geom::to_local(vol.xform, from))
-              : geom::inside_volume(geometry, v, from);
-      if (standing_in) {
-        // A GRID DRAWN CELL BY CELL IS THE EXCEPTION, because its interior is not one
-        // surface. The walk below stops where a higher layer takes the space over, so the
-        // cells BEYOND whatever covers the grid are still to be drawn - and the ray is inside
-        // the grid the whole time. Without this they were simply lost.
-        if (!per_cell_grid(v)) { continue; }
-        // Who owns this point: the same question locate answers for the transport. If it is
-        // the grid, the grid has already been walked from here and there is nothing ahead of
-        // it; if it is something else, that something outranks the grid (locate returns the
-        // highest layer containing the point) and the grid resumes where it ends.
+      if (contains(v, from)) {
+        // A VOLUME WHOSE SPACE A HIGHER LAYER TOOK RESUMES WHERE THAT ENDS - any volume, not
+        // just a grid drawn cell by cell.
+        //
+        // This branch used to `continue` for everything but a grid, on the reasoning above:
+        // the ray is inside it, so there is no entry surface ahead. True, and it is not the
+        // whole picture. A translucent volume on a higher layer can be SEEN THROUGH, and what
+        // is behind it includes the volume whose space it took - which starts being its own
+        // again the moment the cover ends. Skipped, that volume was never drawn there at all,
+        // so the cover was see-through and nothing was behind it.
+        //
+        // Reported twice: two translucent boxes where the far one cannot be seen through the
+        // near one, and a phantom under a vest that appears only when the PHANTOM is on the
+        // higher layer. The second is the same statement with the layers named, and "only when
+        // it is higher" is the signature - a higher volume is never covered, so it never needs
+        // to resume.
+        //
+        // Who owns this point is the question `locate` answers for the transport. If it is
+        // this volume, it has already been drawn or marched from here and there is nothing
+        // ahead of it. If it is something else, that something outranks it, and this volume
+        // resumes at the far side of it.
         //
         // NOT THE WORLD, for the reason the cover scan excludes it: the world contains
-        // everything, so it never takes space away from a cell, and resuming the grid at the
-        // world's far side would put it beyond the scene. A point in a nulled cell with
-        // nothing over it is owned by the world, and the answer there is that there is nothing
-        // left to march.
+        // everything, so it never takes space away, and resuming at the world's far side would
+        // put the volume beyond the scene. A point that only the world owns - a nulled cell
+        // with nothing over it - has nothing left to draw.
         const int own = geom::locate(geometry, from);
         if (own < 0 || own == v || own == geometry.world) { continue; }
         const auto& cov = geometry.volumes[own];
         const real_t t = geom::dist_out(geometry.store, cov.solid,
                                         geom::to_local(cov.xform, from),
                                         geom::dir_to_local(cov.xform, dir));
-        if (t < geom::kInfinity<real_t>() && better(v, t, best_vol, best_t)) {
+        if (t >= geom::kInfinity<real_t>()) { continue; }
+        // AND IT HAS TO STILL BE THERE when the cover ends. A volume wholly inside its cover
+        // stops before the cover does, and offering it at the cover's far side would paint a
+        // surface at a point the volume does not contain - owns_contained_point takes
+        // containment as a precondition and would not catch it.
+        if (!contains(v, from + (t + kNudge) * dir)) { continue; }
+        if (better(v, t, best_vol, best_t)) {
           if (t < best_t) { best_t = t; }
           best_vol = v;
           best_tri = -1;

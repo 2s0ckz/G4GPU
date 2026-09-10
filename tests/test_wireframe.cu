@@ -65,12 +65,18 @@ static void on_surface(const char* what, const vis::EdgeList& e,
     // A pole has no radius to scale, so the bracket has no direction to point in.
     if (r < real_t(1e-9)) { continue; }
     ++tested;
+    // SCALED ABOUT THE ORIGIN, all three coordinates together, which is the radial direction
+    // for every solid here - each is centred on its own origin and contains it. Scaling only x
+    // and y was wrong near a POLE, where the outward direction is almost entirely z: pushing
+    // the radius out 2% while shrinking z by 0.1% moves such a point INWARD, and it read as 48
+    // vertices of a sphere not being bounded by their own surface. That appeared only once the
+    // profile was sampled finely enough to have vertices near a pole at all.
     if (!geom::inside(st, s, Vec3<real_t>{x * real_t(0.999), y * real_t(0.999),
                                           z * real_t(0.999)})) {
       ++off_surface;
     }
     if (geom::inside(st, s, Vec3<real_t>{x * real_t(1.02), y * real_t(1.02),
-                                         z * real_t(0.999)})) {
+                                         z * real_t(1.02)})) {
       ++not_bounded;
     }
   }
@@ -82,6 +88,29 @@ static void on_surface(const char* what, const vis::EdgeList& e,
   check(tested > 0, "the solid has an outline at all");
   check(off_surface == 0, "every drawn vertex is inside the solid when pulled in");
   check(not_bounded == 0, "and outside it when pushed out");
+}
+
+/// The longest segment in the list, as a fraction of the solid's size.
+///
+/// WHETHER A CURVE IS FOLLOWED OR CHORDED. `on_surface` puts every drawn VERTEX on the surface,
+/// and a chord straight across a curve has both ends on the surface too - so it cannot tell a
+/// smooth meridian from a straight line between two rings, which is exactly what a sphere had:
+/// latitudes of 48 segments and longitudes of eight chords from pole to pole.
+///
+/// A segment's length is the test. On a curve of radius R sampled every angle t, a segment is
+/// about R*t long, so requiring every segment to be under a small fraction of R bounds the
+/// angle it turns through - and a chord across a whole meridian is half a circumference, which
+/// no bound like that admits.
+static real_t longest_segment(const vis::EdgeList& e, real_t scale) {
+  real_t worst = 0;
+  for (std::size_t i = 0; i < e.Size(); ++i) {
+    const real_t dx = real_t(e.x1[i]) - e.x0[i];
+    const real_t dy = real_t(e.y1[i]) - e.y0[i];
+    const real_t dz = real_t(e.z1[i]) - e.z0[i];
+    const real_t d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > worst) { worst = d; }
+  }
+  return (scale > 0) ? worst / scale : worst;
 }
 
 int main() {
@@ -106,8 +135,17 @@ int main() {
     vis::EdgeList orb;
     orb.AddVolume(v, 0u);
     on_surface("orb", orb, st, v.solid,
-               (E::kProfileLevels - 2) * E::kRingSegments
-                   + E::kMeridians * (E::kProfileLevels - 1));
+               7 * E::kRingSegments + E::kMeridians * (E::kProfileSamples - 1));
+    // EVERY LINE ON IT FOLLOWS THE SURFACE, latitudes and longitudes alike. A sphere of radius
+    // R sampled at 48 round and 32 along turns at most 2*pi/32 per segment, which is 0.2 R -
+    // so 0.25 is a bound with a little room and nowhere near the 2 R a pole-to-pole chord
+    // would be. This is the check `on_surface` cannot make: a chord has both ends on the
+    // surface too.
+    {
+      const real_t worst = longest_segment(orb, 40);
+      printf("  %-14s longest segment %.3f of the radius\n", "orb", worst);
+      check(worst < real_t(0.25), "every line on a sphere follows it, meridians included");
+    }
 
     // A hollow cylinder. Its inner rings are on the rmin surface, where the bracket points the
     // wrong way by construction - so they are checked separately, against rmin's own solid.
@@ -155,7 +193,7 @@ int main() {
     vis::EdgeList par;
     par.AddVolume(v, 0u);
     on_surface("paraboloid", par, st, v.solid,
-               E::kProfileLevels * E::kRingSegments + E::kMeridians * (E::kProfileLevels - 1));
+               9 * E::kRingSegments + E::kMeridians * (E::kProfileSamples - 1));
 
     // An elliptical tube: rx and ry differ, so a table that carries one radius per level puts
     // every vertex but four off the surface.
@@ -196,9 +234,20 @@ int main() {
     }
     printf("  %-14s %zu segments, %d off the tube, worst %.2e mm\n", "torus", tor.Size(),
            off_tube, static_cast<double>(worst));
-    check(tor.Size() == 2 * E::kTorusMajor * E::kTorusMinor,
+    check(tor.Size() == (E::kTorusMajor + E::kTorusMinor) * E::kRingSegments,
           "a torus is drawn as rings the long way round AND cross-sections");
     check(off_tube == 0, "every drawn vertex of a torus is on its tube");
+    // And both families are curves. Each used to be drawn with the OTHER family's station
+    // count, so a cross-section was an octagon and a long-way ring a 16-gon - the largest
+    // segment on the tube of radius 8 was about 6 mm, three quarters of the tube's own radius.
+    // Against rtor + rmin, not the tube radius: a ring the long way round has that radius, so
+    // it is the largest curve on the solid and the one whose segments are longest.
+    {
+      const real_t worst = longest_segment(tor, 48);
+      printf("  %-14s longest segment %.3f of its outer radius\n", "torus", worst);
+      check(worst < real_t(0.25),
+            "and both families of curve on a torus are drawn as curves");
+    }
   }
 
   // ---------------------------------------------------------------- 2. the aux-pool solids

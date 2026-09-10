@@ -157,11 +157,18 @@ int build_bvh(const real_t* verts, int n, std::vector<real_t>& tri_pool,
   return root;
 }
 
-/// The enclosed volume of a closed triangle mesh, by the divergence theorem: the signed volume
-/// of the tetrahedron each triangle forms with the origin, summed. Exact, and independent of
-/// where the origin is, provided the mesh is closed. |V| because the winding may be either way.
+/// Six times the SIGNED volume of a closed triangle mesh, by the divergence theorem: the signed
+/// volume of the tetrahedron each triangle forms with the origin, summed. Exact and independent
+/// of where the origin is, provided the mesh is closed.
+///
+/// The sign is the WINDING, and it is worth having on its own. A mesh wound outward gives a
+/// positive volume and one wound inward a negative one, and the difference decides whether a
+/// triangle's face normal points out of the solid or into it - which is how the renderer tells
+/// a ray ENTERING a mesh from one LEAVING it without paying for a containment test. Both
+/// windings occur in real files, so it cannot be assumed either way, and it used to be
+/// discarded here with `|V|` and a note saying so.
 template <typename real_t>
-inline real_t mesh_volume(const real_t* verts, int n) {
+inline real_t mesh_signed_volume6(const real_t* verts, int n) {
   real_t v6 = real_t(0);
   for (int i = 0; i < n; ++i) {
     const real_t* t = verts + i * 9;
@@ -170,7 +177,22 @@ inline real_t mesh_volume(const real_t* verts, int n) {
     const real_t x3 = t[6], y3 = t[7], z3 = t[8];
     v6 += x1 * (y2 * z3 - y3 * z2) - x2 * (y1 * z3 - y3 * z1) + x3 * (y1 * z2 - y2 * z1);
   }
-  return std::fabs(v6) / real_t(6);
+  return v6;
+}
+
+/// The enclosed volume, which is a magnitude: |V|, because the winding may be either way.
+template <typename real_t>
+inline real_t mesh_volume(const real_t* verts, int n) {
+  return std::fabs(mesh_signed_volume6(verts, n)) / real_t(6);
+}
+
+/// +1 if the mesh is wound so its face normals point OUT of the solid, -1 if they point in.
+/// Zero only for a mesh that encloses nothing, where there is no answer and the caller should
+/// not act on one.
+template <typename real_t>
+inline real_t mesh_winding(const real_t* verts, int n) {
+  const real_t v6 = mesh_signed_volume6(verts, n);
+  return (v6 > real_t(0)) ? real_t(1) : ((v6 < real_t(0)) ? real_t(-1) : real_t(0));
 }
 
 /// The total surface area, for reporting: a mesh whose area is far from its bounding box's is

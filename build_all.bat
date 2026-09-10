@@ -480,7 +480,7 @@ rem AND A ROUND SOLID HAS ONE, IN ITS OWN COLOUR, VISIBLE THROUGH GLASS.
 rem
 rem The line above passes on a box and the world is a box, which is why it passed while a
 rem sphere set to wireframe was invisible: the pass drew boxes and voxel grids and nothing
-rem else. One fixture answers all four of the reports - an orb contributes 432 segments where
+rem else. One fixture answers all four of the reports - an orb contributes 720 segments where
 rem a box contributes twelve, recolouring it moves the picture, and it sits wholly behind a
 rem translucent pane so every edge that reaches the screen came through it. The opaque half of
 rem that pair is what stops an x-ray line pass passing as compositing.

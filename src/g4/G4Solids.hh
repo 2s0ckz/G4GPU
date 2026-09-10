@@ -856,10 +856,14 @@ class G4TessellatedSolid : public G4VSolid {
     const int root =
         g4gpu::geom::build_bvh(tri_.data(), n, pool.tri, pool.bvh, bmin, bmax);
 
+    // p[7] is the WINDING, from the same divergence-theorem sum the volume comes from. See
+    // geom::mesh_winding: the renderer needs it to tell a ray entering this mesh from one
+    // leaving it, and a mesh may be wound either way.
     g4gpu::g4::Sol s = make(g4gpu::geom::SolidType::kMesh,
                             {0.5 * (bmax[0] - bmin[0]), 0.5 * (bmax[1] - bmin[1]),
                              0.5 * (bmax[2] - bmin[2]), 0.5 * (bmax[0] + bmin[0]),
-                             0.5 * (bmax[1] + bmin[1]), 0.5 * (bmax[2] + bmin[2]), volume_});
+                             0.5 * (bmax[1] + bmin[1]), 0.5 * (bmax[2] + bmin[2]), volume_,
+                             g4gpu::geom::mesh_winding(tri_.data(), n)});
     s.a = root;
     s.b = n;
     return pool.add_solid(s);

@@ -609,6 +609,46 @@ Where a grid has any absent class, the cover scan admits **every** volume rather
 the grid's lowest class layer - a volume below that layer would otherwise be rejected before it
 was ever considered, and an absent cell has no business being compared against anything.
 
+### A volume resumes at the far side of whatever outranks it
+
+The surface search skips any volume the ray is already inside, and that test earns its place:
+without it the search re-finds the volume just entered, paints its front face again, and a
+half-transparent box renders fully opaque with nothing behind it ever reached.
+
+What it also did was drop a volume whose space a higher layer takes for part of the ray. "Already
+inside" is true there and there is no entry surface ahead - so a **translucent** volume on a higher
+layer could be seen through, and the volume underneath it was not drawn beyond it. A phantom under
+a vest appeared only with the PHANTOM on the higher layer, and *works above, fails below* is the
+signature: a higher volume is never covered, so it never has to resume.
+
+So `locate` is asked who owns the current point. If it is this volume, it has already been drawn or
+marched from here. If it is something else, that something outranks it and this volume resumes at
+the far side of it - any volume, not just a grid drawn cell by cell, which is what this branch was
+restricted to for one commit. One extra containment test goes with it: a volume wholly inside its
+cover stops before the cover does, and offering it at the cover's far side would paint a surface
+where the volume is not.
+
+The world is excluded, for the reason the cover scan excludes it: it contains everything, so it
+never takes space away, and resuming at its far side would put the volume beyond the scene.
+
+**A mesh cover needs its winding to be told apart from itself.** A mesh takes a fast path through
+the search - one BVH walk, no containment test, because a containment test on a mesh is a parity
+count and one per composited layer is what made a 100k-triangle import unusable. With nothing to
+classify the hit, from inside a closed mesh the nearest hit ahead is its far wall and it was
+offered as an ENTRY: the mesh composited twice, and that phantom entry sat exactly where the
+volume it covers resumes, winning the tie on layer. A phantom under a vest was therefore visible
+only with the phantom on the higher layer.
+
+The winning triangle's normal decides it - facing along the ray means leaving - but only once the
+winding is known, and a mesh may be wound either way. `geom::mesh_winding` takes the sign of the
+same divergence-theorem sum the volume comes from, and it rides in the mesh solid's `p[7]`. Zero
+there means nobody filled it in, and the hit is taken as an entry, which is the older behaviour.
+
+What is still missing: a MESH that is itself covered does not resume, because reaching the branch
+above would cost the containment test the fast path exists to avoid. No report has needed it - a
+cover is the higher layer by definition - and it is written down here rather than left to be
+rediscovered.
+
 **"Standing inside it" is a question about the box, though.** `inside_volume` is per cell, and the
 march has a branch gated on it that means something else entirely: *have I already marched this
 grid?* Those are not the same question, and answering the second with the first broke a case that
@@ -692,6 +732,14 @@ first version and each was reported separately:
   the same silent zero that `bounding_radius` carries a note about. A mesh and a boolean still
   get nothing: a CAD import is tens of thousands of triangles, and a boolean's shape is not its
   operands'.
+
+  **Every line that follows a curve is drawn curved.** A meridian used to be one straight chord
+  between consecutive rings - nine rings meaning an eight-sided longitude beside 48-segment
+  latitudes - so the profile is sampled at 33 points for the meridians to follow and a ring is
+  drawn every fourth sample. The torus had it in both families at once, each drawn with the
+  OTHER family's station count: cross-sections of 8 segments and long-way rings of 16. How many
+  curves and how many segments in one curve are different numbers. Longest segment on a sphere
+  or a torus: 0.131 of the radius, against 0.39 before.
 
   One convention had to be derived rather than read, and it was wrong first: **a polyhedra's
   `rmax` is the apothem, not the corner radius.** `polyhedra_planes` puts face *f* at distance

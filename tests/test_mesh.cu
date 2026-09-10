@@ -141,6 +141,10 @@ struct Mesh {
     solid.p[4] = real_t(0.5) * (hi[1] + lo[1]);
     solid.p[5] = real_t(0.5) * (hi[2] + lo[2]);
     solid.p[6] = volume;
+    // The WINDING, as the flattener records it - see geom::mesh_winding and the note at the
+    // top of mesh.cuh. Nothing in this file reads it, and a solid record that is complete is
+    // one that can be handed to the renderer without a surprise.
+    solid.p[7] = mesh_winding(tri.data(), n);
     solid.xform = -1;
     solid.a = root;
     solid.b = n;

@@ -4122,3 +4122,126 @@ What is general here: changing what a predicate MEANS is not a local edit, even 
 site still compiles and reads correctly. Each caller has to be re-read for which of the two
 questions it was asking - and a caller that wanted the old meaning is now silently wrong, because
 the name still describes what it does.
+
+### V35: a fix applied to the case it was reported for
+
+Two reports, and the first of them I had already fixed - for one solid type.
+
+#### "Only when it is on a higher layer" is the whole diagnosis
+
+A phantom under a translucent vest was invisible; the same phantom on a HIGHER layer than the
+vest was fine. Two translucent boxes, same story: the far one could not be seen through the near
+one.
+
+That single bit - works above, fails below - names the mechanism, because a volume on a higher
+layer is never COVERED, so it never has to resume. It is the third time an A/B on the layer has
+identified a renderer bug in this project (V31 was "put the box on a higher layer and it drew"),
+and it is worth naming as a signature: *works above, fails below* means the resume path or the
+rank tie-break, and nothing else.
+
+The mechanism: the surface search skips any volume the ray is already inside. That test earns its
+place - without it the search re-finds the volume just entered, paints its front face again, and a
+half-transparent box renders fully opaque. What it also did was drop a volume whose space a higher
+layer had taken for part of the ray, because "already inside" is true there and there is no entry
+surface ahead. So the cover could be seen through and nothing was behind it.
+
+Any volume now resumes at the far side of whatever outranks it, with one extra containment test at
+that point - a volume wholly inside its cover stops before the cover does, and offering it at the
+cover's far side would paint a surface where the volume is not.
+
+#### The restriction I did not question was my own, from one commit earlier
+
+The branch that does this said, in as many words:
+
+    // A GRID DRAWN CELL BY CELL IS THE EXCEPTION, because its interior is not one surface.
+    if (!per_cell_grid(v)) { continue; }
+
+I wrote that. Last commit I fixed the same bug for a voxel grid, reached the line, and treated the
+`per_cell_grid` restriction as the shape of the problem rather than as the shape of the case I had
+in front of me. The comment even explains why a grid is special - and being special is not the
+same as being the only thing that needs to resume.
+
+This is V32's lesson arriving from inside: a justification stops the gap being re-examined, and it
+does so whether the justification is old or written five minutes ago. The tell is the same both
+times - the comment argues for a weaker claim than the code makes. "A grid's interior is not one
+surface" is true; "therefore only a grid resumes" does not follow, and the code said the second.
+
+What would have caught it: when a fix lands for the case it was reported for, ask what else reaches
+that line. There were two callers of the concept and I had a test for one.
+
+
+#### And a mesh could not tell an exit from an entry
+
+Fixing the resume for ordinary volumes did not fix the case it was reported for, because the cover
+in that case is a MESH and a mesh does not go through that branch at all. It takes a fast path:
+one BVH walk for the nearest hit and no containment test, deliberately - a containment test on a
+mesh is a parity count, and paying one per composited layer is what made a 100k-triangle import
+unusable. The note above it said the inside test could go because "with a strictly-ahead hit the
+search cannot re-find the surface it just crossed".
+
+True, and silent about the case that matters. From INSIDE a closed mesh the nearest hit ahead is
+its far wall, and with nothing to classify it, it was offered as though the ray were entering
+there. So the mesh composited twice - coverage 131 where one 77-alpha surface would give 77, which
+is how it was confirmed - and that phantom entry sat at exactly the distance at which the volume
+the mesh COVERS resumes owning the ray. Being the higher layer it won that tie, the covered volume
+never resumed, and the next iteration found it standing in space it owned and skipped it for good.
+
+Third weaker-claim comment in three commits, and the same shape each time: the sentence is correct
+and it argues for less than the code assumes.
+
+#### A comment that explained why information was being thrown away
+
+The fix is the winning triangle's own normal, which is already being fetched to shade with - facing
+along the ray means the ray is leaving. That needs the mesh's WINDING, and the first attempt simply
+assumed outward.
+
+Two things then went right for one reason: a twelve-line probe printing `inside`, `dist_in`,
+`dist_out` and the hit normal at seven points along one ray. It showed `dist_out` on a mesh working
+perfectly, which killed the hypothesis I had actually written the probe to confirm; and it showed
+`n.d = +1` from OUTSIDE the mesh, which meant the test fixture I had just written was wound inward.
+The fix was wrong and the fixture was wrong, and a measurement aimed at neither found both.
+
+Then the real find. `mesh_volume` computes the signed volume by the divergence theorem and returns
+
+    return std::fabs(v6) / real_t(6);   // |V| because the winding may be either way
+
+That comment names precisely the fact that makes the sign worth keeping. Both windings occur in
+real files - so the sign is not noise to be normalised away, it is the answer to a question the
+renderer needs and cannot otherwise afford. It is now `mesh_signed_volume6`, with `mesh_volume`
+taking the magnitude and `mesh_winding` taking the sign, and the sign rides in the mesh solid's
+spare `p[7]`.
+
+Worth generalising, because it is a different failure from the weaker-claim comment: **a comment
+explaining why information is discarded is worth re-reading whenever something needs that
+information.** This one was not wrong, it was answering a narrower question than the code later
+asked. Zero in `p[7]` means nobody filled it in, and the renderer falls back to treating a hit as
+an entry rather than guessing.
+
+#### A vertex on the surface says nothing about the line between two of them
+
+The wireframe drew a sphere's latitudes as 48-segment circles and its longitudes as one straight
+chord per ring gap - nine rings meaning an eight-sided meridian. Reported as a mixture of round
+and straight lines, which is exactly what it was.
+
+The existing check could not see it. `on_surface` requires every drawn VERTEX to be on the solid,
+and a chord straight across a curve has both of its ends on the surface too. Vertex-on-surface is
+blind to the entire question.
+
+What measures it is SEGMENT LENGTH relative to the solid's size: on a curve of radius R sampled
+every angle t a segment is about R*t, so bounding the length bounds the angle each segment turns
+through, and a chord across a whole meridian is half a circumference. Measured: 0.39 of the radius
+before, 0.131 after, on both the sphere and the torus.
+
+The torus was worse and in a way that reads the same. Each family of curve was drawn with the OTHER
+family's station count - cross-sections got 8 segments and long-way rings 16 - so both families
+were polygons on a solid that is nothing but curvature. How many curves and how many segments in
+one curve are different numbers, and using one for the other looks plausible right up to drawing
+it.
+
+And fixing the sampling exposed a direction bug in my own bracket. `on_surface` pushed x and y out
+by 2% and shrank z by 0.1%; near a POLE the outward direction is almost entirely z, so that moves
+the point inward, and it read as 48 vertices of a sphere not being bounded by their own surface.
+It appeared only once the profile was sampled finely enough to have vertices near a pole - the
+check had been right for nine samples and wrong for thirty-three, without changing. A bracket
+scaled about the origin, all three coordinates together, is the radial direction for every solid
+these tests use.

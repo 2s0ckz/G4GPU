@@ -48,12 +48,24 @@ struct EdgeList {
   /// and 5 levels drew a sphere as three loose hoops, which is what "not enough vertices and
   /// edges, e.g. the sphere and the torus" was.
   static constexpr int kRingSegments = 48;
-  /// Rings along the length of a curved solid, and the meridians joining them. Nine levels
-  /// puts seven rings on a sphere (its two poles have no radius), which reads as a surface.
-  static constexpr int kProfileLevels = 9;
+  /// HOW FINELY THE PROFILE IS SAMPLED, which is not the same as how many rings are drawn.
+  ///
+  /// A meridian is a curve too. It used to be one straight chord between consecutive rings -
+  /// nine rings on a sphere meant eight chords from pole to pole - so a sphere came out with
+  /// smooth latitudes and an eight-sided longitude, which is what "you use a mixture of round
+  /// and straight lines" was. The profile is sampled at kProfileSamples points so the
+  /// meridians follow it, and a ring is drawn every kRingStride samples so there are not
+  /// thirty-three of them.
+  ///
+  /// A solid whose profile is genuinely straight - a cylinder, a cone, one frustum of a
+  /// polycone - needs two samples and gets a straight meridian, correctly.
+  static constexpr int kProfileSamples = 33;
+  static constexpr int kRingStride = 4;    ///< 33 samples, stride 4: nine rings
   static constexpr int kMeridians = 12;
   /// A torus is swept round its own circle, so it needs both families: cross-sections at
-  /// intervals of the major angle, and rings at intervals of the minor one.
+  /// intervals of the major angle, and rings at intervals of the minor one. These are how many
+  /// CURVES of each, not how many segments in one - every curve is drawn with kRingSegments,
+  /// or the cross-sections would have been octagons.
   static constexpr int kTorusMajor = 16;
   static constexpr int kTorusMinor = 8;
 
@@ -112,23 +124,31 @@ struct EdgeList {
     }
   }
 
-  /// A surface of revolution given as a table of (z, rx, ry) levels: a ring at each level, and
-  /// meridians joining consecutive levels.
+  /// A surface of revolution given as a table of (z, rx, ry) samples: rings across it, and
+  /// meridians running along it through every sample.
   ///
-  /// This is the whole of the curved-solid wireframe. A cylinder is two levels of equal radius,
-  /// a cone two of different radius, a sphere five of sqrt(R^2 - z^2) - the solids differ only
-  /// in the table they hand over.
+  /// This is the whole of the curved-solid wireframe. A cylinder is two samples of equal radius,
+  /// a cone two of different radius, a sphere thirty-three spaced by polar angle - the solids
+  /// differ only in the table they hand over.
   ///
   /// @param meridians how many generators to draw between the rings. A prism wants one per
   ///        side, so the drawn lines are the solid's real edges; a round solid wants a fixed
   ///        few, since any choice of meridian on it is arbitrary.
+  /// @param ring_stride draw a ring every this many samples, and always at the last one. The
+  ///        MERIDIANS use every sample regardless, which is what makes them follow the curve
+  ///        rather than cut across it. 1 for a table whose entries are all real features - a
+  ///        polycone's sections, a cylinder's two ends.
   template <typename real_t>
   void AddProfile(const geom::Transform<real_t>& xf, const std::vector<real_t>& z,
                   const std::vector<real_t>& rx, const std::vector<real_t>& ry, int ring_n,
-                  int meridians, real_t phi0, unsigned int c) {
+                  int meridians, int ring_stride, real_t phi0, unsigned int c) {
     const std::size_t n = z.size();
     if (n == 0 || rx.size() != n || ry.size() != n) { return; }
-    for (std::size_t k = 0; k < n; ++k) { AddRing(xf, z[k], rx[k], ry[k], ring_n, phi0, c); }
+    const int stride = (ring_stride >= 1) ? ring_stride : 1;
+    for (std::size_t k = 0; k < n; ++k) {
+      if (static_cast<int>(k) % stride != 0 && k + 1 != n) { continue; }
+      AddRing(xf, z[k], rx[k], ry[k], ring_n, phi0, c);
+    }
     const int nm = (meridians >= 1) ? meridians : 1;
     const double two_pi = 6.283185307179586;
     for (int m = 0; m < nm; ++m) {
@@ -259,10 +279,10 @@ struct EdgeList {
       rx.push_back(a);
       ry.push_back(b);
     };
-    // A curve sampled at kProfileLevels heights between two ends.
+    // A curve sampled at kProfileSamples heights between two ends.
     auto sweep = [&](real_t z_lo, real_t z_hi, auto radius) {
-      for (int k = 0; k < kProfileLevels; ++k) {
-        const real_t t = static_cast<real_t>(k) / static_cast<real_t>(kProfileLevels - 1);
+      for (int k = 0; k < kProfileSamples; ++k) {
+        const real_t t = static_cast<real_t>(k) / static_cast<real_t>(kProfileSamples - 1);
         const real_t zz = z_lo + (z_hi - z_lo) * t;
         real_t a = 0, b = 0;
         radius(zz, a, b);
@@ -276,13 +296,13 @@ struct EdgeList {
     // hoops. Returns the rings for radius @p R.
     auto polar = [&](real_t R) {
       const double pi = 3.141592653589793;
-      for (int k = 0; k < kProfileLevels; ++k) {
-        const double th = pi * k / (kProfileLevels - 1);
+      for (int k = 0; k < kProfileSamples; ++k) {
+        const double th = pi * k / (kProfileSamples - 1);
         // THE POLES ARE EXACTLY ZERO, and sin(pi) is not: it is 1.2e-16, so the south pole
         // came out as a ring of radius 5e-15 and AddRing - which only rejects a radius that is
         // not positive - drew all 48 segments of it. Invisible in the picture and not
         // invisible in the count, which is how it was found.
-        const bool pole = (k == 0 || k == kProfileLevels - 1);
+        const bool pole = (k == 0 || k == kProfileSamples - 1);
         const real_t rr = pole ? real_t(0) : static_cast<real_t>(R * std::sin(th));
         level(static_cast<real_t>(R * std::cos(th)), rr, rr);
       }
@@ -338,8 +358,11 @@ struct EdgeList {
         polar(p[1]);
         if (p[0] > real_t(0)) {
           const double pi = 3.141592653589793;
-          for (int k = 1; k + 1 < kProfileLevels; ++k) {   // not the poles: no ring there
-            const double th = pi * k / (kProfileLevels - 1);
+          // Every kRingStride samples, as AddProfile does for the outer shell - the samples
+          // are there for the meridians to follow, and a ring at each of thirty-three of them
+          // would be a solid band of ink.
+          for (int k = kRingStride; k + 1 < kProfileSamples; k += kRingStride) {
+            const double th = pi * k / (kProfileSamples - 1);
             const real_t r = static_cast<real_t>(p[0] * std::sin(th));
             AddRing(v.xform, static_cast<real_t>(p[0] * std::cos(th)), r, r, kRingSegments,
                     phi0, c);
@@ -424,8 +447,8 @@ struct EdgeList {
           a = b = static_cast<real_t>(std::sqrt(p[1] * p[1] + t * t));
         });
         if (p[0] > real_t(0)) {
-          for (int k = 0; k < kProfileLevels; ++k) {
-            const real_t f = static_cast<real_t>(k) / static_cast<real_t>(kProfileLevels - 1);
+          for (int k = 0; k < kProfileSamples; k += kRingStride) {   // as AddProfile strides
+            const real_t f = static_cast<real_t>(k) / static_cast<real_t>(kProfileSamples - 1);
             const real_t zz = -p[4] + real_t(2) * p[4] * f;
             const real_t t = p[2] * zz;
             const real_t r = static_cast<real_t>(std::sqrt(p[0] * p[0] + t * t));
@@ -452,24 +475,29 @@ struct EdgeList {
           y = static_cast<real_t>(r * std::sin(a));
           z = static_cast<real_t>(rm * std::sin(b));
         };
-        // Rings the long way round, at kTorusMinor stations of the minor angle - so the outer
+        // EVERY CURVE IN kRingSegments SEGMENTS, and the station counts only say how many
+        // curves. Drawn with the other family's station count - which is what this did - a
+        // cross-section came out as an octagon and a ring the long way round as a 16-gon: both
+        // families were polygons, on a solid that is nothing but curvature.
+        //
+        // Rings the long way round, at kTorusMinor stations of the minor angle, so the outer
         // equator, the inner one, the top and the bottom are all among them.
         for (int j = 0; j < kTorusMinor; ++j) {
           const double b = two_pi * j / kTorusMinor;
-          for (int i = 0; i < kTorusMajor; ++i) {
+          for (int i = 0; i < kRingSegments; ++i) {
             real_t x0, y0, z0v, x1, y1, z1v;
-            at(p[3] + two_pi * i / kTorusMajor, b, x0, y0, z0v);
-            at(p[3] + two_pi * (i + 1) / kTorusMajor, b, x1, y1, z1v);
+            at(p[3] + two_pi * i / kRingSegments, b, x0, y0, z0v);
+            at(p[3] + two_pi * (i + 1) / kRingSegments, b, x1, y1, z1v);
             AddSegment(v.xform, x0, y0, z0v, x1, y1, z1v, c);
           }
         }
         // And the cross-sections, at kTorusMajor stations of the major angle.
         for (int i = 0; i < kTorusMajor; ++i) {
           const double a = p[3] + two_pi * i / kTorusMajor;
-          for (int j = 0; j < kTorusMinor; ++j) {
+          for (int j = 0; j < kRingSegments; ++j) {
             real_t x0, y0, z0v, x1, y1, z1v;
-            at(a, two_pi * j / kTorusMinor, x0, y0, z0v);
-            at(a, two_pi * (j + 1) / kTorusMinor, x1, y1, z1v);
+            at(a, two_pi * j / kRingSegments, x0, y0, z0v);
+            at(a, two_pi * (j + 1) / kRingSegments, x1, y1, z1v);
             AddSegment(v.xform, x0, y0, z0v, x1, y1, z1v, c);
           }
         }
@@ -504,7 +532,7 @@ struct EdgeList {
             AddRing(v.xform, sec[0], sec[1] * rs, sec[1] * rs, ring_n, phi0, c);
           }
         }
-        AddProfile(v.xform, z, rx, ry, ring_n, prism ? ring_n : kMeridians, phi0, c);
+        AddProfile(v.xform, z, rx, ry, ring_n, prism ? ring_n : kMeridians, 1, phi0, c);
         return;
       }
 
@@ -516,7 +544,7 @@ struct EdgeList {
         // both of its operands is drawn wrong.
         return;
     }
-    AddProfile(v.xform, z, rx, ry, kRingSegments, kMeridians, phi0, c);
+    AddProfile(v.xform, z, rx, ry, kRingSegments, kMeridians, kRingStride, phi0, c);
   }
 
   void clear() {

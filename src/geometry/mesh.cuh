@@ -11,6 +11,11 @@
 //   p[0..2]  bounding-box half-extents, in the solid's own frame
 //   p[3..5]  bounding-box centre
 //   p[6]     the enclosed volume, computed on the host by the divergence theorem
+//   p[7]     the WINDING: +1 if face normals point out of the solid, -1 if in, 0 unknown.
+//            Both occur in real files, so it cannot be assumed - see geom::mesh_winding. It is
+//            what lets the renderer tell a ray ENTERING a mesh from one LEAVING it, which a
+//            nearest-hit walk cannot say by itself, and without paying for a parity test. Zero
+//            means nobody filled it in, and a caller must fall back rather than guess.
 //   a        index of this mesh's BVH root node
 //   b        triangle count, for diagnostics
 //

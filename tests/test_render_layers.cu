@@ -15,6 +15,7 @@
 #include <cstring>
 #include <vector>
 
+#include "geometry/bvh_build.hh"
 #include "render/renderer.cuh"
 
 using namespace g4gpu;
@@ -277,7 +278,146 @@ int main() {
     check(a > 250, "and the pixel ends up fully covered rather than showing background");
   }
 
-  // ---------------------------------------------------------------- 4. the rules that already
+  // ---------------------------------------------------------------- 4. AN ORDINARY VOLUME
+  // beyond a translucent higher layer
+  //
+  // Everything above is about a voxel grid, which has a cell march to resume. An ordinary solid
+  // has no march, and the search skips any volume the ray is already inside - the test that
+  // stops a translucent box being re-entered and painted until it saturates. So a volume whose
+  // space a higher layer takes for part of the ray was never drawn again beyond that: the
+  // higher volume could be seen through, and what was behind it could not.
+  //
+  // Reported twice over: two translucent boxes where the far one cannot be seen through the
+  // near one, and a phantom under a vest that appears only when the PHANTOM is on the higher
+  // layer. That second one is the same statement with the layers named.
+  //
+  // Along the axis: translucent blue on layer 2 from z = 10 to 40, opaque red on layer 1 from
+  // z = -50 to 30. The blue is IN FRONT and owns the overlap, so the red's own front face at
+  // z = 30 is correctly not drawn - but the blue ends at z = 10, and the red beyond that is the
+  // red's again.
+  //
+  // The red's blue channel is zero and the cover's is not, so neither colour can be mistaken
+  // for the other: cover only reads as (12, 24, 69), red only as (r, g, 0).
+  printf("\n== an ordinary volume is drawn beyond a translucent higher layer ==\n");
+  {
+    Scene s;
+    add_world(s, 500);
+    add_box(s, 30, 30, 40, -10, 1, 230, 60, 0, 255);   // opaque red, layer 1, z -50..30
+    add_box(s, 20, 20, 15, 25, 2, 40, 80, 230, 77);    // translucent blue, layer 2, z 10..40
+
+    int r = 0, g = 0, b = 0, a = 0;
+    trace_axis(s, r, g, b, &a);
+    printf("  rgb (%3d %3d %3d) coverage %3d -> %s\n", r, g, b, a, dominant(r, g, b));
+    check(r > 60, "the volume beyond a translucent cover is drawn");
+    check(b > 30, "and the cover is still drawn in front of it");
+    check(a > 250, "and the pixel is covered rather than showing background");
+  }
+
+  // ---------------------------------------------------------------- 5. A MESH COVER
+  //
+  // The same claim as 4, with the cover a triangle mesh - which is the case actually reported,
+  // twice, as a phantom under a vest. A mesh takes a different path through the search: one BVH
+  // walk for the nearest hit and NO containment test, deliberately, because a containment test
+  // on a mesh is a parity count and paying one per composited layer is what made a CAD import
+  // unusable.
+  //
+  // No containment test also means the search cannot tell an ENTRY from an EXIT. From inside
+  // the mesh the nearest hit ahead is its far wall, offered as though the ray were entering
+  // there - and at the same distance as the covered volume's resume, which the mesh then wins
+  // on rank because it is the higher layer. The covered volume never resumes, and the next
+  // iteration finds it owning the point it is standing in, so it is skipped for good.
+  //
+  // Which is why a box cover works and a mesh cover does not, and why nothing in case 4 could
+  // have caught this.
+  printf("\n== and beyond a translucent MESH cover, which is the reported case ==\n");
+  {
+    Scene s;
+    add_world(s, 500);
+    add_box(s, 30, 30, 40, -10, 1, 230, 60, 0, 255);   // opaque red, layer 1, z -50..30
+
+    // A closed 12-triangle box, the same shape as the cover in case 4, as a mesh.
+    std::vector<real_t> tri;
+    {
+      const real_t h[3] = {20, 20, 15};
+      const int f[6][4] = {{0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1},
+                           {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+      real_t v[8][3];
+      for (int i = 0; i < 8; ++i) {
+        v[i][0] = ((i & 1) ? h[0] : -h[0]);
+        v[i][1] = ((i & 2) ? h[1] : -h[1]);
+        v[i][2] = ((i & 4) ? h[2] : -h[2]) + real_t(25);   // centred at z = 25
+      }
+      for (int q = 0; q < 6; ++q) {
+        const int* c = f[q];
+        const int t2[2][3] = {{c[0], c[1], c[2]}, {c[0], c[2], c[3]}};
+        for (int k = 0; k < 2; ++k) {
+          for (int e = 0; e < 3; ++e) {
+            for (int a2 = 0; a2 < 3; ++a2) { tri.push_back(v[t2[k][e]][a2]); }
+          }
+        }
+      }
+    }
+    std::vector<real_t> tri_pool, bvh_pool;
+    real_t lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    const int n_tri = static_cast<int>(tri.size() / 9);
+    const int root = geom::build_bvh(tri.data(), n_tri, tri_pool, bvh_pool, lo, hi);
+
+    geom::Volume<real_t> m{};
+    m.solid.type = geom::SolidType::kMesh;
+    for (int k = 0; k < 3; ++k) {
+      m.solid.p[k] = real_t(0.5) * (hi[k] - lo[k]);
+      m.solid.p[3 + k] = real_t(0.5) * (hi[k] + lo[k]);
+    }
+    // p[6] the volume and p[7] the WINDING, both from the same sum, as the flattener does. The
+    // winding is taken from geom::mesh_winding rather than hand-written: this fixture's
+    // triangles turned out to be wound INWARD, and asserting a hand-picked sign would have
+    // been asserting the fixture's mistake. Whichever way it is wound, the renderer has to
+    // tell an entry from an exit - so the check below is worth more with it read off.
+    m.solid.p[6] = geom::mesh_volume(tri.data(), n_tri);
+    m.solid.p[7] = geom::mesh_winding(tri.data(), n_tri);
+    m.solid.xform = -1;
+    m.solid.a = root;
+    m.solid.b = n_tri;
+    m.xform = at(0, 0, 0);
+    m.layer = 2;
+    m.layer_lo = 2;
+    m.layer_hi = 2;
+    s.volumes.push_back(m);
+    vis::VolumeStyle ms{};
+    ms.solid = true;
+    ms.r = 40;
+    ms.g = 80;
+    ms.b = 230;
+    ms.a = 77;   // translucent, as the vest is
+    s.styles.push_back(ms);
+
+    // The mesh pools have to reach trace_pixel, and Scene::geometry does not carry them.
+    geom::Geometry<real_t> g = s.geometry();
+    g.store.tri = tri_pool.data();
+    g.store.bvh = bvh_pool.data();
+
+    const vis::Camera cam = vis::make_camera(vis::Vec3f{0, 0, 400}, vis::Vec3f{0, 0, 0},
+                                             vis::Vec3f{0, 1, 0}, 40.0f, 64, 64);
+    const unsigned long long px =
+        vis::trace_pixel<real_t>(g, s.styles.data(), cam, 32.0f, 32.0f, false, nullptr,
+                                 nullptr);
+    vis::Palette pal;
+    pal.bg_top = 0;
+    pal.bg_bottom = 0;
+    int r = 0, g2 = 0, b = 0;
+    vis::resolve_pixel(px, 32, 64, pal, r, g2, b);
+    const int a =
+        (px == vis::kEmptyPixel)
+            ? 0
+            : static_cast<int>((static_cast<unsigned int>(px & 0xFFFFFFFFull) >> 24) & 0xFFu);
+    printf("  rgb (%3d %3d %3d) coverage %3d -> %s   (%d triangles)\n", r, g2, b, a,
+           dominant(r, g2, b), n_tri);
+    check(r > 60, "the volume beyond a translucent MESH cover is drawn");
+    check(b > 30, "and the mesh is still drawn in front of it");
+    check(a > 250, "and the pixel is covered rather than showing background");
+  }
+
+  // ---------------------------------------------------------------- 6. the rules that already
   // held, so a fix to the ones above cannot quietly undo them
   printf("\n== and the overlap rules that were already right ==\n");
   {
