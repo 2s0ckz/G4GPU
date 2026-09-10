@@ -46,10 +46,20 @@
 #include "G4DeuteronEvaporationChannel.hh"
 #include "G4DeexPrecoParameters.hh"
 #include "G4Evaporation.hh"
+#include "G4EvaporationDefaultGEMFactory.hh"
 #include "G4EvaporationChannel.hh"
 #include "G4ExcitationHandler.hh"
 #include "G4FermiBreakUpVI.hh"
+#include "G4FermiChannels.hh"
 #include "G4FermiCoulombBarrier.hh"
+#include "G4FermiFragment.hh"
+#include "G4FermiFragmentsPoolVI.hh"
+#include "G4FermiPair.hh"
+#include "G4CompetitiveFission.hh"
+#include "G4FissionBarrier.hh"
+#include "G4FissionLevelDensityParameter.hh"
+#include "G4FissionParameters.hh"
+#include "G4FissionProbability.hh"
 #include "G4Fragment.hh"
 #include "G4He3CoulombBarrier.hh"
 #include "G4He3EvaporationChannel.hh"
@@ -433,6 +443,192 @@ void dump_probs() {
 
 // ---------------------------------------------------------------------------------------------
 
+/// The 60 GEM channels and the fission channel, through the factory that builds them.
+///
+/// Built from G4EvaporationDefaultGEMFactory rather than by naming 60 classes, for the reason
+/// tools/extract_gem_tables.pl reads the same file: the ORDER is observable - G4Evaporation
+/// indexes its probability array by it and stops the loop early on it - so the order has to
+/// come from the factory in the dump and in the port, not from two lists typed twice.
+///
+/// The factory's layout is fixed: 0 photon evaporation, 1 competitive fission, 2..7 the six
+/// G4EvaporationChannel light ejectiles, 8..67 the sixty G4GEMChannel nuclei. The index is
+/// written into the file so a port that disagrees about it fails on the index and not on a
+/// probability.
+void dump_gem() {
+  G4PhotonEvaporation* photon = new G4PhotonEvaporation();
+  G4EvaporationDefaultGEMFactory factory(photon);
+  std::vector<G4VEvaporationChannel*>* ch = factory.GetChannel();
+  for (auto* c : *ch) { c->Initialise(); }
+  if (ch->size() != 68) {
+    std::printf("dump_deexcitation: factory gave %d channels, expected 68\n",
+                static_cast<int>(ch->size()));
+  }
+
+  const int zas[][2] = {
+    {6, 12},  {8, 16},  {10, 20}, {13, 27}, {20, 40}, {26, 56},
+    {26, 60}, {40, 90}, {50, 120},{74, 184},{82, 208},{92, 238},
+  };
+  const double eexc[] = {5.0, 10.0, 20.0, 50.0, 100.0, 200.0};
+
+  FILE* f = std::fopen("deex_gem.csv", "w");
+  std::fprintf(f, "Z,A,Eexc_MeV,channel,emission_prob\n");
+  for (const auto& za : zas) {
+    for (double e : eexc) {
+      G4Fragment frag = make_fragment(za[0], za[1], e * MeV, 0.0);
+      // Channel 1 is fission and 8..67 are GEM. The six evaporation channels are in
+      // deex_probs.csv already and photon evaporation cannot be asked twice for the same
+      // fragment without recomputing its cumulative array, so neither is repeated here.
+      for (std::size_t i = 1; i < ch->size(); ++i) {
+        if (i >= 2 && i <= 7) { continue; }
+        G4Fragment copy(frag);
+        std::fprintf(f, "%d,%d,%.17g,%d,%.17g\n", za[0], za[1], e, static_cast<int>(i),
+                     (*ch)[i]->GetEmissionProbability(&copy));
+      }
+    }
+  }
+  std::fclose(f);
+
+  for (auto* c : *ch) { delete c; }
+  delete ch;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// The fission channel's three deterministic layers, separately.
+///
+/// The barrier is the one that matters beyond fission itself:
+/// G4FissionBarrier::BarashenkovFissionBarrier is the ONLY consumer of
+/// G4CameronShellPlusPairingCorrections in the default configuration, and that table cannot be
+/// read directly on this build - its accessor is inline in the header and the symbol is not
+/// exported, which is why dump_corrections() has no column for it. The barrier IS public, so a
+/// wide (Z, A) sweep of it checks the table through the only door there is.
+void dump_fission() {
+  G4FissionBarrier barrier;
+  G4FissionProbability prob;
+  G4FissionLevelDensityParameter fldp;
+  G4CompetitiveFission chan;
+  chan.Initialise();
+  G4PairingCorrection* pcorr = G4NuclearLevelData::GetInstance()->GetPairingCorrection();
+
+  FILE* f = std::fopen("deex_fission_barrier.csv", "w");
+  std::fprintf(f, "Z,A,U_MeV,barrier_MeV,fission_ldp_perMeV\n");
+  for (int Z = 17; Z <= 100; ++Z) {
+    const int amin = (2 * Z - 20 > 65) ? 2 * Z - 20 : 65;
+    const int amax = (2.8 * Z < 260) ? static_cast<int>(2.8 * Z) : 260;
+    for (int A = amin; A <= amax; ++A) {
+      for (double U : {0.0, 20.0}) {
+        std::fprintf(f, "%d,%d,%.17g,%.17g,%.17g\n", Z, A, U,
+                     barrier.FissionBarrier(A, Z, U * MeV) / MeV,
+                     fldp.LevelDensityParameter(A, Z, U * MeV) * MeV);
+      }
+    }
+  }
+  std::fclose(f);
+
+  // The probability, the channel's own probability, and the five mass-distribution parameters
+  // G4FissionParameters derives - which is where every branch on Z (>= 90, == 89, >= 82,
+  // below) and the A < 227 boost live.
+  FILE* g = std::fopen("deex_fission_prob.csv", "w");
+  std::fprintf(g, "Z,A,Eexc_MeV,chan_prob,fiss_prob_at_maxke,barrier_MeV,maxke_MeV,"
+                  "As,Sigma1,Sigma2,SigmaS,w\n");
+  const int zas[][2] = {
+    {17, 37},  {20, 40},  {26, 56},  {40, 90},  {50, 120}, {62, 152},
+    {74, 184}, {80, 200}, {82, 208}, {89, 227}, {90, 232}, {92, 235},
+    {92, 238}, {94, 239}, {98, 252},
+  };
+  for (const auto& za : zas) {
+    for (double e : {1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0}) {
+      G4Fragment frag = make_fragment(za[0], za[1], e * MeV, 0.0);
+      G4Fragment copy(frag);
+      const double cp = chan.GetEmissionProbability(&copy);
+      const double ex = e * MeV - pcorr->GetFissionPairingCorrection(za[1], za[0]);
+      double bf = 0.0, mk = 0.0, fp = 0.0;
+      G4FissionParameters par;
+      if (ex > 0.0 && za[1] >= 65 && za[0] > 16) {
+        bf = barrier.FissionBarrier(za[1], za[0], ex);
+        mk = ex - bf;
+        fp = prob.EmissionProbability(frag, mk);
+        par.DefineParameters(za[1], za[0], ex, bf);
+      }
+      std::fprintf(g, "%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                   za[0], za[1], e, cp, fp, bf / MeV, mk / MeV, par.GetAs(), par.GetSigma1(),
+                   par.GetSigma2(), par.GetSigmaS(), par.GetW());
+    }
+  }
+  std::fclose(g);
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// The Fermi break-up fragment pool, as a structure rather than as a sampled outcome.
+///
+/// G4FermiFragmentsPoolVI is publicly constructible and ClosestChannels / HasChannels /
+/// IsPhysical are public, so the pool that G4FermiBreakUpVI::SampleDecay walks can be dumped
+/// exactly: for every (Z, A) inside the maxZ = 9 / maxA = 17 window and every excitation on a
+/// grid, which channel set ClosestChannels selects, what its own excitation and mass are, and
+/// every pair in it with its cumulative probability.
+///
+/// This is the deterministic half of Fermi break-up. The sampled half is only reachable
+/// through BreakItUp and is in deex_breakup.csv; without this file a disagreement there could
+/// be the pool, the selection, the probability or the kinematics, and there would be no way to
+/// tell which.
+void dump_fermi() {
+  G4FermiFragmentsPoolVI pool;
+  G4FermiBreakUpVI fbu;
+  fbu.Initialise();
+
+  FILE* f = std::fopen("deex_fermi_pool.csv", "w");
+  std::fprintf(f, "Z,A,Eexc_MeV,applicable,has_channels,is_physical,nch,ch_exc_MeV,"
+                  "ch_mass_MeV,pair,Z1,A1,exc1_MeV,Z2,A2,exc2_MeV,cumprob\n");
+  std::fprintf(stdout, "Fermi pool: maxZ=%d maxA=%d Elim(MeV)=%.17g tol(MeV)=%.17g\n",
+               pool.GetMaxZ(), pool.GetMaxA(), pool.GetEnergyLimit() / MeV,
+               pool.GetTolerance() / MeV);
+
+  for (int Z = 0; Z < pool.GetMaxZ(); ++Z) {
+    for (int A = 1; A < pool.GetMaxA(); ++A) {
+      if (A < Z) { continue; }
+      const double gmass = G4NucleiProperties::GetNuclearMass(A, Z);
+      for (double e : {0.0, 0.001, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0}) {
+        const double exc = e * MeV;
+        const G4FermiChannels* c = pool.ClosestChannels(Z, A, gmass + exc);
+        const int app = fbu.IsApplicable(Z, A, exc) ? 1 : 0;
+        const int hc = pool.HasChannels(Z, A, exc) ? 1 : 0;
+        const int ip = pool.IsPhysical(Z, A) ? 1 : 0;
+        if (c == nullptr) {
+          std::fprintf(f, "%d,%d,%.17g,%d,%d,%d,-1,0,0,-1,0,0,0,0,0,0,0\n", Z, A, e, app, hc,
+                       ip);
+          continue;
+        }
+        const std::size_t nch = c->GetNumberOfChannels();
+        if (nch == 0) {
+          std::fprintf(f, "%d,%d,%.17g,%d,%d,%d,0,%.17g,%.17g,-1,0,0,0,0,0,0,0\n", Z, A, e,
+                       app, hc, ip, c->GetExcitation() / MeV, c->GetMass() / MeV);
+          continue;
+        }
+        // GetProbabilities() is non-const, and the pool leaves cum_prob[i] = 1.0 for a
+        // single-channel set (AddChannel pushes 1.0 and the normalisation loop skips
+        // nch == 1). Dumped as it stands so the port reproduces that too.
+        std::vector<G4double>& cp =
+            const_cast<G4FermiChannels*>(c)->GetProbabilities();
+        for (std::size_t k = 0; k < nch; ++k) {
+          const G4FermiPair* p = (c->GetChannels())[k];
+          const G4FermiFragment* f1 = p->GetFragment1();
+          const G4FermiFragment* f2 = p->GetFragment2();
+          std::fprintf(f,
+                       "%d,%d,%.17g,%d,%d,%d,%d,%.17g,%.17g,%d,%d,%d,%.17g,%d,%d,%.17g,%.17g\n",
+                       Z, A, e, app, hc, ip, static_cast<int>(nch), c->GetExcitation() / MeV,
+                       c->GetMass() / MeV, static_cast<int>(k), f1->GetZ(), f1->GetA(),
+                       f1->GetExcitationEnergy() / MeV, f2->GetZ(), f2->GetA(),
+                       f2->GetExcitationEnergy() / MeV, cp[k]);
+        }
+      }
+    }
+  }
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+
 /// One BreakItUp campaign: N calls on the same fragment under one seed, reduced to the
 /// quantities a statistical comparison can actually be made on.
 struct Campaign {
@@ -518,6 +714,9 @@ void dump_deexcitation(const DumpContext&) {
   dump_levelmax();
   dump_levels();
   dump_probs();
+  dump_gem();
+  dump_fission();
+  dump_fermi();
   dump_breakup();
 }
 
@@ -526,5 +725,7 @@ void dump_deexcitation(const DumpContext&) {
 G4GPU_REGISTER_DUMP("deexcitation",
                     "deex_params.csv deex_masses.csv deex_corrections.csv deex_coulomb.csv "
                     "deex_levelmax.csv deex_levels.csv deex_probs.csv deex_invxs.csv "
+                    "deex_gem.csv deex_fission_barrier.csv deex_fission_prob.csv "
+                    "deex_fermi_pool.csv "
                     "deex_breakup.csv deex_breakup_residual.csv",
                     dump_deexcitation);
