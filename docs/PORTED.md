@@ -197,6 +197,77 @@ QBBC actually runs for a proton in water; `particle_hp`, `inclxx`, `lend`, `im_r
 `cross_sections/` 65 headers: 3 ported (above), 62 not.
 `management/` 15, `processes/` 18, `stopping/` 11, `util/` 53: **0 ported.**
 
+### 2.4 The process framework and the elastic final states (package P5)
+
+Everything here is `V`: transcribed, checked by a registered test, and not yet reached by a
+particle, because no species is stepped through a hadronic process until P8 wires one in.
+
+| Geant4 class / function | QBBC | | Where |
+|---|:--:|:--:|---|
+| G4HadronicProcess::PostStepDoIt / FillResult / CheckResult / CheckEnergyMomentumConservation | y | **V** | `hadronic/process.cuh` |
+| G4HadronicProcess::BuildPhysicsTable (the G4HadXSType choice and the integral-approach rejection) | y | **V** | same |
+| G4EnergyRangeManager::GetHadronicInteraction | y | **V** | same |
+| G4CrossSectionDataStore::ComputeCrossSection / SampleZandA | y | **V** | same |
+| G4HadProjectile, G4Nucleus (what the elastic models read of it) | y | **V** | same |
+| G4HadFinalState, G4HadSecondary | y | **V** | same |
+| G4HadronicInteraction::GetFatalEnergyCheckLevels | y | **V** | same |
+| G4HadronElasticProcess::PostStepDoIt | y | **P** | `hadronic/elastic/elastic_process.cuh` |
+| G4RToEConvForProton::Convert | y | **V** | same |
+| G4HadronElastic::ApplyYourself / SampleInvariantT / GetSlopeCof | y | **V** | `hadronic/elastic/hadron_elastic.cuh` |
+| G4ChipsElasticModel::SampleInvariantT | y | **V** | `hadronic/elastic/chips_elastic.cuh` |
+| G4ChipsProtonElasticXS (GetChipsCrossSection, CalculateCrossSection, GetPTables, GetTabValues, GetQ2max, GetExchangeT, GetSlope) | y | **V** | same |
+| G4ChipsNeutronElasticXS (the same seven) | y | **V** | same, tables in `elastic/chips_neutron_lowe.hh` (422 isotope rows) |
+| G4ElasticHadrNucleusHE (SampleInvariantT, FillData, FillFq2, HadrNucDifferCrSec, DefineHadronValues, GetHadronNucleonXsc*) | y | **V** | `hadronic/elastic/elastic_hadr_nucleus_he.cuh` |
+| G4NuclNuclDiffuseElastic::SampleInvariantT / SampleCoulombMuCMS / InitDynParameters | y | **P** | `hadronic/elastic/nucl_nucl_diffuse_elastic.cuh` |
+
+`tests/test_hadronic_process.cu` and `tests/test_elastic_models.cu`, against
+`ref/oracle/elastic_*.csv` from `ref/dump/dump_elastic.cc`.
+
+**The numbers.** The four elastic samplers are compared under a prescribed eight-value uniform
+cycle, which makes `SampleInvariantT` and `ApplyYourself` deterministic functions of their
+inputs, at 1408 points each (2 projectiles x 8 targets from H1 to Pb208 x 11 energies from 1 MeV
+to 20 GeV x 8 phases). `-t`, cos(theta_cm), the primary's final energy, the recoil energy and
+both direction vectors agree **bitwise** for G4HadronElastic, G4ChipsElasticModel and
+G4NuclNuclDiffuseElastic, and to one ulp on `-t` for G4ElasticHadrNucleusHE; the tolerance is
+1e-15. The CHIPS cross section is within 1e-16 over 832 points and its (-t)max and GetExchangeT
+are bitwise. Statistically, 20,000 samples per point over 176 points: the worst moment and worst
+histogram bin are 3.7 and 3.6 sigma. The framework: the overlap model choice over 200,000 draws
+at 28 points agrees with Geant4 to 0.0016 and with the closed form to 0.0011; element selection
+frequencies to 0.0025 and isotope frequencies to 0.0048.
+
+**What is refused, by name.**
+
+- `G4NuclNuclDiffuseElastic`'s **angle table** - `BuildAngleTable`, `SampleTableThetaCMS`,
+  `SampleTableT`, `GetScatteringAngle`, the Bessel functions and the Legendre integrations. In
+  11.1.1 none of it is reachable: `SampleInvariantT` has the `SampleTableT` call commented out,
+  and `BuildAngleTable` is only called from `Initialise()`, which nothing in the source tree
+  calls and which is not the `InitialiseModel` hook a physics list would use. So QBBC's ion
+  elastic scattering IS screened Rutherford scattering truncated at the Coulomb grazing angle,
+  and that is what is ported. 1500 lines that the oracle's own Geant4 never executes cannot be
+  validated by any oracle. `P` for that reason and not for a gap.
+- `G4HadronElasticProcess`'s **diffraction branch**. `fDiffraction` is null unless
+  `SetDiffraction` is called, and only `G4ChargeExchangePhysics` calls it. `P`.
+- `G4ChipsElasticModel`'s five other cross-section classes - `G4ChipsAntiBaryonElasticXS`,
+  `G4ChipsPionPlus/MinusElasticXS`, `G4ChipsKaonPlus/MinusElasticXS`. No QBBC particle reaches
+  them: QBBC gives pions `G4ElasticHadrNucleusHE` and kaons `G4HadronicBuilder::BuildElastic`.
+  A pbar, pi or K handed to `chips_sample_invariant_t` sets `unsupported_pdg`.
+- A **Z = 0 target** for the CHIPS proton class, which in Geant4 reaches
+  `G4IonTable::GetIon(0, N, 0)` and has no ion. Refused rather than given a plausible mass.
+- `G4AntiNuclElastic`, not started. `GetSlopeCof`, which only it calls, is transcribed.
+- The **kaon0/anti_kaon0 -> kaon0S/kaon0L substitution** in `G4HadronicProcess::PostStepDoIt`.
+  It needs the K0 species, which is P1's refused set; `fill_result` counts and reports a K0
+  rather than substituting silently. No elastic model can produce one.
+- The **`lastTH` latch** in both CHIPS classes - see `docs/RISK.md` V37.
+
+**What the default energy-momentum check does: nothing.** `G4HadronElasticProcess::PostStepDoIt`
+does not call `CheckResult` at all, and the source says why ("cannot be applied because is not
+guranteed that recoil nucleus is created"). And `epReportLevel`, which gates
+`CheckEnergyMomentumConservation`, is a `G4HadronicProcess` data member initialised to 0 and
+changed only by `G4Hadronic_epReportLevel`, `G4HadronicEPTestMessenger` or an explicit setter -
+none of which QBBC touches. There is no `G4HadronicParameters::GetEpReportLevel` in 11.1.1. So
+QBBC's elastic scattering runs with **no** energy-momentum check; both are transcribed anyway,
+returning a verdict instead of printing, so a test can assert on the arithmetic.
+
 ---
 
 ## 3. decay/ (6 headers)

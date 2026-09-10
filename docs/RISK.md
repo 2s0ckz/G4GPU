@@ -4278,3 +4278,127 @@ than the synchronous frame, enter the check only when the two are separated by a
 and size the benchmark so it is entered every run - failing when it is not, so that the next
 speed-up cannot make the check vacuous silently. By hand, renders of 20.0, 22.4, 23.8 and 29.6 ms
 left the UI at 16.3-16.5 ms against the ceiling: the criterion holds where it applies.
+
+---
+
+### V37: the oracle was wrong, and it was wrong in the direction that looks like a port bug
+
+Four elastic models, eighteen failing assertions, and seventeen of them were the oracle's fault.
+
+#### What the file said and what the file meant
+
+`ref/dump/dump_elastic.cc` runs each elastic model under a prescribed eight-value uniform cycle
+so that `ApplyYourself` becomes a deterministic function of its inputs, and records what came
+out. It recorded `-t` like this:
+
+    o.t = 2.0 * mass2 * o.erec;   // -t = 2*M*T_rec, exact for elastic scattering at rest
+
+That identity is exact. The evaluation is not. Geant4 gets the recoil energy by subtracting
+four-momenta - `lv -= nlv1; erec = max(lv.e() - mass2, 0.0)` - and for a 6 GeV alpha on Pb207 at
+a small angle that is two cancellations of ~1.97e5 MeV energies to produce 3.2e-10 MeV. One
+significant digit. The `t` column was therefore carrying up to **8% error** on a value the test
+compared at 1e-13, and 7e-8 error on the well-behaved rows.
+
+The failure report read exactly like a port bug, and better than a port bug would have: a
+consistent 7e-8 on three models, which is the size of the `G4Pow`-versus-`std::pow` difference
+this project has been bitten by before (HADRONIC_PLAN section 8), at 1e-7 the obvious first
+suspect. A long detour went into G4Pow, `G4Exp`, `G4Log`, `pz13[]` and `expA` before the pattern
+that settles it: **the recoil ENERGY agreed to 2.3e-10 while the momentum transfer derived from
+that same recoil energy disagreed by 7e-8.** A derived quantity cannot be less accurate than what
+it was derived from unless the derivation is the problem.
+
+`SampleInvariantT` is public and virtual on `G4HadronicInteraction`, and `pLocalTmax` - the only
+state it needs - is left set by the `ApplyYourself` immediately before. So the dump now calls it
+directly with the engine wound back to the same phase and records the model's own `-t`. With that
+one column fixed, and two ulp-level fixes in the port (below), all four models agree with Geant4
+**bitwise** on `-t`, cos(theta_cm), the final energy, the recoil energy and both direction
+vectors, and the tolerance went from 1e-13/1e-9 to 1e-15. The reconstructed value is still in the
+file, as `t_from_erec_MeV2`, and the test prints how far it is from the real one - so the reason
+the comparison is not made against the recoil is a number in the output rather than a claim in a
+comment.
+
+#### An oracle is code, and this project had not been treating it as code
+
+Every discipline this port applies to `src/` had skipped `ref/dump/`. The identity in that line is
+right, the comment above it is right, and nothing in the pipeline asked whether the arithmetic
+could deliver it. A dump that reconstructs a quantity instead of reading it is doing physics, and
+physics in the oracle is not checked by anything - by construction, since it IS the check.
+
+The rule that follows: **a dump reads values out, it does not compute them.** Where a value is
+only reachable by reconstruction, the reconstruction's precision has to be stated and the
+tolerance derived from it, not from what the port can achieve. And where the real value is one
+public virtual call away, make the call.
+
+#### The one real bug, which the oracle's noise was hiding
+
+`G4ChipsNeutronElasticXS` asks two different questions about the same target:
+
+    GetQ2max      line 2101:  if(tgZ==0 && tgN==1)     <- a free NEUTRON
+    GetPTables    line 1611:  if(tgZ==1 && tgN==0)     <- a free PROTON
+    GetTabValues  line 2021:  if(tgZ==1 && tgN==0)
+    GetExchangeT  line 1878:  if(tgZ==1 && tgN==0)        "===> n+p=n+p"
+
+So for a neutron on free hydrogen, Geant4 takes the two-channel np parameter row and the
+two-channel np t-sampling - the one that carries the u-channel charge-exchange term - but computes
+(-t)max from the nuclear Mandelstam expression with `mt = m_proton`. `G4ChipsProtonElasticXS` is
+consistent; the neutron class is not. The port had one flag for both and sent n+p through the
+four-channel nuclear sampler: a factor of 20 in `-t` at 3 GeV/c and a 38-sigma histogram, on
+**hydrogen, for neutrons** - the single most important elastic channel in a water phantom, since
+np elastic is how a fast neutron deposits dose. Two flags, one per function, reproduce both.
+
+That failure was in the same report as the seventeen artefacts and indistinguishable from them at
+a glance. Noise in a test does not merely waste time; it *conceals*, and it conceals in proportion
+to how much of it there is.
+
+#### And two ulps, one of which matters and one of which does not
+
+`HepLorentzVector::boostVector()` is `pp * (1./ee)`, not `pp/ee` (LorentzVector.cc:189). Writing
+the division instead puts the recoil direction 5.8e-13 out and the alpha-on-Pb recoil energy
+2.3e-10 out - visible, because the recoil is a cancellation and a cancellation amplifies an ulp by
+the ratio of the operands to the result. `Hep3Vector::unit()` is `p *= (1.0/std::sqrt(mag2()))`,
+also not a division; that one is reproduced as well and makes **no measurable difference** on any
+of the 1408 points. It is in the code because it is what CLHEP does, and its comment says exactly
+that rather than claiming it fixed something - a check that cannot fail must not be described as
+one that can.
+
+#### Two assertions that could not fail, found by trying to make them fail
+
+The anti-vacuity pass (working rule 7) does not only confirm that a check works; twice here it
+found that a check could not.
+
+`G4EnergyRangeManager::GetHadronicInteraction` branches on `emi1 < emi2` and has two arms.
+Registering the lower-threshold model first - which is what a physics list does and what the dump
+did for both of its overlap pairs - always makes the upper model the most recent match, so only
+the second arm ever runs. Inverting the first arm's ternary in the port changed no test result.
+The comment over the dump's registration claimed both arms were covered *because* there were two
+pairs, which was a plausible-sounding reason attached to a fact that was not true. Each pair is
+now registered both ways round: 28 points instead of 14, and the mutation fails 6 assertions.
+
+`G4HadronicProcess::FillResult` tests `stopAndKill` FIRST and only then reads a zero final energy
+as a stop. Swapping those two branches is behaviour-preserving *except* for stopAndKill together
+with zero energy on a particle that has at-rest processes - where Geant4 kills the track and the
+swapped order hands it to the at-rest chain a model explicitly asked to end. The test had the
+positive-energy case, where both orders agree. A stopped pi- is the particle that distinguishes
+them, so this was a live gap on the exact hook P4's decay and P12's absorption compete on.
+
+Both are the same shape as V32 and V35: a gap with a rationale over it reads as a decision. The
+new part is that **inverting a branch and finding that nothing failed is a positive result**, and
+the cheapest way there is to mutate one line and rebuild.
+
+#### The CHIPS `lastTH` latch, recorded rather than reproduced
+
+`G4Chips{Proton,Neutron}ElasticXS::GetChipsCrossSection` keeps a per-isotope threshold:
+
+    if(lastCS<=0. && pEn>lastTH) lastTH=pEn;
+
+Once the parameterisation has gone non-positive at some momentum, every LOWER momentum for that
+isotope returns zero for the rest of the run - so the answer depends on the order in which
+momenta were asked for, over the whole job. For pA the expression is a sum of positive terms and
+cannot trip it; for pp it can, because `(par1 + par2*dl1^2 + par4/p)/(1 + 0.425*lp)/(...)` changes
+sign at `lp = -1/0.425`, i.e. p = 95 MeV/c. A device port has no per-isotope run history and
+cannot have one, so `chips_cross_section` computes the value and reports `non_positive`, leaving
+the latch to a caller that has somewhere to keep it. Below ~100 MeV/c on hydrogen the port and
+Geant4 can therefore disagree about whether the cross section is zero, depending on Geant4's
+history. It is 100 MeV/c protons on hydrogen; it is recorded here because "depends on the order
+of previous calls" is not a property anyone expects a cross section to have, and the next person
+to compare a low-energy proton on water needs to know it is there.
