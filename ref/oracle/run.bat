@@ -13,8 +13,16 @@ set G4ABLADATA=%G4DATA%\G4ABLA3.1
 set G4INCLDATA=%G4DATA%\G4INCL1.0
 set G4ENSDFSTATEDATA=%G4DATA%\G4ENSDFSTATE2.3
 set G4NEUTRONHPDATA=%G4DATA%\G4NDL4.7
-cd /d D:\g4gpu\ref\oracle
-D:\g4gpu\ref\dumpbuild\Release\g4dump.exe
+rem Relative to this file, so a package developed in a git worktree regenerates ITS OWN oracle
+rem from ITS OWN dump program rather than D:\g4gpu's. See docs/HADRONIC_PLAN.md section 6.
+cd /d "%~dp0"
+"%~dp0..\dumpbuild\Release\g4dump.exe" || exit /b 1
+
+rem `run.bat tables` stops here: every table dump above, none of the transport run below. The
+rem tables take minutes; the proton depth-dose run below takes much longer, builds under
+rem D:\g4gpu\ref\protonbuild rather than under this worktree, and is not what a package
+rem developing a cross section or a model needs to regenerate.
+if /I "%1"=="tables" exit /b 0
 
 rem proton_depth.csv is an oracle file too, and it is produced by a different program: a real
 rem Geant4 *transport* run rather than a table dump. It is here so that regenerating the

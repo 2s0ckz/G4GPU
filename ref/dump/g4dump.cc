@@ -6,6 +6,7 @@
 //
 // Uses G4EmCalculator, which is the supported way to interrogate the EM tables after a run
 // has initialized them.
+#include "dump_registry.hh"
 #include "G4RunManagerFactory.hh"
 #include "G4EmCalculator.hh"
 #include "G4NistManager.hh"
@@ -210,6 +211,14 @@ class Actions : public G4VUserActionInitialization {
 };
 
 }  // namespace
+
+std::vector<DumpEntry>& dump_registry() {
+  static std::vector<DumpEntry> r;
+  return r;
+}
+DumpRegistrar::DumpRegistrar(const char* name, const char* files, DumpFn fn) {
+  dump_registry().push_back(DumpEntry{name, files, fn});
+}
 
 int main() {
   auto* rm = G4RunManagerFactory::CreateRunManager(G4RunManagerType::Serial);
@@ -1548,6 +1557,13 @@ int main() {
   }
 
   std::printf("wrote rayleigh_angular.csv urban_msc.csv ion_fluctuation.csv nucleon_xs.csv icru73qo.csv nuclear_stopping.csv atomic_masses.csv bragg.csv wentzel.csv hadron_radiative.csv muon_models.csv corrections.csv ionisation_params.csv density_correction.csv bethe_bloch.csv brems_rel.csv cuts.csv gamma_xs.csv electron_tables.csv materials.csv annihilation.csv hadron_tables.csv coulomb.csv\n");
+  // Every dump_<package>.cc that registered itself; see dump_registry.hh.
+  for (const DumpEntry& d : dump_registry()) {
+    const DumpContext ctx{mats};
+    d.fn(ctx);
+    std::printf("wrote %s (%s)\n", d.files, d.name);
+  }
+
   delete rm;
   return 0;
 }
