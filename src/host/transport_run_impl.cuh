@@ -1664,6 +1664,36 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       int over = 0;
       G4GPU_CUDA_CHECK(cudaMemcpy(&over, sec_.overflow, sizeof(int), cudaMemcpyDeviceToHost));
       st.secondary_overflow = over;
+      // PRINTED, WHICH IT WAS NOT.
+      //
+      // The count has been recorded on RunStats since the arena was written, and the field's
+      // own comment says "Zero in every run of this project's pipeline; if it is not zero,
+      // raise the arena" - which is advice to whoever reads the field, and until now the only
+      // thing that read it was tests/test_custom_hook.cu. g4dose, example B1, the viewer, the
+      // builder and every generated project ignored it, so an arena that overflowed said
+      // nothing at all.
+      //
+      // What overflow costs is narrow and worth stating exactly, because it is NOT a wrong
+      // dose: the arena holds one (buffer, slot) pair per secondary so that a stepping action
+      // can walk this step's children, and a pair that does not fit only breaks that walk.
+      // Every track is still in the pool and every deposit is still scored. So this is a
+      // warning about a hook's input, not about the physics - which is precisely why it needs
+      // printing rather than exiting, and precisely why it could sit unread: nothing downstream
+      // gets worse in a way anyone would notice.
+      //
+      // The default capacity is now the whole pool rather than half the batch, so overflow
+      // needs the output buffer to have overflowed first - and that ends the run. It is
+      // reachable only through SetSecondaryArenaCapacity.
+      if (over > 0) {
+        std::printf("\n*** %d SECONDARY CHAIN ENTRIES DID NOT FIT THE ARENA ***\n\n"
+                    "    The arena holds %d entries. Every track was still appended to the\n"
+                    "    pool and every deposit was scored, so the DOSE IS UNAFFECTED - what\n"
+                    "    is incomplete is DeviceStep::sec_last, the chain a stepping action\n"
+                    "    walks to see this step's secondaries. A hook that reads it saw fewer\n"
+                    "    children than the step made. Raise it with\n"
+                    "    SetSecondaryArenaCapacity(n) - the default is the whole track pool.\n\n",
+                    over, sec_.capacity);
+      }
     }
     // A dropped track is a track whose energy never reached a scorer, so the dose this run
     // reports is too low by whatever it would have deposited - and the run otherwise finishes

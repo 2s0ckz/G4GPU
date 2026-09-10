@@ -29,6 +29,17 @@
 // A 100 MeV neutron covers B1's 300 mm in 2.5 ns, so no shower this project runs can reach
 // 10 us. Case 2 is unreachable except by choosing the input, which is exactly what a test is
 // for.
+//
+// AND THE OTHER TWO DISPOSITIONS, FOR THE SAME REASON
+//
+// The second half of this file is about `BufferEmitter::push` rather than about the neutron: a
+// neutrino is created, its energy booked as carried out of the event and no track made; a
+// species this port cannot transport is counted by name and no track made. Both are unreachable
+// today - nothing here decays and no cascade runs - so both are dead code until P4 or P8 lands,
+// and dead code is code that has never been executed. `tests/test_species.cu` asserts that
+// `species_disposition` puts each species in the right group, which is a claim about a switch on
+// the host; what is checked here is what the DEVICE actually does with each answer, which is a
+// different claim and the one the run report depends on.
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -126,6 +137,27 @@ __global__ void RunNeutral(Scene<real_t> scene, const TrackState<real_t>* in, in
   o.alive = alive ? 1 : 0;
   o.n_secondaries = static_cast<int>(em.child_count);
   out[i] = o;
+}
+
+/// Pushes one of each disposition through a real BufferEmitter and reports what came back.
+///
+/// One thread, because what is being checked is the decision and the ledgers, not a race. The
+/// event ids are chosen so that the carried-away array is indexed rather than summed: both
+/// neutrinos belong to event 2, so a bug that booked against event 0 or against a running total
+/// would show as a zero in the slot that should hold 18 MeV.
+__global__ void PushDispositions(TrackBuffer<real_t> pool, SecondaryArena arena,
+                                 EmitterBooks books, int* slots, unsigned int* children) {
+  StepReport<real_t> rep{};
+  rep.process = ProcessId::fDecay;
+  BufferEmitter<real_t> em{pool, Vec3<real_t>{1, 2, 3}, 0, 2, 999u, 0u, 0u,
+                           real_t(0), real_t(1), arena, -1, &rep, books};
+  const Vec3<real_t> d{0, 0, 1};
+  // A proton first, as the control: a species that IS stepped must still get a slot.
+  slots[0] = em.push(ParticleType::kProton, d, real_t(5), 2);
+  slots[1] = em.push(ParticleType::kNeutrinoMu, d, real_t(7), 2);
+  slots[2] = em.push(ParticleType::kAntiNeutrinoE, d, real_t(11), 2);
+  slots[3] = em.push(ParticleType::kLambda, d, real_t(13), 2);
+  *children = em.child_count;
 }
 
 }  // namespace
@@ -300,6 +332,106 @@ int main() {
   // ---------------------------------------------------------------- 4. nothing was emitted
   std::printf("== the emitter was never called ==\n");
   Check(pushes == 0, "no secondary pushed by any of the four steps");
+
+  // ---------------------------------------------------------------- 5. the other two dispositions
+  //
+  // A real BufferEmitter this time, with a real pool and real ledgers, pushing one of each
+  // kind. See the note at the top of the file for why this cannot be reached by a run yet.
+  std::printf("\n== what push() does with a species it will not step ==\n");
+  {
+    TrackBuffer<real_t> pool{};
+    if (allocate_track_buffer<real_t>(pool, 64) != cudaSuccess) {
+      std::printf("  FAIL: could not allocate a 64-slot pool\n");
+      ++g_fails;
+    } else {
+      SecondaryArena arena{};
+      arena.capacity = 64;
+      cudaMalloc(&arena.entry, sizeof(unsigned int) * 64);
+      cudaMalloc(&arena.prev, sizeof(int) * 64);
+      cudaMalloc(&arena.cursor, sizeof(int));
+      cudaMalloc(&arena.overflow, sizeof(int));
+      cudaMemset(arena.cursor, 0, sizeof(int));
+      cudaMemset(arena.overflow, 0, sizeof(int));
+
+      const int kNT = static_cast<int>(ParticleType::kNumTypes);
+      EmitterBooks books{};
+      cudaMalloc(&books.carried_away, sizeof(double) * 4);
+      cudaMalloc(&books.carried_by_type, sizeof(int) * kNT);
+      cudaMalloc(&books.refused_by_type, sizeof(int) * kNT);
+      cudaMemset(books.carried_away, 0, sizeof(double) * 4);
+      cudaMemset(books.carried_by_type, 0, sizeof(int) * kNT);
+      cudaMemset(books.refused_by_type, 0, sizeof(int) * kNT);
+
+      int* d_slots = nullptr;
+      unsigned int* d_children = nullptr;
+      cudaMalloc(&d_slots, sizeof(int) * 4);
+      cudaMalloc(&d_children, sizeof(unsigned int));
+      PushDispositions<<<1, 1>>>(pool, arena, books, d_slots, d_children);
+      err = cudaDeviceSynchronize();
+      if (err != cudaSuccess) {
+        std::printf("  FAIL: %s\n", cudaGetErrorString(err));
+        ++g_fails;
+      } else {
+        int slots[4] = {0, 0, 0, 0};
+        unsigned int children = 0;
+        int live = 0;
+        std::vector<double> away(4, 0.0);
+        std::vector<int> by_type(kNT, 0), refused(kNT, 0);
+        cudaMemcpy(slots, d_slots, sizeof(slots), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&children, d_children, sizeof(children), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&live, pool.count, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(away.data(), books.carried_away, sizeof(double) * 4,
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(by_type.data(), books.carried_by_type, sizeof(int) * kNT,
+                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(refused.data(), books.refused_by_type, sizeof(int) * kNT,
+                   cudaMemcpyDeviceToHost);
+
+        // The proton is the control: without it, "no track was made" could equally mean the
+        // emitter is broken for everything.
+        Check(slots[0] >= 0, "a proton got a pool slot");
+        Check(slots[1] < 0, "a nu_mu got no pool slot");
+        Check(slots[2] < 0, "an anti_nu_e got no pool slot");
+        Check(slots[3] < 0, "a lambda got no pool slot");
+        Check(live == 1, "exactly one track is in the pool");
+
+        // A neutrino's energy is booked against the event it belongs to and nowhere else.
+        CheckClose(away[2], 7.0 + 11.0, 0.0, "event 2 carried away 18 MeV, exactly");
+        CheckClose(away[0], 0.0, 0.0, "event 0 carried away nothing");
+        CheckClose(away[1], 0.0, 0.0, "event 1 carried away nothing");
+        // Per FLAVOUR, which is the whole reason the six neutrinos are six species.
+        Check(by_type[static_cast<int>(ParticleType::kNeutrinoMu)] == 1, "one nu_mu counted");
+        Check(by_type[static_cast<int>(ParticleType::kAntiNeutrinoE)] == 1,
+              "one anti_nu_e counted");
+        Check(by_type[static_cast<int>(ParticleType::kNeutrinoE)] == 0,
+              "no nu_e counted - the flavours are not pooled");
+        // A refused species is counted under its own name and is NOT counted as carried away:
+        // its energy did not leave the event, it was never carried at all.
+        Check(refused[static_cast<int>(ParticleType::kLambda)] == 1, "one lambda refused");
+        Check(by_type[static_cast<int>(ParticleType::kLambda)] == 0,
+              "the lambda is not also booked as carried away");
+        Check(refused[static_cast<int>(ParticleType::kNeutrinoMu)] == 0,
+              "the nu_mu is not also booked as refused");
+        // G4Step::GetNumberOfSecondariesInCurrentStep counts a neutrino, so push consumes a
+        // child index for it - which is what keeps a sibling's RNG key the same whether or not
+        // this transport materialises the neutrino. A refused species does not exist here at
+        // all, so it consumes nothing. 1 proton + 2 neutrinos = 3.
+        Check(children == 3u, "child_count is 3: the proton and both neutrinos, not the lambda");
+        std::printf("    slots %d/%d/%d/%d, %d live, child_count %u, %g MeV carried from"
+                    " event 2\n", slots[0], slots[1], slots[2], slots[3], live, children,
+                    away[2]);
+      }
+      cudaFree(d_slots);
+      cudaFree(d_children);
+      cudaFree(books.carried_away);
+      cudaFree(books.carried_by_type);
+      cudaFree(books.refused_by_type);
+      cudaFree(arena.entry);
+      cudaFree(arena.prev);
+      cudaFree(arena.cursor);
+      cudaFree(arena.overflow);
+    }
+  }
 
   cudaFree(d_vols);
   cudaFree(d_mats);
