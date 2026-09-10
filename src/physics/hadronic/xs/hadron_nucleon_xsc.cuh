@@ -46,10 +46,24 @@
 //   proton:   6.5 + 0.308*G4Exp(G4Log(G4Log(sMand/400.))*1.65) + ...
 //
 // The 1.65 is inside the outer logarithm for the neutron and outside it for the proton. Since
-// exp(log(x*1.65)) is 1.65*x and exp(log(x)*1.65) is x^1.65, these differ by a factor of
-// about two at 373 GeV/c and diverge above it. Transcribed verbatim, both of them: this is
-// upstream's, the oracle contains it, and a port that "corrected" it would disagree with
-// Geant4 by a factor of two for a neutron above 373 GeV/c and be right about the physics.
+// exp(log(x*1.65)) is 1.65*x and exp(log(x)*1.65) is x^1.65, the SUB-EXPRESSION differs by a
+// factor of 2.4 at 373 GeV/c - 0.924 against 0.384.
+//
+// The cross section does not, and the difference is worth stating in the right size, because
+// an earlier version of this comment said "a factor of two" and that is the kind of claim a
+// later reader checks by deciding it must be a bug. The 0.308*(...) term is one of three
+// additive terms in an elastic cross section dominated by the constant 6.5, so measured on a
+// neutron-proton pair:
+//
+//     pLab        neutron form   proton form   ratio
+//     373 GeV/c     7.2425 mb     7.0759 mb    1.024
+//       1 TeV/c     7.5770 mb     7.4235 mb    1.021
+//      10 TeV/c     8.5572 mb     9.4476 mb    0.906
+//
+// 2.4% at the boundary, and it REVERSES SIGN by 10 TeV/c rather than diverging. Transcribed
+// verbatim, both of them: this is upstream's, the oracle contains it, and a port that
+// "corrected" it would be 2.4% away from Geant4 for a neutron above 373 GeV/c and right about
+// the physics.
 #pragma once
 #include <cmath>
 
@@ -648,10 +662,20 @@ __host__ __device__ inline HadXs<real_t> hn_xsc_ns(const Projectile<real_t>& p,
 }
 
 /// G4HadronNucleonXsc::KaonNucleonXscVG - the "smoothed NS" kaon fit, which is NOT the kaon
-/// part of HadronNucleonXscNS: three of the four channels differ (K-p drops the three small
-/// resonance peaks and uses 0.60/hd instead of 0.20/hd; K-n uses .045 and 0.60 where NS uses
-/// .021 and 0.30). Both are live - NS through KaonNucleonXscNS for hydrogen, VG through
-/// KaonNucleonXscGG for everything heavier.
+/// part of HadronNucleonXscNS. Both are live: NS through KaonNucleonXscNS for hydrogen, VG
+/// through KaonNucleonXscGG for everything heavier.
+///
+/// TWO of the four channels differ, not three. This said three, and the count matters because
+/// it is the sort of thing a later reader uses to decide the two functions can be merged. The
+/// K+p and K+n arms of the two are BYTE-IDENTICAL in Geant4 (G4HadronNucleonXsc.cc:693-751
+/// against :909-967, zero lines changed). The differences are all in the K- arms:
+///
+///   K-p (.cc:631-672 vs :859-888)  VG drops the three small resonance peaks, uses 0.60/hd
+///                                  where NS uses 0.20/hd, AND drops the 1.1 from the elastic
+///                                  log coefficient - NS has (1.1*cofLogE*ld2 + 2.23) and VG
+///                                  has (cofLogE*ld2 + 2.23). Three differences, not two; the
+///                                  1.1 was missing from this list and the code has it.
+///   K-n (.cc:673-692 vs :889-908)  VG uses .045 and 0.60 where NS uses .021 and 0.30.
 ///
 /// Note its Coulomb-barrier test has no upper energy limit, unlike NS's `ekin < 100 MeV`.
 template <typename real_t>

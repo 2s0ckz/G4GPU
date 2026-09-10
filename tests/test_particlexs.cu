@@ -530,6 +530,119 @@ int main() {
     report("SampleZandA", "cumulative[last]==total", draw, false);
   }
 
+  // ---------------------------------------------------------------- what G4HadronicProcess
+  //                                                                  DOES tabulate
+  //
+  // A charged hadron's transport reads no cross-section table: G4HadronicProcess holds no
+  // G4PhysicsVector and PostStepGetPhysicalInteractionLength ends in
+  // `theCrossSectionDataStore->ComputeCrossSection(dp, currentMat)`. What BuildPhysicsTable
+  // does build, with the integral method on, is the SHAPE of that cross section per material -
+  // up to three peak energies and two dip energies, from G4HadXSHelper::FillPeaksStructure.
+  //
+  // That structure is a nonlinear functional of the MATERIAL-LEVEL cross section over 1 MeV to
+  // 100 TeV: a peak energy is where a ten-per-decade scan stops rising, so ONE wrong point
+  // anywhere moves it, and it cannot be right by accident. It is therefore the strongest single
+  // check of store_compute_cross_section_fn available, and unlike everything above it is
+  // end-to-end - element cross sections, atom densities, the max(xs, 0) and the accumulation
+  // order all at once. P5 owns using these numbers; they are checked here because every input
+  // to them is P2's.
+  //
+  // Only protonInelastic is checkable from this test: QBBC gives that process exactly one data
+  // set, G4ParticleInelasticXS (G4HadronInelasticQBBC.cc:153). hadElastic on a proton is
+  // G4BGGNucleonElasticXS and pi+-Inelastic is G4BGGPionInelasticXS, neither of which is a
+  // G4PARTICLEXS data set - test_hadronic_xs.cu has those classes, but not the materials. The
+  // other three processes' rows in had_xspeaks.csv are left for P5.
+  {
+    Cell peaks;
+    // G4HadXSHelper.cc: `scale = 10./G4Log(10.)`, `nbin = G4lrint(G4Log(emax/emin)*scale)`,
+    // `fact = G4Exp(ee/nbin)`, and the scan starts at `e = emin/fact` then multiplies - so the
+    // FIRST evaluated energy is emin, and the last is emax exactly rather than emin*fact^nbin.
+    // minKinEnergy is 1*CLHEP::MeV, a private member of G4HadronicProcess with no getter;
+    // emax is G4HadronicParameters::GetMaxEnergy() = 100 TeV.
+    const double emin = 1.0, emax = 1e8;
+    const double scale = 10.0 / std::log(10.0);
+    const double ee0 = std::log(emax / emin);
+    int nbin = static_cast<int>(std::lrint(ee0 * scale));
+    if (nbin < 4) { nbin = 4; }
+    const double fact = std::exp(ee0 / nbin);
+
+    FILE* f = open_oracle(dir, "had_xspeaks.csv");
+    if (f == nullptr) {
+      ++fails;
+    } else {
+      char line[1024];
+      int rows = 0;
+      while (std::fgets(line, sizeof line, f) != nullptr) {
+        char pname[64], part[32], mname[128];
+        double g[5];
+        if (std::sscanf(line, "%63[^,],%31[^,],%127[^,],%lf,%lf,%lf,%lf,%lf", pname, part,
+                        mname, &g[0], &g[1], &g[2], &g[3], &g[4]) != 8) {
+          continue;
+        }
+        if (std::strcmp(pname, "protonInelastic") != 0) { continue; }
+        const int m = ms.index_of(mname);
+        if (m < 0) { continue; }
+        ++rows;
+
+        ElementIsotopes<real_t> isos[data::kMaxElements];
+        for (int i = 0; i < ms.mats[m].n_elements; ++i) { isos[i].natural_abundance = true; }
+
+        // FillPeaksStructure, transcribed. `ee` is the PREVIOUS energy and is what gets
+        // recorded, not the current one - so a peak is reported at the last energy that was
+        // still rising, and the port must keep that off-by-one.
+        const double kBig = 1e308;
+        double e1peak = kBig, e1deep = kBig, e2peak = kBig, e2deep = kBig, e3peak = kBig;
+        double e = emin / fact;
+        double xs = 0.0, eprev = 0.0;
+        for (int j = 0; j <= nbin; ++j) {
+          e = (j + 1 < nbin) ? e * fact : emax;
+          MaterialXs<real_t> mx;
+          const XsValue<real_t> t = store_compute_cross_section_fn<real_t>(
+              pxs_xs_functions<real_t>(L.ds[0], static_cast<real_t>(e),
+                                       static_cast<real_t>(std::log(e))),
+              ms.mats[m], isos, mx);
+          if (!t.ok()) { break; }
+          const double ss = static_cast<double>(t.value);
+          if (e1peak == kBig) {
+            if (ss >= xs) { xs = ss; eprev = e; continue; }
+            e1peak = eprev;
+          }
+          if (e1deep == kBig) {
+            if (ss <= xs) { xs = ss; eprev = e; continue; }
+            e1deep = eprev;
+          }
+          if (e2peak == kBig) {
+            if (ss >= xs) { xs = ss; eprev = e; continue; }
+            e2peak = eprev;
+          }
+          if (e2deep == kBig) {
+            if (ss <= xs) { xs = ss; eprev = e; continue; }
+            e2deep = eprev;
+            break;
+          }
+          if (e3peak == kBig) {
+            if (ss >= xs) { xs = ss; eprev = e; continue; }
+            e3peak = eprev;
+          }
+        }
+        // The dump writes -1 for a DBL_MAX that was never filled in.
+        const double ours[5] = {e1peak, e1deep, e2peak, e2deep, e3peak};
+        const char* cn[5] = {"e1peak", "e1deep", "e2peak", "e2deep", "e3peak"};
+        for (int i = 0; i < 5; ++i) {
+          const double o = (ours[i] > 1e30) ? -1.0 : ours[i];
+          cmp(peaks, o, g[i], "protonInelastic %s %s", mname, cn[i]);
+        }
+      }
+      std::fclose(f);
+      report("G4HadXSHelper", "FillPeaksStructure", peaks, false);
+      if (rows < 7) {
+        std::printf("  FAIL: only %d protonInelastic rows of had_xspeaks.csv had a material "
+                    "had_matelem.csv describes\n", rows);
+        ++fails;
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- G4PhysicsVectorType
   //
   // The enum must be Geant4's, because a value read from a Geant4 dump or a stored

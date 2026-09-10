@@ -90,74 +90,13 @@ struct ElementIsotopes {
 template <typename real_t>
 struct MaterialXs {
   static constexpr int kMax = data::kMaxElements;
-  real_t total = 0;          ///< matCrossSection, 1/mm
-  real_t cumulative[kMax];   ///< xsecelm[], cumulative and in element order
+  real_t total = 0;               ///< matCrossSection, 1/mm
+  /// xsecelm[], cumulative and in element order. Zero-initialised: `total` was and this was
+  /// not, and the two are read together. Only [0, n_elements) is ever meaningful, but a struct
+  /// that is memcpy'd to a device should not carry uninitialised bytes.
+  real_t cumulative[kMax] = {};
   int n_elements = 0;
 };
-
-/// G4CrossSectionDataStore::GetCrossSection(dp, elm, mat) for a single data set - the
-/// microscopic cross section of one element, mm^2.
-///
-/// @param iso  the element's isotopes. When `natural_abundance` is false the isotope sum is
-///             taken instead of the element cross section, which is branch 2 of the comment
-///             at the top of this file.
-template <typename real_t>
-__host__ __device__ inline XsValue<real_t> store_element_xs(const PxsDataSet<real_t>& ds,
-                                                             real_t ekin, real_t loge, int Z,
-                                                             const ElementIsotopes<real_t>& iso) {
-  // Every data set in this package has IsElementApplicable() == true, so the flag is the only
-  // thing that can send us down the isotope branch.
-  if (iso.natural_abundance || iso.n <= 0) {
-    return pxs_element_xs<real_t>(ds, ekin, loge, Z);
-  }
-  real_t sigma = real_t(0.0);
-  XsRefusal ref = XsRefusal::kNone;
-  for (int j = 0; j < iso.n; ++j) {
-    const XsValue<real_t> x = pxs_iso_xs<real_t>(ds, ekin, loge, Z, iso.a[j]);
-    if (!x.ok()) { ref = x.refused; }
-    sigma += iso.abundance[j] * x.value;
-  }
-  return {sigma, ref};
-}
-
-/// G4CrossSectionDataStore::ComputeCrossSection - the material's macroscopic cross section,
-/// and the partial sums SampleZandA will need.
-///
-/// `std::max(xs, 0.0)` before accumulating, as Geant4 does: a negative partial would make the
-/// cumulative array non-monotonic and the element draw meaningless.
-template <typename real_t>
-__host__ __device__ inline XsValue<real_t> store_compute_cross_section(
-    const PxsDataSet<real_t>& ds, real_t ekin, real_t loge,
-    const data::Material<real_t>& mat, const ElementIsotopes<real_t>* isos,
-    MaterialXs<real_t>& out) {
-  out.total = real_t(0.0);
-  out.n_elements = mat.n_elements;
-  XsRefusal ref = XsRefusal::kNone;
-  for (int i = 0; i < mat.n_elements; ++i) {
-    const int z = static_cast<int>(mat.z[i]);
-    const XsValue<real_t> e = store_element_xs<real_t>(ds, ekin, loge, z, isos[i]);
-    if (!e.ok()) { ref = e.refused; }
-    const real_t xs = mat.n_atoms[i] * e.value;
-    out.total += (xs > real_t(0.0)) ? xs : real_t(0.0);
-    out.cumulative[i] = out.total;
-  }
-  return {out.total, ref};
-}
-
-/// True when the data set samples an isotope by abundance alone - the per-class fallback test
-/// listed in the file header.
-template <typename real_t>
-__host__ __device__ inline bool store_abundance_only(const PxsDataSet<real_t>& ds, int Z,
-                                                     real_t ekin) {
-  if (ds.kind == PxsKind::kNeutronElastic) { return true; }
-  if (Z >= pxs_maxz(ds.kind)) { return true; }
-  if (Z > data::kIsotopeListMaxZ) { return true; }
-  if (data::isotope_amax()[Z] == data::isotope_amin()[Z]) { return true; }
-  if (ds.kind == PxsKind::kGammaNuclear && ekin > pxs_gamma_transition<real_t>()) {
-    return true;
-  }
-  return false;
-}
 
 /// The result of a target draw: which element of the material, and which isotope of it.
 struct TargetZA {
@@ -166,23 +105,89 @@ struct TargetZA {
   int a = 0;
 };
 
-/// G4CrossSectionDataStore::SampleZandA, with each data set's SelectIsotope inlined.
+/// A DATA SET, AS THE STORE ACTUALLY USES ONE - THREE FUNCTIONS AND NOTHING ELSE
 ///
-/// @param q_elm  a uniform draw for the element, consumed only when the material has more
-///               than one element - as Geant4 does, inside `if(1 < nElements)`.
-/// @param q_iso  a uniform draw for the isotope, consumed only when the element has more than
-///               one isotope. In Geant4 this is `G4UniformRand()` inside SelectIsotope, drawn
-///               BEFORE the isotope cross sections are summed.
+/// G4CrossSectionDataStore holds `G4VCrossSectionDataSet*` and calls three things on it:
+/// GetElementCrossSection, GetIsoCrossSection and (through SampleZandA) SelectIsotope. So the
+/// functions below are templated on a struct providing exactly those three, rather than on
+/// PxsDataSet - which is what docs/HADRONIC_PLAN.md section 5 asks for ("a device-callable
+/// function taking the material and the per-element/isotope functions") and what lets the same
+/// code serve the four BGG classes, which are not G4PARTICLEXS data sets at all.
 ///
-/// The caller must have run store_compute_cross_section at this energy and material: `mxs` is
-/// where the element partial sums come from, and nothing here recomputes them.
+/// The contract, all three `__host__ __device__` and const:
+///
+///     XsValue<real_t> element(int Z) const;             // GetElementCrossSection
+///     XsValue<real_t> isotope(int Z, int A) const;      // GetIsoCrossSection
+///     bool abundance_only(int Z) const;                 // SelectIsotope's fallback test
+///
+/// Energy is bound into the functor rather than passed, because every real data set needs both
+/// `ekin` and `G4Log(ekin)` and threading two energies through four call sites is how a port
+/// ends up evaluating a cross section at the wrong one. A template and not a virtual: a vtable
+/// pointer built on the host is not dereferenceable on the device.
+///
+/// pxs_xs_functions() below is the adapter for a PxsDataSet.
 template <typename real_t>
-__host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds, real_t ekin,
-                                                    real_t loge,
-                                                    const data::Material<real_t>& mat,
-                                                    const ElementIsotopes<real_t>* isos,
-                                                    const MaterialXs<real_t>& mxs,
-                                                    real_t q_elm, real_t q_iso) {
+struct PxsXsFunctions {
+  const PxsDataSet<real_t>* ds = nullptr;
+  real_t ekin = 0;
+  real_t loge = 0;
+
+  __host__ __device__ XsValue<real_t> element(int Z) const {
+    return pxs_element_xs<real_t>(*ds, ekin, loge, Z);
+  }
+  __host__ __device__ XsValue<real_t> isotope(int Z, int A) const {
+    return pxs_iso_xs<real_t>(*ds, ekin, loge, Z, A);
+  }
+  __host__ __device__ bool abundance_only(int Z) const;  // defined below the predicate
+};
+
+/// G4CrossSectionDataStore::GetCrossSection(dp, elm, mat) - the microscopic cross section of
+/// one element, mm^2, from any data set satisfying the three-function contract above.
+///
+/// @param iso  the element's isotopes. When `natural_abundance` is false the isotope sum is
+///             taken instead of the element cross section, which is branch 2 of the comment
+///             at the top of this file.
+template <typename real_t, typename XsFn>
+__host__ __device__ inline XsValue<real_t> store_element_xs_fn(
+    const XsFn& xs, int Z, const ElementIsotopes<real_t>& iso) {
+  if (iso.natural_abundance || iso.n <= 0) { return xs.element(Z); }
+  real_t sigma = real_t(0.0);
+  XsRefusal ref = XsRefusal::kNone;
+  for (int j = 0; j < iso.n; ++j) {
+    const XsValue<real_t> x = xs.isotope(Z, iso.a[j]);
+    if (!x.ok()) { ref = x.refused; }
+    sigma += iso.abundance[j] * x.value;
+  }
+  return {sigma, ref};
+}
+
+/// G4CrossSectionDataStore::ComputeCrossSection for any such data set.
+template <typename real_t, typename XsFn>
+__host__ __device__ inline XsValue<real_t> store_compute_cross_section_fn(
+    const XsFn& xs, const data::Material<real_t>& mat, const ElementIsotopes<real_t>* isos,
+    MaterialXs<real_t>& out) {
+  out.total = real_t(0.0);
+  out.n_elements = mat.n_elements;
+  XsRefusal ref = XsRefusal::kNone;
+  for (int i = 0; i < mat.n_elements; ++i) {
+    const int z = static_cast<int>(mat.z[i]);
+    const XsValue<real_t> e = store_element_xs_fn<real_t>(xs, z, isos[i]);
+    if (!e.ok()) { ref = e.refused; }
+    const real_t x = mat.n_atoms[i] * e.value;
+    out.total += (x > real_t(0.0)) ? x : real_t(0.0);
+    out.cumulative[i] = out.total;
+  }
+  return {out.total, ref};
+}
+
+/// G4CrossSectionDataStore::SampleZandA for any such data set. See the PxsDataSet overload
+/// below for the parameter meanings; this is that function with the data set abstracted out.
+template <typename real_t, typename XsFn>
+__host__ __device__ inline TargetZA store_sample_za_fn(const XsFn& xs,
+                                                       const data::Material<real_t>& mat,
+                                                       const ElementIsotopes<real_t>* isos,
+                                                       const MaterialXs<real_t>& mxs,
+                                                       real_t q_elm, real_t q_iso) {
   TargetZA t;
   t.element_index = 0;
   if (mat.n_elements > 1) {
@@ -200,10 +205,7 @@ __host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds
   t.a = (iso.n > 0) ? iso.a[0] : 0;
   if (iso.n <= 1) { return t; }
 
-  // Every data set here answers IsElementApplicable true, so SampleZandA takes its
-  // element-wise branch: the isotope comes from the data set's own SelectIsotope and no
-  // isotope cross section is computed unless SelectIsotope computes one.
-  if (store_abundance_only<real_t>(ds, Z, ekin)) {
+  if (xs.abundance_only(Z)) {
     real_t sum = real_t(0.0);
     for (int j = 0; j < iso.n; ++j) {
       sum += iso.abundance[j];
@@ -214,16 +216,11 @@ __host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds
     }
     return t;
   }
-
-  // abundance x isotope cross section, cumulated, then `temp[j] >= sum` with sum scaled by
-  // the draw. Bounded by data::kMaxElements only because that is the widest fixed array in
-  // this header; Geant4 resizes a std::vector to nIso.
   real_t temp[64];
   const int niso = (iso.n < 64) ? iso.n : 64;
   real_t sum = real_t(0.0);
   for (int j = 0; j < niso; ++j) {
-    const XsValue<real_t> x = pxs_iso_xs<real_t>(ds, ekin, loge, Z, iso.a[j]);
-    sum += iso.abundance[j] * x.value;
+    sum += iso.abundance[j] * xs.isotope(Z, iso.a[j]).value;
     temp[j] = sum;
   }
   sum *= q_iso;
@@ -234,6 +231,62 @@ __host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds
     }
   }
   return t;
+}
+
+
+/// True when the data set samples an isotope by abundance alone - the per-class fallback test
+/// listed in the file header.
+template <typename real_t>
+__host__ __device__ inline bool store_abundance_only(const PxsDataSet<real_t>& ds, int Z,
+                                                     real_t ekin) {
+  if (ds.kind == PxsKind::kNeutronElastic) { return true; }
+  if (Z >= pxs_maxz(ds.kind)) { return true; }
+  if (Z > data::kIsotopeListMaxZ) { return true; }
+  if (data::isotope_amax()[Z] == data::isotope_amin()[Z]) { return true; }
+  if (ds.kind == PxsKind::kGammaNuclear && ekin > pxs_gamma_transition<real_t>()) {
+    return true;
+  }
+  return false;
+}
+
+template <typename real_t>
+__host__ __device__ inline bool PxsXsFunctions<real_t>::abundance_only(int Z) const {
+  return store_abundance_only<real_t>(*ds, Z, ekin);
+}
+
+/// The adapter: a PxsDataSet at one energy, as the three functions the store needs.
+template <typename real_t>
+__host__ __device__ inline PxsXsFunctions<real_t> pxs_xs_functions(const PxsDataSet<real_t>& ds,
+                                                                   real_t ekin, real_t loge) {
+  return {&ds, ekin, loge};
+}
+
+/// G4CrossSectionDataStore::ComputeCrossSection and SampleZandA for a G4PARTICLEXS data set
+/// at one energy. Both are wrappers over the functor forms above, so there is ONE
+/// implementation of the accumulation and of the two draws, and every test that touches either
+/// covers it. The parameters are the functor forms', documented above.
+///
+/// The caller must have run store_compute_cross_section at this energy and material before
+/// store_sample_za: `mxs` is where the element partial sums come from, and nothing here
+/// recomputes them.
+template <typename real_t>
+__host__ __device__ inline XsValue<real_t> store_compute_cross_section(
+    const PxsDataSet<real_t>& ds, real_t ekin, real_t loge,
+    const data::Material<real_t>& mat, const ElementIsotopes<real_t>* isos,
+    MaterialXs<real_t>& out) {
+  return store_compute_cross_section_fn<real_t>(pxs_xs_functions<real_t>(ds, ekin, loge), mat,
+                                               isos, out);
+}
+
+template <typename real_t>
+__host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds, real_t ekin,
+                                                    real_t loge,
+                                                    const data::Material<real_t>& mat,
+                                                    const ElementIsotopes<real_t>* isos,
+                                                    const MaterialXs<real_t>& mxs,
+                                                    real_t q_elm, real_t q_iso) {
+  return store_sample_za_fn<real_t>(pxs_xs_functions<real_t>(ds, ekin, loge), mat, isos, mxs,
+                                    q_elm, q_iso);
 }
 
 }  // namespace g4gpu::hadronic::xs

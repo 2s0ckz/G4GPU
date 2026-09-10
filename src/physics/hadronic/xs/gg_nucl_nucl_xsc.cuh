@@ -9,7 +9,7 @@
 // G4ParticleInelasticXS's constructor asks the registry for "Glauber-Gribov Nucl-nucl" for
 // anything that is not a proton.
 //
-// THREE THINGS THAT ARE NOT THE HADRON-NUCLEUS VERSION
+// FOUR THINGS THAT ARE NOT THE HADRON-NUCLEUS VERSION
 //
 // 1. The nucleon-nucleon cross section is evaluated at the *per-nucleon* kinetic energy,
 //    `pTkin = kinEnergy/pA`. A 200 MeV alpha is four 50 MeV nucleons here.
@@ -26,6 +26,11 @@
 //    a proton of the same velocity striking the ion. Transcribed verbatim, including the
 //    velocity scaling, because it is the only path an ion-on-hydrogen cross section has - and
 //    hydrogen is half the atoms in water.
+// 4. `ppInXsc`, which feeds the production cross section, is read from the shared
+//    G4HadronNucleonXsc member AFTER the lambda call rather than from the pp one - so for a
+//    hypernucleus projectile it is 0.88 times the pp inelastic and not the pp inelastic. See
+//    the comment at the read itself. The hadron-nucleus version has no such call to be
+//    overwritten by.
 //
 // THE COULOMB BARRIER GATES EVERYTHING
 //
@@ -138,6 +143,27 @@ __host__ __device__ inline HadXs<real_t> ggnn_compute_cross_sections(
     const Projectile<real_t> thePr = proton<real_t>();
     const HadXs<real_t> pp = hn_xsc_ns<real_t>(thePr, thePr, pTkin);
     real_t sigma = static_cast<real_t>(pZ * Z + pN * tN) * pp.total;
+    // `ppInXsc` IS NOT THE pp INELASTIC WHEN THE PROJECTILE IS A HYPERNUCLEUS
+    //
+    // Geant4 reads it from the shared G4HadronNucleonXsc member AFTER the lambda call:
+    //
+    //     sigma = (pZ*Z+pN*tN)*fHNXsc->HadronNucleonXscNS(theProton, theProton, pTkin);
+    //     if(pHN) sigma += pL*A*fHNXsc->HadronNucleonXsc(theLambda, theProton, pTkin);
+    //     G4double ppInXsc = fHNXsc->GetInelasticHadronNucleonXsc();
+    //
+    // and `HadronNucleonXsc(theLambda, ...)` dispatches to HyperonNucleonXscNS, which does
+    // `fTotalXsc = coeff*HadronNucleonXscNS(theProton, nucleon, ekin); fInelasticXsc *= coeff;`
+    // with coeff = 0.88 for a lambda. So for a hypernucleus Geant4's ppInXsc is the LAMBDA
+    // call's inelastic - 0.88 times the pp one - and that is what feeds `xratio` and
+    // fProductionXsc below. This read `pp.inelastic` unconditionally, which is right for every
+    // projectile that is not a hypernucleus and wrong for one that is.
+    //
+    // NOT TESTABLE TODAY, AND SAID SO HERE RATHER THAN LEFT TO LOOK COVERED: the whole
+    // hypernucleus arm is refused three lines down, because HyperonNucleonXscNS is not ported
+    // (XsRefusal::kHyperonNucleonXscNS), and G4HadronicParameters::EnableHyperNuclei is off by
+    // default so nothing in QBBC produces one. Whoever ports HyperonNucleonXscNS makes this
+    // line live; it is written the way Geant4 reads it so that they do not have to find it.
+    real_t ppInXsc = pp.inelastic;
     if (pHN) {
       const HadXs<real_t> lp = hadron_nucleon_xsc<real_t>(lambda<real_t>(), thePr, pTkin);
       if (!lp.ok()) {
@@ -145,8 +171,8 @@ __host__ __device__ inline HadXs<real_t> ggnn_compute_cross_sections(
         return out;
       }
       sigma += static_cast<real_t>(pL * A) * lp.total;
+      ppInXsc = lp.inelastic;
     }
-    const real_t ppInXsc = pp.inelastic;
 
     const HadXs<real_t> np = hn_xsc_ns<real_t>(neutron<real_t>(), thePr, pTkin);
     sigma += static_cast<real_t>(pZ * tN + pN * Z) * np.total;
