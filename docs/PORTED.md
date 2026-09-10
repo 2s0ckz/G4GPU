@@ -173,6 +173,7 @@ physics lists.
 | G4GammaNuclearXS | **P** | same - below 130 MeV only, see below |
 | G4NeutronGeneralProcess (its five tables and grid) | **V** | `hadronic/xs/neutron_general_xs.cuh` |
 | G4CrossSectionDataStore (ComputeCrossSection, SampleZandA) | **V** | `hadronic/xs/sample_za.cuh` |
+| G4HadXSHelper::FillPeaksStructure | **V** | checked in `tests/test_particlexs.cu`; P5 owns the port |
 | G4ComponentSAIDTotalXS | **-** | not reachable - see below |
 | G4ComponentAntiNuclNuclearXS | **-** | refused by name in `hadronic/xs/refusal.cuh` |
 
@@ -196,20 +197,24 @@ end over Z = 1..92 and 1 keV to 100 TeV.
 
 #### 2.1.1 P2 - the hadronic cross sections (added by the P2 branch)
 
-**1,109,836 points against Geant4 11.1.1 at 1e-12 relative**, two tests:
+**1,109,871 points against Geant4 11.1.1 at 1e-12 relative**, two tests:
 
 | test | oracle | points | worst |
 |---|---|--:|--:|
 | `tests/test_hadronic_xs.cu` | `had_radii`, `had_masses`, `had_coulomb`, `had_hnxsc`, `had_ggcomp`, `had_bgg` | 906,700 | 2.0e-15 |
-| `tests/test_particlexs.cu` | `had_particlexs`, `had_particlexs_iso`, `had_neutron_general`, `had_matelem` | 203,136 | **0** (bit-exact) |
+| `tests/test_particlexs.cu` | `had_particlexs`, `had_particlexs_iso`, `had_neutron_general`, `had_matelem`, `had_xspeaks` | 203,171 | **0** (bit-exact) |
 
-Every bucket reads **0.000e+00** - the seven radii, all 3,279 AME2012 masses, all three Coulomb
-factors, all six `G4HadronNucleonXsc` entry points for eleven projectiles, both Glauber-Gribov
-components in all five columns, `G4UPiNuclearCrossSection`, both BGG pion classes, all five
-G4PARTICLEXS data sets element and isotope, and all five neutron-general tables with their
-9,415 grid nodes - except `G4BGGNucleon{Elastic,Inelastic}XS` at 2.0e-15 and 8.6e-16, which is
-`barashenkov_xs.cuh`'s own pre-existing residual: `tests/test_nucleon_xs.cu` reports the same
-2e-15 over its 10,738 points.
+Of the 33 comparison buckets, **29 read 0.000e+00** - all 3,279 AME2012 masses, all three
+Coulomb factors, all six `G4HadronNucleonXsc` entry points for eleven projectiles, both
+Glauber-Gribov components in all five columns, `G4UPiNuclearCrossSection`, both BGG pion
+classes, all five G4PARTICLEXS data sets element and isotope, all five neutron-general tables
+with their 9,415 grid nodes, and `G4HadXSHelper`'s peak structure. The four that do not:
+
+| bucket | worst | what it is |
+|---|--:|---|
+| `RadiusNNGG`, `RadiusHNGG`, `RadiusKNGG`, `RadiusCB` | 2.1e-16 - 3.5e-16 | one ulp; these four multiply `G4Pow::Z13(A)` by an exponential where the others do not |
+| `BGGNucleonElasticXS` | 2.0e-15 | `barashenkov_xs.cuh`'s own pre-existing residual - `tests/test_nucleon_xs.cu` reports the same 2e-15 over its 10,738 points |
+| `BGGNucleonInelasticXS` | 8.6e-16 | the same |
 
 Bit-exactness took three fixes, all of them constants and none of them physics; see docs/RISK.md
 V39.
@@ -260,6 +265,16 @@ cached cross section may be reused, with `lambdaFactor = 0.8`. `fXSType` is `fHa
 pi+-, pi- and protons, `fHadOnePeak` for K+, and increasing/decreasing by charge otherwise.
 `ref/oracle/had_xspeaks.csv` carries those five energies per material for protonInelastic,
 hadElastic on a proton, and pi+-Inelastic; P5 owns using them.
+
+The protonInelastic rows are **checked**, and they are the strongest single check in this
+package. A peak energy is where a ten-per-decade scan of the *material-level* cross section
+stops rising over 1 MeV to 100 TeV, so it is a nonlinear functional of ~800 evaluations: one
+wrong point anywhere moves it, a uniform scale error does not move it at all, and it cannot be
+right by accident. It is also the only end-to-end check here - element cross sections, atom
+densities, the `max(xs, 0)` and the accumulation order at once. 35 points, seven materials by
+five energies, all bit-exact. Only protonInelastic is reachable from `tests/test_particlexs.cu`
+because QBBC gives that process exactly one data set, `G4ParticleInelasticXS`
+(`G4HadronInelasticQBBC.cc:153`); the other three processes are BGG classes.
 
 #### 2.1.2 THE NEUTRON GRID
 
