@@ -4402,3 +4402,106 @@ Geant4 can therefore disagree about whether the cross section is zero, depending
 history. It is 100 MeV/c protons on hydrogen; it is recorded here because "depends on the order
 of previous calls" is not a property anyone expects a cross section to have, and the next person
 to compare a low-energy proton on water needs to know it is there.
+
+---
+
+### V38: ask the code what it does; a comment saying it is unreachable is not a measurement
+
+The decay package (`docs/HADRONIC_PLAN.md` P4). Three of its claims were wrong, all three had a
+rationale written above them, and all three were settled by running something rather than reading
+something.
+
+#### An at-rest length of zero is not a competitor
+
+The plan says a stopped pi- is captured rather than decayed - `G4HadronicAbsorptionBertini` is an
+at-rest process, its length is zero, capture wins - and it says a stopped mu- "competes between
+capture and decay". `src/physics/decay/decay.cuh` expanded that into a paragraph: a real
+competition, both processes with a finite at-rest length, the stepper's ordinary smallest-wins
+rule deciding, most stopped mu- decaying in a light material and being captured in a heavy one.
+
+Every clause of that is a plausible description of muon physics. None of it describes the code.
+`G4MuonMinusCapture` derives from `G4HadronStoppingProcess`, and
+`G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength` is `return 0.0;` - it does not read
+the track, the material or anything else (line 115). So it pre-empts `G4Decay` exactly as Bertini
+does, for the muon as much as for the pion, and G4Decay's at-rest branch never runs for any
+negative species. The capture-versus-decay split for a stopped muon is *inside* the capture
+process: `G4MuonMinusBoundDecay` computes lambda_c(Z, A) from Suzuki et al. and a bound decay
+rate, samples the time from their sum, and on the decay branch runs its own K-shell Michel
+sampler with the bound energy subtracted. Different sampler, different process, different package.
+
+What settled it was `ref/oracle/decay_atrest.csv`: walk every particle's
+`GetAtRestProcessVector()` and ask each process for the length it would offer a stopped track.
+Twelve lines of dump. And the first version of those twelve lines reported *minus the lifetime*
+for every unstable species, because `G4Decay::AtRestGetPhysicalInteractionLength` is
+`theNumberOfInteractionLengthLeft * GetMeanLifeTime` and that member is -1.0 from `G4VProcess`'s
+constructor until `StartTracking` draws it. A number that is exactly minus something recognisable
+is a state error, not a physics error.
+
+This is V32's pattern for the third time (V31 and V35 are the others): the comment argues for a
+*weaker* claim than the code makes. "Bertini's length is zero so capture wins" is true and is not
+an argument about the muon; the paragraph that generalised it into a race was written from what
+muon capture is, not from what the class does.
+
+#### A parameter with no check on it, behind a comment explaining why it needed none
+
+`G4KL3DecayChannel` carries two form factor parameters, pLambda and pXi0, chosen by (parent,
+lepton) in its constructor. `tests/test_decay.cu` said they are private with no accessor, so the
+only thing that can see them is the shape of the sampled pion spectrum, and that this is why the
+40-bin Poisson comparison exists - "substituting K0L's pLambda = 0.0300 for K+'s 0.0286 has to
+fail it".
+
+It does not. Both halves were false and the anti-vacuity run is what said so. `-perturb
+kl3-lambda` and `-perturb kl3-xi0` substitute K0L's values and **passed every assertion in the
+file**. They pass for a reason that is obvious once measured: F = 1 + lambda*q2/m_pi^2 moves by
+1.6% at the edge of the Dalitz region and less inside it, so the pion spectrum moves by parts in
+a thousand - a third of a sigma per bin at 400,000 samples - and Ke3's pXi0 multiplies
+m_e^2 = 0.261 MeV^2 against a coefficient of order m_K^3, which no sample size will ever resolve.
+Reaching 5 sigma on the lambda effect needs about 1e8 samples per channel.
+
+And they were reachable all along: `GetDalitzParameterLambda()` and `GetDalitzParameterXi()` are
+public inline accessors (`G4KL3DecayChannel.hh:52`), and `DalitzDensity` is *protected*, so a
+three-line derived probe re-exports it - the same trick the dump was already using on `G4Decay`'s
+protected lengths, in the same file. The density is now dumped on a 606-point grid and agrees
+bit-for-bit, which pins both parameters and the whole Chounet expression to machine precision.
+
+The general lesson is the one the plan already states and this is the sharpest instance of it so
+far: **a statistical check is not a substitute for a deterministic one, and "the only thing that
+can see it is the distribution" is a claim to verify, not to assert.** If a parameter can be read
+out of Geant4, read it. The perturbation harness is what turns that from an opinion into a
+measurement, and it only works if the perturbation is the *real* alternative value - 0.0286
+against 0.0300, not against 0.1.
+
+#### An assertion asking whether a string literal is non-empty
+
+Also found by the same pass: `require(why != nullptr && why[0] != '\0')` on a refusal message,
+where every arm of the function's switch returns a string literal. It cannot fail. It is replaced
+by a comparison of each named refusal against the catch-all message, which fails if a case is
+deleted from the switch.
+
+#### And a channel selector that starves channels that are open
+
+Not a comment problem - a transcription that would have been wrong and had nothing to catch it.
+`G4DecayTable::SelectADecayChannel` draws `br = sumBR * rand` against the sum of the channels that
+pass `IsOKWithParentMass`, then walks the table accumulating `sum += GetBR()` over **every**
+channel and only then tests the mass. Two consequences that a clean rewrite does not have: a
+closed channel's slice of the cumulative axis is absorbed by the next open channel after it, and
+any channel whose cumulative bound lies past sumBR is never selected at all. Measured for kaon+ at
+0.84 of its PDG mass, where pi+pi+pi- is shut: Ke3 fires 10.68% of the time instead of 5.37%, and
+Kmu3 fires **0 times out of 200,000** with a branching ratio of 0.0335 and IsOKWithParentMass
+true.
+
+At the PDG mass none of that is visible - every channel is open and the frequencies are just
+BR/sumBR - so a test that only sampled at the nominal mass would have passed either
+implementation. The reduced masses exist in `decay_select.csv` for exactly that reason, and
+`-perturb select-normalise` (the clean rewrite) misses by 61 sigma. **A branch that only differs
+off the nominal input needs a test off the nominal input**, and for a decay table that means a
+parent mass that shuts something.
+
+#### One transcription defect worth its own line
+
+`0.493677 * gev()` is not `493.677`. The kaon rows carried the decimal literal and the table
+comparison reported a worst relative deviation of 1.15e-16 against a 1e-15 tolerance - passing,
+and the only nonzero number in a block of twenty. Writing every mass and width as the Geant4
+source writes it, product and all, takes every deterministic comparison in the file to exactly
+zero. The same class of error as V8, one ulp instead of 1e-8, and the tell was the same: one
+number in a table that should have been zero and was not.

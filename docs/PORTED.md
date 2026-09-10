@@ -283,13 +283,44 @@ returning a verdict instead of printing, so a test can assert on the arithmetic.
 
 ---
 
-## 3. decay/ (6 headers)
+## 3. decay/ (6 headers) and the channel classes in particles/management/
 
-**Nothing ported.** `G4Decay`, `G4DecayWithSpin`, `G4UnknownDecay`, `G4PionDecayMakeSpin`,
-`G4VExtDecayer`, `G4DecayProcessType`. QBBC registers `G4DecayPhysics`, which attaches `G4Decay`
-to every unstable particle. Invisible for gamma / e± / p / alpha - all stable - and a hard
-blocker for pi±, K±, mu± the moment they are transported, since a stopped pion decays rather
-than simply stopping.
+QBBC registers `G4DecayPhysics`, which builds ONE `G4Decay` and attaches it to every particle
+for which `IsApplicable` is true. Invisible for gamma / e± / p / alpha - all stable.
+
+| Geant4 class | QBBC | | Where |
+|---|---|---|---|
+| G4Decay | y | **V** | `physics/decay/decay.cuh` |
+| G4DecayTable (`SelectADecayChannel`, `Insert`'s order) | y | **V** | `physics/decay/decay.cuh`, `physics/decay/decay_tables.hh` |
+| G4DecayProducts (`Boost`) | y | **V** | `physics/decay/decay_products.cuh` |
+| G4DynamicParticle (`Set4Momentum`, `SetMomentum`, `Get4Momentum`, the mass snap) | y | **V** | `physics/decay/decay_products.cuh` |
+| G4VDecayChannel (`IsOKWithParentMass`, `rangeMass`) | y | **P** | `physics/decay/decay_channels.cuh` - `DynamicalMass`'s Breit-Wigner resampling is refused; no daughter of any ported table has a width above 1e-3 of its mass |
+| G4PhaseSpaceDecayChannel (1-, 2-, 3- and N-body) | y | **V** | `physics/decay/decay_channels.cuh` |
+| G4MuonDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` - the plain channel is what `G4MuonPlus.cc`/`G4MuonMinus.cc` install |
+| G4KL3DecayChannel (+ `DalitzDensity`) | y | **V** | `physics/decay/decay_channels.cuh` |
+| G4DalitzDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` |
+| G4NeutronBetaDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` |
+| G4MuonDecayChannelWithSpin | n | **-** | exists in 11.1.1; only `G4SpinDecayPhysics` installs it, and QBBC does not register that |
+| G4MuonRadiativeDecayChannelWithSpin | n | **-** | same |
+| G4PionRadiativeDecayChannel | n | **-** | in the release, in no table |
+| G4TauLeptonicDecayChannel | n | **-** | tau is not transported; refused by PDG code |
+| G4DecayWithSpin, G4UnknownDecay, G4PionDecayMakeSpin, G4VExtDecayer | n | **-** | QBBC registers none of them |
+| G4DecayProcessType | y | **-** | an enum of process sub-types; `core/step_report.cuh` already reserves `fDecay` |
+
+Species with a transcribed table: pi+, pi-, pi0, mu+, mu-, K+, K-, neutron. The refused set is
+K0L, K0S, K0, the hyperons and the tau - each refused by PDG code with a message that names it,
+never treated as stable; 413 species Geant4 gives a decay table come back `kNoTable`.
+
+The at-rest branch is `V` in a narrower sense than the rest, and it is worth stating: measured
+(`ref/oracle/decay_atrest.csv`), `G4HadronicAbsorptionBertini` on pi-/K- and `G4MuonMinusCapture`
+on mu- all offer an at-rest interaction length of exactly 0.0, so G4Decay's at-rest branch never
+runs for any negative species. It is reachable for pi+, K+, mu+, pi0 and the neutron only. The
+muon's bound decay lives inside `G4MuonMinusBoundDecay` with its own K-shell Michel sampler and
+belongs to P12, not here. `decay_at_rest_competitor` names the species so a wiring package
+cannot forget silently.
+
+Wiring (P8) still owes: a `ParticleType` for each PDG code, the process in the stepper's
+at-rest and post-step queues, and the competition above.
 
 ---
 
@@ -414,4 +445,4 @@ work on the proton.
 |---|--:|--:|---|
 | electromagnetic | 568 | 34 T/V + 8 P | G4CoulombScattering (+2 models), atomic deexcitation (6), G4SynchrotronRadiation, G4EmExtraPhysics' 11 EM classes |
 | hadronic | 1235 | 3 (1 partial) | effectively all of it |
-| decay | 6 | 0 | all of it |
+| decay | 6 | 1 V (`G4Decay`) + 9 V/P channel and product classes from `particles/management` | wiring only: no species carries the process in `stepper.cuh` yet (P8) |
