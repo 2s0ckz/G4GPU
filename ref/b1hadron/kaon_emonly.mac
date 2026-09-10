@@ -1,0 +1,25 @@
+# Example B1 with a kaon+ beam and everything QBBC gives a kaon that this port does not have,
+# switched off. The P1 stage; see muon_emonly.mac beside it for why each line is here.
+#
+# `ref/oracle/species_processes.csv` for kaon+ is the pion's list with kaon+Inelastic in place of
+# pi+Inelastic. Same six inactivations, same reasons.
+#
+# 200 MeV kaon+: about 14 cm of water. Its lifetime is 12 ns, so as with the pion it is the
+# stopped kaon that decays and this port leaves it stopped.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/process/inactivate hadElastic
+/process/inactivate kaon+Inelastic
+/process/inactivate Decay
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/particle kaon+
+/gun/energy 200 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

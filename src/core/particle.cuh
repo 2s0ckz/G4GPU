@@ -17,10 +17,29 @@ __host__ __device__ inline real_t dynamic_particle_beta(real_t kinetic, real_t m
   return sqrt(t * (t + real_t(2))) / (t + real_t(1));
 }
 
-/// Every particle G4EmStandardPhysics registers EM processes for.
-/// The first three are what example B1 produces; the rest exist because the physics list
-/// covers them (via G4EmBuilder::ConstructCharged), and their models are transcribed for
-/// completeness even though B1 never creates one.
+/// Every particle QBBC creates and this port has a name for.
+///
+/// It began as "every particle G4EmStandardPhysics registers EM processes for", which is why
+/// the first fourteen are all charged or a photon. That was the right set while the only
+/// physics here was electromagnetic, and it is the wrong set now: a hadronic cascade emits
+/// neutrons and pi0s, and a decay emits neutrinos, and none of the three has an EM process
+/// at all. So the list is what QBBC can PRODUCE, not what it registers a dE/dx for.
+///
+/// Three groups, and which group a species is in is answered by classify_species() in
+/// core/track_buffer.cuh rather than by its position here:
+///
+///   * stepped     - a kernel exists (gamma, e+-, and the eleven charged hadrons and the two
+///                   neutral hadrons below)
+///   * counted     - the six neutrinos: created, their energy booked as carried out of the
+///                   event, never stepped. QBBC gives them Transportation and nothing else,
+///                   so in Geant4 they leave the world with their energy; the accounting here
+///                   is that escape, done at emission because there is no point moving them.
+///   * refused     - everything else a cascade or a decay can make. Named and counted at
+///                   emission and fatal as a primary, never a silent default.
+///
+/// APPEND ONLY, and nothing may be inserted before kNumTypes. The value is stored on every
+/// track in a device buffer and written into trajectory records the viewer reads back, so a
+/// renumbering silently reinterprets both.
 enum class ParticleType : int {
   kGamma = 0,
   kElectron = 1,
@@ -36,7 +55,49 @@ enum class ParticleType : int {
   kAlpha = 11,
   kHe3 = 12,
   kGenericIon = 13,
-  kNumTypes = 14
+  // Added with the hadronic transport plumbing. The neutron and pi0 are the first neutral
+  // hadrons; the deuteron and triton are the first species whose dE/dx comes entirely from a
+  // base particle's table by G4hIonisation's scaling.
+  kNeutron = 14,
+  kPiZero = 15,
+  kDeuteron = 16,
+  kTriton = 17,
+  // The six neutrinos, as separate species rather than one "neutrino".
+  //
+  // Their ParticleDef rows are identical - massless, uncharged, spin 1/2, lepton number +-1 -
+  // so one type would give the same numbers everywhere in this file. What it would throw away
+  // is the only thing a neutrino carries: which one it is. G4DecayPhysics' channels name them
+  // individually (mu- -> e- + anti_nu_e + nu_mu, pi+ -> mu+ + nu_mu), so a decay that had to
+  // report "a neutrino" could not be checked against the channel it came from. docs/RISK.md
+  // V35 is what discarding the one distinguishing bit costs later.
+  kNeutrinoE = 18,
+  kAntiNeutrinoE = 19,
+  kNeutrinoMu = 20,
+  kAntiNeutrinoMu = 21,
+  kNeutrinoTau = 22,
+  kAntiNeutrinoTau = 23,
+  // Refused, with real rows. QBBC transports all six - species_processes.csv shows the charged
+  // hyperons carrying hIoni scaled from the proton and an Urban msc, and all six carrying
+  // hadElastic, an inelastic and a decay - so they are species this port is MISSING rather
+  // than species that do not arise. They are here so that the refusal can name what it
+  // refused, and so that `/gun/particle lambda` gets an answer about the lambda instead of
+  // "unknown particle".
+  //
+  // This is not the complete refused set. sigma0, xi0, omega-, the anti-hyperons, the light
+  // anti-nuclei and the b/c hadrons `EnableBCParticles` turns on are all reachable through a
+  // cascade and none of them is here - because nothing in this port can produce one yet, and a
+  // row nobody can reach is a row nobody checks. The MECHANISM is what P1 owes and what is
+  // finished: species_disposition refuses anything without a kernel, BufferEmitter::push counts
+  // it under its own name, and the run reports it. Whichever package first emits an omega-
+  // appends four lines - an enumerator, a name, a ParticleDef row, and a dump entry - and gets
+  // the refusal for nothing.
+  kKaonZeroLong = 24,
+  kKaonZeroShort = 25,
+  kLambda = 26,
+  kSigmaPlus = 27,
+  kSigmaMinus = 28,
+  kXiMinus = 29,
+  kNumTypes = 30
 };
 
 /// Static properties the EM models need: PDG mass, charge and spin.
@@ -117,11 +178,193 @@ __host__ __device__ inline ParticleDef<real_t> particle_def(ParticleType t) {
       // non-He3 ion scales its dE/dx and range from GenericIon's table by a mass ratio, that
       // literal is what the ratio is against. The two differ by 3e-7 relative, which is
       // nothing physically and everything to a table compared at 1e-9.
-      return {real_t(938.2723), real_t(1), real_t(0.5), true, false, false,
-              real_t(2.792847351 * 2.792847351 - 1)};
-    default:
-      return {real_t(0), real_t(0), real_t(0), false, false, false, real_t(-1)};
+      //
+      // mag_moment2 is -1 and NOT the proton's 6.8, which is what this row carried until
+      // ref/oracle/species_tables.csv was dumped and disagreed. G4GenericIon never calls
+      // SetPDGMagneticMoment, so its moment is zero, so magmom is zero and magMoment2 is
+      // 0 - 1. The proton's value was here because GenericIon borrows the proton's mass, and
+      // borrowing one constant is not borrowing the other. It is read - the delta-ray
+      // rejection in em/hadron_delta.cuh uses it whenever spin > 0, and GenericIon's spin is
+      // 1/2 - so this was a wrong spectrum waiting for the first transported ion.
+      return {real_t(938.2723), real_t(1), real_t(0.5), true, false, false, real_t(-1)};
+    // ---- neutral hadrons.
+    case ParticleType::kNeutron:
+      // G4Neutron.cc: `new G4Ions(name, neutron_mass_c2, ...)` with 2*spin = 1, lepton
+      // number 0, baryon number +1.
+      //
+      // The mass is CLHEP's neutron_mass_c2 = 939.56536 MeV. The comment sitting directly
+      // above that line in G4Neutron.cc says 939.56563 - two digits transposed - and it is
+      // commented-out documentation of an older CLHEP, not the value used. Taking the comment
+      // would have put the mass 2.9e-7 out, which is nothing in a kinematic limit and three
+      // hundred times the tolerance species_tables.csv is compared at.
+      //
+      // The moment is quoted against the PROTON magneton while the neutron carries its own
+      // mass, so the cancellation that leaves the proton a bare g does not happen: see the
+      // note on ParticleDef::mag_moment2 and the identical arithmetic for He3.
+      return {units::neutron_mass_c2<real_t>(), real_t(0), real_t(0.5), false, false, false,
+              real_t(-1.9130427 * 939.56536 / 938.272013
+                     * (-1.9130427 * 939.56536 / 938.272013) - 1)};
+    case ParticleType::kPiZero:
+      // G4PionZero.cc: `0.1349766*GeV`, 2*spin = 0, no magnetic moment. Spin zero, so
+      // mag_moment2 is never read and -1 is also the value Geant4 computes from a zero moment.
+      return {real_t(134.9766), real_t(0), real_t(0), false, false, false, real_t(-1)};
+    // ---- the two light ions G4EmBuilder gives G4hIonisation rather than G4ionIonisation.
+    //
+    // is_ion is FALSE for both, and that is not an oversight. G4BetheBlochModel::Initialise
+    // sets isIon on `particle->GetPDGCharge() > CLHEP::eplus || pname == "GenericIon"`, and a
+    // deuteron's charge is exactly eplus - strictly greater is strictly greater. So a deuteron
+    // takes the HighOrderCorrections branch like a proton, not the IonBarkasCorrection branch
+    // like an alpha, even though it is a nucleus. A rule written on "is it a nucleus" gets
+    // both of these wrong; see uses_ion_ionisation below for the same split by process.
+    case ParticleType::kDeuteron:
+      // G4Deuteron.cc: `1.875613*GeV`, 2*spin = 2 (so spin 1), moment 0.857438230 nuclear
+      // magnetons against the proton's magneton.
+      return {real_t(1875.613), real_t(1), real_t(1), false, false, false,
+              real_t(0.857438230 * 1875.613 / 938.272013
+                     * (0.857438230 * 1875.613 / 938.272013) - 1)};
+    case ParticleType::kTriton:
+      // G4Triton.cc: `2.808921*GeV`, 2*spin = 1 (so spin 1/2), moment 2.97896248.
+      //
+      // 2808.921, and He3 above is 2808.391. The two differ in the third decimal and in
+      // nothing else a glance would catch - and they have different charges, different spins,
+      // different processes and different base particles. Nothing here is shared between them.
+      return {real_t(2808.921), real_t(1), real_t(0.5), false, false, false,
+              real_t(2.97896248 * 2808.921 / 938.272013
+                     * (2.97896248 * 2808.921 / 938.272013) - 1)};
+    // ---- neutrinos. Massless, uncharged, spin 1/2, lepton number +-1, no moment.
+    //
+    // is_lepton is true, which is the one field that does any work for them: it is
+    // `GetLeptonNumber() != 0`, and G4BetheBlochModel::SetupParameters leaves tlimit at
+    // infinity for a lepton. Nothing here ever asks a neutrino for a stopping power, but the
+    // row has to be right rather than absent, because the alternative is a zero that reads
+    // like a value.
+    case ParticleType::kNeutrinoE:
+    case ParticleType::kAntiNeutrinoE:
+    case ParticleType::kNeutrinoMu:
+    case ParticleType::kAntiNeutrinoMu:
+    case ParticleType::kNeutrinoTau:
+    case ParticleType::kAntiNeutrinoTau:
+      return {real_t(0), real_t(0), real_t(0.5), false, false, true, real_t(-1)};
+    // ---- refused, but with the real numbers. See the enum.
+    //
+    // Every moment below is quoted in G4*.cc against the proton magneton while the particle
+    // carries its own mass, so each is scaled by mass/m_p exactly as the neutron's and He3's
+    // are. Transcribed from the constructors rather than copied out of the oracle CSV, which
+    // would make the test that compares them a comparison of a number with itself.
+    case ParticleType::kKaonZeroLong:
+    case ParticleType::kKaonZeroShort:
+      // G4KaonZeroLong.cc / G4KaonZeroShort.cc: both `0.497614*GeV`, 2*spin = 0, no moment.
+      // Same mass and spin, different lifetimes (1.287e-14 and 7.3508e-12 MeV of width) and
+      // different decay tables - so they are two species and not one, and P4 will need both.
+      return {real_t(497.614), real_t(0), real_t(0), false, false, false, real_t(-1)};
+    case ParticleType::kLambda:
+      // G4Lambda.cc: `1.115683*GeV`, 2*spin = 1, moment -0.613 mN.
+      return {real_t(1115.683), real_t(0), real_t(0.5), false, false, false,
+              real_t(-0.613 * 1115.683 / 938.272013
+                     * (-0.613 * 1115.683 / 938.272013) - 1)};
+    case ParticleType::kSigmaPlus:
+      // G4SigmaPlus.cc: `1.18937*GeV`, +eplus, 2*spin = 1, moment 2.458 mN.
+      return {real_t(1189.37), real_t(1), real_t(0.5), false, false, false,
+              real_t(2.458 * 1189.37 / 938.272013 * (2.458 * 1189.37 / 938.272013) - 1)};
+    case ParticleType::kSigmaMinus:
+      // G4SigmaMinus.cc: `1.197449*GeV`, -eplus, 2*spin = 1, moment -1.160 mN.
+      return {real_t(1197.449), real_t(-1), real_t(0.5), false, false, false,
+              real_t(-1.160 * 1197.449 / 938.272013
+                     * (-1.160 * 1197.449 / 938.272013) - 1)};
+    case ParticleType::kXiMinus:
+      // G4XiMinus.cc: `1.32171*GeV`, -eplus, 2*spin = 1, moment -0.6507 mN.
+      return {real_t(1321.71), real_t(-1), real_t(0.5), false, false, false,
+              real_t(-0.6507 * 1321.71 / 938.272013
+                     * (-0.6507 * 1321.71 / 938.272013) - 1)};
+    case ParticleType::kNumTypes:
+      break;
   }
+  // A ParticleType with no row above.
+  //
+  // NOT a row of zeros, which is what this returned. A zero mass makes beta exactly 1, a zero
+  // charge makes every stopping power zero, and a zero spin turns the delta-ray form factor
+  // off - so an unhandled species came back as a massless neutral that traverses the geometry
+  // depositing nothing, which is a perfectly plausible-looking gamma and is the shape of
+  // failure this project keeps writing up: the wrong answer that declines to announce itself.
+  //
+  // A NEGATIVE mass announces itself. Every guard in the ionisation chain is `pd.mass <= 0`
+  // and fires; dynamic_particle_beta's `mass <= 0` returns 1 as it does for a photon; and the
+  // value prints as -1 in any report rather than as a number somebody might believe. There is
+  // no case that reaches here today - every enumerator but kNumTypes has a row - and
+  // tests/test_species.cu asserts the poison rather than trusting this comment.
+  return {real_t(-1), real_t(0), real_t(0), false, false, false, real_t(-1)};
+}
+
+/// Geant4's own name for a species, so that a refusal or a report can say what it refused.
+///
+/// One table, here, next to the masses. There were three before - G4ParticleTable's `add`
+/// list, the `type_of` helper each test writes, and the prose in G4RunManager::CheckSpecies'
+/// message - and the third had drifted: it described the missing muon transport as "the
+/// smallest gap of the three" long after the range table had landed.
+///
+/// Returns "?" for a value outside the enum rather than an empty string, so that a message
+/// built from it reads as a message rather than as a gap.
+__host__ __device__ inline const char* particle_name(ParticleType t) {
+  switch (t) {
+    case ParticleType::kGamma: return "gamma";
+    case ParticleType::kElectron: return "e-";
+    case ParticleType::kPositron: return "e+";
+    case ParticleType::kMuonMinus: return "mu-";
+    case ParticleType::kMuonPlus: return "mu+";
+    case ParticleType::kPionPlus: return "pi+";
+    case ParticleType::kPionMinus: return "pi-";
+    case ParticleType::kKaonPlus: return "kaon+";
+    case ParticleType::kKaonMinus: return "kaon-";
+    case ParticleType::kProton: return "proton";
+    case ParticleType::kAntiProton: return "anti_proton";
+    case ParticleType::kAlpha: return "alpha";
+    case ParticleType::kHe3: return "He3";
+    case ParticleType::kGenericIon: return "GenericIon";
+    case ParticleType::kNeutron: return "neutron";
+    case ParticleType::kPiZero: return "pi0";
+    case ParticleType::kDeuteron: return "deuteron";
+    case ParticleType::kTriton: return "triton";
+    case ParticleType::kNeutrinoE: return "nu_e";
+    case ParticleType::kAntiNeutrinoE: return "anti_nu_e";
+    case ParticleType::kNeutrinoMu: return "nu_mu";
+    case ParticleType::kAntiNeutrinoMu: return "anti_nu_mu";
+    case ParticleType::kNeutrinoTau: return "nu_tau";
+    case ParticleType::kAntiNeutrinoTau: return "anti_nu_tau";
+    case ParticleType::kKaonZeroLong: return "kaon0L";
+    case ParticleType::kKaonZeroShort: return "kaon0S";
+    case ParticleType::kLambda: return "lambda";
+    case ParticleType::kSigmaPlus: return "sigma+";
+    case ParticleType::kSigmaMinus: return "sigma-";
+    case ParticleType::kXiMinus: return "xi-";
+    default: return "?";
+  }
+}
+
+/// A species whose energy leaves the event without being transported.
+///
+/// QBBC registers nothing but G4Transportation for a neutrino, so in Geant4 one is created,
+/// streamed across the world in a single step, and leaves. Doing that here would cost a track
+/// slot, a kernel launch and a boundary search per neutrino to reach a conclusion that is
+/// known at emission - so the energy is booked as escaping at the point of creation instead,
+/// and no track is made.
+///
+/// That is an OPTIMISATION of Geant4's answer and not a different answer, but only while the
+/// two conditions behind it hold, so they are written down: a neutrino deposits nothing on the
+/// way out (no process to deposit with), and nothing downstream reads a neutrino track. The
+/// day either changes - a neutrino-nucleus process, or a stepping action that wants to see
+/// one - this becomes a species with a kernel like any other, and the accounting below is what
+/// has to be removed.
+__host__ __device__ inline bool is_neutrino(ParticleType t) {
+  return t == ParticleType::kNeutrinoE || t == ParticleType::kAntiNeutrinoE
+         || t == ParticleType::kNeutrinoMu || t == ParticleType::kAntiNeutrinoMu
+         || t == ParticleType::kNeutrinoTau || t == ParticleType::kAntiNeutrinoTau;
+}
+
+/// A hadron with no charge: no continuous energy loss, no multiple scattering, no delta rays.
+/// Its step is geometry against a discrete interaction length and nothing else. See
+/// step_neutral in physics/stepper.cuh.
+__host__ __device__ inline bool is_neutral_hadron(ParticleType t) {
+  return t == ParticleType::kNeutron || t == ParticleType::kPiZero;
 }
 
 /// Is G4ionIonisation the ionisation process Geant4 registers for this species, rather than
@@ -186,15 +429,150 @@ __host__ __device__ inline bool uses_ion_fluctuations(ParticleType t) {
 /// G4hIonisation lists by name (proton, anti_proton, pi+, pi-, kaon+, kaon-, GenericIon,
 /// alpha), plus mu+ and mu- which G4MuIonisation never gives a base to. That leaves He3, whose
 /// base is GenericIon, and deuteron and triton, whose base is the proton.
+///
+/// The deuteron and triton rows are what this function was missing while they were not
+/// transported: without them both fell through to `return t`, and hadron_species_of would
+/// have sent them to HadronSpecies::kProton anyway by ITS default - the right table for the
+/// wrong reason, with hadron_mass_ratio then returning 1 and the lookup done at the deuteron's
+/// own energy instead of at E * m_p/m_d. A deuteron's range would have come out as a proton's
+/// of the same kinetic energy, which is a factor of about two.
+/// Transcribed rather than tabulated, because Geant4's `else` branch is a rule and the rule
+/// covers species this port has not met yet. `G4hIonisation::InitialiseEnergyLossProcess`:
+///
+///     if (pname == "proton" || "anti_proton" || "pi+" || "pi-" || "kaon+" || "kaon-"
+///         || "GenericIon" || "alpha")        theBaseParticle = nullptr;
+///     else if (GetPDGSpin() == 0.0)          q > 0 ? kaon+ : kaon-
+///     else                                   q > 0 ? proton : anti_proton
+///
+/// - so the choice turns on SPIN and then on the sign of the charge, which is why a deuteron
+/// (spin 1) and a triton (spin 1/2) both scale from the proton while a hypothetical spin-0
+/// singly-charged hadron would scale from the kaon. mu+- are excluded because G4MuIonisation
+/// never sets a base particle, and He3 because G4ionIonisation hands it GenericIon explicitly.
+///
+/// Checked against `ref/oracle/species_processes.csv`'s `base_particle` column - which is
+/// `G4VEnergyLossProcess::BaseParticle()` on the process the constructed QBBC registered - for
+/// every species that has an ionisation process at all. It gets sigma+, sigma- and xi- right
+/// as a side effect of being the rule rather than a list, and those three are species this
+/// port refuses to transport, so the rule is checked further than it is used.
+///
+/// For a NEUTRAL hadron the answer is unreachable: G4hIonisation is registered by charge, so
+/// the neutron and the pi0 have no ionisation process to have a base particle. `q > 0` is false
+/// for them and the expression below returns anti_proton or kaon-, which is what Geant4's own
+/// expression would return if it were ever evaluated. Neither is read.
 __host__ __device__ inline ParticleType hadron_base_particle(ParticleType t) {
-  return (t == ParticleType::kHe3) ? ParticleType::kGenericIon : t;
+  switch (t) {
+    // G4ionIonisation's two: alpha has no base, He3's is set explicitly to GenericIon.
+    case ParticleType::kAlpha:
+    case ParticleType::kGenericIon:
+    // G4MuIonisation never sets one.
+    case ParticleType::kMuonMinus:
+    case ParticleType::kMuonPlus:
+    // G4hIonisation's by-name list.
+    case ParticleType::kProton:
+    case ParticleType::kAntiProton:
+    case ParticleType::kPionPlus:
+    case ParticleType::kPionMinus:
+    case ParticleType::kKaonPlus:
+    case ParticleType::kKaonMinus:
+      return t;
+    case ParticleType::kHe3:
+      return ParticleType::kGenericIon;
+    default: break;
+  }
+  const ParticleDef<double> pd = particle_def<double>(t);
+  if (pd.spin == 0.0) {
+    return (pd.charge > 0.0) ? ParticleType::kKaonPlus : ParticleType::kKaonMinus;
+  }
+  return (pd.charge > 0.0) ? ParticleType::kProton : ParticleType::kAntiProton;
 }
 
 /// True for the particles that go through the heavy-charged-particle ionisation chain
 /// (Bragg / Bethe-Bloch) rather than Moller-Bhabha.
+///
+/// Written out rather than as an index range. It USED to be
+/// `t >= kMuonMinus && t < kNumTypes`, which was true of every species in the enum at the time
+/// and became wrong the moment a neutral one was appended: a neutron and a neutrino both
+/// answered yes. Nothing called it, so nothing broke - which is the only reason this is a note
+/// and not an incident. An enum-range predicate is a claim about the ORDER of an enum, and the
+/// enum above is append-only precisely because its order is a storage format rather than a
+/// classification.
 __host__ __device__ inline bool is_heavy_charged(ParticleType t) {
-  return static_cast<int>(t) >= static_cast<int>(ParticleType::kMuonMinus)
-         && static_cast<int>(t) < static_cast<int>(ParticleType::kNumTypes);
+  return t == ParticleType::kMuonMinus || t == ParticleType::kMuonPlus
+         || t == ParticleType::kPionPlus || t == ParticleType::kPionMinus
+         || t == ParticleType::kKaonPlus || t == ParticleType::kKaonMinus
+         || t == ParticleType::kProton || t == ParticleType::kAntiProton
+         || t == ParticleType::kAlpha || t == ParticleType::kHe3
+         || t == ParticleType::kGenericIon || t == ParticleType::kDeuteron
+         || t == ParticleType::kTriton;
+}
+
+/// Does QBBC register G4NuclearStopping for this species?
+///
+/// **No. For none of them.** Which is not what reading G4EmBuilder suggests, and is why this
+/// is a predicate answered by the oracle rather than by the source.
+///
+/// The source reads as a four-way split: `G4EmStandardPhysics::ConstructProcess` makes one
+/// `G4NuclearStopping* pnuc` and hands it to GenericIon, then `G4EmBuilder::ConstructCharged`
+/// gives it to the proton and `ConstructIonEmPhysics` to the alpha and He3 - passing over the
+/// deuteron and triton two lines above them, and never reaching mu+-, pi+-, K+- or pbar at
+/// all. That split is real, and it is downstream of a line four functions up:
+///
+///     G4double nielEnergyLimit = param->MaxNIELEnergy();
+///     G4NuclearStopping* pnuc = nullptr;
+///     if(nielEnergyLimit > 0.0) { pnuc = new G4NuclearStopping(); ... }
+///
+/// and `G4EmParameters::Initialise` sets `maxNIELEnergy = 0.0`. So `pnuc` is null, every
+/// `if(nullptr != pnuc)` fails, and the process is registered for nobody.
+/// `ref/oracle/species_processes.csv` - one row per process on each species' own process
+/// manager, from the constructed QBBC - carries no `nuclearStopping` row for any particle,
+/// which is the fact rather than the derivation of it.
+///
+/// step_hadron applied nuclear stopping unconditionally, so this port has been running a
+/// process the reference does not. It is small - G4ICRU49NuclearStoppingModel returns zero
+/// above about z1^2 MeV per nucleon, so it touches only the last microns of a track, and the
+/// energy it removed was deposited locally in the same volume it would otherwise have been
+/// deposited in by the dying track. What it changed is the STEP the deposit happened on and
+/// the non-ionising share of it, not the total. The measured size is in the commit that made
+/// this false; see docs/RISK.md.
+///
+/// Kept as a predicate rather than deleted, because it is a physics-list parameter and not a
+/// property of Geant4: `/process/em/setMaxNIEL <E>` turns it on, and a list that does so wants
+/// exactly the four-species split the source describes. One place to change.
+__host__ __device__ inline bool uses_nuclear_stopping(ParticleType /*t*/) {
+  return false;
+}
+
+/// Is WentzelVI the multiple-scattering model Geant4 gives this species, rather than Urban?
+///
+/// Another table rather than a rule, and it splits the charged hadrons in a place no property
+/// of the particle would. `G4EmStandardPhysics::ConstructProcess` makes ONE
+/// `G4hMultipleScattering("ionmsc")` with **no model set**, and G4hMultipleScattering's
+/// default model is Urban. Then:
+///
+///     mu+-                G4MuMultipleScattering + SetEmModel(G4WentzelVIModel)
+///     pi+-, K+-, p, pbar  G4EmBuilder::ConstructLightHadrons - a fresh
+///                         G4hMultipleScattering + SetEmModel(G4WentzelVIModel)
+///     deuteron, triton    the shared "ionmsc", no model     -> URBAN
+///     alpha, He3          a fresh G4hMultipleScattering(), no model -> URBAN
+///     GenericIon          the shared "ionmsc"                -> URBAN
+///
+/// So the deuteron and the triton scatter by Urban in Geant4, sitting two lines above the
+/// alpha in the same function, and the pion - lighter, same charge - scatters by WentzelVI.
+///
+/// What the port does with the `false` answer is a SUBSTITUTION, not a transcription:
+/// em/urban_msc.cuh's stepping half is the electron's (it takes `is_positron` and reads an
+/// e-/e+ transport mean free path), so an ion cannot be run through it, and step_hadron uses
+/// WentzelVI for these species too. That has been true of the alpha since it was transported,
+/// and what it costs is measured rather than assumed - `tools/compare_b1_beams.ps1` puts an
+/// 840 MeV alpha's B1 dose within about a per cent of Geant4's. It is recorded as `P` in
+/// docs/PORTED.md for the same reason. This predicate exists so that the substitution is
+/// visible at the point it is made and so that generalising urban_msc.cuh has one call site
+/// to flip rather than a search.
+__host__ __device__ inline bool uses_wentzel_msc(ParticleType t) {
+  return t == ParticleType::kMuonMinus || t == ParticleType::kMuonPlus
+         || t == ParticleType::kPionPlus || t == ParticleType::kPionMinus
+         || t == ParticleType::kKaonPlus || t == ParticleType::kKaonMinus
+         || t == ParticleType::kProton || t == ParticleType::kAntiProton;
 }
 
 }  // namespace g4gpu

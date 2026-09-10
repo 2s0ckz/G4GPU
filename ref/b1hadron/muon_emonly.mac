@@ -1,0 +1,58 @@
+# Example B1 with a mu- beam and everything QBBC gives a muon that this port does not have,
+# switched off - the P1 stage of the staged like-for-like docs/HADRONIC_PLAN.md section 4 asks
+# for. One macro per stage, so the stage a number was measured at travels with the number.
+#
+# For the real Geant4 build of B1 only (ref/run/runb1.bat). The port's side of this comparison
+# is the same geometry, the same beam and the same binning, run by tools/compare_b1_beams.ps1's
+# method.
+#
+# WHAT IS SWITCHED OFF, AND WHY EACH ONE. `ref/oracle/species_processes.csv` lists mu-'s process
+# manager as QBBC builds it: Transportation, msc (WentzelVIUni), muIoni (ICRU73QO;MuBetheBloch,
+# UrbanFluc), muBrems (MuBrem), muPairProd (muPairProd), CoulombScat, muonNuclear, Decay,
+# muMinusCaptureAtRest. The port has the first three and nothing else, so the other six come off:
+#
+#   Decay, muMinusCaptureAtRest   G4DecayPhysics and G4StoppingPhysics. A stopped mu- is captured
+#                                 and a mu+ decays; this port stops one and leaves it stopped.
+#                                 docs/PORTED.md section 3. The largest of the differences here.
+#   muonNuclear                   G4MuonVDNuclearModel, from G4EmExtraPhysics. Not ported.
+#   muBrems, muPairProd           the DISCRETE radiative processes. Their dE/dx and cross
+#                                 sections are transcribed and exact (tests/test_muon.cu,
+#                                 test_hadron_radiative.cu) but neither SampleSecondaries is, so
+#                                 step_hadron samples no radiative interaction. At 200 MeV the
+#                                 brem mean free path in water is above a kilometre and pair
+#                                 production has not started (its threshold is 8*mass = 845 MeV),
+#                                 so this line should change nothing at this energy - which is
+#                                 the point of inactivating it rather than arguing that it is
+#                                 small. docs/RISK.md V36.
+#   CoulombScat                   G4CoulombScattering, the one EM process in QBBC's chain still
+#                                 unported (docs/PORTED.md 1.1, P14). Registered next to
+#                                 WentzelVI above 100 MeV, so at this energy it is live on the
+#                                 Geant4 side and absent here.
+#
+# NOTE a difference from proton_emonly.mac beside it: that macro leaves CoulombScat and hBrems /
+# hPairProd active on the Geant4 side. Both are unported for the proton too, so its EM-only
+# column carries them and this one does not. The two macros are therefore not the same
+# convention, and this one is the stricter of the two on purpose - a like-for-like that leaves a
+# process running on one side measures that process rather than the transport. Whoever revisits
+# proton_emonly.mac should expect its numbers to move by however much CoulombScat is worth.
+#
+# 200 MeV: a mu- range of about 46 cm in water, so it stops well inside B1's envelope, and below
+# every radiative threshold that matters. Everything below the inactivations is the shape of
+# examples/B1/proton.mac with the particle and energy changed.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/process/inactivate Decay
+/process/inactivate muMinusCaptureAtRest
+/process/inactivate muonNuclear
+/process/inactivate muBrems
+/process/inactivate muPairProd
+/process/inactivate CoulombScat
+
+/gun/particle mu-
+/gun/energy 200 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

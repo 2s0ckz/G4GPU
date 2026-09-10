@@ -22,6 +22,7 @@
 #include "physics/em/annihilation.cuh"
 #include "physics/em/pair_production.cuh"
 #include "physics/em/urban_msc.cuh"
+#include "physics/hadronic/neutron_general_xs.cuh"
 #include "physics/scene.cuh"
 #include "render/trajectory.cuh"
 
@@ -516,6 +517,12 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     G4UrbanMscModel, and only muons and singly-charged hadrons get WentzelVI. Using
 ///     WentzelVI for the alpha here is a substitution, not a transcription.
 ///
+///     **Which species take the substitution is now a predicate**, `uses_wentzel_msc` in
+///     core/particle.cuh, because wiring nine more species made it a list rather than a
+///     footnote about the alpha. WentzelVI is correct for mu+-, pi+-, K+-, p and pbar; it is a
+///     substitution for alpha, He3, GenericIon and - newly - the deuteron and the triton,
+///     which share the physics list's one model-less `G4hMultipleScattering("ionmsc")`.
+///
 ///     It is not fixed because urban_msc.cuh is transcribed for leptons specifically - its
 ///     step limit and its sampler both take `is_positron`, and its transport mean free path
 ///     comes from an e-/e+ table - so an alpha would need the model generalised to arbitrary
@@ -532,10 +539,28 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     nuclear stopping into the table put the proton range 25% short at 10 keV; leaving it out
 ///     of the *stepper* would lose the energy entirely. See hadron_total_dedx.
 ///
-///   * **The loss is all local.** A hadron has no radiative split worth making at these
-///     energies. G4hBremsstrahlung and G4hPairProduction are registered by the physics list,
-///     but the oracle's dedx_brem and dedx_pair columns are zero for every proton and alpha row
-///     below a GeV, so there is no share to split off.
+///   * **The loss is all local, and there is no discrete radiative process at all.** Two
+///     separate statements, and the second is the gap.
+///
+///     The continuous half is genuinely nothing. `ref/oracle/hadron_radiative.csv`'s dedx_brem
+///     and dedx_pair columns are zero for every proton and alpha row below a GeV, so there is
+///     no share to split off - and for the muon, which this function now steps,
+///     `muon_models.csv` puts the restricted radiative share of dE/dx in water at 5e-5 of the
+///     total at 1.6 GeV, 3.6e-4 at 10 GeV and 2.7e-3 at 100 TeV. Below every tolerance here.
+///
+///     The DISCRETE half is missing and is not small at high energy. Every charged hadron in
+///     QBBC carries `hBrems` and `hPairProd`, and mu+- carry `muBrems` and `muPairProd`
+///     (`ref/oracle/species_processes.csv`), and nothing below samples one. em/muon_radiative.
+///     cuh has both models' dE/dx and cross sections, exact, and neither model's
+///     `SampleSecondaries` - so the interaction length could be drawn and the final state could
+///     not be applied, which is why it is absent rather than half-wired. The mean free paths say
+///     where it starts to matter: a mu- in water at 1 GeV has a 649 m brem and 1.8 km pair
+///     length against a 6 m range, and at 10 GeV an 86 m pair length against a 58 m range - so
+///     a muon above about 10 GeV is transported here without its dominant loss channel. For
+///     pi+- pair production does not begin until 1.12 GeV and for the proton until 7.5 GeV.
+///     Pre-existing rather than new: the proton has been stepped without these two processes for
+///     as long as it has been stepped. docs/PORTED.md 1.3 and docs/RISK.md V36 carry the numbers
+///     and the reason no energy refusal was added.
 ///
 ///   * **There are no nuclear interactions.** This is EM transport: a proton here is stopped by
 ///     electrons, never by a nucleus. That is a real omission with a known size rather than an
@@ -762,7 +787,17 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     // energies, capped at the pre-step energy, and deposited locally. The guard is the model's
     // own and lives inside nuclear_stopping_dedx: above z1^2 MeV per nucleon it returns zero,
     // which is why a 100 MeV proton pays nothing for this call but a stopping one does.
-    if (e_after > real_t(0) && step_len > real_t(0)) {
+    //
+    // AND ONLY WHEN THE PHYSICS LIST REGISTERS THE PROCESS, WHICH QBBC DOES NOT.
+    //
+    // This was unconditional. `ref/oracle/species_processes.csv` lists every process on every
+    // species' process manager in the constructed QBBC and there is no `nuclearStopping` row
+    // for any of them: `G4EmParameters::maxNIELEnergy` initialises to 0.0, so
+    // G4EmStandardPhysics never constructs the process to hand out. See
+    // uses_nuclear_stopping in core/particle.cuh - which is now `false` for everything, and is
+    // still a predicate because `/process/em/setMaxNIEL` turns it on and the source's
+    // four-species split is then the right answer.
+    if (uses_nuclear_stopping(type) && e_after > real_t(0) && step_len > real_t(0)) {
       const real_t t_mean = real_t(0.5) * (e_before + e_after);
       const real_t nl = fmin(step_len * em::nuclear_stopping_dedx(mm, type, t_mean), e_before);
       if (nl > real_t(0)) {
@@ -813,6 +848,127 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
   rep.status = StepStatus::fStopAndKill;
   if (rep.process == ProcessId::fNotDefined) { rep.process = ProcessId::fBelowTrackingCut; }
   if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
+  return false;
+}
+
+/// Advances one neutral hadron - a neutron or a pi0 - by a single step.
+///
+/// A third of the length of step_hadron, and the two thirds that are missing are missing for a
+/// reason rather than for want of writing them. A neutral particle has no ionisation process,
+/// so there is no continuous loss, no range table, no step function over the residual range,
+/// no delta rays and no fluctuation; and `G4hMultipleScattering` is registered by charge, so
+/// there is no multiple scattering and therefore no true-to-geometric path conversion. What is
+/// left is what a G4Transportation-only track does: go straight until either geometry or one
+/// discrete process stops it.
+///
+/// THE ONE DISCRETE PROCESS, and why it is one rather than three. `ref/oracle/hadronic_params.
+/// csv` says `EnableNeutronGeneralProcess = 1`, and `ref/oracle/neutron_processes.csv` - dumped
+/// from the real QBBC - shows the neutron carrying `Transportation`, `Decay` and
+/// `NeutronGeneralProc` and nothing else. Elastic, inelastic and capture are sub-processes
+/// inside that one process, competing through a single summed interaction length with the
+/// winner chosen afterwards from cumulative partials. See physics/hadronic/neutron_general_xs.
+/// cuh, which holds the grid, the contract and the socket P8 fills.
+///
+/// THE TIME CUT COMES FIRST, and it is not the tracking cut it is usually described as.
+/// `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` opens with
+///
+///     if(track.GetGlobalTime() >= fTimeLimit) { fLambda = 0.0; return 0.0; }
+///
+/// - a zero interaction length, tested before the cross section is even looked up, so it beats
+/// geometry and every other limit. `PostStepDoIt` then does
+///
+///     if(0.0 == fLambda) { theTotalResult->Initialize(track);
+///                          theTotalResult->ProposeTrackStatus(fStopAndKill); return ...; }
+///
+/// and `Initialize` runs `InitializeLocalEnergyDeposit()`, which sets `theLocalEnergyDeposit`
+/// and `theNonIonizingEnergyDeposit` to zero. **So the neutron's kinetic energy is not
+/// deposited. It is discarded.** `G4NeutronKiller::PostStepDoIt` does the identical two lines
+/// for the branch where the general process is off. That is worth stating flatly because the
+/// natural assumption is the opposite - every other way a track dies in this stepper deposits
+/// what is left where it stood - and depositing it would put energy into a phantom that Geant4
+/// puts nowhere. The process exists "to kill particles to save CPU" (G4NeutronKiller.cc's own
+/// description); it is a budget, not physics, and it does not conserve energy. The engine books
+/// the discarded energy per event so that a run can say how much it lost this way rather than
+/// leaving it to be discovered as a shortfall.
+///
+/// The energy half of the cut is inert: `kineticEnergyLimit` is 0.0 and the test is
+/// `GetKineticEnergy() < kinEnergyThreshold`. See kNeutronEnergyLimit.
+///
+/// @param xs the combined table, or null. Null is the state before P8: the cross section is
+///        then zero, `s_int` is infinite, and the neutron streams to the world boundary - which
+///        is what a Geant4 neutron does with `NeutronGeneralProc` inactivated, and the only
+///        honest thing to do with a process that does not exist yet.
+template <typename real_t, typename Rng, typename Emitter>
+__device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& p,
+                                    ParticleType type,
+                                    const had::NeutronGeneralXs<real_t>* xs, Rng& rng,
+                                    Emitter& em, real_t& edep, StepReport<real_t>& rep,
+                                    vis::TrajectoryBuffer traj = vis::no_capture()) {
+  edep = real_t(0);
+  rep = StepReport<real_t>{};
+  const Vec3<real_t> pos_before = p.pos;
+  if (p.volume == geom::kOutsideWorld) { return false; }
+
+  const int mat = geom::material_at(s.geometry, p.volume, p.pos);
+  rep.material = mat;
+
+  // ---- the neutron time cut. Before geometry, before the cross section, as above.
+  //
+  // Applied to the neutron only. G4NeutronKiller::IsApplicable is
+  // `particle.GetParticleName() == "neutron"` and G4NeutronGeneralProcess exists only for the
+  // neutron, so a pi0 has no time cut - it has a 8.5e-8 ns lifetime and decays long before any
+  // clock matters, which is P4's business rather than this function's.
+  if (type == ParticleType::kNeutron
+      && p.global_time >= had::kNeutronTimeLimit<real_t>()) {
+    rep.status = StepStatus::fStopAndKill;
+    rep.process = ProcessId::fNeutronKiller;
+    // No deposit. See the note above: this is the one death in this stepper that does not
+    // hand its energy to the volume it happened in, and `edep` stays zero deliberately.
+    return false;
+  }
+
+  // ---- geometry against the one discrete interaction length.
+  int next_volume = geom::kOutsideWorld;
+  const real_t d_boundary =
+      geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
+
+  // Zero for a pi0 and for a neutron with no table, which is every run today.
+  const real_t sigma = (xs != nullptr && type == ParticleType::kNeutron)
+                           ? xs->total(mat, p.ekin) : real_t(0);
+  const real_t s_int =
+      (sigma > real_t(0)) ? -log(rng.uniform()) / sigma : geom::kInfinity<real_t>();
+
+  if (s_int >= d_boundary) {
+    // Streaming. One step, requeued unless it left the world - the same shape as step_gamma's
+    // boundary branch, including the push past the surface.
+    rep.true_length = d_boundary + geom::kPushDistance<real_t>();
+    rep.status = StepStatus::fGeomBoundary;
+    rep.process = ProcessId::fTransportation;
+    p.pos = p.pos + (d_boundary + geom::kPushDistance<real_t>()) * p.dir;
+    traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+    p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
+    return p.volume != geom::kOutsideWorld;
+  }
+
+  // ---- a sub-process fired.
+  //
+  // UNREACHABLE TODAY, and it says so in the only way the build can hear. `sigma` is zero
+  // unless a table is present, and TransportEngine::Upload refuses to hold a table without the
+  // final states to go with it - so nothing can arrive here until P8 has written both. When it
+  // has, this is where `xs->select(mat, p.ekin, rng.uniform())` chooses between elastic,
+  // inelastic and capture and the chosen model's final state is applied.
+  //
+  // Until then the step is left annotated with `fNotDefined`, which is not laziness: it is the
+  // one value `g4dose -verify-step-hook` fails the build on, and it is reserved for exactly
+  // this - a branch nobody has annotated because nobody has written it. A track reaching here
+  // is killed with its energy deposited locally, which is the conservative disposal, but the
+  // verifier refuses the run before that number can be used for anything.
+  rep.true_length = s_int;
+  rep.status = StepStatus::fStopAndKill;
+  rep.process = ProcessId::fNotDefined;
+  p.pos = p.pos + s_int * p.dir;
+  traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+  if (s.geometry.volumes[p.volume].score_index >= 0) { edep = p.ekin; }
   return false;
 }
 

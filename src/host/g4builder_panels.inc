@@ -453,8 +453,13 @@ static void RunFromGui(App& a, int n_events) {
     Log(Fmt("  WARNING: %lld track(s) abandoned, %d buffer overflow(s), %d iterations",
             stats.abandoned, stats.overflow, stats.max_iterations));
   }
+  // RunStats::peak_live, indexed by TrackSpeciesIndex, replaced the five named peak_* fields
+  // when the species set stopped being five. Still the three EM peaks here rather than sixteen
+  // numbers: this is a one-line summary in a GUI log pane, and the species a builder run
+  // produces beyond these is reported by the engine itself.
   Log(Fmt("  %lld track steps, %d iterations, peaks g/e/p %d/%d/%d", stats.track_steps,
-          stats.max_iterations, stats.peak_gamma, stats.peak_electron, stats.peak_positron));
+          stats.max_iterations, stats.peak_live[g4gpu::kSpeciesGamma],
+          stats.peak_live[g4gpu::kSpeciesElectron], stats.peak_live[g4gpu::kSpeciesPositron]));
   if (live.size() > 1) {
     for (std::size_t k = 0; k < live.size() && k < share.size(); ++k) {
       const builder::Source& ms = a.model.sources[live[k]];

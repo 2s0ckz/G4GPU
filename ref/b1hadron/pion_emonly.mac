@@ -1,0 +1,36 @@
+# Example B1 with a pi+ beam and everything QBBC gives a pion that this port does not have,
+# switched off. The P1 stage; see muon_emonly.mac beside it for why each line is here.
+#
+# `ref/oracle/species_processes.csv` for pi+: Transportation, msc (WentzelVIUni), hIoni
+# (Bragg;BetheBloch, UrbanFluc), hBrems, hPairProd, CoulombScat, Decay, hadElastic, pi+Inelastic.
+# The port has the first three.
+#
+#   hadElastic, pi+Inelastic   the hadronic processes. P5 and P9/P10/P11.
+#   Decay                      a pi+ has a 26 ns lifetime and a 200 MeV pi+ travels about 5 m in
+#                              vacuum before decaying, so in a 20 cm phantom what decays is the
+#                              STOPPED pion - which is most of them, at the end of the track.
+#                              This port stops one and leaves it stopped. P4.
+#   hBrems, hPairProd          discrete radiative, unported final states. Pair production does
+#                              not start until max(850 MeV, 8*139.57) = 1.12 GeV, and the brem
+#                              mean free path at 200 MeV in water is 1.8e6 mm, so this pair of
+#                              lines should be worth nothing here. docs/RISK.md V36.
+#   CoulombScat                unported; P14.
+#
+# 200 MeV pi+: about 25 cm of water, so it stops inside B1's envelope.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/process/inactivate hadElastic
+/process/inactivate pi+Inelastic
+/process/inactivate Decay
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/particle pi+
+/gun/energy 200 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

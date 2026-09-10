@@ -70,25 +70,144 @@ constexpr bool kFullTrackState = (G4GPU_FULL_TRACK_STATE != 0);
 /// and carry what they are.
 ///
 /// Adding a species is now: an entry here, and a kernel instantiated for it. Nothing else.
+///
+/// The first five are the order they were added in and are left alone deliberately - the
+/// per-species fan-out reservation in BeamOn is keyed on this index, and holding the five
+/// existing entries fixed is what keeps B1's scheduling, and therefore its dose to the last
+/// printed digit, unchanged by this file growing.
 enum TrackSpeciesIndex : int {
   kSpeciesGamma = 0,
   kSpeciesElectron = 1,
   kSpeciesPositron = 2,
   kSpeciesProton = 3,
   kSpeciesAlpha = 4,
-  kNumTrackSpecies = 5,
+  // Charged hadrons whose dE/dx, delta rays, radiative losses and range tables were already
+  // transcribed and checked, and which had no kernel to be stepped by.
+  kSpeciesMuonMinus = 5,
+  kSpeciesMuonPlus = 6,
+  kSpeciesPionPlus = 7,
+  kSpeciesPionMinus = 8,
+  kSpeciesKaonPlus = 9,
+  kSpeciesKaonMinus = 10,
+  kSpeciesAntiProton = 11,
+  kSpeciesDeuteron = 12,
+  kSpeciesTriton = 13,
+  // Neutral hadrons: step_neutral, not step_hadron.
+  kSpeciesNeutron = 14,
+  kSpeciesPiZero = 15,
+  kNumTrackSpecies = 16,
 };
 
 /// -1 for a particle no kernel steps. The caller decides what that means; nothing here
 /// quietly routes it somewhere plausible.
 __host__ __device__ inline int species_index(ParticleType t) {
   switch (t) {
-    case ParticleType::kGamma:    return kSpeciesGamma;
-    case ParticleType::kElectron: return kSpeciesElectron;
-    case ParticleType::kPositron: return kSpeciesPositron;
-    case ParticleType::kProton:   return kSpeciesProton;
-    case ParticleType::kAlpha:    return kSpeciesAlpha;
-    default:                      return -1;
+    case ParticleType::kGamma:      return kSpeciesGamma;
+    case ParticleType::kElectron:   return kSpeciesElectron;
+    case ParticleType::kPositron:   return kSpeciesPositron;
+    case ParticleType::kProton:     return kSpeciesProton;
+    case ParticleType::kAlpha:      return kSpeciesAlpha;
+    case ParticleType::kMuonMinus:  return kSpeciesMuonMinus;
+    case ParticleType::kMuonPlus:   return kSpeciesMuonPlus;
+    case ParticleType::kPionPlus:   return kSpeciesPionPlus;
+    case ParticleType::kPionMinus:  return kSpeciesPionMinus;
+    case ParticleType::kKaonPlus:   return kSpeciesKaonPlus;
+    case ParticleType::kKaonMinus:  return kSpeciesKaonMinus;
+    case ParticleType::kAntiProton: return kSpeciesAntiProton;
+    case ParticleType::kDeuteron:   return kSpeciesDeuteron;
+    case ParticleType::kTriton:     return kSpeciesTriton;
+    case ParticleType::kNeutron:    return kSpeciesNeutron;
+    case ParticleType::kPiZero:     return kSpeciesPiZero;
+    default:                        return -1;
+  }
+}
+
+/// The ParticleType a dispatch index steps. The inverse of species_index, and the one place
+/// the two enumerations are tied together - a kernel launch reads it to know which
+/// specialisation to call, and the engine reads it to name a species in a report.
+__host__ __device__ inline ParticleType species_of_index(int sp) {
+  switch (sp) {
+    case kSpeciesGamma:      return ParticleType::kGamma;
+    case kSpeciesElectron:   return ParticleType::kElectron;
+    case kSpeciesPositron:   return ParticleType::kPositron;
+    case kSpeciesProton:     return ParticleType::kProton;
+    case kSpeciesAlpha:      return ParticleType::kAlpha;
+    case kSpeciesMuonMinus:  return ParticleType::kMuonMinus;
+    case kSpeciesMuonPlus:   return ParticleType::kMuonPlus;
+    case kSpeciesPionPlus:   return ParticleType::kPionPlus;
+    case kSpeciesPionMinus:  return ParticleType::kPionMinus;
+    case kSpeciesKaonPlus:   return ParticleType::kKaonPlus;
+    case kSpeciesKaonMinus:  return ParticleType::kKaonMinus;
+    case kSpeciesAntiProton: return ParticleType::kAntiProton;
+    case kSpeciesDeuteron:   return ParticleType::kDeuteron;
+    case kSpeciesTriton:     return ParticleType::kTriton;
+    case kSpeciesNeutron:    return ParticleType::kNeutron;
+    case kSpeciesPiZero:     return ParticleType::kPiZero;
+    default:                 return ParticleType::kNumTypes;
+  }
+}
+
+/// What this transport does with a species when a process creates one.
+///
+/// Three answers, and the point of naming them is that the third is not the second. Before
+/// this, everything without a kernel was one case - `species_index` returned -1 and the engine
+/// counted it - so a neutrino, which QBBC deliberately does not transport, was indistinguishable
+/// from a hyperon, which this port cannot yet transport. One is the correct answer and the
+/// other is a hole, and a single counter reporting both says neither.
+enum class SpeciesDisposition : int {
+  /// A kernel exists. The track goes in the pool and is dispatched.
+  kStepped = 0,
+  /// Created, its energy booked as leaving the event, no track made. The six neutrinos, and
+  /// only because QBBC gives them no process either - see is_neutrino in core/particle.cuh
+  /// for the two conditions that make this equal to Geant4's answer rather than cheaper than
+  /// it.
+  kCounted = 1,
+  /// This port cannot transport it. Counted BY SPECIES at the point of emission and reported
+  /// at the end of the run; fatal if it arrives as a primary. Hyperons, K0L/K0S, anti-nuclei
+  /// and the b/c hadrons `G4HadronicParameters::EnableBCParticles` turns on are all here, and
+  /// a cascade will start producing them the moment one is wired.
+  kRefused = 2,
+};
+
+__host__ __device__ inline SpeciesDisposition species_disposition(ParticleType t) {
+  if (species_index(t) >= 0) { return SpeciesDisposition::kStepped; }
+  if (is_neutrino(t)) { return SpeciesDisposition::kCounted; }
+  return SpeciesDisposition::kRefused;
+}
+
+/// Output slots one step of this species may need for its secondaries.
+///
+/// This bounds the OUTPUT buffer, not the physics: the engine works out before a launch how
+/// many tracks it can afford to step, given that each stepped track needs a slot for itself
+/// plus this many for what it creates. A track it cannot afford is not dropped, it is written
+/// through unchanged and stepped next iteration.
+///
+/// It used to be one constant, four, for every species - justified because "the largest number
+/// of tracks any single step in stepper.cuh produces is three: a delta ray, then the two
+/// annihilation photons of a positron that stops". That is still true of every species that
+/// has a kernel today, so every value below is four and B1's scheduling is byte for byte what
+/// it was.
+///
+/// It is a FUNCTION OF SPECIES because of what comes next. A hadronic inelastic reaction at a
+/// few GeV emits tens of secondaries, so the neutron's and the charged hadrons' reservation
+/// has to rise when P8 wires the processes in - and raising one shared constant to 64 would
+/// divide every species' budget by sixteen. Measured on B1's own numbers, which is why this is
+/// arithmetic and not a worry: the pool holds 4 slots an event, about 2 are live, so ~2 slots
+/// an event are spare; at a reservation of 4 the budget is 0.5 tracks an event and at 64 it is
+/// 0.03, so a gamma run would step 1.6% as many tracks per iteration and need sixty times the
+/// iterations to drain. Per species, the same change costs a gamma nothing.
+///
+/// So: P8 raises the hadronic rows here and leaves the EM rows alone. The neutral row is four
+/// today because step_neutral emits nothing at all - its cross section is zero until P8 - and
+/// four rather than one only so that the row that has to change is obvious rather than special.
+__host__ __device__ inline int max_secondaries_per_step(int sp) {
+  switch (sp) {
+    case kSpeciesGamma:      return 4;  // e- + e+ from a conversion, or a photoelectron
+    case kSpeciesElectron:   return 4;  // a delta ray or a brems photon
+    case kSpeciesPositron:   return 4;  // two annihilation photons plus a delta ray
+    case kSpeciesProton:     return 4;  // one delta ray
+    case kSpeciesAlpha:      return 4;
+    default:                 return 4;  // every charged and neutral hadron: one delta ray
   }
 }
 
@@ -665,6 +784,29 @@ struct SecondaryArena {
   }
 };
 
+/// The two per-run ledgers an emitter writes to when it does NOT make a track.
+///
+/// Bundled because every stepping kernel constructs a BufferEmitter and every one of them has
+/// to be able to reach both - so this is one kernel argument rather than one per counter, and
+/// the next disposition that needs recording is one field here instead of a signature change
+/// in four kernels. Null pointers disable a ledger; the run then still reports the counts it
+/// does keep, so nothing is silently off.
+struct EmitterBooks {
+  /// Energy carried out of each event, MeV, indexed by the batch-local event id. Sized at the
+  /// batch. Written with a double atomicAdd, so the order of accumulation - and therefore the
+  /// last bits - is not reproducible, exactly as the scorer's is not.
+  double* carried_away = nullptr;
+  /// How many of each booked-not-stepped species were made, one counter per ParticleType.
+  ///
+  /// Per type rather than one total, at the same cost, because "1.4 GeV left in neutrinos" and
+  /// "1.4 GeV left in nu_mu specifically" are different amounts of evidence about a decay
+  /// chain: a pi+ decay makes a nu_mu and a mu+ decay makes a nu_e and an anti_nu_mu, so the
+  /// flavour mix is a check on the channels rather than a label on the energy.
+  int* carried_by_type = nullptr;
+  /// One counter per ParticleType, for species this port refuses to transport.
+  int* refused_by_type = nullptr;
+};
+
 /// Adapter giving the physics models the push() signature they already expect.
 ///
 /// ONE POOL, NOT ONE BUFFER PER SPECIES. This used to route each secondary into its own
@@ -678,6 +820,12 @@ struct SecondaryArena {
 /// process that starts producing a new particle needs no change here at all. Which kernel
 /// eventually steps it is decided later, by the index lists, and that is a dispatch question
 /// rather than a storage one.
+///
+/// What DOES have to be decided here is the other two dispositions, because both are answered
+/// by not making a track and a track is the only thing this function makes. A neutrino's
+/// energy is booked as leaving the event; a species this port cannot transport is counted
+/// under its own name. Neither is a `default:` and neither is silent - see
+/// SpeciesDisposition above and RunStats in host/transport_run.cuh for what is reported.
 template <typename real_t>
 struct BufferEmitter {
   /// Where every secondary goes, whatever it is.
@@ -704,8 +852,38 @@ struct BufferEmitter {
   /// the caller's StepReport, which outlives every push within the step.
   const StepReport<real_t>* report;
 
+  /// Where the two non-track dispositions are recorded. See EmitterBooks.
+  EmitterBooks books{};
+
   __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin,
                       int /*event_id*/) {
+    const SpeciesDisposition disp = species_disposition(type);
+    if (disp != SpeciesDisposition::kStepped) {
+      if (disp == SpeciesDisposition::kCounted) {  // NOLINT - see SpeciesDisposition
+        // A neutrino IS a secondary of this step as far as Geant4 is concerned, so it
+        // consumes a child index - which keeps the RNG keys of its siblings the same whether
+        // or not this transport chooses to materialise it - and it is counted in
+        // GetNumberOfSecondariesInCurrentStep. It is not put in the arena, because the arena
+        // holds (buffer, slot) pairs pointing at real tracks and there is no track. That
+        // makes the count larger than the chain for a step that emits one, which is the same
+        // relationship an arena overflow already produces and is documented at SecondaryArena.
+        ++child_count;
+        if (books.carried_away != nullptr) {
+          atomicAdd(&books.carried_away[event], static_cast<double>(ekin));
+        }
+        if (books.carried_by_type != nullptr) {
+          atomicAdd(&books.carried_by_type[static_cast<int>(type)], 1);
+        }
+        return -1;
+      }
+      // Refused. Counted under its own species so the report can name it, and NOT counted as
+      // a secondary, because the honest statement is that this step's product does not exist
+      // here rather than that it exists and was mislaid.
+      if (books.refused_by_type != nullptr) {
+        atomicAdd(&books.refused_by_type[static_cast<int>(type)], 1);
+      }
+      return -1;
+    }
     TrackState<real_t> t{};
     t.species = type;
     t.pos = pos;

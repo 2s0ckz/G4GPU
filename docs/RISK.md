@@ -4692,3 +4692,174 @@ only come from a term the width is blind to.
 Reproduced rather than corrected, because it is what the installed Geant4 computes; the
 expression the working pointer would have supplied is written out in the port beside the zero,
 so a release that fixes the order needs no rediscovery.
+
+### V43: a process the reference does not register, and two predicates that were lists
+
+Species and transport plumbing (P1 of `docs/HADRONIC_PLAN.md`): eleven charged hadrons, two
+neutral ones and six neutrinos joined the fourteen species this transport had. Nothing here is a
+rendering bug or a sampler bug. All three findings are the same shape - **a question about the
+physics list that was answered by reading Geant4's source instead of by asking the object Geant4
+built** - and the fix was the same in each case: dump the constructed `G4ProcessManager` and
+compare.
+
+#### The port has been running G4NuclearStopping. QBBC does not register it.
+
+`step_hadron` applied `G4ICRU49NuclearStoppingModel` along every step of every charged hadron,
+unconditionally, since the day the hadron stepper was written. QBBC attaches that process to no
+particle at all.
+
+Reading `G4EmStandardPhysics.cc` and `G4EmBuilder.cc` gives the opposite impression, and reading
+them carefully gives it more strongly, because the source really does contain a four-way split:
+one `G4NuclearStopping* pnuc` handed to GenericIon, then to the proton by
+`G4EmBuilder::ConstructCharged` and to the alpha and He3 by `ConstructIonEmPhysics`, passing over
+the deuteron and triton two lines above them and never reaching mu+-, pi+-, K+- or pbar. That
+split is real. It is also downstream of three lines four functions further up:
+
+```
+G4double nielEnergyLimit = param->MaxNIELEnergy();
+G4NuclearStopping* pnuc = nullptr;
+if(nielEnergyLimit > 0.0) { pnuc = new G4NuclearStopping(); ... }
+```
+
+and `G4EmParameters::Initialise` sets `maxNIELEnergy = 0.0`. So `pnuc` is null, every
+`if(nullptr != pnuc)` fails, and the elaborate split distributes nothing. The condition is not
+near the code it controls, it is not in the class the process belongs to, and it is spelled as a
+`G4double` limit rather than as a `G4bool` - three reasons why reading downward from
+`ConstructProcess` never reaches it. `ref/oracle/species_processes.csv` - one row per process on
+each species own process manager in the QBBC this project's own oracle constructs - has no
+`nuclearStopping` row for any particle, and that took one dump and no reading at all.
+
+**What it was worth.** Exactly measurable without a GPU run, because the quantity is an integral
+over the port's own tables: walk a track from E0 to 1 eV on a fine energy grid, take the step
+length from the range table, and accumulate what `step_hadron` removed. Grid-independent to six
+figures at 100,000 and 200,000 steps. In `G4_WATER`:
+
+| beam | energy through the NIEL channel | share of the primary |
+|---|--:|--:|
+| 210 MeV proton | 2.03 keV | 9.7e-6 |
+| 840 MeV alpha | 26.0 keV | 3.1e-5 |
+| 200 MeV deuteron | 5.22 keV | 2.6e-5 |
+| 200 MeV mu- | 0.21 keV | 1.1e-6 |
+
+Air is the worst of the four B1 materials and is 1.6x water. So the answer is that it changed no
+dose anyone has quoted: the model returns zero above z1^2 MeV per nucleon, so it touches only the
+last microns of a track, and the energy it removed was **deposited locally in the same volume the
+dying track would have deposited it in anyway**. What it changed is the step the deposit happened
+on and the non-ionising share of it. RESULT.md's 0.15% proton agreement is 1.5e-3 and this is
+1e-5, two orders of magnitude below it.
+
+That is the uncomfortable part, and it is why this is an entry rather than a commit message. The
+error was harmless *for the two species that were transported and the one quantity that was
+compared*, and there was no signal anywhere in this project that could have found it: the dose
+agreed, the range table agreed (nuclear stopping is deliberately not in it - see
+`hadron_total_dedx`), and no test asked which processes the physics list holds. It was found by
+dumping the process manager for an unrelated reason, while adding species. A wrong process that
+costs 1e-5 today is still a wrong process, and the next species or the next scored quantity is
+where it stops being free - `G4NIELCalculator` exists precisely because somebody scores the
+non-ionising share.
+
+`uses_nuclear_stopping` in `core/particle.cuh` now returns false for everything, and is kept as a
+predicate rather than deleted because `/process/em/setMaxNIEL <E>` turns the process on and the
+source's four-species split is then the right answer. One place to change.
+
+#### Two predicates that were lists of the species that existed when they were written
+
+`is_heavy_charged` was `t >= kMuonMinus && t < kNumTypes`. True of every species in the enum on
+the day it was written, and false the moment a neutral one was appended - a neutron and a
+neutrino both answered yes. Nothing called it, which is the only reason this is a note. An
+enum-range predicate is a claim about the ORDER of an enum, and `ParticleType`'s order is a
+storage format: it is written into every device track and into the trajectory records the viewer
+reads back, so it is append-only, so a range over it is a claim that cannot be maintained.
+
+`em::hadron_tlimit` tested `type == kMuonMinus || type == kMuonPlus` where Geant4's
+`G4BetheBlochModel::SetupParameters` tests `GetLeptonNumber() == 0`. The two agreed while the
+muons were the only leptons anything called it for. They stopped agreeing when the electron, the
+positron and six neutrinos became reachable - eight species being handed a hadron's nuclear form
+factor. Latent, because a lepton goes through Moller-Bhabha and never reaches the Bethe-Bloch
+chain; found because `ref/oracle/species_tables.csv` has a `tlimit` column and eight rows
+disagreed. The fix is one word: the property, `pd.is_lepton`, which is Geant4's own condition.
+
+Both are the same failure. A predicate that enumerates its members is a *snapshot* of a rule, and
+it is correct exactly until the set changes - which for this file is every time a package lands.
+Five per-species questions are now answered against `ref/oracle/species_processes.csv`
+(`uses_ion_ionisation`, `uses_ion_fluctuations`, `uses_wentzel_msc`, `uses_nuclear_stopping`,
+`hadron_base_particle`), and `hadron_base_particle` is transcribed as Geant4's *rule* - spin,
+then the sign of the charge - rather than as its list, which is why it comes out right for
+sigma+, sigma- and xi-, three species this port refuses to transport and therefore checks
+further than it uses.
+
+#### Recorded and not fixed: A^0.27 where the port computes Z^0.27
+
+`hadron_tlimit` divides by `pow(Z, 0.27)` where `G4BetheBlochModel::SetupParameters` divides by
+`G4NistManager::GetA27(iz)` - a table of A^0.27 for the natural-abundance atomic weight. For
+Z = 2 that is 2^0.27 = 1.206 against 4.0026^0.27 = 1.454, so the alpha's and He3's `tlimit` comes
+out **45% high** (measured 4.54e-01). They are the only species here with |charge| > 1 and
+therefore the only ones that reach the line.
+
+Not fixed, and the reason is worth stating rather than the fix being quietly skipped: `tlimit`
+binds only where the kinematic `tmax` exceeds it, which for an alpha is above about 3 TeV, and
+the correction needs 101 transcribed A(Z) values in `data/` - a file P1 does not own. So
+`tests/test_species.cu` prints it as a `gap` with its measured value and asserts on the
+twenty-two species that do agree, rather than widening one tolerance until all twenty-four pass.
+That is the distinction V29 is about: a recorded measurement of an unfinished path is evidence; a
+tolerance wide enough to cover it is not.
+
+#### The discrete radiative processes, which nobody had noticed were missing either
+
+Found while checking what else `species_processes.csv` says about the newly transported species,
+and it turned out to be about the old ones too. **Every** charged hadron in QBBC carries
+`hBrems` and `hPairProd`, and mu+- carry `muBrems` and `muPairProd`. `step_hadron` samples no
+discrete radiative interaction for any species, and the range table is ionisation only. So the
+proton has been transported without two of its registered processes for as long as it has been
+transported, exactly as it was with nuclear stopping - except that this one is a process that
+should be there rather than one that should not.
+
+The continuous half is nothing: the restricted sub-cut radiative share of dE/dx for mu- in water
+is 5e-5 of the total at 1.6 GeV, 3.6e-4 at 10 GeV and 2.7e-3 at 100 TeV. The **discrete** half is
+the whole loss channel at high energy, and the mean free paths say where it starts to matter:
+
+| mu- in water | brem mfp | pair mfp | CSDA range | P(one interaction) |
+|---|--:|--:|--:|--:|
+| 1 GeV | 649 m | 1.81 km | ~6 m | ~1% |
+| 10 GeV | 462 m | 86 m | ~58 m | ~0.8 |
+
+For pi+- the brem mean free path is 1.8e6 mm at 200 MeV and pair production does not begin until
+`max(850 MeV, 8m)` = 1.12 GeV; for the proton, 7.5 GeV. So below a GeV this is 1e-4 of a track
+and above ten GeV a muon is being transported without its dominant loss.
+
+Not closed here, and named rather than left: what is missing is
+`G4MuBremsstrahlungModel::SampleSecondaries` and `G4MuPairProductionModel::SampleSecondaries`
+(the second needs its sampling tables), which is physics and not plumbing. `docs/PORTED.md` 1.3
+carries it as `P` with these numbers. The judgement recorded here is that no energy refusal was
+added: a cap at the model's own `lowestKinEnergy` of 100 MeV would refuse the 210 MeV proton this
+project's headline result is measured on, for a process worth 1.6e-4 of that track, and a cap
+chosen per species from a mean free path is a physics-list decision rather than P1's.
+
+#### What the neutron's own process list settled
+
+Worth keeping because two packages have to build against it. `ref/oracle/neutron_processes.csv`
+says the neutron in QBBC 11.1.1 carries `Transportation`, `Decay` and `NeutronGeneralProc`
+(subtype 116, `fNeutronGeneral` - not 161, which is what reading the enum too fast gives) and
+**nothing else** - no `hadElastic`, no `neutronInelastic`, no `nCapture`, no `nKiller`. So
+`/process/inactivate hadElastic` names nothing a neutron has, the three cross sections compete
+through one summed interaction length, and the 10 us cut is two lines inside
+`PostStepGetPhysicalInteractionLength` rather than a process of its own.
+
+And that cut **deposits nothing**: `PostStepDoIt` calls `theTotalResult->Initialize(track)`,
+whose `InitializeLocalEnergyDeposit()` zeroes both deposits, then proposes `fStopAndKill`. The
+neutron's kinetic energy is discarded. Every other way a track dies in `stepper.cuh` hands its
+energy to the volume it stood in, so the natural assumption is the opposite one, and acting on it
+would put energy into a phantom that Geant4 puts nowhere. `G4NeutronKiller.cc` describes itself
+as "The process to kill particles to save CPU"; it is a budget, not physics, and it does not
+conserve energy. `RunStats::neutron_killed_energy` books it so a run can be held to an energy
+balance instead of the shortfall being found later and blamed on the transport.
+
+The grid is the other thing two packages need. `G4NeutronGeneralProcess::PreparePhysicsTable`
+builds two `G4PhysicsLogVector`s - 400 bins from 1 keV to 20 MeV, 70 more to 100 TeV - and passes
+`false` for the spline flag, so the interpolation is **linear** where the dE/dx and range tables
+in this port are splined. Two tables in one transport with different interpolation rules is
+visible only by going and reading which flag was passed, and V5 is what mismatching a grid costs.
+The partials also swap order at 20 MeV: `PostStepDoIt` tests elastic first below it and inelastic
+first above it, so the high zone's single stored partial is the inelastic one. Getting that
+backwards exchanges two cross sections that differ by a factor of a few and still looks like a
+plausible neutron.

@@ -78,6 +78,15 @@ enum class ProcessId : int {
   fSynchrotronRadiation = 27,
   fAtomicDeexcitation = 28,
   fUserDefined = 29,         ///< a process a project added that this enum does not name
+  /// The neutron time cut, which is a PROCESS and not the tracking manager's energy cut.
+  /// `G4NeutronKiller` when the physics list registers one; in 11.1.1
+  /// `EnableNeutronGeneralProcess` is 1, so it is the identical two lines inside
+  /// `G4NeutronGeneralProcess::PostStepDoIt` instead. Distinct from fBelowTrackingCut on
+  /// purpose: this one kills on the CLOCK and deposits nothing, where fBelowTrackingCut kills
+  /// on energy and deposits what is left. Folding them together would have made a step that
+  /// loses energy indistinguishable from one that gives it to a volume, which is the whole
+  /// difference between the two.
+  fNeutronKiller = 30,
 };
 
 /// G4TrackStatus. The complete Geant4 set, not the subset this transport can act on.

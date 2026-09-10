@@ -34,9 +34,14 @@
 // Then the inverse, per particle, because a round trip that does not close is a stepper that
 // loses or invents energy on every step.
 //
-// Not here: deuteron and triton. Both are in the oracle - G4EmBuilder gives them
-// G4hIonisation with the proton as base particle - and neither is in this port's ParticleType
-// yet. They are the obvious next two.
+// Deuteron and triton are here now. Both were in the oracle already - G4EmBuilder gives them
+// G4hIonisation with the proton as base particle - and neither was in this port's ParticleType.
+// They are the cleanest measurement of the scaling in this file, because their charge ratio is
+// exactly 1 and there is nothing but the mass ratio left to get wrong.
+//
+// Every species with a stepping kernel is compared: gamma and e+- have their own tables
+// elsewhere, and He3 and GenericIon are here without kernels because their numbers are right
+// and their multiple scattering is not.
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +50,9 @@
 #include <vector>
 
 #include "core/particle.cuh"
+// For species_index: whether a species has a stepping kernel, which is what decides between
+// this file's two kinds of number. See the round-trip block.
+#include "core/track_buffer.cuh"
 #include "data/materials.cuh"
 #include "physics/em/hadron_range.cuh"
 
@@ -98,6 +106,22 @@ struct Species {
   ParticleType type;
   double dedx[kNBands];
   double range[kNBands];
+  /// Limit on the range -> energy round trip, per species and measured like the two above.
+  ///
+  /// It was one number with two tiers - 2e-3 if the species is transported, 1e-2 if it is not -
+  /// and the tier was justified by the proton and the alpha, which were the only two
+  /// transported. Nine more species got kernels and two of them, anti_proton at 0.39% and
+  /// kaon- at 0.23%, walked straight through 2e-3.
+  ///
+  /// Neither is a regression and neither is a disagreement with Geant4: this check compares the
+  /// port's own range table against the port's own inverse of it, and the two are independent
+  /// cubic splines through the same points, exactly as G4LossTableBuilder's BuildRangeTable and
+  /// BuildInverseRangeTable are. The residual between them is a property of how kinked the
+  /// table is, and the negative hadrons' table in AIR is the most kinked one here - the same
+  /// undiagnosed charge-odd air anomaly the note above describes, showing up in a second
+  /// quantity. Raising the shared limit to 5e-3 would have hidden the proton's 0.066% behind
+  /// the antiproton's 0.39%; a measured column per species keeps both visible.
+  double inv;
 };
 
 // Bands: 1-10 keV, 10-100 keV, 0.1-2 MeV, 2-100 MeV, 0.1-10 GeV.
@@ -105,13 +129,23 @@ struct Species {
 // ---------------------------------------------------------------------------------------
 // TWO KINDS OF NUMBER LIVE IN THIS TABLE AND CONFUSING THEM WOULD DEFEAT THE POINT
 //
-// For **proton and alpha** - the two species this port actually transports - these are
-// tolerances. Each is the measured worst case rounded up, and a regression past it is a bug.
+// For the species this port TRANSPORTS these are tolerances. Each is the measured worst case
+// rounded up, and a regression past it is a bug. That was proton and alpha; it is now also
+// mu+-, pi+-, K+-, anti_proton, deuteron and triton, which have stepping kernels.
 //
-// For everything else they are *recorded measurements* of a path that is not finished, in the
-// same spirit as the He3 row of the version of this test that preceded it: wide enough to pass
-// today, narrow enough to notice movement, and no evidence at all that the species is right.
-// None of them is transportable - G4RunManager::CheckSpecies refuses them at the gun.
+// For He3 and GenericIon they are *recorded measurements* of a path that is not finished:
+// wide enough to pass today, narrow enough to notice movement, and no evidence at all that the
+// species is right. Both are refused at the gun by G4RunManager::CheckSpecies, and the reason
+// is multiple scattering rather than the numbers in this file - Geant4 scatters an ion by
+// Urban and em/urban_msc.cuh's stepping half is the electron's.
+//
+// **The rows did not become tolerances by being re-measured.** They are the same numbers,
+// measured when the species had no kernel, and what changed is that a species now reaching
+// them in transport makes them binding. anti_proton's 25% dE/dx in the 2-100 MeV band and
+// kaon-'s 20% in 0.1-2 MeV are the undiagnosed charge-odd air anomaly described below; those
+// two rows are wide because the physics is unexplained, and calling them tolerances does not
+// make them small. A negative hadron stopping in AIR is the case they bound, and no dose in
+// this project is scored in air.
 //
 // WHAT THE TABLE GRID BOUGHT
 //
@@ -151,7 +185,7 @@ struct Species {
 //
 // Bands: 1-10 keV, 10-100 keV, 0.1-2 MeV, 2-100 MeV, 0.1-10 GeV.
 const Species kSpecies[] = {
-    // ---- TRANSPORTED. These two are tolerances.
+    // ---- TRANSPORTED. Tolerances.
     //
     // The 2-100 MeV band is the model boundary - 2 MeV for a proton, 7.95 MeV for an alpha -
     // where Geant4's 7-bin-per-decade spline rings across the discontinuity between
@@ -160,47 +194,47 @@ const Species kSpecies[] = {
     // (20 points per decade) lands between the table's.
     {"proton", ParticleType::kProton,
      {0.002, 0.002, 0.002, 0.015, 0.002},
-     {0.002, 0.002, 0.002, 0.008, 0.002}},
+     {0.002, 0.002, 0.002, 0.008, 0.002}, 0.001},
     {"alpha", ParticleType::kAlpha,
      {0.002, 0.002, 0.002, 0.020, 0.005},
-     {0.002, 0.002, 0.002, 0.010, 0.005}},
+     {0.002, 0.002, 0.002, 0.010, 0.005}, 0.001},
 
-    // ---- NOT TRANSPORTED. Measurements, not tolerances.
+    // ---- TRANSPORTED as of the species-and-plumbing work. Same numbers, now binding.
     //
     // The positive hadrons come out at the proton's level, which is the one thing this section
     // establishes: the Bragg / Bethe-Bloch path generalises across mass with nothing
     // species-specific in it.
     {"pi+", ParticleType::kPionPlus,
      {0.002, 0.002, 0.020, 0.005, 0.002},
-     {0.002, 0.002, 0.010, 0.006, 0.002}},
+     {0.002, 0.002, 0.010, 0.006, 0.002}, 0.001},
     {"kaon+", ParticleType::kKaonPlus,
      {0.002, 0.002, 0.020, 0.010, 0.002},
-     {0.002, 0.002, 0.010, 0.010, 0.002}},
+     {0.002, 0.002, 0.010, 0.010, 0.002}, 0.001},
     // Negative hadrons, on G4ICRU73QOModel below the boundary. The 2-100 MeV band is the air
     // anomaly above; the low bands are it too, diluted.
     {"anti_proton", ParticleType::kAntiProton,
      {0.080, 0.030, 0.020, 0.250, 0.030},
-     {0.030, 0.020, 0.020, 0.150, 0.030}},
+     {0.030, 0.020, 0.020, 0.150, 0.030}, 0.005},
     {"pi-", ParticleType::kPionMinus,
      {0.030, 0.020, 0.030, 0.030, 0.020},
-     {0.020, 0.020, 0.020, 0.020, 0.020}},
+     {0.020, 0.020, 0.020, 0.020, 0.020}, 0.001},
     {"kaon-", ParticleType::kKaonMinus,
      {0.080, 0.020, 0.200, 0.100, 0.030},
-     {0.030, 0.010, 0.100, 0.090, 0.030}},
+     {0.030, 0.010, 0.100, 0.090, 0.030}, 0.003},
     // Muons: a flat 200 keV boundary rather than the mass-scaled 225 keV, and
     // G4MuBetheBlochModel above it. mu+ agrees exactly below 100 keV now; the 0.1-2 MeV band
     // straddles the boundary and mu- carries the air anomaly on top.
     {"mu+", ParticleType::kMuonPlus,
      {0.002, 0.002, 0.080, 0.010, 0.005},
-     {0.002, 0.002, 0.040, 0.020, 0.005}},
+     {0.002, 0.002, 0.040, 0.020, 0.005}, 0.001},
     {"mu-", ParticleType::kMuonMinus,
      {0.030, 0.030, 0.120, 0.030, 0.010},
-     {0.020, 0.020, 0.080, 0.040, 0.010}},
+     {0.020, 0.020, 0.080, 0.040, 0.010}, 0.002},
     // The base particle every non-alpha ion scales from. Charge 1, mass 938.2723 - and not
     // units::proton_mass_c2, which is 938.272013. Exact below 100 keV.
     {"GenericIon", ParticleType::kGenericIon,
      {0.002, 0.002, 0.005, 0.050, 0.002},
-     {0.002, 0.002, 0.002, 0.030, 0.005}},
+     {0.002, 0.002, 0.002, 0.030, 0.005}, 0.001},
     // No table of its own: scaled from GenericIon by massRatio and by an effective charge
     // recomputed at every pre-step energy, which is what G4VEnergyLossProcess does under
     // `if(isIon)` and what G4EmTableUtil::CheckIon excludes the alpha from by name. The only
@@ -215,7 +249,35 @@ const Species kSpecies[] = {
     // worse in the low ones. Only the third column is the mechanism Geant4 has.
     {"He3", ParticleType::kHe3,
      {0.002, 0.002, 0.002, 0.040, 0.005},
-     {0.002, 0.002, 0.002, 0.025, 0.010}},
+     {0.002, 0.002, 0.002, 0.025, 0.010}, 0.001},
+    // ---- deuteron and triton. TOLERANCES: both are transported now.
+    //
+    // Neither has a table of its own. G4hIonisation gives both the PROTON as their base
+    // particle - by the spin-then-charge rule in hadron_base_particle, checked against
+    // `ref/oracle/species_processes.csv`'s BaseParticle() column - so every number here is the
+    // proton's table read at E * m_p/m and rescaled. The charge ratio is exactly 1 (both carry
+    // one unit) and `uses_dynamic_effective_charge` excludes them, so what these rows measure
+    // is the MASS ratio and nothing else: 938.272013/1875.613 and 938.272013/2808.921.
+    //
+    // That makes them the cleanest test of the scaling in this file. He3's row measures the
+    // scaling too, but through an effective charge recomputed per energy, so a mass-ratio error
+    // there could hide inside a charge-ratio error. Here there is one factor and no cover for
+    // it, and the size of getting it wrong is measured rather than asserted: with
+    // hadron_mass_ratio inverted to `m/m_base`, the deuteron's range comes out 222% high at
+    // 25 MeV in air and the triton's 531% - a factor of 3.2 and 6.3 - and every one of the
+    // thirty banded limits below fires. That measurement is what makes these rows a check.
+    // Both land on the PROTON's numbers, band for band: 1.05% and 1.07% dE/dx in the
+    // 2-100 MeV band against the proton's 1.049%, 0.546% and 0.544% range against its 0.546%,
+    // and exact zeros everywhere else. That is the result worth having - away from the
+    // Bragg/Bethe-Bloch boundary the scaled table and Geant4's are the same table, and at the
+    // boundary they inherit exactly the proton's spline artefact and nothing of their own.
+    // So the limits are the proton's, not He3's.
+    {"deuteron", ParticleType::kDeuteron,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    {"triton", ParticleType::kTriton,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
 };
 
 constexpr int kNPart = static_cast<int>(sizeof kSpecies / sizeof kSpecies[0]);
@@ -396,9 +458,9 @@ int main() {
           }
         }
       }
-      const bool transported =
-          (t == ParticleType::kProton || t == ParticleType::kAlpha);
-      const double limit = transported ? 2e-3 : 1e-2;
+      // Per species and measured, like the two banded columns. See Species::inv for why the
+      // two-tier `transported ? 2e-3 : 1e-2` rule had to go.
+      const double limit = kSpecies[p].inv;
       std::printf("  %-12s worst %.4f%%  (%s)\n", kSpecies[p].name, 100 * worst,
                   where.c_str());
       if (worst > limit) {

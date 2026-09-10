@@ -51,25 +51,25 @@ class G4ParticleTable {
   }
 
  private:
+  /// Every ParticleType, under Geant4's own name for it.
+  ///
+  /// Built by walking the enum rather than by a hand-written list of `add` calls, and
+  /// g4gpu::particle_name is where the names live. There were three name tables before - this
+  /// one, a `type_of` helper in each of six tests, and the prose in
+  /// G4RunManager::CheckSpecies - and this one was the shortest: it stopped at GenericIon, so
+  /// `/gun/particle neutron` reported "unknown particle" alongside a list that was the set of
+  /// names somebody had typed rather than the set of species the port has.
+  ///
+  /// Being in this table means the name RESOLVES, not that the species is transported. A gun
+  /// set to a species with no kernel is refused by G4RunManager::CheckSpecies, which can then
+  /// say what is missing for that species - which is a better answer than "unknown particle"
+  /// for a particle Geant4 knows perfectly well.
   G4ParticleTable() {
     using g4gpu::ParticleType;
-    auto add = [&](const char* n, ParticleType t) {
-      defs_.emplace_back(new G4ParticleDefinition(n, t));
-    };
-    add("gamma", ParticleType::kGamma);
-    add("e-", ParticleType::kElectron);
-    add("e+", ParticleType::kPositron);
-    add("mu-", ParticleType::kMuonMinus);
-    add("mu+", ParticleType::kMuonPlus);
-    add("pi-", ParticleType::kPionMinus);
-    add("pi+", ParticleType::kPionPlus);
-    add("kaon+", ParticleType::kKaonPlus);
-    add("kaon-", ParticleType::kKaonMinus);
-    add("proton", ParticleType::kProton);
-    add("anti_proton", ParticleType::kAntiProton);
-    add("alpha", ParticleType::kAlpha);
-    add("He3", ParticleType::kHe3);
-    add("GenericIon", ParticleType::kGenericIon);
+    for (int t = 0; t < static_cast<int>(ParticleType::kNumTypes); ++t) {
+      const ParticleType pt = static_cast<ParticleType>(t);
+      defs_.emplace_back(new G4ParticleDefinition(g4gpu::particle_name(pt), pt));
+    }
   }
   std::vector<std::unique_ptr<G4ParticleDefinition>> defs_;
 };

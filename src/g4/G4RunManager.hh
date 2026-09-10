@@ -327,29 +327,51 @@ class G4RunManager {
   /// What this replaces: the seeding kernel chose a track buffer by species with the gamma
   /// buffer as its default, so `/gun/particle proton` transported 6 MeV gammas and printed a
   /// dose for them.
+  /// Refuses a gun set to a species this transport cannot fire, and says what is missing.
+  ///
+  /// The list of accepted species is `g4gpu::species_disposition`, not a list written here:
+  /// this function used to name five species and describe the gaps of the rest, and every
+  /// sentence of that description had gone stale - it said the muon "needs a range table",
+  /// which landed months ago, and that He3's ion scaling "is not transcribed", which it now is.
+  /// A guard that repeats a fact is a guard that will contradict it.
   void CheckSpecies(const g4gpu::Source<G4double>& src) const {
-    if (src.particle == g4gpu::ParticleType::kGamma
-        || src.particle == g4gpu::ParticleType::kElectron
-        || src.particle == g4gpu::ParticleType::kPositron
-        || src.particle == g4gpu::ParticleType::kProton
-        || src.particle == g4gpu::ParticleType::kAlpha) {
-      return;
-    }
+    using g4gpu::ParticleType;
+    using g4gpu::SpeciesDisposition;
+    const ParticleType t = src.particle;
+    if (g4gpu::species_disposition(t) == SpeciesDisposition::kStepped) { return; }
     const G4String name = (gun_ != nullptr) ? gun_->GetParticleName() : G4String("?");
+
+    if (g4gpu::is_neutrino(t)) {
+      std::printf(
+          "\nFATAL: \"%s\" is not a primary this transport will fire.\n"
+          "  QBBC registers no process for a neutrino - only G4Transportation - so every\n"
+          "  event would cross the world depositing exactly nothing, and the run would print\n"
+          "  a dose of zero that looks like a measurement. A neutrino made by a DECAY has its\n"
+          "  energy booked as carried out of the event; as a primary there is nothing else in\n"
+          "  the event for that book to balance against.\n",
+          name.c_str());
+      std::exit(2);
+    }
+
     std::printf(
         "\nFATAL: \"%s\" is not transported.\n"
-        "  This transport carries gamma, e-, e+, proton and alpha. Other hadrons and ions\n"
-        "  are not stepped, and the reason differs by species:\n"
         "\n"
-        "    He3 and generic ions - G4ionIonisation scales a non-alpha ion from a base\n"
-        "      particle's table by an effective charge squared and a mass ratio, and that\n"
-        "      scaling is not transcribed. Its dE/dx here is wrong by a factor of twelve\n"
-        "      (tests/test_hadron_range.cu records the number rather than hiding it).\n"
-        "    muons, pions, kaons - dE/dx, delta rays and the radiative processes are all\n"
-        "      transcribed and checked (tests/test_muon.cu, test_hadron_radiative.cu), but\n"
-        "      no range table is built for them and step_hadron needs one. This is the\n"
-        "      smallest gap of the three.\n"
-        "    neutrons - need hadronic interactions, which this port does not have at all.\n"
+        "  Stepped today: gamma, e-, e+, mu-, mu+, pi+, pi-, kaon+, kaon-, proton,\n"
+        "  anti_proton, deuteron, triton, alpha, neutron, pi0.\n"
+        "\n"
+        "  What each remaining species needs:\n"
+        "\n"
+        "    He3, GenericIon - the dE/dx, the effective-charge scaling and the range table\n"
+        "      are all in place (em/hadron_range.cuh, tests/test_hadron_range.cu). What is\n"
+        "      missing is multiple scattering: G4EmBuilder gives every ion a\n"
+        "      G4hMultipleScattering with no model, so Geant4 scatters them by URBAN, and\n"
+        "      em/urban_msc.cuh's stepping half is transcribed for e-/e+ only. The alpha,\n"
+        "      the deuteron and the triton are transported with WentzelVI in its place and\n"
+        "      that substitution is measured (docs/PORTED.md 1.1); it is not extended to a\n"
+        "      fully stripped heavy ion, where the two models differ by much more.\n"
+        "    hyperons, K0L, K0S, anti-nuclei, b/c hadrons - no transport and no physics.\n"
+        "      They are reachable only through a cascade, and a cascade that emits one has\n"
+        "      it counted by name and reported rather than dropped (see RunStats).\n"
         "\n"
         "  Refusing rather than transporting \"%s\" as something it is not.\n",
         name.c_str(), name.c_str());

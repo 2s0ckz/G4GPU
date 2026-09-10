@@ -44,9 +44,16 @@ __host__ __device__ inline real_t hadron_max_secondary_energy(const ParticleDef<
 /// hadrons and ions; leptons keep tlimit = infinity).
 template <typename real_t>
 __host__ __device__ inline real_t hadron_tlimit(const ParticleDef<real_t>& pd,
-                                                ParticleType type) {
-  const bool is_lepton = (type == ParticleType::kMuonMinus || type == ParticleType::kMuonPlus);
-  if (is_lepton) { return real_t(1e30); }
+                                                ParticleType /*type*/) {
+  // `pd.is_lepton`, which is `G4ParticleDefinition::GetLeptonNumber() != 0` - Geant4's own
+  // condition. This read `type == kMuonMinus || type == kMuonPlus` instead: the two leptons
+  // that were the only ones anything called this for, spelled as a list rather than as the
+  // property. The list did not survive the species set growing - an electron, a positron and
+  // all six neutrinos are leptons with a lepton number and were being handed a hadron's
+  // nuclear form factor. Latent, because none of them reaches the Bethe-Bloch chain (a lepton
+  // goes through Moller-Bhabha), and found only because
+  // ref/oracle/species_tables.csv carries a tlimit column and eight rows disagreed.
+  if (pd.is_lepton) { return real_t(1e30); }
   const real_t me = units::electron_mass_c2<real_t>();
   real_t x = real_t(842.6);  // 0.8426 GeV, in MeV
   if (pd.spin == real_t(0) && pd.mass < real_t(1000)) {

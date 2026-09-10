@@ -38,7 +38,7 @@ table below is marked with whether the class is in QBBC's chain at all.
 | G4eBremsstrahlungRelModel | y | **T** | `em/brems_rel.cuh` |
 | G4ModifiedTsai | y | **T** | `em/electron_processes.cuh` |
 | G4eeToTwoGammaModel | y | **T** | `em/annihilation.cuh` |
-| G4UrbanMscModel | y | **P** | `em/urban_msc.cuh`, `data/urban_msc_tables.cuh`. The cross section is general across mass and charge and exact for all eight species dumped (`tests/test_urban_general.cu`, 41,952 points, 6.7e-16). The *stepping* half is still the electron's: `ComputeTruePathLengthLimit`'s `fUseSafety` branch only, with the lepton `facrange` of 0.04. An ion needs `fMinimal`, `facrange` 0.2, no lateral displacement, and the `mass >= masslimite` path - so alpha and He3 still scatter here by WentzelVI, which is the wrong model for them. |
+| G4UrbanMscModel | y | **P** | `em/urban_msc.cuh`, `data/urban_msc_tables.cuh`. The cross section is general across mass and charge and exact for all eight species dumped (`tests/test_urban_general.cu`, 41,952 points, 6.7e-16). The *stepping* half is still the electron's: `ComputeTruePathLengthLimit`'s `fUseSafety` branch only, with the lepton `facrange` of 0.04. An ion needs `fMinimal`, `facrange` 0.2, no lateral displacement, and the `mass >= masslimite` path - so the species Geant4 scatters by Urban are scattered here by WentzelVI instead. `uses_wentzel_msc` in `core/particle.cuh` is where that substitution is now decided and named: correct for mu±, pi±, K±, p, pbar; a substitution for alpha, He3, GenericIon and - since they gained kernels - deuteron and triton. |
 | G4WentzelVIModel | y | **T** | `em/wentzel_msc.cuh` |
 | G4WentzelOKandVIxSection | y | **T** | `em/wentzel_xs.cuh` |
 | G4ScreeningMottCrossSection | y | **T** | `data/mott.hh` (the Mott/Rutherford ratio inside WentzelVI) |
@@ -46,13 +46,13 @@ table below is marked with whether the class is in QBBC's chain at all.
 | G4BraggIonModel | y | **T** | `em/bragg.cuh` |
 | G4BetheBlochModel | y | **T** | `em/hadron_ionisation.cuh` |
 | G4UniversalFluctuation | y | **T** | `em/fluctuation.cuh` |
-| G4NuclearStopping / G4ICRU49NuclearStoppingModel | y | **T** | `em/nuclear_stopping.cuh` |
+| G4NuclearStopping / G4ICRU49NuclearStoppingModel | **opt** | **T** | `em/nuclear_stopping.cuh`. **The QBBC column was `y` and is wrong.** `G4EmStandardPhysics::ConstructProcess` builds the process only `if(param->MaxNIELEnergy() > 0.0)`, and `G4EmParameters::Initialise` sets `maxNIELEnergy = 0.0` - so `pnuc` is null and no species gets it. `ref/oracle/species_processes.csv`, one row per process on each species' own manager in the constructed QBBC, carries no `nuclearStopping` row for any particle. `/process/em/setMaxNIEL <E>` turns it on, which is why this is `opt`. `step_hadron` applied it unconditionally; `uses_nuclear_stopping` in `core/particle.cuh` is now the one place that decides, and it says no. |
 | G4PSTARStopping, G4ASTARStopping, G4NISTStoppingData | y | **T** | `data/nist_stopping.hh` |
 | G4SauterGavrilaAngularDistribution | y | **T** | `data/photoelectric_data.cuh` |
 | G4MottData, G4SBBremTable | y | **T** | `data/mott.hh`, `data/brems_data.cuh` |
 | G4IonFluctuations | y | **T** | `em/ion_fluctuation.cuh`, `data/yang_fluctuation.hh` - the alpha's and every ion's fluctuation model |
 | G4Pow (powA / logX / expA) | y | **T** | `data/g4pow.hh` - Geant4's own expansions, not `std::pow` |
-| G4ICRU73QOModel | y | **V** | `em/icru73qo.cuh`, and now in the dispatch and the range tables for every negative hadron. Needs pi-/K-/pbar *transport*, which is buffer plumbing rather than physics. |
+| G4ICRU73QOModel | y | **T** | `em/icru73qo.cuh`. In the dispatch, the range tables and now the transport: pi-, K-, pbar and mu- have kernels. The plumbing that was missing is done; what the model's own numbers still carry is the charge-odd air anomaly in `tests/test_hadron_range.cu` (pbar 25% and K- 20% in one band, in `G4_AIR` only). |
 | **G4CoulombScattering** | **y** | **-** | discrete single scattering, registered next to WentzelVI for every hadron and for e± above 100 MeV |
 | **G4eCoulombScatteringModel / G4hCoulombScatteringModel** | **y** | **-** | its models; the shared `G4WentzelOKandVIxSection` engine under them *is* ported |
 | G4eIonisation, G4hIonisation, G4ionIonisation | y | **P** | process classes; their `AlongStepDoIt`, model selection, base-particle scaling and per-step effective charge are inlined in `stepper.cuh` and `em/hadron_range.cuh` rather than existing as classes. All three processes' model dispatch is complete: Bragg / BraggIon / ICRU73QO / BetheBloch / MuBetheBloch, chosen by process rather than by charge magnitude. |
@@ -91,10 +91,11 @@ table below is marked with whether the class is in QBBC's chain at all.
 
 | Geant4 class | QBBC | | Where |
 |---|:--:|:--:|---|
-| G4MuBetheBlochModel | y | **V** | `em/hadron_ionisation.cuh` (`tests/test_muon.cu`) |
-| G4MuBremsstrahlungModel | y | **V** | `em/muon_radiative.cuh` |
-| G4MuPairProductionModel | y | **V** | `em/muon_radiative.cuh` |
-| G4MuIonisation, G4MuBremsstrahlung, G4MuPairProduction, G4MuMultipleScattering | y | **P** | process wrappers. mu± now have their own dE/dx and range tables on Geant4's grid, with the flat 200 keV model boundary and G4MuBetheBlochModel above it; they are still refused at the gun, for want of a track buffer rather than for want of physics. |
+| G4MuBetheBlochModel | y | **T** | `em/hadron_ionisation.cuh` (`tests/test_muon.cu`). mu± are transported. |
+| G4MuBremsstrahlungModel | y | **V** | `em/muon_radiative.cuh`. dE/dx and cross section per volume, exact; **no `SampleSecondaries`**, so the discrete process is not wired - see the row below. |
+| G4MuPairProductionModel | y | **V** | `em/muon_radiative.cuh`. Same: the numbers, not the final state. |
+| G4MuIonisation, G4MuMultipleScattering | y | **T** | mu± have their own dE/dx and range tables on Geant4's grid, with the flat 200 keV model boundary and G4MuBetheBlochModel above it, a kernel each (`kSpeciesMuonMinus`, `kSpeciesMuonPlus`) and the gun accepting them. |
+| **G4MuBremsstrahlung, G4MuPairProduction** (and **G4hBremsstrahlung, G4hPairProduction**, 1.4) | **y** | **P** | The **discrete** radiative processes, and the one gap the muon's transport makes reachable. `step_hadron` samples no discrete radiative interaction for any species, and the range table is ionisation only (`hadron_total_dedx`). Measured, in `G4_WATER`, from `ref/oracle/muon_models.csv` and `hadron_radiative.csv`: the omitted *continuous* restricted share of dE/dx for mu- is 5e-5 at 1.6 GeV, 3.6e-4 at 10 GeV and 2.7e-3 at 100 TeV - below every tolerance in the port. The omitted *discrete* process is the one that matters: mu- at 1 GeV has a 649 m brem and 1.8 km pair mean free path against a 6 m range (P ~ 1%), and at 10 GeV an 86 m pair mean free path against a 58 m range (P ~ 0.8). So a muon above about 10 GeV in water is transported without its dominant loss channel. For pi± the brem mean free path is 1.8e6 mm at 200 MeV and pair production does not start until max(850 MeV, 8m) = 1.12 GeV; for the proton, 7.5 GeV. **Pre-existing** - the proton has carried `hBrems`/`hPairProd` unwired since it was transported - and not P1's to close: what is missing is two `SampleSecondaries`, which is physics. See docs/RISK.md. |
 | G4ModifiedMephi | y | - | angular generator for muon secondaries |
 | G4ePairProduction, G4MuonToMuonPairProduction, G4MuonToMuonPairProductionModel | y | - | |
 | G4EnergyLossForExtrapolator, G4TablesForExtrapolator, G4ErrorEnergyLoss | n | - | error propagation, not transport |
@@ -153,6 +154,7 @@ physics lists.
 | G4ComponentBarNucleonNucleusXsc | **P** | `hadronic/barashenkov_xs.cuh` |
 | G4PiData (the interpolation it calls) | **T** | same |
 | G4BarashenkovData (the tables) | **T** | `data/barashenkov.hh`, 17 elements, 776 points |
+<<<<<<< HEAD
 | G4NuclearRadii (all 7 radii + both CoulombFactor) | **V** | `hadronic/xs/nuclear_radii.cuh` |
 | G4NucleiPropertiesTableAME12 / G4NucleiProperties | **P** | `data/nuclei_mass_ame12.hh`, 3353 nuclides |
 | G4PhysicsVector / LogVector / LinearVector (evaluation) | **V** | `hadronic/xs/physics_vector.cuh` |
@@ -176,6 +178,8 @@ physics lists.
 | G4HadXSHelper::FillPeaksStructure | **V** | checked in `tests/test_particlexs.cu`; P5 owns the port |
 | G4ComponentSAIDTotalXS | **-** | not reachable - see below |
 | G4ComponentAntiNuclNuclearXS | **-** | refused by name in `hadronic/xs/refusal.cuh` |
+=======
+| G4NeutronGeneralProcess | **P** | `hadronic/neutron_general_xs.cuh` and `step_neutral` in `physics/stepper.cuh`. The *shape* of the process, not its numbers: `EnableNeutronGeneralProcess` is 1 in 11.1.1, so a neutron has one discrete interaction length over elastic + inelastic + capture summed and picks the sub-process from cumulative partials afterwards, and `G4NeutronTrackingCut::ConstructProcess` returns early so the 10 us cut lives inside it. Ported: the grid `PreparePhysicsTable` builds (400 log bins 1 keV - 20 MeV, 70 more to 100 TeV, **linear** interpolation - the spline flag is `false`), the `G4PhysicsVector::LogVectorValue` lookup, the sub-process choice including the **order swap** either side of 20 MeV, and the time cut with its energy half correctly inert. Not ported: the table's contents (P2) and the final states (P8). The pointer is null, the cross section is zero, and a neutron streams to the world boundary or dies on the clock - which is what a Geant4 neutron does with `NeutronGeneralProc` inactivated. `Upload` refuses a table without final states. |
 
 Nucleon-nucleus total, inelastic and elastic, Z = 2..92, 14 MeV - 1 TeV, protons and neutrons,
 agreeing with Geant4 to **2e-15 over 10,738 points** (`tests/test_nucleon_xs.cu`).
@@ -217,7 +221,7 @@ with their 9,415 grid nodes, and `G4HadXSHelper`'s peak structure. The four that
 | `BGGNucleonInelasticXS` | 8.6e-16 | the same |
 
 Bit-exactness took three fixes, all of them constants and none of them physics; see docs/RISK.md
-V39.
+V44.
 
 **V and not T** for all of it, for the same reason `barashenkov_xs.cuh` is: these are cross
 sections with no process attached. P5 and P8 wire them.
@@ -350,7 +354,7 @@ Tests: `test_deex_nuclear.cu`, `test_deex_levels.cu`, `test_deex_probs.cu`,
 | `G4IonPhysicsXS` | `G4ParticleInelasticXS`, `G4BinaryLightIonReaction` | **none** |
 | `G4IonElasticPhysics` | `G4ComponentGGNuclNuclXsc`, `G4NuclNuclDiffuseElastic` | **none** |
 | `G4StoppingPhysics` | `G4HadronStoppingProcess`, `G4HadronicAbsorptionBertini`, `G4HadronicAbsorptionFritiof`, `G4MuonMinusCapture`, `G4EmCaptureCascade` | **none** |
-| `G4NeutronTrackingCut` | `G4NeutronKiller` | **none** (trivial, but absent) |
+| `G4NeutronTrackingCut` | `G4NeutronKiller` | **P** - and the class is not the answer. With `EnableNeutronGeneralProcess = 1` this constructor `return`s without creating a `G4NeutronKiller`; the cut is the two lines at the top of `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`. Ported in `step_neutral`, before geometry and before the cross section, and it **deposits nothing** - `theTotalResult->Initialize(track)` zeroes both energy deposits, so the neutron's kinetic energy is discarded rather than given to the volume. The engine books it (`RunStats::neutron_killed_energy`) because Geant4 does not conserve energy across this either and the only way anyone finds out is a printed number. |
 | `G4EmExtraPhysics` | gamma-nuclear (`G4GammaNuclearXS`, `G4LowEGammaNuclearModel`, LEND), electro- and muon-nuclear (`G4ElectroVDNuclearModel`, `G4MuonVDNuclearModel`), 18 neutrino classes, `G4SynchrotronRadiation`, `G4AnnihiToMuPair`, `G4GammaConversionToMuons`, `G4eeToHadrons`, `G4MuonToMuonPairProduction` | **none** |
 
 ### 2.3 The model tree, by size
@@ -498,6 +502,14 @@ cannot forget silently.
 
 Wiring (P8) still owes: a `ParticleType` for each PDG code, the process in the stepper's
 at-rest and post-step queues, and the competition above.
+
+**That moment has arrived.** pi±, K±, mu±, the triton and the neutron all have stepping kernels
+now and all five are unstable (`ref/oracle/species_tables.csv` carries each one's lifetime and
+`stable` flag; `species_processes.csv` shows the `Decay` process on each). In this port they
+stop and stay stopped. It is loud rather than silent - `QBBC.hh`'s banner says "no decay" for
+every species it lists, and the `ProcessId::fDecay` slot has been reserved since before any of
+them was transported - but it is a real difference from Geant4 for any run that stops one of
+them, and it is the largest of the gaps P1 leaves behind. P4 is the package; P8 wires it.
 
 ---
 

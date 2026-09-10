@@ -150,8 +150,43 @@ struct RunStats {
   /// exact regardless. Zero in every run of this project's pipeline; if it is not zero, raise
   /// the arena with SetSecondaryArenaCapacity.
   long long secondary_overflow = 0;
-  int peak_gamma = 0, peak_electron = 0, peak_positron = 0;
-  int peak_proton = 0, peak_alpha = 0;
+  /// Peak live tracks of each species, indexed by TrackSpeciesIndex.
+  ///
+  /// Five named fields before - peak_gamma through peak_alpha - which is the shape that has to
+  /// be edited every time a species is added, in a struct whose whole job is to report on a
+  /// run whose species set is not fixed. An array and species_of_index() name themselves.
+  int peak_live[kNumTrackSpecies] = {};
+  /// Energy carried out of each event by particles this transport books rather than steps -
+  /// the neutrinos - in MeV, one entry per event of the whole run. Empty when nothing made one.
+  ///
+  /// Per event because that is the only form in which it is checkable: a shower's balance is
+  /// `deposited + escaped + carried away = primary energy`, and a run total cannot be held
+  /// against a single primary. See BufferEmitter::carried_away.
+  std::vector<double> carried_away;
+  /// How many were made of each flavour, and the total energy, so a run that made none says so
+  /// rather than reporting a zero that could equally mean the accounting is off. Indexed by
+  /// ParticleType.
+  long long carried_by_species[static_cast<int>(ParticleType::kNumTypes)] = {};
+  long long carried_away_n = 0;
+  double carried_away_total = 0;
+  /// Secondaries this port refuses to transport, counted at the point of emission and indexed
+  /// by ParticleType so the report names each one. Hyperons, K0L/K0S, anti-nuclei, b/c hadrons.
+  ///
+  /// Non-zero is not an error in the sense that the run failed - it is an error in the sense
+  /// that the answer is missing those particles' energy, and it says which particles. A primary
+  /// of a refused species never gets this far: BeamOn ends the run instead.
+  long long refused_by_species[static_cast<int>(ParticleType::kNumTypes)] = {};
+  long long refused_total = 0;
+  /// Energy discarded by the neutron time cut, MeV, and how many neutrons it killed.
+  ///
+  /// Separate from `carried_away` because it is a different kind of loss and conflating them
+  /// would hide both. A neutrino's energy leaves the event because it physically leaves; a
+  /// neutron aged past 10 us has its energy DELETED, by a process whose stated purpose is to
+  /// save CPU (`G4NeutronKiller.cc`: "The process to kill particles to save CPU"). Geant4 does
+  /// the same thing and also does not conserve energy across it - see step_neutral - so
+  /// reproducing it is right and reporting it is the only way anyone finds out.
+  long long neutron_killed_n = 0;
+  double neutron_killed_energy = 0;
   long long abandoned = 0;
   int overflow = 0;
 };
@@ -395,19 +430,47 @@ class TransportEngine {
   /// pool's business only in so far as each carries its own species.
   DeviceTracks<real_t> tracks_[2];
 
-  /// Per-species index lists into tracks_, rebuilt every iteration by build_species_lists.
+  /// ONE index list per side, bucketed by species. Rebuilt every iteration.
   ///
-  /// Dispatch still needs each species contiguous - a warp whose threads take different physics
-  /// paths serialises through all of them - and this is what provides it. Four bytes a slot
-  /// against 232, and it buys the separation between how tracks are STORED and how they are
-  /// DISPATCHED that the five buffers used to conflate.
-  int* idx_[2][kNumTrackSpecies] = {};
-  /// The same five pointers, in device memory, because the scatter kernel indexes them.
-  int** d_idx_[2] = {};
-  /// How many tracks each list holds; kNumTrackSpecies ints per side, read back each iteration.
+  /// Dispatch needs each species contiguous - a warp whose threads take different physics paths
+  /// serialises through all of them - and this is what provides it. It used to be one ARRAY per
+  /// species, each sized at the whole pool because any one species may in principle be all of
+  /// it, and that made the memory cost of naming a species `4 * pool` bytes a side. With five
+  /// species that was 40 bytes on top of a 236-byte slot, which was worth not thinking about.
+  /// With sixteen it is 128, a 54% surcharge on the track arena and therefore a 35% smaller
+  /// batch - paid by a gamma run that will never see a kaon.
+  ///
+  /// A counting sort removes the dependence entirely: one array of `pool_` ints, a histogram
+  /// pass, a host-side prefix sum, and a scatter pass that writes each species into its own
+  /// contiguous range. Four bytes a slot for any number of species. The cost is a second kernel
+  /// launch per iteration - B1 drains in about 110 of them, at a few microseconds each, against
+  /// a batch that takes some hundreds of milliseconds.
+  int* idx_[2] = {};
+  /// kNumTrackSpecies ints per side, used twice per iteration: as the histogram, read back to
+  /// the host to build the offsets, then zeroed and reused as the scatter cursors. One
+  /// allocation, and the offsets travel to the scatter kernel as a by-value argument rather
+  /// than through a third buffer.
   int* idx_n_[2] = {};
-  /// Tracks whose species no kernel steps. Counted, never quietly routed somewhere plausible.
+  /// Tracks whose species no kernel steps. A tripwire rather than an accounting line: the
+  /// emitter refuses such a species before it can be appended and BeamOn refuses it as a
+  /// primary, so anything counted here got past both guards.
   int* d_unknown_ = nullptr;
+  /// Energy carried out of each event by a booked-not-stepped species. batch_ doubles.
+  double* d_carried_away_ = nullptr;
+  /// Counts of booked-not-stepped secondaries by ParticleType, and refused ones. Both written
+  /// at emission by BufferEmitter::push through EmitterBooks.
+  int* d_carried_n_ = nullptr;
+  int* d_refused_ = nullptr;
+  /// Energy and count discarded by the neutron time cut. Two words, written by run_step_neutral.
+  double* d_killed_energy_ = nullptr;
+  int* d_killed_n_ = nullptr;
+  /// The neutron's combined cross-section table, or null.
+  ///
+  /// Null in every run today and that is the state the port is in, not a switch: P2 produces
+  /// the four cross sections and P8 sums them onto G4NeutronGeneralProcess's grid and writes
+  /// the final states. See physics/hadronic/neutron_general_xs.cuh for the contract, and the
+  /// refusal in Upload() for why a table without final states is not an allowed state.
+  had::NeutronGeneralXs<real_t>* d_neutron_xs_ = nullptr;
 };
 
 

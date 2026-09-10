@@ -1,0 +1,44 @@
+# Example B1 with a neutron beam and NeutronGeneralProc switched off - the state this port's
+# neutron is in until P8 wires the sub-processes and P2 supplies their cross sections.
+#
+# ONE inactivation, and that is the whole point of the macro. `ref/oracle/neutron_processes.csv`
+# says the neutron in QBBC 11.1.1 carries exactly three processes:
+#
+#     Transportation        type 1  subtype 91
+#     Decay                 type 6  subtype 201
+#     NeutronGeneralProc    type 4  subtype 116
+#
+# With `EnableNeutronGeneralProcess = 1` the elastic, inelastic and capture processes are
+# sub-processes inside that one, and `G4NeutronTrackingCut::ConstructProcess` returns before it
+# can create a `G4NeutronKiller`. So `/process/inactivate hadElastic` names nothing a neutron
+# has, `/process/inactivate nCapture` names nothing, and `/process/inactivate nKiller` names
+# nothing - inactivating the general process is the only way to get the EM-only column for a
+# neutron, and it takes the 10 us time cut off with it.
+#
+# Decay is left ON deliberately: a free neutron's lifetime is 880 s, so at any energy that
+# reaches the far side of a 20 cm phantom the decay length is astronomical and the process is
+# inert. Inactivating an inert process would make this macro differ from Geant4's default for no
+# reason. `species_tables.csv` carries the lifetime if anyone wants to check that claim.
+#
+# WHAT THIS SHOULD SHOW. A neutron with no cross section is a G4Transportation-only track: it
+# crosses the world in a straight line and leaves with its full kinetic energy, depositing
+# nothing anywhere. B1's scoring volume should read exactly zero, and that zero is a real
+# prediction rather than an absence - the same run with the process ACTIVE deposits, which is
+# what makes it a check. Run this pair and the difference is the whole of the neutron's hadronic
+# physics for this geometry.
+#
+# The port's side: `species_disposition` reports the neutron as stepped, `step_neutral` is handed
+# a null table, and its cross section is zero. `TransportEngine::Upload` refuses a table without
+# final states, so this cannot silently become a half-wired run.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 0
+
+/process/inactivate NeutronGeneralProc
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 2000
+/run/beamOn 10000

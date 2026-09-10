@@ -178,17 +178,50 @@ __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
 ///
 /// A species with no kernel gets index -1 from species_index and is counted rather than
 /// scattered. Nothing routes it somewhere plausible; the engine reports it.
+///
+/// TWO PASSES, NOT ONE, and one array instead of one per species. The previous version wrote
+/// straight into `lists[sp]`, an array per species each sized at the whole pool - so naming a
+/// sixteenth species cost `4 * pool` bytes a side whether any run ever produced one. A counting
+/// sort pays four bytes a slot for any number of species: histogram here, prefix sum on the
+/// host (it already reads the counts back to size the launches), scatter below.
+///
+/// The scatter's offsets travel as a by-value argument rather than a third device buffer, which
+/// is why SpeciesOffsets exists: sixteen ints is 64 bytes against a 4 KB kernel parameter
+/// space, and a buffer would need its own allocation, upload and lifetime.
 template <typename real_t>
-__global__ void build_species_lists(TrackBuffer<real_t> pool, int n, int* const* lists,
-                                    int* counts, int* unknown) {
+__global__ void count_species(TrackBuffer<real_t> pool, int n, int* counts, int* unknown) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   const int sp = species_index(static_cast<ParticleType>(pool.species[i]));
   if (sp < 0) {
+    // A tripwire, not an accounting line. BufferEmitter::push refuses a species with no kernel
+    // before it can be appended, and BeamOn refuses one as a primary, so a track reaching here
+    // got past both - which is a hole in the guards rather than a particle to be counted.
     atomicAdd(unknown, 1);
     return;
   }
-  lists[sp][atomicAdd(&counts[sp], 1)] = i;
+  atomicAdd(&counts[sp], 1);
+}
+
+/// Start of each species' contiguous range in the one index list.
+struct SpeciesOffsets {
+  int base[kNumTrackSpecies];
+};
+
+/// Writes each track's pool slot into its own species' range.
+///
+/// `cursors` is the same allocation the histogram used, zeroed again - it is a per-species
+/// bump counter now rather than a count. Reusing it is not a saving worth making on its own;
+/// what it avoids is a second `kNumTrackSpecies`-sized buffer whose only distinguishing
+/// feature would be which of the two passes wrote it.
+template <typename real_t>
+__global__ void scatter_species(TrackBuffer<real_t> pool, int n, int* list,
+                                SpeciesOffsets off, int* cursors) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  const int sp = species_index(static_cast<ParticleType>(pool.species[i]));
+  if (sp < 0) { return; }  // already counted by count_species
+  list[off.base[sp] + atomicAdd(&cursors[sp], 1)] = i;
 }
 
 template <typename real_t, typename StepHook>
@@ -196,7 +229,7 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
                                TrackBuffer<real_t> out, int n, int batch, double* score,
                                double* voxel_score,
                                int n_step, vis::TrajectoryBuffer traj, int* status_warn,
-                               SecondaryArena sec, StepHook hook) {
+                               SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   // Beyond the throttle this track is not stepped; it is written on unchanged and waits for
@@ -241,7 +274,7 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0u);
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep};
+                           0u, p.global_time, p.weight, sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -318,7 +351,7 @@ __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, con
                                 TrackBuffer<real_t> out, int n, int batch, double* score,
                                 double* voxel_score,
                                 int n_step, vis::TrajectoryBuffer traj, int* status_warn,
-                                SecondaryArena sec, StepHook hook) {
+                                SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   // Through the index list: `i` walks this species' run, `idx[i]` is where that track
@@ -350,7 +383,7 @@ __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, con
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0x5A5Au);
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep};
+                           0u, p.global_time, p.weight, sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -433,7 +466,7 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
                                 TrackBuffer<real_t> out, int n, int batch, double* score,
                                 double* voxel_score, int n_step,
                                 vis::TrajectoryBuffer traj, int* status_warn,
-                                SecondaryArena sec, StepHook hook) {
+                                SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   // Through the index list: `i` walks this species' run, `idx[i]` is where that track
@@ -466,7 +499,7 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0xB19Du);
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep};
+                           0u, p.global_time, p.weight, sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -531,6 +564,125 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   // A stepping action may have killed the track. Its request is resolved here rather than
   // inside the hook so that every kernel does it identically, and anything this transport
   // cannot honour is counted rather than quietly reinterpreted.
+  const bool requeue = resolve_track_status<real_t>(alive, p.status);
+  if (status_warn != nullptr && is_unsupported_track_status(p.status)) {
+    atomicAdd(status_warn, 1);
+  }
+  if (requeue) { out.append(p); }
+}
+
+/// One step of one neutral hadron - a neutron or a pi0.
+///
+/// The same frame as the three kernels above, and it is worth saying why it is a fourth kernel
+/// rather than a branch inside run_step_hadron: step_neutral shares no code with step_hadron at
+/// all. No range table, no step function, no fluctuation, no MSC, no delta ray. A warp holding
+/// both would run the union of the two and pay for the half its threads skipped, which is the
+/// same argument that made one kernel per species the rule in the first place.
+///
+/// @param neutron_xs the combined cross-section table, or null. Passed as a parameter rather
+///        than carried on the Scene deliberately: it makes the one call site that can turn the
+///        neutron's physics on visible in this file, and it keeps the field out of Scene until
+///        P8 - which owns the wiring - decides it wants it there.
+/// @param killed_energy,killed_n where the neutron time cut's discarded energy is booked. It
+///        is not a deposit and not an escape, so it cannot ride on `edep` or on the emitter's
+///        ledger; it is a third kind of loss and it gets its own two words. See step_neutral.
+template <typename real_t, ParticleType kType, typename StepHook>
+__global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, const int* idx,
+                                 TrackBuffer<real_t> out, int n, int batch, double* score,
+                                 double* voxel_score, int n_step,
+                                 const had::NeutronGeneralXs<real_t>* neutron_xs,
+                                 double* killed_energy, int* killed_n,
+                                 vis::TrajectoryBuffer traj, int* status_warn,
+                                 SecondaryArena sec, EmitterBooks books, StepHook hook) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  TrackState<real_t> p;
+  in.load(idx[i], p);
+  if (i >= n_step) {
+    // See run_step_gamma: not stepped, written on unchanged.
+    out.append(p);
+    return;
+  }
+  const int slot = (p.volume >= 0) ? scene.geometry.volumes[p.volume].score_index : -1;
+
+  // See the note in run_step_gamma: the cell the step *starts* in.
+  int vcell = -1;
+  if (slot >= 0 && p.volume >= 0 && voxel_score != nullptr) {
+    const auto& vv = scene.geometry.volumes[p.volume];
+    if (vv.score_per_voxel) {
+      const auto grid = geom::voxel_grid_of(vv.solid);
+      const auto q = geom::to_local(vv.xform, p.pos);
+      int ijk[3];
+      geom::voxel_cell_of(grid, q, ijk);
+      vcell = grid.index(ijk[0], ijk[1], ijk[2]);
+    }
+  }
+
+  // A fourth purpose value, so a neutral hadron's stream is independent of the gamma, lepton
+  // and charged-hadron streams a track of the same key would have drawn.
+  StepReport<real_t> srep;
+  Philox<real_t> rng(p.rng_key, p.step, 0x4E7Au);
+  BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
+                           0u, p.global_time, p.weight, sec, -1, &srep, books};
+
+  const real_t ekin_pre = p.ekin;
+  const Vec3<real_t> pos_pre = p.pos;
+  const Vec3<real_t> dir_pre = p.dir;
+  const int volume_pre = p.volume;
+  const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
+
+  real_t edep = 0;
+  constexpr ParticleType kSpecies = kType;
+  const bool alive = step_neutral(scene, p, kType, neutron_xs, rng, em, edep, srep, traj);
+  ++p.step;
+  // The clocks, from the PRE-step energy: see TrackState::advance. This is the one that decides
+  // whether the neutron time cut ever fires, so it is load-bearing here in a way it is not for
+  // a charged track - a neutron thermalising in a shield takes microseconds of flight to cross
+  // millimetres, and 10 us is reached by the clock and not by the geometry.
+  p.advance(srep.true_length, ekin_pre, particle_def<real_t>(kSpecies).mass);
+  p.flags = (srep.status == StepStatus::fGeomBoundary) ? (p.flags | kFirstStepInVolume)
+                                                       : (p.flags & ~kFirstStepInVolume);
+  // The time cut discards the kinetic energy rather than depositing it, so it is booked here
+  // where the pre-step energy is still in hand. Recorded before the hook, so a stepping action
+  // that reads the step sees a consistent set of numbers.
+  if (srep.process == ProcessId::fNeutronKiller) {
+    if (killed_energy != nullptr) { atomicAdd(killed_energy, static_cast<double>(ekin_pre)); }
+    if (killed_n != nullptr) { atomicAdd(killed_n, 1); }
+  }
+  if (edep != real_t(0) && slot >= 0) {
+    atomicAdd(&score[static_cast<size_t>(slot) * batch + p.event], static_cast<double>(edep));
+    if (vcell >= 0) { atomicAdd(&voxel_score[vcell], static_cast<double>(edep)); }
+  }
+  const bool escaped = (p.volume == geom::kOutsideWorld);
+  DeviceStep<real_t> ds{};
+  ds.species = kSpecies;
+  p.species = kSpecies;
+  ds.ekin_pre = ekin_pre;
+  ds.ekin_post = (alive || escaped) ? p.ekin : real_t(0);
+  ds.edep = edep;
+  ds.length = srep.true_length;
+  ds.pos_pre = pos_pre;
+  ds.pos_post = p.pos;
+  ds.dir_pre = dir_pre;
+  ds.dir_post = p.dir;
+  ds.volume_pre = volume_pre;
+  ds.volume_post = p.volume;
+  ds.score_slot = slot;
+  ds.event = p.event;
+  ds.alive = alive;
+  ds.track_ptr = &p;
+  ds.first_in_volume = first_in_vol;
+  ds.material = srep.material;
+  ds.safety = srep.safety;
+  ds.non_ionizing = srep.non_ionizing;
+  ds.n_secondaries = static_cast<int>(em.child_count);
+  ds.sec_arena = sec;
+  ds.sec_pool = &out;
+  ds.sec_last = em.last_secondary;
+  ds.status = (escaped && srep.status == StepStatus::fGeomBoundary) ? StepStatus::fWorldBoundary
+                                                                   : srep.status;
+  ds.process = srep.process;
+  hook(ds);
   const bool requeue = resolve_track_status<real_t>(alive, p.status);
   if (status_warn != nullptr && is_unsupported_track_status(p.status)) {
     atomicAdd(status_warn, 1);
@@ -829,16 +981,13 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                       "       allocate_track_buffer have diverged.\n", arena_half_);
           std::exit(2);
         }
-        // The dispatch lists. Sized at the whole pool each because any one species may, in
-        // principle, be all of it - a gamma beam's first iteration very nearly is. Four bytes
-        // a slot times five is 8.6% on top of a 232-byte track, which is what the separation
-        // between storage and dispatch costs.
-        for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
-          G4GPU_CUDA_CHECK(cudaMalloc(&idx_[i][sp], sizeof(int) * pool_));
-        }
-        G4GPU_CUDA_CHECK(cudaMalloc(&d_idx_[i], sizeof(int*) * kNumTrackSpecies));
-        G4GPU_CUDA_CHECK(cudaMemcpy(d_idx_[i], idx_[i], sizeof(int*) * kNumTrackSpecies,
-                                    cudaMemcpyHostToDevice));
+        // The dispatch list: ONE array of pool_ ints, bucketed by species each iteration.
+        // Sized at the whole pool because the buckets together are the whole pool - which is
+        // the point, and is what one array per species could not say: each of those had to be
+        // sized at the pool on its own, because any single species may in principle be all of
+        // it, so N species cost N times the pool to describe pool-many tracks. Four bytes a
+        // slot here, 1.7% on top of a 236-byte track, independent of how many species exist.
+        G4GPU_CUDA_CHECK(cudaMalloc(&idx_[i], sizeof(int) * pool_));
         G4GPU_CUDA_CHECK(cudaMalloc(&idx_n_[i], sizeof(int) * kNumTrackSpecies));
       }
       std::printf("track pool: %lld live slots per side (%.1f per event), %.2f GB total\n",
@@ -864,11 +1013,62 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     G4GPU_CUDA_CHECK(cudaMalloc(&d_status_warn_, sizeof(int)));
     G4GPU_CUDA_CHECK(cudaMemset(d_status_warn_, 0, sizeof(int)));
 
+    // ---- the three ledgers for energy and particles that do not become tracks.
+    //
+    // Allocated unconditionally. `carried_away` is batch_ doubles, the same shape as one row
+    // of the score array, so it is not the allocation worth making conditional; the other two
+    // are a few dozen words. What would be worth avoiding is a NULL that means "the accounting
+    // is off" being indistinguishable from a zero that means "nothing happened", which is why
+    // these exist at all - see RunStats.
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_carried_away_, sizeof(double) * batch_));
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_carried_n_,
+                                sizeof(int) * static_cast<int>(ParticleType::kNumTypes)));
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_refused_,
+                                sizeof(int) * static_cast<int>(ParticleType::kNumTypes)));
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_killed_energy_, sizeof(double)));
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_killed_n_, sizeof(int)));
+
+    // ---- a neutron cross section without a final state is not an allowed state.
+    //
+    // Refused here rather than discovered on the device. If a table is ever uploaded without
+    // the samplers to go with it, every neutron would draw a finite interaction length, arrive
+    // at a branch with nothing to do, and be killed with its energy dumped locally - a dose
+    // that looks like hadronic transport and is a deposit at the first interaction point. The
+    // device cannot report that usefully at kernel rates, so the combination is refused where
+    // it is set up. Today d_neutron_xs_ is always null and this never fires, which is exactly
+    // the state the message describes; it fires the first time half of P8 lands.
+    if (d_neutron_xs_ != nullptr) {
+      std::printf(
+          "\nFATAL: a neutron cross-section table is present but no final states are wired.\n"
+          "  step_neutral would sample an interaction length, reach the sub-process branch\n"
+          "  with nothing to apply, and kill the neutron with its energy deposited at that\n"
+          "  point - which is a plausible-looking dose for physics that did not run.\n"
+          "  See physics/hadronic/neutron_general_xs.cuh for the contract: the table and the\n"
+          "  final states land together.\n");
+      std::exit(2);
+    }
+
     // The secondary arena. One entry per secondary created in a single kernel launch, so it is
     // sized against how many tracks can be in flight rather than against the length of a run.
-    // Half the batch is generous for the EM physics here - B1 makes about 0.3 secondaries per
-    // step - and the overflow counter says so if a future process makes it wrong.
-    sec_.capacity = (sec_capacity_ > 0) ? sec_capacity_ : (batch_ / 2 + 1024);
+    //
+    // THE DEFAULT IS NOW THE POOL, not half the batch. Half the batch was a measurement of B1 -
+    // "about 0.3 secondaries per step" - and a measurement of one physics list is a poor bound
+    // for the next one: a hadronic inelastic reaction at a few GeV emits tens of secondaries in
+    // one step, and 0.3 per step is not a fact about transport, it is a fact about 6 MeV gammas
+    // in water.
+    //
+    // The pool is a bound rather than an estimate, and it comes from arithmetic that is already
+    // in this file. The throttle in BeamOn steps only as many tracks as the output can hold
+    // together with their reserved secondaries, so the secondaries one launch can create is at
+    // most `cap_out - n_live`, which is at most the pool. An arena of pool_ entries therefore
+    // cannot overflow while the output does not - which is the property worth having, because
+    // the output's overflow ends the run and the arena's only degrades
+    // GetSecondaryInCurrentStep(). Before this the arena was the smaller of the two and could
+    // fail quietly first.
+    //
+    // It costs 8 bytes an entry against a track slot's 236, so pool_ entries is 3.4% on top of
+    // the track arena - measured by track_bytes_per_slot, not guessed.
+    sec_.capacity = (sec_capacity_ > 0) ? sec_capacity_ : static_cast<int>(pool_);
     G4GPU_CUDA_CHECK(cudaMalloc(&sec_.entry, sizeof(unsigned int) * sec_.capacity));
     G4GPU_CUDA_CHECK(cudaMalloc(&sec_.prev, sizeof(int) * sec_.capacity));
     G4GPU_CUDA_CHECK(cudaMalloc(&sec_.cursor, sizeof(int)));
@@ -919,42 +1119,73 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     if (sec_.overflow != nullptr) {
       G4GPU_CUDA_CHECK(cudaMemset(sec_.overflow, 0, sizeof(int)));
     }
+    // Per run, not per batch: these are counts and totals over the whole run, unlike the
+    // per-event carried-away array which is batch-local and zeroed with the scores.
+    const size_t kTypeBytes = sizeof(int) * static_cast<size_t>(ParticleType::kNumTypes);
+    if (d_carried_n_ != nullptr) {
+      G4GPU_CUDA_CHECK(cudaMemset(d_carried_n_, 0, kTypeBytes));
+    }
+    if (d_refused_ != nullptr) { G4GPU_CUDA_CHECK(cudaMemset(d_refused_, 0, kTypeBytes)); }
+    if (d_killed_energy_ != nullptr) {
+      G4GPU_CUDA_CHECK(cudaMemset(d_killed_energy_, 0, sizeof(double)));
+    }
+    if (d_killed_n_ != nullptr) { G4GPU_CUDA_CHECK(cudaMemset(d_killed_n_, 0, sizeof(int))); }
     if (primaries == nullptr || n_events <= 0) { return st; }
 
-    // The three species the track buffers carry. A primary of any other species would land in
-    // the gamma buffer by default and be transported as a gamma - a run that produced a
-    // plausible dose for physics that never happened. Refuse it instead.
+    // Every primary is checked against what a kernel can step. A primary with no kernel used
+    // to land in the gamma buffer and be transported as a gamma - a run that produced a
+    // plausible dose for physics that never happened - and the guard that replaced that was a
+    // hand-written list of five species. It is species_disposition now, so the list cannot
+    // drift from the set of kernels the way prose does.
     //
-    // Checked over every primary now rather than once for the source, because a generator is
-    // free to fire a different species per event and the guard has to cover what it actually
-    // produced. It is one comparison per event against a whole shower.
+    // Checked over every primary rather than once for the source, because a generator is free
+    // to fire a different species per event and the guard has to cover what it actually
+    // produced. It is one switch per event against a whole shower.
     for (int i = 0; i < n_events; ++i) {
       const ParticleType p = primaries[i].particle;
-      if (p == ParticleType::kGamma || p == ParticleType::kElectron
-          || p == ParticleType::kPositron) {
-        continue;
-      }
-      if (p == ParticleType::kProton || p == ParticleType::kAlpha) {
-        // Stepped by run_step_hadron, which needs the range table. A scene uploaded without
-        // one - b1_gpu_sched builds a gamma-only Scene deliberately - would step the primary
-        // once, find a null table, and drop it. That is a silent zero, so it is refused here.
-        if (scene_.hadron_range == nullptr) {
+      const SpeciesDisposition disp = species_disposition(p);
+      if (disp == SpeciesDisposition::kStepped) {
+        // Every charged hadron is stepped from the hadron dE/dx and range tables. A scene
+        // uploaded without them (b1_gpu_sched builds a gamma-only Scene deliberately) would
+        // step the primary once, find a null table, and drop it. That is a silent zero, so it
+        // is refused here.
+        //
+        // `is_heavy_charged` and not "everything but the three EM species". A neutron and a
+        // pi0 are stepped by step_neutral, which has no continuous loss and therefore never
+        // reads the range table - so refusing them for want of it would refuse the one run
+        // that is worth making today: a neutron primary with no cross section, streaming to
+        // the world boundary. The predicate names the species that read the table rather than
+        // the species that do not.
+        if (scene_.hadron_range == nullptr && is_heavy_charged(p)) {
           std::printf(
-              "\nFATAL: a proton or alpha primary was given to a Scene with no hadron range\n"
-              "  table (event %d). step_hadron cannot advance a track without one, and\n"
-              "  dropping it would look like a run that simply deposited nothing.\n",
-              i);
+              "\nFATAL: a \"%s\" primary was given to a Scene with no hadron range table\n"
+              "  (event %d). step_hadron cannot advance a track without one, and dropping it\n"
+              "  would look like a run that simply deposited nothing.\n",
+              particle_name(p), i);
           std::exit(2);
         }
         continue;
       }
+      if (disp == SpeciesDisposition::kCounted) {
+        // A neutrino primary is not an error and not transportable either: its whole energy
+        // leaves the event at the vertex. Refused rather than silently booked as escaped,
+        // because a run of neutrino primaries would report a dose of exactly zero and that is
+        // a number somebody would take at face value. QBBC would transport it - across the
+        // world in one step, depositing nothing - so the answer is the same and saying so is
+        // better than producing it.
+        std::printf(
+            "\nFATAL: \"%s\" is not a primary this transport will fire (event %d).\n"
+            "  A neutrino has no process in QBBC, so every event would deposit exactly zero\n"
+            "  and the run would look like a result. Its energy is booked as carried away\n"
+            "  when a decay makes one; as a primary there would be nothing else in the event.\n",
+            particle_name(p), i);
+        std::exit(2);
+      }
       std::printf(
-          "\nFATAL: primary species %d is not transported (event %d).\n"
-          "  This transport carries gamma, e-, e+, proton and alpha. Other hadrons and ions\n"
-          "  are refused: see G4RunManager::CheckSpecies for what is missing for each, and\n"
-          "  tests/test_hadron_range.cu for the measured size of the He3 gap. Refusing\n"
-          "  rather than transporting it as something it is not.\n",
-          static_cast<int>(p), i);
+          "\nFATAL: \"%s\" (species %d) is not transported (event %d).\n"
+          "  See G4RunManager::CheckSpecies for the current species set and what each\n"
+          "  missing one needs. Refusing rather than transporting it as something it is not.\n",
+          particle_name(p), static_cast<int>(p), i);
       std::exit(2);
     }
 
@@ -994,6 +1225,11 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     while (base < n_events) {
       const int n_batch = std::min(try_batch, n_events - base);
       G4GPU_CUDA_CHECK(cudaMemset(d_score_, 0, sizeof(double) * n_scorers_ * batch_));
+      // Zeroed with the scores and for the same reason: it is indexed by the BATCH-local event
+      // id, so a batch that reused a slot would add this batch's neutrinos to the last one's.
+      if (d_carried_away_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemset(d_carried_away_, 0, sizeof(double) * batch_));
+      }
       // This attempt's drops, not a previous attempt's.
       for (int i = 0; i < 2; ++i) { tracks_[i].reset_overflow(); }
       const long long steps_before = st.track_steps;
@@ -1029,23 +1265,34 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // How many tracks are alive, of any species. One number, because there is one pool.
         const int n_live = tracks_[cur].count();
 
-        // The dispatch lists for this iteration: which slots hold gammas, which electrons, and
-        // so on. Rebuilt every time because the pool is written in append order, which is
+        // The dispatch layout for this iteration: which slots hold gammas, which electrons,
+        // and so on. Rebuilt every time because the pool is written in append order, which is
         // whatever the atomics gave out, and a kernel needs its own species contiguous.
-        int nsp[kNumTrackSpecies] = {0, 0, 0, 0, 0};
+        //
+        // Two passes and a prefix sum - a counting sort into the one index array. The counts
+        // have to come back to the host anyway to size the launches, so the sum costs nothing
+        // extra beyond the second launch.
+        int nsp[kNumTrackSpecies] = {};
+        SpeciesOffsets off{};
         if (n_live > 0) {
+          const int blocks = (n_live + threads_ - 1) / threads_;
           G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kNumTrackSpecies));
-          build_species_lists<real_t><<<(n_live + threads_ - 1) / threads_, threads_>>>(
-              tracks_[cur].view, n_live, d_idx_[cur], idx_n_[cur], d_unknown_);
+          count_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live, idx_n_[cur],
+                                                      d_unknown_);
           G4GPU_CUDA_CHECK(cudaGetLastError());
           G4GPU_CUDA_CHECK(cudaMemcpy(nsp, idx_n_[cur], sizeof(int) * kNumTrackSpecies,
                                       cudaMemcpyDeviceToHost));
+          int at = 0;
+          for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
+            off.base[sp] = at;
+            at += nsp[sp];
+          }
+          // Zeroed again and reused as the scatter cursors; see scatter_species.
+          G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kNumTrackSpecies));
+          scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live, idx_[cur],
+                                                        off, idx_n_[cur]);
+          G4GPU_CUDA_CHECK(cudaGetLastError());
         }
-        const int ng = nsp[kSpeciesGamma];
-        const int ne = nsp[kSpeciesElectron];
-        const int np = nsp[kSpeciesPositron];
-        const int nh = nsp[kSpeciesProton];
-        const int na = nsp[kSpeciesAlpha];
         if (n_live == 0) {
           st.max_iterations = std::max(st.max_iterations, iteration);
 
@@ -1090,6 +1337,14 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
               G4GPU_CUDA_CHECK(cudaMemset(d_score_ + static_cast<size_t>(sc) * batch_ + e, 0,
                                           sizeof(double)));
             }
+            // The carried-away ledger is per event exactly as the score is, so a repaired
+            // event's neutrinos have to be forgotten alongside its deposit. Leaving it would
+            // double-count every neutrino of every repaired event - an error that shows up
+            // only as an energy balance that does not close, which is the last place anyone
+            // looks.
+            if (d_carried_away_ != nullptr) {
+              G4GPU_CUDA_CHECK(cudaMemset(d_carried_away_ + e, 0, sizeof(double)));
+            }
           }
           st.events_repaired += static_cast<long long>(ids.size());
           std::printf("repair: %zu of %d events lost a track and are being transported\n"
@@ -1108,50 +1363,50 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           G4GPU_CUDA_CHECK(cudaGetLastError());
           continue;  // drain again, this time carrying only the repaired events
         }
-        if (iteration == kMaxIterations - 1) { leftover = ng + ne + np + nh + na; }
-        
-        st.peak_gamma = std::max(st.peak_gamma, ng);
-        st.peak_electron = std::max(st.peak_electron, ne);
-        st.peak_positron = std::max(st.peak_positron, np);
-        st.peak_proton = std::max(st.peak_proton, nh);
-        st.peak_alpha = std::max(st.peak_alpha, na);
+        if (iteration == kMaxIterations - 1) { leftover = n_live; }
 
-        // How many tracks may be stepped this iteration.
+        for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
+          st.peak_live[sp] = std::max(st.peak_live[sp], nsp[sp]);
+        }
+
+        // How many tracks of each species may be stepped this iteration.
         //
         // Nothing is re-divided any more. There is one output pool, so there is one budget:
         // every live track needs a slot in it whether it is stepped or merely passed through,
         // and what is left over after that is what pays for secondaries.
         //
-        // The fan-out bound is per STEP rather than per species, which is the simplification
-        // the single pool buys. One step runs one discrete process, and the largest number of
-        // tracks any single step in stepper.cuh produces is three - a delta ray, then the two
-        // annihilation photons of a positron that stops. Four is that with a margin, and it no
-        // longer has to be reasoned separately for each species and each destination.
+        // The fan-out reservation is PER SPECIES - max_secondaries_per_step in
+        // core/track_buffer.cuh - and the budget below is therefore counted in SLOTS rather
+        // than in tracks. It was one constant of four for every species, which was correct
+        // while every species could make at most three secondaries in a step. A hadronic
+        // inelastic reaction makes tens, and raising a shared constant to cover it would
+        // divide the gamma's budget by the same factor: on B1's own numbers, ~2 spare slots an
+        // event at a reservation of 4 is 0.5 tracks an event, and at 64 it is 0.03 - sixty
+        // times the iterations to drain a gamma run that will never make a neutron. Every
+        // reservation is still 4 today, so this loop chooses exactly what the old one did.
         //
         // A species that cannot be stepped in full this iteration is not truncated: the
         // remainder passes through untouched and is stepped next time.
-        constexpr int kMaxSecondariesPerStep = 4;
         const int cap_out = tracks_[nxt].view.capacity;
-        int budget = (cap_out > n_live) ? (cap_out - n_live) / kMaxSecondariesPerStep : 0;
-        int step_n[kNumTrackSpecies] = {0, 0, 0, 0, 0};
+        int slots = (cap_out > n_live) ? (cap_out - n_live) : 0;
+        int step_n[kNumTrackSpecies] = {};
+        int total_step = 0;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
-          step_n[sp] = std::min(nsp[sp], budget);
-          budget -= step_n[sp];
+          const int per = max_secondaries_per_step(sp);
+          const int can = (per > 0) ? (slots / per) : nsp[sp];
+          step_n[sp] = std::min(nsp[sp], can);
+          slots -= step_n[sp] * per;
+          total_step += step_n[sp];
         }
-        const int step_g = step_n[kSpeciesGamma];
-        const int step_e = step_n[kSpeciesElectron];
-        const int step_p = step_n[kSpeciesPositron];
-        const int step_h = step_n[kSpeciesProton];
-        const int step_a = step_n[kSpeciesAlpha];
-        if (step_g + step_e + step_p + step_h + step_a == 0) {
+        if (total_step == 0) {
           std::printf("\nFATAL: no track can be stepped without overrunning the pool.\n"
                       "       %d tracks are live and the pool holds %d slots a side. Raise\n"
                       "       SetLiveTracksPerEvent (now %.1f per event) or lower the batch.\n",
                       n_live, cap_out, live_per_event_);
           std::exit(3);
         }
-        st.throttled += n_live - (step_g + step_e + step_p + step_h + step_a);
-        st.track_steps += step_g + step_e + step_p + step_h + step_a;
+        st.throttled += n_live - total_step;
+        st.track_steps += total_step;
 
         tracks_[nxt].reset();
         // The secondary arena holds one iteration worth of chains and no more: the chains
@@ -1161,37 +1416,74 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         if (sec_.cursor != nullptr) {
           G4GPU_CUDA_CHECK(cudaMemsetAsync(sec_.cursor, 0, sizeof(int)));
         }
-        // One launch per species, each over its own index list, each into the one output pool.
+        // One launch per species, each over its own range of the one index list, each into the
+        // one output pool.
         //
-        // Five specialised kernels remain because a warp whose threads take different physics
-        // paths serialises through all of them - that is the reason the species list survives
-        // at all. What has gone is the idea that a specialised KERNEL needs a separate BUFFER.
-        if (ng > 0) {
-          run_step_gamma<real_t><<<(ng + threads_ - 1) / threads_, threads_>>>(
-              scene_, tracks_[cur].view, idx_[cur][kSpeciesGamma], tracks_[nxt].view, ng,
-              batch_, d_score_, d_voxel_score_, step_g, traj, d_status_warn_, sec_, hook_);
-        }
-        if (ne > 0) {
-          run_step_lepton<real_t, false><<<(ne + threads_ - 1) / threads_, threads_>>>(
-              scene_, tracks_[cur].view, idx_[cur][kSpeciesElectron], tracks_[nxt].view, ne,
-              batch_, d_score_, d_voxel_score_, step_e, traj, d_status_warn_, sec_, hook_);
-        }
-        if (np > 0) {
-          run_step_lepton<real_t, true><<<(np + threads_ - 1) / threads_, threads_>>>(
-              scene_, tracks_[cur].view, idx_[cur][kSpeciesPositron], tracks_[nxt].view, np,
-              batch_, d_score_, d_voxel_score_, step_p, traj, d_status_warn_, sec_, hook_);
-        }
-        if (nh > 0) {
-          run_step_hadron<real_t, ParticleType::kProton>
-              <<<(nh + threads_ - 1) / threads_, threads_>>>(
-                  scene_, tracks_[cur].view, idx_[cur][kSpeciesProton], tracks_[nxt].view, nh,
-                  batch_, d_score_, d_voxel_score_, step_h, traj, d_status_warn_, sec_, hook_);
-        }
-        if (na > 0) {
-          run_step_hadron<real_t, ParticleType::kAlpha>
-              <<<(na + threads_ - 1) / threads_, threads_>>>(
-                  scene_, tracks_[cur].view, idx_[cur][kSpeciesAlpha], tracks_[nxt].view, na,
-                  batch_, d_score_, d_voxel_score_, step_a, traj, d_status_warn_, sec_, hook_);
+        // A specialised kernel per species remains because a warp whose threads take different
+        // physics paths serialises through all of them - that is the reason the species list
+        // survives at all. What has gone is the idea that a specialised KERNEL needs a separate
+        // BUFFER, and now also the idea that it needs a separate index ARRAY.
+        //
+        // The switch is written out rather than driven from a table of function pointers
+        // because a __global__ template's address is not something a host table can hold
+        // portably, and because each line names the specialisation it launches - which is what
+        // makes a missing species a compile error in the switch rather than a track that is
+        // counted and never stepped.
+        const EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_};
+        for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
+          const int n_sp = nsp[sp];
+          if (n_sp <= 0) { continue; }
+          const int* list = idx_[cur] + off.base[sp];
+          const int blocks = (n_sp + threads_ - 1) / threads_;
+#define G4GPU_LAUNCH_HADRON(TYPE)                                                            \
+  run_step_hadron<real_t, TYPE><<<blocks, threads_>>>(                                       \
+      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
+      d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_)
+#define G4GPU_LAUNCH_NEUTRAL(TYPE)                                                           \
+  run_step_neutral<real_t, TYPE><<<blocks, threads_>>>(                                      \
+      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
+      d_voxel_score_, step_n[sp], d_neutron_xs_, d_killed_energy_, d_killed_n_, traj,         \
+      d_status_warn_, sec_, books, hook_)
+          switch (sp) {
+            case kSpeciesGamma:
+              run_step_gamma<real_t><<<blocks, threads_>>>(
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+              break;
+            case kSpeciesElectron:
+              run_step_lepton<real_t, false><<<blocks, threads_>>>(
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+              break;
+            case kSpeciesPositron:
+              run_step_lepton<real_t, true><<<blocks, threads_>>>(
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+              break;
+            case kSpeciesProton:     G4GPU_LAUNCH_HADRON(ParticleType::kProton); break;
+            case kSpeciesAlpha:      G4GPU_LAUNCH_HADRON(ParticleType::kAlpha); break;
+            case kSpeciesMuonMinus:  G4GPU_LAUNCH_HADRON(ParticleType::kMuonMinus); break;
+            case kSpeciesMuonPlus:   G4GPU_LAUNCH_HADRON(ParticleType::kMuonPlus); break;
+            case kSpeciesPionPlus:   G4GPU_LAUNCH_HADRON(ParticleType::kPionPlus); break;
+            case kSpeciesPionMinus:  G4GPU_LAUNCH_HADRON(ParticleType::kPionMinus); break;
+            case kSpeciesKaonPlus:   G4GPU_LAUNCH_HADRON(ParticleType::kKaonPlus); break;
+            case kSpeciesKaonMinus:  G4GPU_LAUNCH_HADRON(ParticleType::kKaonMinus); break;
+            case kSpeciesAntiProton: G4GPU_LAUNCH_HADRON(ParticleType::kAntiProton); break;
+            case kSpeciesDeuteron:   G4GPU_LAUNCH_HADRON(ParticleType::kDeuteron); break;
+            case kSpeciesTriton:     G4GPU_LAUNCH_HADRON(ParticleType::kTriton); break;
+            case kSpeciesNeutron:    G4GPU_LAUNCH_NEUTRAL(ParticleType::kNeutron); break;
+            case kSpeciesPiZero:     G4GPU_LAUNCH_NEUTRAL(ParticleType::kPiZero); break;
+            default:
+              // Not reachable, and not silent if it becomes so: a TrackSpeciesIndex added
+              // without a line above would land here, and a species counted by the histogram
+              // and never launched is a track that stops being transported.
+              std::printf("\nFATAL: species index %d has no stepping kernel, but %d tracks\n"
+                          "       were sorted into its range. Add a case to the switch in\n"
+                          "       TransportEngine::BeamOn.\n", sp, n_sp);
+              std::exit(3);
+          }
+#undef G4GPU_LAUNCH_HADRON
+#undef G4GPU_LAUNCH_NEUTRAL
         }
         G4GPU_CUDA_CHECK(cudaGetLastError());
         cur ^= 1;
@@ -1230,6 +1522,20 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       G4GPU_CUDA_CHECK(cudaMemcpy(h_score.data(), d_score_,
                                   sizeof(double) * n_scorers_ * batch_,
                                   cudaMemcpyDeviceToHost));
+      // The carried-away ledger, brought back with the scores and appended to the run-length
+      // vector. Accumulated on the host per event rather than reduced on the device because the
+      // per-event number is the one that means anything - see RunStats::carried_away - and the
+      // array is already being copied for the batch.
+      if (d_carried_away_ != nullptr) {
+        if (st.carried_away.empty()) { st.carried_away.assign(n_events, 0.0); }
+        std::vector<double> h_nu(static_cast<size_t>(n_batch));
+        G4GPU_CUDA_CHECK(cudaMemcpy(h_nu.data(), d_carried_away_, sizeof(double) * n_batch,
+                                    cudaMemcpyDeviceToHost));
+        for (int e = 0; e < n_batch; ++e) {
+          st.carried_away[base + e] = h_nu[e];
+          st.carried_away_total += h_nu[e];
+        }
+      }
       // Event-major, so that a sink sees one event's scores together. Each accumulator still
       // sums over events in ascending order, so the totals are bit-identical to the
       // scorer-major loop this replaced - which matters, because those totals are what the
@@ -1277,7 +1583,81 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       if (unk > 0) {
         std::printf("\n*** %d TRACKS HAVE NO STEPPING KERNEL ***\n"
                     "    Their species is not in species_index, so they were never\n"
-                    "    dispatched and their energy was never deposited.\n\n", unk);
+                    "    dispatched and their energy was never deposited. BufferEmitter::push\n"
+                    "    refuses such a species before appending it and BeamOn refuses it as a\n"
+                    "    primary, so this is a hole in one of those two guards rather than a\n"
+                    "    particle to be accounted for.\n\n", unk);
+      }
+    }
+
+    // ---- the three ledgers.
+    //
+    // Read back and reported here, together, because the three of them are one statement about
+    // the run: of the energy that did not reach a scorer, this much left as neutrinos, this
+    // much was deleted by the neutron time cut, and these particles were not transported at
+    // all. Reported only when non-zero, so a gamma run's output is unchanged.
+    {
+      const int kNT = static_cast<int>(ParticleType::kNumTypes);
+      std::vector<int> n_carried(kNT, 0), n_refused(kNT, 0);
+      if (d_carried_n_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(n_carried.data(), d_carried_n_, sizeof(int) * kNT,
+                                    cudaMemcpyDeviceToHost));
+      }
+      if (d_refused_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(n_refused.data(), d_refused_, sizeof(int) * kNT,
+                                    cudaMemcpyDeviceToHost));
+      }
+      for (int t = 0; t < kNT; ++t) {
+        st.carried_by_species[t] = n_carried[t];
+        st.carried_away_n += n_carried[t];
+        st.refused_by_species[t] = n_refused[t];
+        st.refused_total += n_refused[t];
+      }
+      if (d_killed_n_ != nullptr) {
+        int kn = 0;
+        G4GPU_CUDA_CHECK(cudaMemcpy(&kn, d_killed_n_, sizeof(int), cudaMemcpyDeviceToHost));
+        st.neutron_killed_n = kn;
+      }
+      if (d_killed_energy_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(&st.neutron_killed_energy, d_killed_energy_, sizeof(double),
+                                    cudaMemcpyDeviceToHost));
+      }
+
+      if (st.carried_away_n > 0) {
+        std::printf("carried away: %lld particles, %.6g MeV total (not deposited, not"
+                    " transported)\n", st.carried_away_n, st.carried_away_total);
+        for (int t = 0; t < kNT; ++t) {
+          if (n_carried[t] > 0) {
+            std::printf("              %-12s %d\n",
+                        particle_name(static_cast<ParticleType>(t)), n_carried[t]);
+          }
+        }
+      }
+      if (st.neutron_killed_n > 0) {
+        // Not a warning. Geant4 does exactly this and also does not conserve energy across it;
+        // the number is printed so that a run can be held to an energy balance rather than
+        // leaving the shortfall to be found later and blamed on the transport.
+        std::printf("neutron time cut: %lld neutrons killed past 10 us, %.6g MeV discarded\n"
+                    "                  (G4NeutronGeneralProcess deposits nothing here - see"
+                    " step_neutral)\n",
+                    st.neutron_killed_n, st.neutron_killed_energy);
+      }
+      if (st.refused_total > 0) {
+        // This one IS a warning, and it names what is missing. A refused secondary is energy
+        // the shower had and this port did not carry, so the dose is low by whatever those
+        // particles would have deposited - the same failure mode as a dropped track, arrived at
+        // for a different reason.
+        std::printf("\n*** %lld SECONDARIES OF SPECIES THIS PORT CANNOT TRANSPORT ***\n\n"
+                    "    They were counted at the point a process created them and no track\n"
+                    "    was made, so the dose from this run is TOO LOW by whatever they\n"
+                    "    would have deposited.\n\n", st.refused_total);
+        for (int t = 0; t < kNT; ++t) {
+          if (n_refused[t] > 0) {
+            std::printf("      %-12s %lld\n", particle_name(static_cast<ParticleType>(t)),
+                        st.refused_by_species[t]);
+          }
+        }
+        std::printf("\n");
       }
     }
     if (sec_.overflow != nullptr) {
@@ -1319,17 +1699,25 @@ template <typename real_t, typename StepHook>
 void TransportEngine<real_t, StepHook>::Free() {
     for (int i = 0; i < 2; ++i) {
       tracks_[i].free_all();
-      for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
-        cudaFree(idx_[i][sp]);
-        idx_[i][sp] = nullptr;
-      }
-      cudaFree(d_idx_[i]);
+      cudaFree(idx_[i]);
       cudaFree(idx_n_[i]);
-      d_idx_[i] = nullptr;
+      idx_[i] = nullptr;
       idx_n_[i] = nullptr;
     }
     cudaFree(d_unknown_);
     d_unknown_ = nullptr;
+    cudaFree(d_carried_away_);
+    cudaFree(d_carried_n_);
+    cudaFree(d_refused_);
+    cudaFree(d_killed_energy_);
+    cudaFree(d_killed_n_);
+    d_carried_away_ = nullptr;
+    d_carried_n_ = nullptr;
+    d_refused_ = nullptr;
+    d_killed_energy_ = nullptr;
+    d_killed_n_ = nullptr;
+    cudaFree(d_neutron_xs_);
+    d_neutron_xs_ = nullptr;
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);
