@@ -257,9 +257,14 @@ fragment (Z, A, E*, momentum) and returns fragments and gammas.
 - **Oracle**: `dump_decay.cc`. Deterministic: lifetimes, branching ratios, the kinematic
   limits per channel. Statistical: product energy spectra and angular moments for each channel
   N times, fixed seed.
-- **Interaction**: a stopped pi- is captured, not decayed - `G4HadronicAbsorptionBertini` is an
-  at-rest process competing with `G4Decay`'s at-rest length, and the capture wins. P4 provides
-  the competition hook; P12 provides the competitor.
+- **Interaction**: a stopped pi-, K- or mu- is captured, not decayed, and not by winning a
+  competition. `G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength` returns 0.0 -
+  `G4HadronicAbsorptionBertini` and `G4MuonMinusCapture` both derive from it - while `G4Decay`'s
+  at-rest length is a sampled lifetime, and the stepping manager invokes the at-rest process with
+  the shortest lifetime. The stopping process pre-empts the decay outright; the negative muon's
+  bound decay happens inside `G4MuonMinusBoundDecay`, P12's model, not in `G4Decay`. So P4's
+  at-rest branch is reached only by species without a stopping process: pi+, K+, mu+. (Corrected
+  2026-09-10 from P4's measurement; the plan had described the two as competing.)
 
 #### P5 The hadronic process framework, and elastic final states
 
