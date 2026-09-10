@@ -1,0 +1,47 @@
+# Example B1 with a pi- beam and everything QBBC gives a negative pion that this port does not
+# have, switched off. The P1 stage; see muon_emonly.mac beside it for why each line is here and
+# pion_emonly.mac for the positive pion this pairs with.
+#
+# ONE MORE INACTIVATION THAN THE POSITIVE PION NEEDS. `ref/oracle/species_processes.csv` gives
+# pi- the pi+'s list with two substitutions: ICRU73QO in place of Bragg as hIoni's low-energy
+# model - which is the port's own split too, so it stays - and `hBertiniCaptureAtRest` where the
+# pi+ has no at-rest process at all. A stopped pi- is CAPTURED, not decayed:
+# G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength returns 0.0 and the stepping
+# manager takes the shortest at-rest lifetime, so the stopping process pre-empts G4Decay. With
+# both inactivated a pi- that reaches rest is killed where it stands, which is what this port
+# does. It does not arise here - see the range below - but the macro would be measuring nuclear
+# capture rather than transport if it were left active, and that is worth a line rather than an
+# assumption.
+#
+# MEASURED, 500,000 events:
+#
+#   pi-  port 630.922 +/- 0.666 nGy   Geant4 600.831 +/- 0.636   +5.01%, 32.7 sigma
+#
+# The port is high, and the reason is not in this file - it is the charge-odd dose split
+# docs/RISK.md records: every POSITIVE hadron here agrees with Geant4 inside 0.35% and every
+# negative one is high by 3.8% (mu-), 5.0% (pi-) or 9.5% (kaon-), while the port's own two
+# charges differ by 0.23% - which is exactly the split Geant4's own dE/dx table implies. The
+# three macros pion_nomsc.mac, pion_nodelta.mac and pion_1gev.mac beside this one are what
+# narrowed it; read them before reading anything into this number.
+#
+# 200 MeV pi-: 779.3 mm of water (hadron_tables.csv, G4_WATER at 199.5262 MeV), so it CROSSES
+# B1's 300 mm envelope with about three quarters of its energy left and never reaches its Bragg
+# peak. This is a plateau dE/dx measurement, not a stopping one.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hadElastic
+/process/inactivate pi-Inelastic
+/process/inactivate Decay
+/process/inactivate hBertiniCaptureAtRest
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/particle pi-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

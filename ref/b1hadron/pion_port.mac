@@ -7,6 +7,14 @@
 #
 # The cleanest of the four: a species whose transport this package added, agreeing with Geant4
 # to two parts in a thousand on a dose, with no free parameter between them.
+#
+# RE-MEASURED AT 500,000 events, when the negative pion was added beside it:
+#
+#   pi+   port 632.349 +/- 0.668 nGy   Geant4 633.446 +/- 0.668   -0.17%, 1.16 sigma
+#
+# Same answer at twenty-five times the statistics, and it is now one row of six: every positive
+# hadron measured agrees inside 0.35% and every negative one is 3.8% to 9.5% high. The negative
+# half is pion_minus_port.mac and the reason is in docs/RISK.md, not in the pion.
 
 /run/initialize
 /control/verbose 0

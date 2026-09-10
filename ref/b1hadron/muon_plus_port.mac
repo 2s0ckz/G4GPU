@@ -1,0 +1,20 @@
+# The port's half of the mu+ like-for-like; its partner is muon_plus_emonly.mac.
+#
+# MEASURED, 500,000 events:
+#
+#   mu+  port 598.660 +/- 0.634 nGy   Geant4 600.681 +/- 0.634   -0.34%, 2.25 sigma
+#
+# The port's two muons differ by 0.223%. Geant4's differ by 4.36%. Before the dispatch fix in
+# `hadron_ioni_dedx` the port's two muons were BIT-IDENTICAL, which is what found that bug; the
+# 0.223% that replaced it is the asymmetry Geant4's own tables imply, and the 4.36% is not.
+# docs/RISK.md.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle mu+
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

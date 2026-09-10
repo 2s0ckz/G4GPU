@@ -22,6 +22,23 @@
 # scattering - G4MuMultipleScattering with G4WentzelVIModel, whose single-scattering tail runs
 # through G4WentzelOKandVIxSection. Open; see docs/RISK.md V38.
 #
+# MSC IS EXCLUDED, AND IT IS NOT THE MUON'S. Re-measured at 500,000 events per beam, with the
+# pion and the kaon beside it:
+#
+#   mu-   port 597.326 +/- 0.633 nGy   Geant4 575.568 +/- 0.611   +3.78%, 24.7 sigma
+#   mu+   port 598.660 +/- 0.634 nGy   Geant4 600.681 +/- 0.634   -0.34%,  2.25 sigma
+#   pi-   port 630.922 +/- 0.666        Geant4 600.831 +/- 0.636   +5.01%, 32.7 sigma
+#   pi+   port 632.349 +/- 0.668        Geant4 633.446 +/- 0.668   -0.17%,  1.16 sigma
+#   kaon- port 1239.62 +/- 1.303        Geant4 1131.87 +/- 1.195   +9.52%, 61.0 sigma
+#   kaon+ port 1242.97 +/- 1.306        Geant4 1240.74 +/- 1.302   +0.18%,  1.21 sigma
+#
+# Inactivating msc on the Geant4 side moves the muon split from 4.36% to 3.99% and the pion's
+# from 5.43% to 5.35% - see pion_nomsc.mac, which also records how the inactivations were
+# verified. And the split vanishes at 1 GeV (pion_1gev.mac) and orders by mass at fixed kinetic
+# energy, which is by 1/beta. So it is neither multiple scattering nor a muon peculiarity: it is
+# a low-velocity, charge-odd effect common to every negative hadron. docs/RISK.md carries what
+# is excluded and what is left.
+#
 # 200 MeV: a mu- range of 861 mm in water against B1's ~360 mm of world, so nothing stops and
 # this is a plateau dose. Confirmed rather than assumed - the Geant4 run with
 # muMinusCaptureAtRest left ACTIVE gives a bit-identical 22.9917 nGy, so no muon reached rest.

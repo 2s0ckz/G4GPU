@@ -1,0 +1,41 @@
+# Example B1 with a kaon- beam and everything QBBC gives a negative kaon that this port does
+# not have, switched off. The P1 stage; see muon_emonly.mac for why each line is here.
+#
+# `ref/oracle/species_processes.csv` for kaon- is pi-'s list with kaon-Inelastic in place of
+# pi-Inelastic: the same ICRU73QO low-energy model, the same hBertiniCaptureAtRest, the same
+# seven inactivations. A stopped K- is captured and not decayed, for the reason
+# pion_minus_emonly.mac gives.
+#
+# MEASURED, 500,000 events:
+#
+#   kaon-  port 1239.62 +/- 1.303 nGy   Geant4 1131.87 +/- 1.195   +9.52%, 61.0 sigma
+#   kaon+  port 1242.97 +/- 1.306 nGy   Geant4 1240.74 +/- 1.302   +0.18%, 1.21 sigma
+#
+# The largest charge-odd split of the three species measured, and the slowest particle of the
+# three at 200 MeV: beta 0.703 against the pion's 0.911 and the muon's 0.938. The order is
+# mu- 3.78%, pi- 5.01%, kaon- 9.52% - monotone in mass at fixed kinetic energy, which is
+# monotone in 1/beta. Geant4's own kaon dE/dx table has kaon- 0.29% ABOVE kaon+ in water, so
+# the sign of the table's split is opposite to the sign of the dose's. docs/RISK.md.
+#
+# 200 MeV kaon-: 408.8 mm of water (hadron_tables.csv, G4_WATER at 199.5262 MeV), so it crosses
+# B1's 300 mm envelope. NOTE this corrects kaon_emonly.mac's header beside it, which says
+# "about 14 cm of water" and that the stopped kaon decays inside the phantom - the kaon at this
+# energy does not stop in B1 at all.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hadElastic
+/process/inactivate kaon-Inelastic
+/process/inactivate Decay
+/process/inactivate hBertiniCaptureAtRest
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/particle kaon-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

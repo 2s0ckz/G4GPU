@@ -1,0 +1,19 @@
+# The port's half of the kaon- like-for-like; its partner is kaon_minus_emonly.mac.
+#
+# MEASURED, 500,000 events:
+#
+#   kaon-  port 1239.62 +/- 1.303 nGy   Geant4 1131.87 +/- 1.195   +9.52%, 61.0 sigma
+#
+# The port's own two kaons differ by 0.270% (1242.97 against 1239.62), which is the split its
+# range and dE/dx tables imply. Geant4's own two differ by 9.62%. See kaon_minus_emonly.mac and
+# docs/RISK.md.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle kaon-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

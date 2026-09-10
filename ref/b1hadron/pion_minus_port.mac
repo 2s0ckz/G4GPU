@@ -1,0 +1,23 @@
+# The port's half of the pi- like-for-like; its partner is pion_minus_emonly.mac. The two files
+# differ only by the inactivations, which is the whole point of keeping them as a pair.
+#
+# MEASURED, 500,000 events:
+#
+#   pi-  port 630.922 +/- 0.666 nGy   Geant4 600.831 +/- 0.636   +5.01%, 32.7 sigma
+#   pi+  port 632.349 +/- 0.668 nGy   Geant4 633.446 +/- 0.668   -0.17%, 1.16 sigma
+#
+# THE PAIR IS THE MEASUREMENT, not either number. The port separates its two pions by 0.226%
+# and Geant4 separates its own by 5.43%; the restricted dE/dx table Geant4 dumped from the same
+# install separates them by 0.023% in water and 0.233% in the bone the dose is scored in. The
+# port agrees with the table. Geant4's transport does not agree with its own table, by a factor
+# of twenty. docs/RISK.md has the diagnostics and what they exclude.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle pi-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

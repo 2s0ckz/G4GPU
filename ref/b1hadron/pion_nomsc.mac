@@ -1,0 +1,55 @@
+# DIAGNOSTIC, Geant4 only. Is the charge-odd dose split multiple scattering?
+#
+# No. This macro is the answer to the question docs/RISK.md's charge-split entry was left open
+# on: with ionisation the only process a pion has, the split survives essentially unchanged.
+#
+# The pion here carries Transportation and hIoni and NOTHING else - the seven inactivations of
+# pion_emonly.mac and pion_minus_emonly.mac plus msc. `/particle/select pi- ; /particle/process/
+# dump` was used to confirm every inactivation took: after these lines pi-'s process manager
+# lists Transportation, msc and hIoni as Active and hBrems, hPairProd, CoulombScat, Decay,
+# hadElastic, hBertiniCaptureAtRest and pi-Inelastic as InActive, so the comparison is not
+# resting on a command name being right.
+#
+# MEASURED, 500,000 events per beam. Split is (positive - negative) / negative, throughout
+# ref/b1hadron. The two rows below THIS file printed are the second one; the msc-active row is
+# pion_emonly.mac and pion_minus_emonly.mac.
+#
+#                      pi+                  pi-                  split
+#   msc active    633.446 +/- 0.668   600.831 +/- 0.636          5.43%
+#   msc off       634.279 +/- 0.668   602.078 +/- 0.637          5.35%
+#
+# The pi- here is the second beam of a single process, so it starts from the random state the
+# pi+ run left; the same configuration run on its own gave 603.024 +/- 0.636, a 5.18% split.
+# The two differ by 1.1 sigma and the conclusion does not depend on which is quoted.
+#
+# Each charge moves by less than 0.4% when its multiple scattering is removed and the split
+# moves by a tenth of itself. The same test on the muons, one beam per run: mu+ 600.681 ->
+# 599.621 and mu- 575.568 -> 576.593, a split of 4.36% becoming 3.99%. G4WentzelVIModel and
+# G4MuMultipleScattering are therefore EXCLUDED, and they were the named suspect.
+#
+# A first pass at 2,000 events had said the opposite - the split appearing to fall from 3.58%
+# to 1.19% - and that reading was one sigma of a +/-1.7% measurement. The count is part of the
+# test.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hadElastic
+/process/inactivate pi+Inelastic
+/process/inactivate pi-Inelastic
+/process/inactivate Decay
+/process/inactivate hBertiniCaptureAtRest
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+/process/inactivate msc
+
+/gun/energy 200 MeV
+/run/printProgress 100000
+
+/gun/particle pi+
+/run/beamOn 500000
+
+/gun/particle pi-
+/run/beamOn 500000

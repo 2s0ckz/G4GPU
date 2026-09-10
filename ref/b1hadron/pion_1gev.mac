@@ -1,0 +1,52 @@
+# DIAGNOSTIC, Geant4 only. Does the charge-odd dose split survive at high energy?
+#
+# It does not. This is the cleanest thing known about it: at 1 GeV the two charges agree
+# exactly, so whatever the split is, it is a function of velocity and switches off.
+#
+# MEASURED, 500,000 events per beam. Split is (positive - negative) / negative, and the sigma
+# is the split against the two runs' combined rms. The 200 MeV row is pion_emonly.mac and
+# pion_minus_emonly.mac; the 500 MeV row was the same macro with the energy changed; the
+# 1000 MeV row is what this file printed.
+#
+#   beam        beta      pi+                  pi-                 split
+#   200 MeV    0.911  633.446 +/- 0.668   600.831 +/- 0.636         5.43%   32.7 sigma
+#   500 MeV    0.977  570.256 +/- 0.612   556.043 +/- 0.597         2.56%   16.6 sigma
+#   1000 MeV   0.991  589.271 +/- 0.648   587.903 +/- 0.646        0.233%   1.50 sigma
+#
+# The pi- is the second beam of one process and starts from the state the pi+ run left; run on
+# its own it gave 589.059 +/- 0.646, a 0.036% split at 0.23 sigma. The two are 1.3 sigma apart,
+# and the honest statement is the weaker of the two: at 1 GeV the split is below 0.25% and
+# under 1.5 sigma, against 5.43% at 32.7 sigma at 200 MeV.
+#
+# Under 1.5 sigma at 1 GeV is agreement, not a small residue. Together with the mass ordering at
+# fixed kinetic energy - mu- 3.78%, pi- 5.01%, kaon- 9.52%, which is the order of 1/beta - this
+# says the split is a low-velocity effect and not a per-species one. That is the shape of a
+# stopping-power correction; the restricted dE/dx table it should therefore be visible in has
+# the two charges 0.023% apart in water at 200 MeV, and Geant4's transported dose has them
+# 5.43% apart. docs/RISK.md carries what that leaves.
+#
+# The absolute dose is not monotone in beam energy (633 -> 570 -> 589 nGy) because the pion is
+# near minimum ionising across this range while the relativistic rise and the delta-ray
+# spectrum both move; nothing here depends on it.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hadElastic
+/process/inactivate pi+Inelastic
+/process/inactivate pi-Inelastic
+/process/inactivate Decay
+/process/inactivate hBertiniCaptureAtRest
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/energy 1000 MeV
+/run/printProgress 100000
+
+/gun/particle pi+
+/run/beamOn 500000
+
+/gun/particle pi-
+/run/beamOn 500000

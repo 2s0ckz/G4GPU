@@ -1,0 +1,54 @@
+# DIAGNOSTIC, Geant4 only. How much of the charge-odd dose split is the delta rays, and how
+# much is the primary's own continuous loss?
+#
+# `/run/setCut 5 cm` raises the secondary-production threshold far above anything a 200 MeV
+# pion can transfer, so no delta ray is ever made and the whole loss is continuous. The dose
+# scored is then the primary's mean energy loss integrated over its path through the scoring
+# volume and nothing else - which is the quantity a restricted dE/dx table is supposed to be.
+# The cut goes BEFORE /run/initialize; after it, the couple table is already built.
+#
+# MEASURED, 500,000 events per beam. Split is (positive - negative) / negative. The row this
+# file printed is the second; the first is pion_emonly.mac and pion_minus_emonly.mac.
+#
+#                            pi+                  pi-                 split
+#   default cut (0.7 mm) 633.446 +/- 0.668   600.831 +/- 0.636         5.43%
+#   no delta rays        632.613 +/- 0.671   621.103 +/- 0.660         1.85%
+#
+# The pi- is the second beam of one process and starts from the state the pi+ run left; run on
+# its own it gave 620.212 +/- 0.660, a 2.00% split. 1.0 sigma apart.
+#
+# So the split is in BOTH halves: about three fifths of it arrives through the delta-ray
+# channel and about two fifths is in the primary's continuous loss. Neither is what the table
+# says. ref/oracle/hadron_tables.csv, G4_WATER at 199.5262 MeV, restricted dE/dx read from the
+# process's own table (the dedx_total column, G4EmCalculator::GetDEDX): pi+ 0.18734421 and
+# pi- 0.18730131 MeV/mm - 0.023% apart. In G4_BONE_COMPACT_ICRU, the material the dose is
+# scored in: 0.32733467 and 0.32657222 - 0.233% apart. A ~2% asymmetry in a pure continuous
+# loss whose table is 0.23% asymmetric is the finding; delta-ray production above the cut is
+# proportional to z^2, so it cannot introduce an asymmetry of its own either.
+#
+# The absolute doses move very little when the cut is raised (pi+ 633.4 -> 632.6) because a
+# delta ray of a few hundred keV deposits within a millimetre of where it was made, and the
+# scoring volume is 60 mm thick.
+
+/run/setCut 5 cm
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hadElastic
+/process/inactivate pi+Inelastic
+/process/inactivate pi-Inelastic
+/process/inactivate Decay
+/process/inactivate hBertiniCaptureAtRest
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+
+/gun/energy 200 MeV
+/run/printProgress 100000
+
+/gun/particle pi+
+/run/beamOn 500000
+
+/gun/particle pi-
+/run/beamOn 500000

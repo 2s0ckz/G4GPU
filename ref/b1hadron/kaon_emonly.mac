@@ -4,8 +4,13 @@
 # `ref/oracle/species_processes.csv` for kaon+ is the pion's list with kaon+Inelastic in place of
 # pi+Inelastic. Same six inactivations, same reasons.
 #
-# 200 MeV kaon+: about 14 cm of water. Its lifetime is 12 ns, so as with the pion it is the
-# stopped kaon that decays and this port leaves it stopped.
+# 200 MeV kaon+: 411.1 mm of water (ref/oracle/hadron_tables.csv, G4_WATER at 199.5262 MeV), so
+# it CROSSES B1's 300 mm envelope. Its proper lifetime is 12.38 ns; it enters at beta 0.702 and
+# leaves at about 112 MeV and beta 0.58, so mean gamma is about 1.32 and the 330 mm to the world
+# boundary takes 1.72 ns against a lab lifetime of 16.3 ns: 1 - exp(-1.72/16.3) = 10% decay in
+# flight, and none of them stops. CORRECTED: this read "about 14 cm of water ... it is
+# the stopped kaon that decays and this port leaves it stopped", which is wrong by a factor of
+# three and wrong about the fate. See muon_emonly.mac for why the distinction matters.
 
 /run/initialize
 /control/verbose 0

@@ -9,6 +9,14 @@
 # physics - the honest statement is "well inside one combined sigma". What it establishes is
 # that the Bragg / Bethe-Bloch chain and the range table generalise to a mass and a lifetime
 # nothing in this project had transported before.
+#
+# RE-MEASURED AT 500,000 events, when the negative kaon was added beside it:
+#
+#   kaon+  port 1242.97 +/- 1.306 nGy   Geant4 1240.74 +/- 1.302   +0.18%, 1.21 sigma
+#
+# The 0.005% at 2,000 events was indeed luck; 0.18% at 1.21 sigma is the real size of the
+# agreement, and it is still agreement. The negative kaon at the same count is +9.52% at
+# 61 sigma - kaon_minus_port.mac and docs/RISK.md.
 
 /run/initialize
 /control/verbose 0

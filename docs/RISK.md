@@ -4921,3 +4921,159 @@ Three things worth keeping:
   any source was read: charge-even where the reference is charge-odd.
 
 The B1 numbers after the fix are in the commit that made it.
+
+
+### V44: every negative hadron, and a reference that disagrees with its own table
+
+V43 left one thing open with numbers on it: this port's mu+ dose agreed with Geant4 and its mu-
+did not, and the suspect named there was multiple scattering, "EM territory and P14's
+neighbourhood rather than P1's". Extending the like-for-like to the other two charge pairs the
+plan asked for - pi+- and K+- - turned that from one species' anomaly into a pattern, and four
+diagnostics narrowed it. It is still not P1's to fix. It is now a located question instead of a
+named one, and the diagnostics are what is worth keeping.
+
+#### The pattern: the positives agree, the negatives do not, and the size orders by 1/beta
+
+Example B1, 200 MeV, 500,000 events per run on each side, port against Geant4 QBBC with
+everything QBBC gives each species and this port does not have inactivated. The macros are one
+per species per side under `ref/b1hadron/`, each carrying its own numbers.
+
+| species | port (nGy) | Geant4 EM-only (nGy) | diff | sigma |
+|---|---|---|---|---|
+| mu+   | 598.660 +/- 0.634 | 600.681 +/- 0.634 | -0.34% | 2.25 |
+| mu-   | 597.326 +/- 0.633 | 575.568 +/- 0.611 | **+3.78%** | 24.7 |
+| pi+   | 632.349 +/- 0.668 | 633.446 +/- 0.668 | -0.17% | 1.16 |
+| pi-   | 630.922 +/- 0.666 | 600.831 +/- 0.636 | **+5.01%** | 32.7 |
+| kaon+ | 1242.97 +/- 1.306 | 1240.74 +/- 1.302 | +0.18% | 1.21 |
+| kaon- | 1239.62 +/- 1.303 | 1131.87 +/- 1.195 | **+9.52%** | 61.0 |
+
+Three positives inside 0.35%; three negatives high by 3.8%, 5.0% and 9.5%. Read down the
+charge pairs instead of across:
+
+|  | mu | pi | kaon |
+|---|---|---|---|
+| beta at 200 MeV | 0.938 | 0.911 | 0.703 |
+| Geant4's own (+ minus -) | 4.36% | 5.43% | 9.62% |
+| this port's own (+ minus -) | 0.223% | 0.226% | 0.270% |
+| what the dE/dx table implies | 0.02% (water) / 0.23% (bone) | same | kaon- 0.29% **above** kaon+ |
+
+The port is charge-blind to a quarter of a percent, which is what Geant4's own tables say it
+should be. Geant4's transport is not, by a factor of twenty to forty, and for the kaon the sign
+of the table's split is opposite to the sign of the dose's.
+
+#### None of these particles stops in B1, so it is not a Bragg peak
+
+The premise that would explain a large dose split from a small range split - a peak sitting on
+the edge of the scoring volume, where d(dose)/d(range) is enormous - is false here, and three
+macro headers said otherwise. `ref/oracle/hadron_tables.csv`, G4_WATER at 199.5262 MeV: mu-
+855.0 mm, pi+ 782.2 mm, kaon+ 411.1 mm, against B1's 300 mm envelope. All three cross.
+`muon_emonly.mac` had said "about 46 cm ... so it stops well inside B1's envelope",
+`pion_emonly.mac` "about 25 cm ... it stops inside B1's envelope", `kaon_emonly.mac` "about
+14 cm ... it is the stopped kaon that decays". All three are corrected, and the commit that
+wrote the first of them had the right figure in its own body. **A number in a comment is a
+measurement and decays like one.**
+
+#### What is excluded, each by a measurement rather than an argument
+
+- **Multiple scattering.** `ref/b1hadron/pion_nomsc.mac`. With `msc` inactivated as well, so
+  the pion carries Transportation and hIoni and nothing else, the pion split goes from 5.43% to
+  5.35% and the muon's from 4.36% to 3.99%. That was V43's named suspect. A first pass at 2,000
+  events had said the opposite - the split appearing to fall from 3.58% to 1.19% - and that
+  reading was one sigma of a +/-1.7% measurement, which is why the count is written into the
+  macro.
+- **The inactivations themselves.** `/particle/select pi- ; /particle/process/dump` after the
+  seven commands: Transportation, msc and hIoni Active; hBrems, hPairProd, CoulombScat, Decay,
+  hadElastic, hBertiniCaptureAtRest and pi-Inelastic InActive. The comparison is not resting on
+  a command name being right. The split also survives with **nothing** inactivated (pi+ 657.396
+  against pi- 575.366).
+- **At-rest capture and decay.** Both inactivated on the Geant4 side, and neither can fire
+  anyway because nothing stops. P4's measurement holds and is why the negative macros carry the
+  extra line: `G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength` returns 0.0, so
+  capture pre-empts `G4Decay` for a stopped pi-, K- or mu-.
+- **The tables.** `dedx_total` in `hadron_tables.csv` is `G4EmCalculator::GetDEDX`, which reads
+  the process's own built table - the one transport uses. pi+ 0.18734421 and pi- 0.18730131
+  MeV/mm in water, 0.023% apart; 0.32733467 and 0.32657222 in G4_BONE_COMPACT_ICRU, the material
+  the dose is scored in, 0.233% apart. Range 782.16484 against 779.33985 mm, 0.36% apart. A
+  single-track dump with a fixed seed and msc off gave **identical step lengths** for the two
+  charges across all eight ionisation steps, which is the step limitation and therefore the
+  range table agreeing to better than it can show.
+- **The model split at low energy.** `G4hIonisation::InitialiseEnergyLossProcess` sets
+  `eth = 2 MeV * mass / m_proton` and hands the low-energy model everything below it: 0.2975 MeV
+  for a pion, 1.05 MeV for a kaon. `G4ICRU73QOModel`'s constructor sets a 10 MeV high limit, so
+  `emax1` is `eth` and not `emax` - the negative's QO model covers a third of an MeV, not the
+  whole range. Above it both charges are `G4BetheBlochModel`, whose only charge-odd term is the
+  z^3 Barkas piece inside `G4EmCorrections::HighOrderCorrections`, and that is the 0.23% the
+  table shows. `G4BetheBlochModel::CorrectionsAlongStep` returns immediately for anything that
+  is not an ion.
+
+#### What is left, with its two numbers
+
+- **It is in both halves of the loss.** `ref/b1hadron/pion_nodelta.mac`. With `/run/setCut 5 cm`
+  no delta ray is produced at all and the scored dose is purely the primary's continuous loss:
+  the split is about 2.0%, against 5.43% at the default 0.7 mm cut. So roughly two fifths sits in
+  the mean continuous loss and three fifths arrives through the delta-ray channel - and
+  production above the cut goes as z^2, so the delta rays cannot introduce an asymmetry of their
+  own.
+- **It switches off with velocity.** `ref/b1hadron/pion_1gev.mac`. 200 MeV: 5.43% at 32.7 sigma.
+  500 MeV: 2.56% at 16.6 sigma. 1000 MeV: below 0.25% and under 1.5 sigma in both of two
+  independent runs. Not a small residue - agreement.
+
+So: a charge-odd, low-velocity, species-independent suppression of about 2% in Geant4's own
+continuous energy loss for negative hadrons, roughly doubled by the delta-ray channel, absent
+from the DEDX and range tables the same install dumps, and absent from this port. **The port
+reproduces the reference's tables and does not reproduce the reference's transport, and the two
+reference quantities do not agree with each other.** Which of the two is right is not something
+this package can settle from outside the EM chain, and it is the largest open item P1 leaves.
+
+**What this cost, and the rule it earns.** Half a day of it went into hypotheses that a 2,000-
+event run had appeared to support and a 500,000-event run then killed - msc twice. B1's printed
+rms is the standard error and scales as 1/sqrt(N) exactly; a 2,000-event B1 run is +/-1.7%, so
+it can neither confirm nor exclude a 3% effect. **Choose the event count from the size of the
+effect being tested, before running, and write it into the macro.** The same rule already sits
+in `tools/compare_b1_beams.ps1` for timing - "the event count is part of the measurement, not a
+knob for how long you want to wait" - and it is just as true of a dose.
+
+
+### V45: build scripts that compile a worktree against main
+
+Every driver build script in this repository hardcodes the absolute path of the primary
+checkout:
+
+```
+build_dose.bat:4        call "D:/g4gpu/build_engine.bat"
+build_gui.bat:12        call "D:/g4gpu/build_engine.bat"
+build_proton.bat:12     call "D:/g4gpu/build_engine.bat"
+build_view.bat:10       call "D:/g4gpu/build_engine.bat"
+examples/B1/build.bat:25 call "D:/g4gpu/build_engine.bat"
+examples/B1/build.bat:29 set OBJ=D:\g4gpu\out\B1
+examples/B1/build.bat:31 set INC=-I "%~dp0include" -I D:\g4gpu\src -I D:\g4gpu\src\g4
+```
+
+`build_engine.bat` and `build_vis.bat` are themselves correct - they use `%~dp0` throughout and
+export `G4GPU_ENGINE_OBJ` from it. The defect is in the callers: `call`ing them by absolute path
+makes `%~dp0` the primary checkout, so from a git worktree
+
+* the transport engine is compiled from **main's** `src/host/transport_run.cu` and its headers,
+  into **main's** `out/transport_run.obj`;
+* `examples/B1/build.bat` additionally compiles the worktree's B1 example against **main's**
+  `src` include path and writes its objects into main's `out/B1`;
+* and the resulting `exampleB1.exe` or `g4dose.exe` links that engine, runs, and prints a dose.
+
+The dose is main's physics wearing the branch's name. This is exactly S4's failure - "the run
+prints a plausible number for physics that was never compiled" - reached by a different route,
+and the branch under test is the one it silently discards. It also races the lead's build for
+the same object file.
+
+Not fixed here: these are not P1's files and five branches editing them is five conflicts. The
+fix is mechanical - `call "%~dp0build_engine.bat"`, `set OBJ=%~dp0..\..\out\B1`,
+`-I "%~dp0..\..\src"` - and it belongs in one commit on main, not in a package branch. Until it
+lands, **anything built from a worktree has to be built with the worktree's own paths and the
+size of the binary checked**: the P1 worktree's engine object is 14.5 MB against main's 7.4 MB,
+because P1 instantiates sixteen kernels and main five, and that difference is the only reason
+the mistake would be visible at all.
+
+`build_one_test.bat` has a smaller relative of the same problem: it passes no `-arch`, so nvcc
+defaults below compute 6.0, and `tests/test_neutron.cu` fails to compile because
+`atomicAdd(double*, double)` does not exist there. What it reports is an overload-resolution
+error inside `src/core/track_buffer.cuh`, naming neither the architecture nor the flag.
+`build_all.bat`'s `TESTS_GPU` line already passes `-arch=sm_86`.

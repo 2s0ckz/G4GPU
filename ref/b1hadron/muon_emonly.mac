@@ -36,9 +36,18 @@
 # process running on one side measures that process rather than the transport. Whoever revisits
 # proton_emonly.mac should expect its numbers to move by however much CoulombScat is worth.
 #
-# 200 MeV: a mu- range of about 46 cm in water, so it stops well inside B1's envelope, and below
-# every radiative threshold that matters. Everything below the inactivations is the shape of
-# examples/B1/proton.mac with the particle and energy changed.
+# 200 MeV: a mu- range of 855.0 mm in water (ref/oracle/hadron_tables.csv, G4_WATER at
+# 199.5262 MeV), so it CROSSES B1's 300 mm envelope with most of its energy left and stops
+# nowhere inside it - and below every radiative threshold that matters. Everything below the
+# inactivations is the shape of examples/B1/proton.mac with the particle and energy changed.
+#
+# CORRECTED. This line read "about 46 cm in water, so it stops well inside B1's envelope",
+# which is wrong by a factor of 1.9 and wrong about the fate. The commit that added this file
+# used the right figure in its own body - "861 mm of range against B1's ~360 mm of world" - so
+# the number was known and this header was not updated with it. It matters: "it stops inside
+# the envelope" is the premise that would let the charge-odd dose split of docs/RISK.md be
+# explained as a Bragg peak moving across the edge of the scoring volume, and no muon, pion or
+# kaon in any of these macros stops in B1 at all. Every one of them is a plateau measurement.
 
 /run/initialize
 /control/verbose 0

@@ -1,0 +1,36 @@
+# Example B1 with a mu+ beam and everything QBBC gives a positive muon that this port does not
+# have, switched off. The positive half of the pair muon_emonly.mac measures the negative half
+# of; read that file first, it carries the reasoning for every inactivation.
+#
+# ONE FEWER INACTIVATION THAN THE MUON MINUS NEEDS. `ref/oracle/species_processes.csv` gives
+# mu+ Transportation, msc (WentzelVIUni), muIoni (Bragg;MuBetheBloch, UrbanFluc), muBrems,
+# muPairProd, CoulombScat, muonNuclear and Decay - and no at-rest process, where mu- carries
+# muMinusCaptureAtRest. Bragg where mu- has ICRU73QO is the same charge split hIoni makes for
+# the pions, and it is the port's split too.
+#
+# MEASURED, 500,000 events:
+#
+#   mu+  port 598.660 +/- 0.634 nGy   Geant4 600.681 +/- 0.634   -0.34%, 2.25 sigma
+#   mu-  port 597.326 +/- 0.633 nGy   Geant4 575.568 +/- 0.611   +3.78%, 24.7 sigma
+#
+# 200 MeV mu+: 857.6 mm of water (hadron_tables.csv, G4_WATER at 199.5262 MeV), so it crosses
+# B1's 300 mm envelope with most of its energy left. NOTE this corrects muon_emonly.mac's
+# header beside it, which says "a mu- range of about 46 cm in water" - the table says 855.0 mm
+# for the mu-, and the body of the commit that added these macros used the right figure (861 mm
+# against B1's ~360 mm of world) while the macro header kept the wrong one.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate Decay
+/process/inactivate muonNuclear
+/process/inactivate muBrems
+/process/inactivate muPairProd
+/process/inactivate CoulombScat
+
+/gun/particle mu+
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000
