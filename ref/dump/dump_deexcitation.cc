@@ -266,7 +266,7 @@ void dump_levelmax() {
     if (amax <= 0) { continue; }
     for (int A = amin; A <= amax; ++A) {
       const G4LevelManager* man = nd->GetLevelManager(Z, A);
-      std::fprintf(f, "%d,%d,%.9g,%.9g,%d,%.9g\n", Z, A,
+      std::fprintf(f, "%d,%d,%.17g,%.17g,%d,%.17g\n", Z, A,
                    nd->GetMaxLevelEnergy(Z, A) / MeV,
                    man ? man->MaxLevelEnergy() / MeV : -1.0,
                    man ? static_cast<int>(man->NumberOfTransitions()) + 1 : 0,
@@ -290,6 +290,14 @@ void dump_levels() {
     {22, 48}, {26, 54}, {26, 56}, {26, 57}, {28, 58}, {29, 63}, {36, 84}, {40, 90},
     {47, 107},{50, 120},{54, 132},{56, 138},{64, 156},{74, 184},{79, 197},{82, 206},
     {82, 207},{82, 208},{83, 209},{90, 232},{92, 235},{92, 238},
+    // Two nuclides that are here for a reason and not for coverage.
+    // z89.a219 is the ONLY file in PhotonEvaporation5.7 that trips G4LevelReader's
+    // broken-transition repair - it has a transition from level 24 to level 24, which the
+    // reader redirects to the ground state with a warning. Without this row the port's copy of
+    // that repair is never exercised: removing it changed nothing in a 46-nuclide sample.
+    // z18.a38 has exactly 632 levels, which is exactly G4LevelReader::fLevelMax, so it is the
+    // file that decides whether the level cap is a limit or a fit.
+    {89, 219}, {18, 38},
   };
   FILE* f = std::fopen("deex_levels.csv", "w");
   std::fprintf(f, "Z,A,level,energy_MeV,lifetime_ns,spin2,parity,floating,ntrans,"
@@ -306,13 +314,13 @@ void dump_levels() {
       const G4NucLevel* lev = man->GetLevel(i);
       const std::size_t nt = lev ? lev->NumberOfTransitions() : 0;
       if (nt == 0) {
-        std::fprintf(f, "%d,%d,%d,%.17g,%.9g,%d,%d,%d,%d,-1,0,0,0,0,0\n", Z, A,
+        std::fprintf(f, "%d,%d,%d,%.17g,%.17g,%d,%d,%d,%d,-1,0,0,0,0,0\n", Z, A,
                      static_cast<int>(i), man->LevelEnergy(i) / MeV, man->LifeTime(i) / ns,
                      man->SpinTwo(i), man->Parity(i), man->FloatingLevel(i), 0);
         continue;
       }
       for (std::size_t j = 0; j < nt; ++j) {
-        std::fprintf(f, "%d,%d,%d,%.17g,%.9g,%d,%d,%d,%d,%d,%d,%d,%.9g,%.9g,%.9g\n", Z, A,
+        std::fprintf(f, "%d,%d,%d,%.17g,%.17g,%d,%d,%d,%d,%d,%d,%d,%.17g,%.17g,%.17g\n", Z, A,
                      static_cast<int>(i), man->LevelEnergy(i) / MeV, man->LifeTime(i) / ns,
                      man->SpinTwo(i), man->Parity(i), man->FloatingLevel(i),
                      static_cast<int>(nt), static_cast<int>(j),
