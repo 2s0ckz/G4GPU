@@ -13,7 +13,7 @@
 #   hBrems, hPairProd          discrete radiative, unported final states. Pair production does
 #                              not start until max(850 MeV, 8*139.57) = 1.12 GeV, and the brem
 #                              mean free path at 200 MeV in water is 1.8e6 mm, so this pair of
-#                              lines should be worth nothing here. docs/RISK.md V36.
+#                              lines should be worth nothing here. docs/RISK.md V38.
 #   CoulombScat                unported; P14.
 #
 # 200 MeV pi+: about 25 cm of water, so it stops inside B1's envelope.

@@ -559,7 +559,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     a muon above about 10 GeV is transported here without its dominant loss channel. For
 ///     pi+- pair production does not begin until 1.12 GeV and for the proton until 7.5 GeV.
 ///     Pre-existing rather than new: the proton has been stepped without these two processes for
-///     as long as it has been stepped. docs/PORTED.md 1.3 and docs/RISK.md V36 carry the numbers
+///     as long as it has been stepped. docs/PORTED.md 1.3 and docs/RISK.md V38 carry the numbers
 ///     and the reason no energy refusal was added.
 ///
 ///   * **There are no nuclear interactions.** This is EM transport: a proton here is stopped by

@@ -20,7 +20,7 @@
 # times larger than the stopping-power asymmetry that is supposed to cause it is not in the
 # tables, and what is left charge-odd in a 200 MeV mu- once ionisation is excluded is multiple
 # scattering - G4MuMultipleScattering with G4WentzelVIModel, whose single-scattering tail runs
-# through G4WentzelOKandVIxSection. Open; see docs/RISK.md V36.
+# through G4WentzelOKandVIxSection. Open; see docs/RISK.md V38.
 #
 # 200 MeV: a mu- range of 861 mm in water against B1's ~360 mm of world, so nothing stops and
 # this is a plateau dose. Confirmed rather than assumed - the Geant4 run with

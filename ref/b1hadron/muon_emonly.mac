@@ -23,7 +23,7 @@
 #                                 production has not started (its threshold is 8*mass = 845 MeV),
 #                                 so this line should change nothing at this energy - which is
 #                                 the point of inactivating it rather than arguing that it is
-#                                 small. docs/RISK.md V36.
+#                                 small. docs/RISK.md V38.
 #   CoulombScat                   G4CoulombScattering, the one EM process in QBBC's chain still
 #                                 unported (docs/PORTED.md 1.1, P14). Registered next to
 #                                 WentzelVI above 100 MeV, so at this energy it is live on the
