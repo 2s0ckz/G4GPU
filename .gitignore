@@ -37,3 +37,6 @@
 # Scratch
 /tests/_probe*
 *.log
+
+# The harness puts agent worktrees here; they are checkouts of this repo, not content of it.
+/.claude/worktrees/

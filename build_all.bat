@@ -38,6 +38,11 @@ for %%E in (g4builder.exe g4view.exe g4dose.exe b1_gpu_sched.exe exampleB1.exe M
   )
 )
 
+rem Every log this run writes carries a per-run id, so two builds - two worktrees integrating,
+rem or a build beside a stray selftest - cannot read each other's output. They could: the
+rem logs were fixed names under %TEMP%, and the findstr gates below would have passed on the
+rem other run's file. RANDOM twice, because one is 15 bits.
+set RUNID=%RANDOM%%RANDOM%
 set MODE=%1
 if "%MODE%"=="" set MODE=all
 
@@ -140,27 +145,27 @@ if "%MODE%"=="test" exit /b 0
 
 echo.
 echo --- dose vs Geant4, 2M events ---
-"%~dp0b1_gpu_sched.exe" 2000000 > "%TEMP%\g4gpu_dose.txt" 2>&1 || exit /b 1
-findstr /C:"FATAL" "%TEMP%\g4gpu_dose.txt" >nul 2>&1
+"%~dp0b1_gpu_sched.exe" 2000000 > "%TEMP%\g4gpu_%RUNID%_dose.txt" 2>&1 || exit /b 1
+findstr /C:"FATAL" "%TEMP%\g4gpu_%RUNID%_dose.txt" >nul 2>&1
 if not errorlevel 1 (
-  type "%TEMP%\g4gpu_dose.txt"
+  type "%TEMP%\g4gpu_%RUNID%_dose.txt"
   exit /b 1
 )
-findstr /C:"photoelectric:" /C:"rayleigh:" /C:"bremsstrahlung:" /C:"scaled to 10k" /C:"Geant4 11.1.1" /C:"uncertainty" "%TEMP%\g4gpu_dose.txt"
+findstr /C:"photoelectric:" /C:"rayleigh:" /C:"bremsstrahlung:" /C:"scaled to 10k" /C:"Geant4 11.1.1" /C:"uncertainty" "%TEMP%\g4gpu_%RUNID%_dose.txt"
 echo.
 echo --- example B1, 2M events ---
-"%~dp0examples\B1\exampleB1.exe" -n 2000000 > "%TEMP%\g4gpu_b1.txt" 2>&1 || exit /b 1
-findstr /C:"FATAL" "%TEMP%\g4gpu_b1.txt" >nul 2>&1
+"%~dp0examples\B1\exampleB1.exe" -n 2000000 > "%TEMP%\g4gpu_%RUNID%_b1.txt" 2>&1 || exit /b 1
+findstr /C:"FATAL" "%TEMP%\g4gpu_%RUNID%_b1.txt" >nul 2>&1
 if not errorlevel 1 (
-  type "%TEMP%\g4gpu_b1.txt"
+  type "%TEMP%\g4gpu_%RUNID%_b1.txt"
   exit /b 1
 )
-findstr /C:"scaled to 10k" /C:"Geant4 11.1.1" /C:"difference" "%TEMP%\g4gpu_b1.txt"
+findstr /C:"scaled to 10k" /C:"Geant4 11.1.1" /C:"difference" "%TEMP%\g4gpu_%RUNID%_b1.txt"
 rem And *checked*, not merely printed. The agreement with Geant4 is what this project claims;
 rem printing it into a log for a person to read is not a test of it, and a drift to five sigma
 rem would have passed here and been reported as ALL OK.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\check_sigma.ps1" ^
-  -Log "%TEMP%\g4gpu_b1.txt" || exit /b 1
+  -Log "%TEMP%\g4gpu_%RUNID%_b1.txt" || exit /b 1
 
 echo.
 rem The same example, in batch and driven by a macro, must give the same answer.
@@ -175,10 +180,10 @@ rem
 rem The pipeline runs everything in batch, so every interactive path - the viewer's Run button,
 rem any macro that touches the gun - was exercised only by a person. See docs/RISK.md V3.
 pushd "%~dp0examples\B1"
-"%~dp0examples\B1\exampleB1.exe" gunstate.mac > "%TEMP%\g4gpu_b1mac.txt" 2>&1 || (popd & exit /b 1)
+"%~dp0examples\B1\exampleB1.exe" gunstate.mac > "%TEMP%\g4gpu_%RUNID%_b1mac.txt" 2>&1 || (popd & exit /b 1)
 popd
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_runs.ps1" ^
-  -BatchLog "%TEMP%\g4gpu_b1.txt" -MacroLog "%TEMP%\g4gpu_b1mac.txt" || exit /b 1
+  -BatchLog "%TEMP%\g4gpu_%RUNID%_b1.txt" -MacroLog "%TEMP%\g4gpu_%RUNID%_b1mac.txt" || exit /b 1
 
 echo --- example B1: the vis macros run, and produce pictures ---
 rem init_vis.mac opens the viewer from the example rather than from g4view, which is what
@@ -189,16 +194,16 @@ rem (docs/RISK.md S5), and because "the offscreen commands work" is otherwise a 
 rem nothing behind it.
 pushd "%~dp0examples\B1"
 del /q B1_*.png g4gpu_offscreen_*.png 2>nul
-"%~dp0examples\B1\exampleB1.exe" tsg_offscreen.mac > "%TEMP%\g4gpu_tsg.txt" 2>&1 || (
+"%~dp0examples\B1\exampleB1.exe" tsg_offscreen.mac > "%TEMP%\g4gpu_%RUNID%_tsg.txt" 2>&1 || (
   echo FATAL: tsg_offscreen.mac failed.
-  type "%TEMP%\g4gpu_tsg.txt"
+  type "%TEMP%\g4gpu_%RUNID%_tsg.txt"
   popd
   exit /b 1
 )
-findstr /C:"ERROR" /C:"FATAL" /C:"unhandled" "%TEMP%\g4gpu_tsg.txt" >nul
+findstr /C:"ERROR" /C:"FATAL" /C:"unhandled" "%TEMP%\g4gpu_%RUNID%_tsg.txt" >nul
 if not errorlevel 1 (
   echo FATAL: tsg_offscreen.mac reported an error.
-  findstr /C:"ERROR" /C:"FATAL" /C:"unhandled" "%TEMP%\g4gpu_tsg.txt"
+  findstr /C:"ERROR" /C:"FATAL" /C:"unhandled" "%TEMP%\g4gpu_%RUNID%_tsg.txt"
   popd
   exit /b 1
 )
@@ -247,14 +252,14 @@ rem arena at 4 mod 8 and every double in it was misaligned - a device fault that
 rem -live 4 could never reach. tests\test_track_arena.exe checks the arithmetic; this checks
 rem that a real run gives the same number three ways.
 for %%L in (8.0 4.0 2.5) do (
-  "%~dp0g4dose.exe" -n 200000 -live %%L > "%TEMP%\g4gpu_pool_%%L.txt" 2>&1 || (
+  "%~dp0g4dose.exe" -n 200000 -live %%L > "%TEMP%\g4gpu_%RUNID%_pool_%%L.txt" 2>&1 || (
     echo FATAL: g4dose failed at -live %%L
-    type "%TEMP%\g4gpu_pool_%%L.txt"
+    type "%TEMP%\g4gpu_%RUNID%_pool_%%L.txt"
     exit /b 1
   )
 )
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_pool.ps1" ^
-  -Prefix "%TEMP%\g4gpu_pool_" -Labels "8.0,4.0,2.5" || exit /b 1
+  -Prefix "%TEMP%\g4gpu_%RUNID%_pool_" -Labels "8.0,4.0,2.5" || exit /b 1
 
 echo.
 echo --- a second run in one process is a second sample, and a new process replays ---
@@ -265,38 +270,38 @@ rem checked against a reference. Three runs of the same program, because the sha
 rem claim is that two runs of 20000 sum to one run of 40000 - an offset that jumped too far
 rem would still differ and still replay, and would silently skip part of the stream.
 pushd "%~dp0examples\B1"
-"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_seq_a.txt" 2>&1 || (
+"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_%RUNID%_seq_a.txt" 2>&1 || (
   echo FATAL: two_runs.mac failed.
-  type "%TEMP%\g4gpu_seq_a.txt"
+  type "%TEMP%\g4gpu_%RUNID%_seq_a.txt"
   popd
   exit /b 1
 )
-"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_seq_b.txt" 2>&1 || (
+"%~dp0examples\B1\exampleB1.exe" two_runs.mac > "%TEMP%\g4gpu_%RUNID%_seq_b.txt" 2>&1 || (
   echo FATAL: two_runs.mac failed on its second process.
   popd
   exit /b 1
 )
-"%~dp0examples\B1\exampleB1.exe" two_runs_one.mac > "%TEMP%\g4gpu_seq_one.txt" 2>&1 || (
+"%~dp0examples\B1\exampleB1.exe" two_runs_one.mac > "%TEMP%\g4gpu_%RUNID%_seq_one.txt" 2>&1 || (
   echo FATAL: two_runs_one.mac failed.
   popd
   exit /b 1
 )
 popd
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\check_run_sequence.ps1" ^
-  -TwoRunLog "%TEMP%\g4gpu_seq_a.txt" -RepeatLog "%TEMP%\g4gpu_seq_b.txt" ^
-  -SingleLog "%TEMP%\g4gpu_seq_one.txt" || exit /b 1
+  -TwoRunLog "%TEMP%\g4gpu_%RUNID%_seq_a.txt" -RepeatLog "%TEMP%\g4gpu_%RUNID%_seq_b.txt" ^
+  -SingleLog "%TEMP%\g4gpu_%RUNID%_seq_one.txt" || exit /b 1
 echo.
 echo --- viewer selftest ---
 rem An interactive window cannot be tested by clicking, so the viewer drives its own camera
 rem and one run for a fixed number of frames and saves a PNG. This catches a broken Win32,
 rem WGL, CUDA-render or font path, all of which are invisible to every other check here.
-"%~dp0g4view.exe" -selftest > "%TEMP%\g4gpu_view.txt" 2>&1 || exit /b 1
+"%~dp0g4view.exe" -selftest > "%TEMP%\g4gpu_%RUNID%_view.txt" 2>&1 || exit /b 1
 rem A logged failure is fatal, same as for the builder. Without this the viewer's selftest was
 rem satisfied by writing a PNG, whatever was in it.
-findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_view.txt" >nul
+findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_%RUNID%_view.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the viewer selftest logged a failure.
-  findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_view.txt"
+  findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_%RUNID%_view.txt"
   exit /b 1
 )
 rem Solid geometry has to actually render.
@@ -307,12 +312,12 @@ rem VolumeStyle grew an alpha channel and the viewer's style setup was not updat
 rem in, every volume sat at alpha zero, render_geometry skipped all of them, and the viewer
 rem drew no solid geometry at all while every check kept passing. The selftest now turns the
 rem line passes off and counts what the solid pass covered.
-findstr /C:"selftest: solid geometry rendered" "%TEMP%\g4gpu_view.txt" >nul
+findstr /C:"selftest: solid geometry rendered" "%TEMP%\g4gpu_%RUNID%_view.txt" >nul
 if errorlevel 1 (
   echo FATAL: the viewer selftest did not confirm that solid geometry renders.
   exit /b 1
 )
-findstr /C:"selftest:" "%TEMP%\g4gpu_view.txt" || exit /b 1
+findstr /C:"selftest:" "%TEMP%\g4gpu_%RUNID%_view.txt" || exit /b 1
 
 echo.
 echo --- model builder selftest ---
@@ -321,56 +326,56 @@ rem then compiled and run here, because "Save gives you a compilable project" is
 rem worth something if something checks it - and generated code that does not compile is
 rem exactly the breakage no other test in this pipeline would notice.
 if exist "%~dp0out\selftest_project" rd /s /q "%~dp0out\selftest_project"
-"%~dp0g4builder.exe" -selftest > "%TEMP%\g4gpu_builder.txt" 2>&1 || exit /b 1
-findstr /C:"selftest:" "%TEMP%\g4gpu_builder.txt" || exit /b 1
+"%~dp0g4builder.exe" -selftest > "%TEMP%\g4gpu_%RUNID%_builder.txt" 2>&1 || exit /b 1
+findstr /C:"selftest:" "%TEMP%\g4gpu_%RUNID%_builder.txt" || exit /b 1
 rem "selftest:" alone is satisfied by a selftest that logged a failure and carried on, and the
 rem subtraction step did exactly that: it picked the imported mesh as the boolean's operand,
 rem which the boolean engine rightly refuses. So the two shapes that need the shared solid
 rem store are named explicitly here, and a logged FAILED is fatal.
-findstr /C:"added a subtraction and a polycone" "%TEMP%\g4gpu_builder.txt" >nul || (
+findstr /C:"added a subtraction and a polycone" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul || (
   echo FATAL: the builder selftest did not insert the boolean and the polycone,
   echo        so nothing exercised the renderer's solid store.
-  type "%TEMP%\g4gpu_builder.txt"
+  type "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
-findstr /C:"a run with a same-layer overlap was refused" "%TEMP%\g4gpu_builder.txt" >nul || (
+findstr /C:"a run with a same-layer overlap was refused" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul || (
   echo FATAL: the builder selftest did not prove the same-layer overlap refusal.
   echo        Two volumes overlapping on one layer have no rule deciding which owns the
   echo        shared space, so a run must be refused rather than report a dose that depends
   echo        on the order the detector was built in.
-  type "%TEMP%\g4gpu_builder.txt"
+  type "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
 rem And the same rule where the layer belongs to a CLASS rather than to the volume: a phantom
 rem on layer 2 whose bone class is on 3 clashes with a box on 3, in those cells and nowhere
 rem else. The check compared the two VOLUMES and saw nothing at all.
-findstr /C:"a voxel class on another volume" "%TEMP%\g4gpu_builder.txt" >nul || (
+findstr /C:"a voxel class on another volume" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul || (
   echo FATAL: the builder selftest did not prove the PER-CLASS same-layer refusal.
   echo        A voxel class raised to another volume's layer shares that space with it at
   echo        the same layer, so which one owns it depends on list order and a run must be
   echo        refused rather than report a dose that depends on the build order.
-  type "%TEMP%\g4gpu_builder.txt"
+  type "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
-findstr /C:"it clears when the class moves off that layer" "%TEMP%\g4gpu_builder.txt" >nul || (
+findstr /C:"it clears when the class moves off that layer" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul || (
   echo FATAL: the per-class overlap check did not CLEAR when the class moved off that layer,
   echo        so it is flagging pairs on their layer RANGE rather than on where the two are
   echo        actually on one layer - which would refuse every phantom with a raised class.
-  type "%TEMP%\g4gpu_builder.txt"
+  type "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
 rem Two faces in exactly the same place, on different layers: the higher one has to be drawn.
 rem Neither was - the surface search took whichever it found first, the ownership test threw it
 rem away, and the next iteration was already inside both. A hole where two faces meet.
-findstr /C:"where two faces coincide" "%TEMP%\g4gpu_builder.txt" >nul || (
+findstr /C:"where two faces coincide" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul || (
   echo FATAL: the builder selftest did not prove that coincident faces draw the higher layer.
-  type "%TEMP%\g4gpu_builder.txt"
+  type "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
-findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the builder selftest logged a failure.
-  findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_builder.txt"
+  findstr /C:"selftest: FAILED" "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
 rem The builder's own run has to report a dose that is not zero, for the same reason the
@@ -380,16 +385,16 @@ rem rare event or nothing at all, and it read 2.81 MeV or exactly 0 depending on
 rem RNG stream landed. Anything that shifted that stream - more steps per track - looked
 rem exactly like a transport bug, and cost most of a day. The run is now large enough for the
 rem number to be stable, and this is the check that says so.
-findstr /C:"dose 0 pGy" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"dose 0 pGy" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the builder selftest scored a dose of exactly zero.
-  findstr /C:"dose" "%TEMP%\g4gpu_builder.txt"
+  findstr /C:"dose" "%TEMP%\g4gpu_%RUNID%_builder.txt"
   exit /b 1
 )
 rem Per-voxel scoring, which is checked inside the selftest by summing the cells and comparing
 rem with the volume total the same run reported. This only asserts that the check ran at all:
 rem a selftest that stopped exercising it would otherwise pass silently.
-findstr /C:"selftest: per-voxel scoring:" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"selftest: per-voxel scoring:" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not exercise per-voxel scoring.
   exit /b 1
@@ -414,7 +419,7 @@ rem The custom-scorer flag must not change the number a scorer reports until the
 rem file is edited. It is not free: a filtered scorer's total is accumulated event by event on
 rem the host through Accept(), while a stock one's comes from the device array. The selftest
 rem runs the same seed both ways and requires them to agree exactly.
-findstr /C:"selftest: a custom scorer reports what the stock one does" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"selftest: a custom scorer reports what the stock one does" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not check the custom-scorer equivalence.
   exit /b 1
@@ -426,12 +431,12 @@ rem makes the transport and the tally ignore it, and a changed picture. Each of 
 rem satisfied by a fixture that was never on screen, so the selftest proves the box visible
 rem first by recolouring it; both fixtures were once placed outside the world, where nothing
 rem is drawn, and passed.
-findstr /C:"a solid on the null layer leaves the scene" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"a solid on the null layer leaves the scene" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a null-layer solid leaves the scene.
   exit /b 1
 )
-findstr /C:"and comes back to exactly the picture it left" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"and comes back to exactly the picture it left" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a null-layer solid can be put back.
   exit /b 1
@@ -439,13 +444,13 @@ if errorlevel 1 (
 rem And a voxel class on it, checked on a grid with NOTHING over it - on a covered one the
 rem clamp removes such a cell whether the code means to or not, and breaking the rule
 rem deliberately left that check passing.
-findstr /C:"a voxel class on the null layer is not drawn" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"a voxel class on the null layer is not drawn" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a null-layer voxel class is not drawn.
   exit /b 1
 )
 rem The world is asked about before it moves off layer 0, and refused the null layer outright.
-findstr /C:"the world layer is confirmed before it moves" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"the world layer is confirmed before it moves" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the world's layer is confirmed.
   exit /b 1
@@ -462,7 +467,7 @@ rem
 rem Both halves are checked, because each alone is satisfied by a broken renderer: drawn in the
 rem hole by one that has stopped honouring layers, hidden when the class is back by one that
 rem never draws it.
-findstr /C:"gives its space to the volume inside it" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"gives its space to the volume inside it" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a nulled class hands over its space.
   exit /b 1
@@ -471,7 +476,7 @@ rem AND THE WIREFRAME PASS RUNS. The builder never launched one: its styles said
 rem `solid = visible && !wireframe`, which is right, and nothing drew the edges - so a volume
 rem set to wireframe was invisible, and the default world arrives with wireframe on and had no
 rem outline at all.
-findstr /C:"the wireframe pass draws edges" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"the wireframe pass draws edges" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the wireframe pass draws anything.
   exit /b 1
@@ -489,7 +494,7 @@ rem And the COLOUR, channel by channel, against the model's own floats - not "re
 rem changed the picture", which passes on every colour there is and did pass over an outline
 rem drawn with its red and blue exchanged. The check counts pixels that are exactly the orb's
 rem colour and requires the reversed colour to appear zero times.
-findstr /C:"pixels of them exactly its own colour" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"pixels of them exactly its own colour" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a round solid has a wireframe.
   exit /b 1
@@ -501,12 +506,12 @@ rem its coverage is 0 or 255 and never between. Four rays and an average is what
 rem values between, so counting them counts the smoothing - measured on ONE OPAQUE BOX with the
 rem rest of the scene hidden, because a translucent volume is partly covering every pixel it
 rem touches and would swamp the few hundred that are edge.
-findstr /C:"anti-aliasing softens the silhouette" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"anti-aliasing softens the silhouette" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the render is anti-aliased.
   exit /b 1
 )
-findstr /C:"turning it off changes the picture back" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"turning it off changes the picture back" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the anti-aliasing switch works.
   exit /b 1
@@ -514,12 +519,12 @@ if errorlevel 1 (
 rem THE INSERT FORM: sized from the world, and it inserts what it shows. Two claims, and the
 rem first is the one a constant cannot meet - the same fraction that gives a sensible box in a
 rem 500 mm world gives a speck in a 10 m one.
-findstr /C:"the insert form seeds half the world" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"the insert form seeds half the world" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the insert form is sized from the world.
   exit /b 1
 )
-findstr /C:"it inserts exactly the size and position it was showing" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"it inserts exactly the size and position it was showing" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the insert form inserts what it shows.
   exit /b 1
@@ -527,7 +532,7 @@ if errorlevel 1 (
 rem And that the layer menu can say "null" at all, and maps every entry to the layer it names.
 rem An off-by-one between the option INDEX and the layer NUMBER would put every solid one layer
 rem out, silently, and the option list is the only place that mapping exists.
-findstr /C:"every entry maps to the layer it names" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"every entry maps to the layer it names" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the layer menu maps its entries.
   exit /b 1
@@ -539,12 +544,12 @@ rem everything so an overlap with it is containment. True for layer 1 and above 
 rem needs no exemption, since the layer-range test prunes it. What the exemption hid was a
 rem volume placed ON layer 0, which is a real same-layer overlap resolved only by "whichever was
 rem added later wins" - the tie-break this whole check exists to refuse.
-findstr /C:"a volume on the world's own layer clashes with the world" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"a volume on the world's own layer clashes with the world" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove a layer-0 volume clashes with the world.
   exit /b 1
 )
-findstr /C:"it clears when the volume moves off that layer" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"it clears when the volume moves off that layer" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove that clash clears again.
   exit /b 1
@@ -553,7 +558,7 @@ rem The composited viewport must BE the device image - the blit's placement, str
 rem completeness, compared against d_rgba rather than against another frame that went through
 rem the same blit. A checksum comparison cannot see this: break the row stride and both sides
 rem of it are wrong identically. Verified by doing exactly that.
-findstr /C:"the composited viewport is the device image" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"the composited viewport is the device image" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not compare the composited viewport with the device.
   exit /b 1
@@ -561,7 +566,7 @@ if errorlevel 1 (
 rem And the selftest's own check that the polling path draws the same picture the waiting one does.
 rem Everything else in the selftest runs with the render inside the frame, so without this the
 rem staging swap, the row stride and the adopt would ship unexercised.
-findstr /C:"the render off the UI frame draws the same picture" "%TEMP%\g4gpu_builder.txt" >nul
+findstr /C:"the render off the UI frame draws the same picture" "%TEMP%\g4gpu_%RUNID%_builder.txt" >nul
 if errorlevel 1 (
   echo FATAL: the builder selftest did not prove the async render draws the same picture.
   exit /b 1
@@ -577,23 +582,23 @@ rem A SMALL mesh on purpose. The invariant checked here is that the UI frame spe
 rem the render, and that does not need a slow render to fail: a cudaDeviceSynchronize put back
 rem into DrawFrame breaks it on any scene at all. The big-mesh numbers, where the payoff is
 rem visible, are in docs\VIS.md - they cost forty seconds that nothing here is waiting on.
-"%~dp0g4builder.exe" -benchmesh 200000 0.40 3 > "%TEMP%\g4gpu_bench.txt" 2>&1 || exit /b 1
-findstr /C:"benchmesh: render is off the UI frame" "%TEMP%\g4gpu_bench.txt" >nul
+"%~dp0g4builder.exe" -benchmesh 200000 0.40 3 > "%TEMP%\g4gpu_%RUNID%_bench.txt" 2>&1 || exit /b 1
+findstr /C:"benchmesh: render is off the UI frame" "%TEMP%\g4gpu_%RUNID%_bench.txt" >nul
 if errorlevel 1 (
   echo FATAL: the render is back inside the UI frame.
-  findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt"
+  findstr /C:"benchmesh:" "%TEMP%\g4gpu_%RUNID%_bench.txt"
   exit /b 1
 )
 rem And when the render IS slower than the refresh interval, the UI frame has to be faster than
 rem it. Below that both are vsync-limited and -benchmesh says so instead, which is why this is
 rem a check for the failure string rather than for a success one.
-findstr /C:"benchmesh: NOT DECOUPLED" "%TEMP%\g4gpu_bench.txt" >nul
+findstr /C:"benchmesh: NOT DECOUPLED" "%TEMP%\g4gpu_%RUNID%_bench.txt" >nul
 if not errorlevel 1 (
   echo FATAL: a render slower than the refresh interval still slowed the UI frame.
-  findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt"
+  findstr /C:"benchmesh:" "%TEMP%\g4gpu_%RUNID%_bench.txt"
   exit /b 1
 )
-findstr /C:"benchmesh:" "%TEMP%\g4gpu_bench.txt" || exit /b 1
+findstr /C:"benchmesh:" "%TEMP%\g4gpu_%RUNID%_bench.txt" || exit /b 1
 rem The generated project has to be a Geant4 project, not three files that happen to compile.
 rem It shipped DetectorConstruction, PrimaryGeneratorAction and RunAction and nothing else -
 rem no ActionInitialization, no EventAction, no SteppingAction - so there was nowhere to put
@@ -647,16 +652,16 @@ if errorlevel 1 (
 echo the generated project has the full Geant4 file set
 
 call "%~dp0out\selftest_project\build.bat" || exit /b 1
-"%~dp0out\selftest_project\MyDetector.exe" -n 10000 > "%TEMP%\g4gpu_gen.txt" 2>&1 || exit /b 1
-findstr /C:"events" "%TEMP%\g4gpu_gen.txt" >nul || exit /b 1
+"%~dp0out\selftest_project\MyDetector.exe" -n 10000 > "%TEMP%\g4gpu_%RUNID%_gen.txt" 2>&1 || exit /b 1
+findstr /C:"events" "%TEMP%\g4gpu_%RUNID%_gen.txt" >nul || exit /b 1
 rem The generated project has a dose scorer on the imported mesh, so it has to report a dose
 rem that is not zero. Requiring only the word "dose" was satisfied by "dose 0 pGy", which is
 rem what a mesh made of air deposits - and what the check reported as a pass.
-findstr /C:"dose" "%TEMP%\g4gpu_gen.txt" || exit /b 1
-findstr /C:"dose 0 pGy" "%TEMP%\g4gpu_gen.txt" >nul
+findstr /C:"dose" "%TEMP%\g4gpu_%RUNID%_gen.txt" || exit /b 1
+findstr /C:"dose 0 pGy" "%TEMP%\g4gpu_%RUNID%_gen.txt" >nul
 if not errorlevel 1 (
   echo FATAL: the generated project scored a dose of exactly zero.
-  type "%TEMP%\g4gpu_gen.txt"
+  type "%TEMP%\g4gpu_%RUNID%_gen.txt"
   exit /b 1
 )
 rem The generated project must agree with the builder about the same model.
@@ -678,9 +683,9 @@ rem million - 1/sqrt(N), which is what agreement looks like. The threshold in
 rem compare_project.ps1 is 6%, and at 200000 the spread between two independent sides is 4.4%
 rem on dose1, so it sat 1.36 sigma out: a coin toss, and every pass it had ever given was luck
 rem rather than evidence. See docs/RISK.md V10.
-"%~dp0out\selftest_project\MyDetector.exe" -n 1000000 > "%TEMP%\g4gpu_cmp.txt" 2>&1 || exit /b 1
+"%~dp0out\selftest_project\MyDetector.exe" -n 1000000 > "%TEMP%\g4gpu_%RUNID%_cmp.txt" 2>&1 || exit /b 1
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_project.ps1" ^
-  -Builder "%TEMP%\g4gpu_builder.txt" -Project "%TEMP%\g4gpu_cmp.txt" || exit /b 1
+  -Builder "%TEMP%\g4gpu_%RUNID%_builder.txt" -Project "%TEMP%\g4gpu_%RUNID%_cmp.txt" || exit /b 1
 
 echo generated project compiled and ran
 

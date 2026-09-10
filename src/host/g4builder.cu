@@ -1802,11 +1802,24 @@ int main(int argc, char** argv) {
               // And the payoff, checked by the run that claims it. A fast scene passes by
               // saying there was nothing to decouple, which is true and is not a pass smuggled
               // in: the invariant above is what holds everywhere.
+              //
+              // DECOUPLED MEANS THE UI FRAME IS AT THE REFRESH INTERVAL, whatever the render
+              // cost - so that is what is asserted, against a ceiling just above 60 Hz. It was
+              // asserted as a RATIO, async < 0.9 * sync, and that cannot be satisfied in a
+              // band: the UI frame cannot go below vsync, so a render at 18.3 ms makes 16.6 ms
+              // read as 0.907 and "NOT DECOUPLED" while being exactly as decoupled as at 22.9.
+              // The mesh render got faster (the exit cull in the surface search) and moved
+              // this benchmark into that band, which is how a gate that could not pass in it
+              // was found. The ratio was also too weak at the other end: it would have called a
+              // 35 ms UI frame decoupled against a 40 ms render. A coupled frame is at least
+              // the render, which the branch condition has already put above 18 ms, so a UI
+              // frame under 17.5 ms is a decoupled one at every render cost this test reaches.
+              constexpr double kVsyncCeilingMs = 17.5;   // 60 Hz is 16.7; 5% for measurement
               if (sync_ms > 18.0) {
                 std::printf("benchmesh: %s: a render slower than the refresh (%.1f ms) left "
-                            "the UI at %.1f ms\n",
-                            (async_ms < sync_ms * 0.9) ? "decoupled" : "NOT DECOUPLED",
-                            sync_ms, async_ms);
+                            "the UI at %.1f ms (ceiling %.1f)\n",
+                            (async_ms < kVsyncCeilingMs) ? "decoupled" : "NOT DECOUPLED",
+                            sync_ms, async_ms, kVsyncCeilingMs);
               } else {
                 std::printf("benchmesh: decoupled: nothing to decouple, both frames are "
                             "vsync-limited at %.1f ms\n", sync_ms);

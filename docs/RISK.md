@@ -4245,3 +4245,36 @@ It appeared only once the profile was sampled finely enough to have vertices nea
 check had been right for nine samples and wrong for thirty-three, without changing. A bracket
 scaled about the origin, all three coordinates together, is the radial direction for every solid
 these tests use.
+
+### V36: a gate that could not pass
+
+V29 and V32 are about checks that cannot fail. This is the mirror image, and it was found by a
+speed-up: the benchmesh gate that asserts the render is decoupled from the UI frame demanded
+`async < 0.9 * sync` once the synchronous render exceeded 18 ms. The UI frame cannot go below the
+refresh interval - 16.6 ms at 60 Hz - so for any render between 18.0 and 18.5 ms the ratio sits
+at 0.90-0.92 and the gate fails **while the frame is exactly as decoupled as it is at 22.9 ms**,
+where it passed. V33's exit cull made the mesh render about a quarter faster and moved the
+benchmark into that band; a run failed on a change to log-file names.
+
+The ratio was also too weak at the other end. Against a 40 ms render it would have accepted a
+35 ms UI frame - twice vsync - as decoupled. What the gate means is one sentence: *the UI frame is
+at the refresh interval whatever the render costs*. A coupled frame is at least the render, and the
+branch condition has already put the render above 18 ms, so a UI frame under 17.5 ms is decoupled
+at every render cost the test reaches. That is the assertion now, and it names the ceiling in its
+output.
+
+Two lessons. A criterion has to be checked at the edges of the region it is applied in, not at the
+one operating point it was written at - 22.9 ms passed, and nobody asked what 18.1 would do. And a
+speed-up is a change to the inputs of every timing gate downstream of it; the commit that made the
+render faster should have been the one that re-read this gate, and was not.
+
+Left open when the GUI work was parked (2026-09-10). At build_all's benchmark size the render now
+sits on the entry threshold - 17.8 ms one run, 18.3 the next - so the payoff check is reached on
+some runs and not others, and the structural invariant (the UI frame spends under 2 ms on the
+render) is what holds every run. The fixed 17.5 ms ceiling is also load-sensitive: a UI frame at
+vsync is 16.6 ms only on a quiet machine. The complete fix is to time a baseline phase with
+nothing to render in the same process, require the asynchronous frame to sit nearer that baseline
+than the synchronous frame, enter the check only when the two are separated by a few milliseconds,
+and size the benchmark so it is entered every run - failing when it is not, so that the next
+speed-up cannot make the check vacuous silently. By hand, renders of 20.0, 22.4, 23.8 and 29.6 ms
+left the UI at 16.3-16.5 ms against the ceiling: the criterion holds where it applies.
