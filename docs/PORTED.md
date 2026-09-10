@@ -223,6 +223,19 @@ particle, because no species is stepped through a hadronic process until P8 wire
 `tests/test_hadronic_process.cu` and `tests/test_elastic_models.cu`, against
 `ref/oracle/elastic_*.csv` from `ref/dump/dump_elastic.cc`.
 
+**How the G4ElasticHadrNucleusHE tables are checked, and why not directly.** The plan asks for
+its initialisation tables to be dumped and matched. They cannot be: `G4ElasticData`'s `R1`, `R2`,
+`Pnucl`, `Aeff` and its `fCumProb[NENERGY]` are all **private**, `fElasticData[NHADRONS][ZMAX]`
+is a private static, and every function that builds or reads them - `FillData`, `FillFq2`,
+`HadrNucDifferCrSec`, `DefineHadronValues`, `GetLightFq2`, `HadronNucleusQ2_2`,
+`HadronProtonQ2` - is private too. `SampleInvariantT` is the class's only public door, and
+editing the Geant4 install to widen it would invalidate the oracle it is the oracle of. So the
+port builds the same tables (`he_fill_data`) and they are validated *through* the sampler:
+bitwise on `-t` over 1408 points, which is sensitive enough that changing the tables' mb->GeV^-2
+constant from 2.568 to 2.5681 - four parts in 100,000 - moves `-t` by 1.2e-5 and fails five
+assertions. That is measured, not assumed. It is nonetheless coverage of the table entries those
+1408 points reach and not of every entry, and it is the reason this row says so.
+
 **The numbers.** The four elastic samplers are compared under a prescribed eight-value uniform
 cycle, which makes `SampleInvariantT` and `ApplyYourself` deterministic functions of their
 inputs, at 1408 points each (2 projectiles x 8 targets from H1 to Pb208 x 11 energies from 1 MeV
