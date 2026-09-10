@@ -145,4 +145,89 @@ inline const std::string& g4radioactive_decay_dir() {
   return d;
 }
 
+// Deliberately here and not at the top of the file: the include block above is what every
+// other package appending to this file will also touch, and one line added to it is one merge
+// conflict per package (docs/HADRONIC_PLAN.md section 6 rule 5). A file-scope include is legal
+// anywhere, and this keeps the G4PARTICLEXS addition contiguous.
+#include <cstdio>
+
+/// G4PARTICLEXS - the hadronic cross-section data set: per-element and per-isotope inelastic,
+/// elastic and capture cross sections for n, p, d, t, He3, alpha and gamma.
+///
+/// THIS ONE CANNOT TRUST ITS ENVIRONMENT VARIABLE, AND THE REASON IS MEASURED
+///
+/// The other resolvers above take the dataset's own Geant4 variable first, on the argument
+/// that "a working Geant4 shell works here too". On this machine that argument fails for
+/// G4PARTICLEXS. The shell has
+///
+///     G4PARTICLEXSDATA = ...\geant4-v10.7.3-install\...\data\G4PARTICLEXS3.1.1
+///
+/// - every dataset variable points at the 10.7.3 install - while ref/oracle/run.bat sets
+/// G4PARTICLEXS**4.0** from the 11.1.1 install, which is the version the oracle CSVs are
+/// produced from. G4EMLOW got away with it: `must_contain` rejects 7.13 because its
+/// epics2017 directory has no photoelectric data in it, so the search falls through to the
+/// 11.1.1 root. G4PARTICLEXS3.1.1 has `neutron/el1` and every other file this port opens, so
+/// no sentinel discriminates it. A test run outside run.bat's environment would read 3.1.1,
+/// agree with itself, and disagree with the oracle - and the disagreement would look like a
+/// transcription error in whichever class was being written.
+///
+/// So this resolver takes the HIGHEST version it can find anywhere, rather than the first
+/// usable candidate, and says so when the environment variable is not it. That is the same
+/// discipline tools/g4src.sh applies to the source tree, for the same reason and after the
+/// same mistake. docs/RISK.md has the history.
+inline const std::string& g4particlexs_dir() {
+  static const std::string d = [] {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    // `neutron/el1` - the neutron elastic cross section on hydrogen. Every reader in
+    // src/physics/hadronic/xs/ opens Z = 1 first, so a dataset without it fails immediately
+    // anyway; the check only moves the failure to where it can be explained.
+    auto usable = [&](const fs::path& p) {
+      return fs::is_directory(p, ec) && fs::exists(p / "neutron/el1", ec);
+    };
+
+    std::vector<std::string> cand;
+    const std::string from_env = detail::env_or_empty("G4PARTICLEXSDATA");
+    if (!from_env.empty() && usable(from_env)) { cand.push_back(from_env); }
+    for (const std::string& root : g4_data_roots()) {
+      for (const auto& e : fs::directory_iterator(root, ec)) {
+        if (!e.is_directory(ec)) { continue; }
+        const std::string name = e.path().filename().string();
+        if (name.rfind("G4PARTICLEXS", 0) != 0) { continue; }
+        if (!usable(e.path())) { continue; }
+        cand.push_back(e.path().string());
+      }
+    }
+    if (cand.empty()) { return std::string(); }
+
+    std::string best = cand[0];
+    for (const std::string& c : cand) {
+      const std::string a = fs::path(best).filename().string();
+      const std::string b = fs::path(c).filename().string();
+      if (detail::version_less(a, b)) { best = c; }
+    }
+    if (!from_env.empty() && fs::path(best).filename() != fs::path(from_env).filename()) {
+      std::printf("note: G4PARTICLEXSDATA names %s, using %s - the higher version, which is\n"
+                  "      the one ref/oracle/run.bat sets and the oracle was produced from.\n",
+                  fs::path(from_env).filename().string().c_str(),
+                  fs::path(best).filename().string().c_str());
+    }
+    return best;
+  }();
+  return d;
+}
+
+/// One particle's subdirectory of G4PARTICLEXS: "proton", "neutron", "deuteron", "triton",
+/// "He3", "alpha" or "gamma" - the names G4ParticleInelasticXS builds from
+/// `particle->GetParticleName()`, so they are the Geant4 particle names and not a mapping.
+///
+/// Returns an empty string when the data set cannot be found at all, which the caller must
+/// treat as fatal: a zero hadronic cross section is a particle that never interacts, which is
+/// a wrong answer that looks like a physics result.
+inline std::string g4particlexs_subdir(const char* particle) {
+  const std::string& base = g4particlexs_dir();
+  if (base.empty()) { return {}; }
+  return (std::filesystem::path(base) / particle).string();
+}
+
 }  // namespace g4gpu::host
