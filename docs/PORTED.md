@@ -196,17 +196,23 @@ end over Z = 1..92 and 1 keV to 100 TeV.
 
 #### 2.1.1 P2 - the hadronic cross sections (added by the P2 branch)
 
-**1.34 million points against Geant4 11.1.1 at 1e-12 relative**, two tests:
+**1,109,836 points against Geant4 11.1.1 at 1e-12 relative**, two tests:
 
 | test | oracle | points | worst |
 |---|---|--:|--:|
-| `tests/test_hadronic_xs.cu` | `had_radii`, `had_coulomb`, `had_hnxsc`, `had_ggcomp`, `had_bgg` | 1,127,000 | 3.5e-13 |
-| `tests/test_particlexs.cu` | `had_particlexs`, `had_particlexs_iso`, `had_neutron_general`, `had_matelem` | 212,000 | **0** (bit-exact) |
+| `tests/test_hadronic_xs.cu` | `had_radii`, `had_masses`, `had_coulomb`, `had_hnxsc`, `had_ggcomp`, `had_bgg` | 906,700 | 2.0e-15 |
+| `tests/test_particlexs.cu` | `had_particlexs`, `had_particlexs_iso`, `had_neutron_general`, `had_matelem` | 203,136 | **0** (bit-exact) |
 
-The 3.5e-13 is a cancellation and not a disagreement: the Glauber-Gribov elastic cross section
-is `fTotalXsc - fInelasticXsc`, and for a pi- on Li7 at 121 keV that difference is 1/371 of
-either term, so an agreement of 1e-16 in each shows as 4e-14 in the difference. Every input to
-it agrees to the last bit.
+Every bucket reads **0.000e+00** - the seven radii, all 3,279 AME2012 masses, all three Coulomb
+factors, all six `G4HadronNucleonXsc` entry points for eleven projectiles, both Glauber-Gribov
+components in all five columns, `G4UPiNuclearCrossSection`, both BGG pion classes, all five
+G4PARTICLEXS data sets element and isotope, and all five neutron-general tables with their
+9,415 grid nodes - except `G4BGGNucleon{Elastic,Inelastic}XS` at 2.0e-15 and 8.6e-16, which is
+`barashenkov_xs.cuh`'s own pre-existing residual: `tests/test_nucleon_xs.cu` reports the same
+2e-15 over its 10,738 points.
+
+Bit-exactness took three fixes, all of them constants and none of them physics; see docs/RISK.md
+V39.
 
 **V and not T** for all of it, for the same reason `barashenkov_xs.cuh` is: these are cross
 sections with no process attached. P5 and P8 wire them.
@@ -223,8 +229,13 @@ points land in that gap and are counted as refusals rather than passes.
 (s/c/b hyperons) and `SCBMesonNucleonXscNS` (s/c/b mesons). Both are refused by name.
 `G4NucleiProperties` is **P** because `G4NucleiPropertiesTheoreticalTable` and the Cameron
 formula behind it are not ported, so a nuclide outside AME2012 refuses rather than being given
-a neighbour's mass. P3 has committed its own AME12 table as `src/data/ame12_masses.hh`; the two
-want unifying at integration.
+a neighbour's mass. What IS there is the whole AME2012 table: `had_masses.csv` dumps
+`GetNuclearMass` for every (Z, A) `IsInStableTable` admits - 3,279 nuclides, the 3353 table
+entries less the 74 outside `IsInTable`'s own A <= 273 / Z <= 110 - and all 3,279 agree to the
+last bit, with the membership sets equal in both directions. Both directions matter: an extra
+nuclide the port claims to know is a mass it invented. P3 has committed its own AME12 table as
+`src/data/ame12_masses.hh`; the two want unifying at integration, and `had_masses.csv` is the
+oracle for whichever survives.
 
 **`G4ComponentSAIDTotalXS` is not reachable and no `G4SAIDDATA` reader is needed.** Checked
 rather than assumed: in the whole 11.1.1 source tree the class is *mentioned* in exactly one
