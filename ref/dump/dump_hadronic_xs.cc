@@ -1,11 +1,14 @@
 // Oracle for P2 - every hadronic cross section QBBC asks for, from Geant4 itself.
 //
-// docs/HADRONIC_PLAN.md section 5, package P2. Ten CSVs, one per layer of the stack, so
+// docs/HADRONIC_PLAN.md section 5, package P2. Eleven CSVs, one per layer of the stack, so
 // that a disagreement can be localised to a layer rather than to "the proton inelastic cross
 // section":
 //
 //   had_hnxsc.csv            G4HadronNucleonXsc - the bottom of everything
 //   had_radii.csv            G4NuclearRadii and G4NucleiProperties::GetNuclearMass
+//   had_masses.csv           every nuclide G4NucleiProperties::IsInStableTable admits, because
+//                            had_radii.csv only reaches the 398 with a G4PARTICLEXS file and
+//                            the port transcribes all 3353
 //   had_coulomb.csv          the three Coulomb factors, which are threshold behaviour
 //   had_ggcomp.csv           G4ComponentGGHadronNucleusXsc and G4ComponentGGNuclNuclXsc
 //   had_bgg.csv              the four BGG data sets, end to end
@@ -308,6 +311,37 @@ void dump_hadronic_xs(const DumpContext& ctx) {
       }
     }
     std::fclose(f);
+  }
+
+  // ------------------------------------------------------------ 2b. EVERY nuclide AME2012 has
+  //
+  // had_radii.csv above covers only the (Z, A) pairs a G4PARTICLEXS file can exist for - 398 of
+  // them. src/data/nuclei_mass_ame12.hh is a 3353-entry hand transcription of
+  // G4NucleiPropertiesTableAME12's mass-excess table, so 2955 of its entries would be compared
+  // against nothing: a single mistyped excess, or a row shifted by one in the packed index,
+  // would be invisible where the isotope loop does not go and wrong wherever a de-excitation
+  // fragment or an ion projectile lands.
+  //
+  // So: every (Z, A) Geant4 says it has. IsInStableTable is the table's own membership test, so
+  // this dumps exactly the table rather than a guess at its extent, and the port's
+  // `nuclear_mass_known` has to agree with it entry for entry.
+  {
+    FILE* f = std::fopen("had_masses.csv", "w");
+    std::fprintf(f, "Z,A,nuclear_mass_MeV\n");
+    long n = 0;
+    // G4NucleiPropertiesTableAME12 is indexed for A up to 273 and Z up to 110; the loop is
+    // wider than that on purpose, so that a nuclide Geant4 has and this range would have
+    // missed shows up as a row the port refuses and the oracle does not carry.
+    for (int a = 1; a <= 295; ++a) {
+      for (int z = 0; z <= a && z <= 120; ++z) {
+        if (!G4NucleiProperties::IsInStableTable(a, z)) { continue; }
+        std::fprintf(f, "%d,%d,%.17g\n", z, a,
+                     G4NucleiProperties::GetNuclearMass(a, z) / MeV);
+        ++n;
+      }
+    }
+    std::fclose(f);
+    std::printf("dump_hadronic_xs: had_masses.csv has %ld nuclides\n", n);
   }
 
   // ------------------------------------------------------------ 3. the Coulomb factors
@@ -705,7 +739,7 @@ void dump_hadronic_xs(const DumpContext& ctx) {
 }  // namespace
 
 G4GPU_REGISTER_DUMP("hadronic_xs",
-                    "had_hnxsc.csv had_radii.csv had_coulomb.csv had_ggcomp.csv "
+                    "had_hnxsc.csv had_radii.csv had_masses.csv had_coulomb.csv had_ggcomp.csv "
                     "had_bgg.csv had_particlexs.csv had_particlexs_iso.csv "
                     "had_neutron_general.csv had_matelem.csv had_xspeaks.csv",
                     dump_hadronic_xs);

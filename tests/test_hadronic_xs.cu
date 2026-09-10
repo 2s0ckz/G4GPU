@@ -1,9 +1,12 @@
 // The four model layers under every hadronic cross section in QBBC, against Geant4's own.
 //
-// Five oracle files, one per layer, because a disagreement in
+// Six oracle files, one per layer, because a disagreement in
 // G4BGGNucleonInelasticXS at 200 MeV can come from six places and this is what says which:
 //
-//   had_radii.csv    G4NuclearRadii's seven radii and G4NucleiProperties::GetNuclearMass
+//   had_radii.csv    G4NuclearRadii's seven radii, for every (Z, A) with a data file
+//   had_masses.csv   G4NucleiProperties::GetNuclearMass for every nuclide AME2012 has - all
+//                    3279 of them, because had_radii.csv reaches 398 and the port transcribes
+//                    the whole table
 //   had_coulomb.csv  the three Coulomb factors - which are thresholds, not scalings
 //   had_hnxsc.csv    G4HadronNucleonXsc, all six entry points, eleven projectiles
 //   had_ggcomp.csv   G4ComponentGGHadronNucleusXsc and G4ComponentGGNuclNuclXsc
@@ -188,6 +191,56 @@ int check_radii(const std::string& dir, Cell* cells) {
     }
   }
   std::fclose(f);
+  return 0;
+}
+
+// ------------------------------------------------- 1b. EVERY nuclide AME2012 has, not 398
+//
+// had_radii.csv reaches only the (Z, A) a G4PARTICLEXS file can exist for. src/data/
+// nuclei_mass_ame12.hh is a 3353-entry hand transcription of G4NucleiPropertiesTableAME12's
+// mass-excess table, of which 3279 are inside its own A <= 273 / Z <= 110 bounds - so 2881 of
+// them would otherwise be compared against nothing. A mistyped excess, or a row shifted by one
+// in the packed index, is invisible where the isotope loop does not go and wrong wherever a
+// de-excitation fragment or an ion projectile lands.
+//
+// Both directions are checked. Every row of the oracle must be reproduced, AND the port's
+// membership set must be exactly the oracle's: an extra nuclide the port claims to know is a
+// mass it invented, and a missing one is a refusal where Geant4 has an answer.
+int check_masses(const std::string& dir, Cell& value, Cell& membership) {
+  FILE* f = open_oracle(dir, "had_masses.csv");
+  if (f == nullptr) { return 1; }
+  // A <= 295 and Z <= 120 are the enum bounds of G4NucleiPropertiesTableAME12
+  // (nEntries = 3353, MaxA = 295, ZMax = 120); IsInTable then narrows to A <= 273, Z <= 110.
+  static bool in_oracle[296][121] = {};
+  char line[512];
+  while (std::fgets(line, sizeof line, f) != nullptr) {
+    int z = 0, a = 0;
+    double mass = 0;
+    if (std::sscanf(line, "%d,%d,%lf", &z, &a, &mass) != 3) { continue; }
+    if (a >= 0 && a <= 295 && z >= 0 && z <= 120) { in_oracle[a][z] = true; }
+    if (!data::nuclear_mass_known(a, z)) {
+      char buf[160];
+      std::snprintf(buf, sizeof buf,
+                    "Z=%d A=%d is in G4's stable table and the port refuses it", z, a);
+      note(membership, 1.0, buf);
+      continue;
+    }
+    ++membership.n;
+    cmp(value, data::nuclear_mass<real_t>(a, z), mass, "NuclearMass Z=%d A=%d", z, a);
+  }
+  std::fclose(f);
+  // The other direction, over the whole domain the port's own bounds admit.
+  for (int a = 1; a <= 295; ++a) {
+    for (int z = 0; z <= a && z <= 120; ++z) {
+      if (data::nuclear_mass_known(a, z) && !in_oracle[a][z]) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf,
+                      "Z=%d A=%d: the port claims a mass (%.17g MeV) that G4's stable table "
+                      "does not have", z, a, data::nuclear_mass<real_t>(a, z));
+        note(membership, 1.0, buf);
+      }
+    }
+  }
   return 0;
 }
 
@@ -426,9 +479,10 @@ int main() {
   const char* env = std::getenv("G4GPU_ORACLE");
   const std::string dir = (env != nullptr) ? env : "ref/oracle";
 
-  Cell radii[11], coul[3], hn[6], gg[2], bgg[5];
+  Cell radii[11], coul[3], hn[6], gg[2], bgg[5], mass_value, mass_member;
   int io = 0;
   io += check_radii(dir, radii);
+  io += check_masses(dir, mass_value, mass_member);
   io += check_coulomb(dir, coul);
   io += check_hnxsc(dir, hn);
   io += check_ggcomp(dir, gg);
@@ -444,6 +498,14 @@ int main() {
                             "RadiusECS",      "RadiusHNGG", "RadiusKNGG", "RadiusND",
                             "RadiusCB",       "NuclearMass", "AME12 coverage"};
   for (int i = 0; i < 11; ++i) { fails += report("G4NuclearRadii", rnames[i], radii[i]); }
+  fails += report("AME2012 mass table", "GetNuclearMass, all 3279", mass_value);
+  fails += report("AME2012 mass table", "IsInStableTable membership", mass_member);
+  if (mass_value.n < 3279) {
+    std::printf("  FAIL: had_masses.csv carries %d nuclides, expected the 3279 inside\n"
+                "        G4NucleiPropertiesTableAME12's A <= 273 / Z <= 110 bounds\n",
+                mass_value.n);
+    ++fails;
+  }
   const char* cnames[3] = {"CoulombFactor(Z,A,p,E)", "CoulombFactor(p,nucleon,E)",
                            "HadronNucleonXsc barrier"};
   for (int i = 0; i < 3; ++i) { fails += report("Coulomb", cnames[i], coul[i]); }
