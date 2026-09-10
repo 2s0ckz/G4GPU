@@ -145,7 +145,12 @@ inline void ConvertToFloat(const HostGeometry& h, FloatPools& out) {
     o.has_class_layers = v.has_class_layers;
     o.layer_lo = v.layer_lo;
     o.layer_hi = v.layer_hi;
-    o.has_absent_classes = v.has_absent_classes;
+    // NOT has_absent_classes, deliberately: see Build. Absence is a fact about the transport,
+    // and the renderer draws a null class the way it draws a hidden one - through its alpha.
+    // Left false rather than copied, because geom::inside_volume reads this flag and the
+    // renderer's ownership test goes through it: copied, a ray entering the grid through an
+    // absent cell would be told it is not in the grid at all.
+    o.has_absent_classes = false;
   }
   out.xforms.resize(static_cast<std::size_t>(h.n_xforms));
   for (int i = 0; i < h.n_xforms; ++i) {
@@ -193,6 +198,21 @@ class FloatGeometry {
     g_.store.tri = d_tri_;
     g_.store.bvh = d_bvh_;
     g_.voxels = voxels;
+    // THE RENDERER IS NOT TOLD WHICH CLASSES ARE ABSENT, and that is the whole of "no null-
+    // layer rendering logic". A null class is drawn exactly as a class whose visibility is
+    // turned off is drawn - its colour arrives with zero alpha, the march walks through it and
+    // paints whatever is behind - and that is the picture the null layer is meant to have.
+    //
+    // Withheld here rather than tested for in the kernel, because there is no branch to get
+    // wrong this way: geom::voxel_cell_absent returns false with no array, and
+    // geom::inside_volume is gated on the per-volume flag above. Absence still reaches the
+    // TRANSPORT, which shares this array and is where a class not being in the scene has to
+    // mean something: no material, no step, no score.
+    //
+    // What it costs is the one thing the special case bought: a volume sitting inside a nulled
+    // class's cells on a LOWER layer than the grid is not drawn there, because the grid still
+    // owns that space as far as the picture is concerned - the same as for a hidden class.
+    g_.voxels.class_absent = nullptr;
     ready_ = true;
   }
 

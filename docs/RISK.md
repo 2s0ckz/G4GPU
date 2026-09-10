@@ -3843,3 +3843,109 @@ file.
 Before that, one experiment worth more than the reasoning: put the box on a HIGHER layer than the
 grid and it drew. That single bit - works above, fails below - is the whole signature of a rank
 tie-break, and it was available for the cost of one rebuild at any point.
+
+### V32: a justification is not a decision, and a second rendering nobody asked for
+
+Four reports about the wireframe and the null layer, and three of the four were mine to begin with.
+
+#### The comment that stopped the gap being looked at
+
+`EdgeList` drew boxes and voxel grids and nothing else, and above it I had written that a bounding
+cube round a cone "is not a hint about its shape, it is a lie about it - and the curved solids are
+ray cast as surfaces anyway, so they need no outline". Every clause of that is true. None of it is
+an argument for the code below it: it argues against drawing a *cube*, and what the code did was
+draw *nothing*, so a sphere set to wireframe disappeared.
+
+The test could not see it either. It asked whether turning the wireframe display off changed the
+picture - and the default world is a box, so it did.
+
+This is the second time in this project that a comment has protected the thing it sat above.
+V31 was a comment in the surface search asserting that a volume the ray is already inside has no
+entry surface ahead of it, which is the opposite of what `box_dist_in` returns; it went unexamined
+for as long as it did *because* it was explained. A gap with a rationale over it reads as a
+decision, and nobody re-derives a decision. The tell in both cases is the same and it is
+recognisable: the comment argues for a *weaker* claim than the code makes.
+
+What the work turned out to be is worth recording against the "it needs a real modeller" instinct.
+A cylinder, a cone, a sphere, an ellipsoid, a paraboloid, a hyperboloid and a polycone are all
+surfaces of revolution about z, so each is a table of `(z, rx, ry)` levels and one function draws
+all of them. `kPara`, `kTrap` and `kTet` keep no dimensions at all - only half-spaces - and their
+corners come back exactly by intersecting plane triples and keeping the points that satisfy every
+plane. Forty lines, and it agrees with the engine's own containment test by construction because it
+reads the engine's own planes. The para came out with corners at `x = dx + tan(alpha) y0 + tx z`,
+which is not the naive `x = dx + tan(alpha) y + tx z` - `tan(alpha)` multiplies the *unsheared* y -
+and that fell out of using `para_planes` rather than re-deriving it.
+
+The one convention I did re-derive I got wrong: a polyhedra's `rmax` is the APOTHEM, so the
+corners are `r / cos(pi/sides)` out, and drawn at `r` a hexagonal prism's outline sits 15% inside
+the solid it outlines. Reading `polyhedra_planes` had not settled it - the offset is `r` and the
+normals are at `sphi + step*(f + 0.5)`, and the half-step is the whole answer. What settled it was
+a dozen lines that print `geom::inside` across azimuth and radius: inside to r = 23 at 0 and 60
+degrees, inside only to r = 20 at 15, 30 and 45. The same lesson as the screenshot in V31 and the
+higher-layer experiment before it - a probe that asks the code what it does beats another pass of
+reading it, and it is usually available for less effort than the reading.
+
+The verification of the whole set has the same shape. Every drawn vertex is required to be ON the
+engine's own surface, bracketed rather than tested at the point: pulled 0.1% toward the axis it
+must be inside, pushed 2% out it must not be. Bracketed because `EdgeList` stores floats, and an
+exact corner round-tripped through float lands about 5e-7 outside a double-precision surface
+tolerance - which says nothing about the geometry, and did read as 30 failures until I looked at
+what the number was. The bracket also happens to identify an INNER surface, where it inverts:
+the hollow tubs reports exactly 64, which is its two inner rings of 32.
+
+#### One framebuffer, so one rule
+
+`draw_line` ends in an `atomicMin` against the geometry's packed word. Among lines that is exactly
+right: they are opaque, so the nearest one wins and nothing else about them matters. Against
+*geometry* the same operation is a pure depth test, and it threw away every line behind a
+translucent surface however little of the pixel that surface actually covered - 3% coverage still
+won the min. Reported as not seeing wireframe behind transparent objects.
+
+No tuning fixes that, because the operation cannot express the question. A depth test answers
+"which is nearer"; what a translucent surface poses is "how much of the pixel did the nearer one
+take". Two buffers and one composite in the resolve pass, where both depths and the coverage are
+in hand.
+
+And the reason it is a second BUFFER rather than a read-modify-write in the line pass: compositing
+is not commutative, so two lines reaching one pixel in either order would give two different
+pixels, and half the checks in this project are "did the picture change". A non-deterministic frame
+would have made them unreliable in a way that shows up as flakiness weeks later, not as a failure.
+`atomicMin` per buffer keeps every pass order-independent.
+
+#### The null layer got a rendering of its own, and only one was wanted
+
+The rest of it is a cost I created. A null voxel class needs the renderer told *something*, since
+the grid is still in the scene and only some cells are gone - and what I built was a rule: an
+absent cell ranks below every volume, so any cover clamps the march there and a volume sitting
+inside the hole is drawn in it. That took a widened cover scan, an exclusion for the world, a
+special case in the march, and three commits of debugging, one of which produced a volume-shaped
+black hole (V31).
+
+The requirement, when the user finally put it in one sentence, was: *turning off an object's
+visibility renders it exactly how I want something in a null layer to be rendered.* There was
+already a rendering for "not drawn". It works, it has worked for months, and routing the new state
+into it is a one-line change in `build_scene.hh` - the class's colour arrives with zero alpha - plus
+the *deletion* of everything above.
+
+The lesson is a shape, not a detail. When a new state is meant to look like an existing state, the
+implementation is to route it into that state, not to teach the renderer a second one; a second
+behaviour that is reachable only through the new feature is a second thing to debug, and it is the
+one nobody else has ever exercised. I did not ask which rendering was wanted, because inventing one
+did not feel like a decision - it felt like implementing the feature.
+
+Two smaller notes from the removal:
+
+- **Withhold the input rather than branch on it.** `FloatGeometry::Build` does not copy
+  `class_absent` or `has_absent_classes` into the render geometry at all. There is no branch to get
+  wrong that way: `voxel_cell_absent` returns false with no array, and `inside_volume` is gated on
+  the flag. Absence still reaches the transport, which shares the same arrays and is where a class
+  not being in the scene has to mean something - no material, no step, no score.
+- **The check has to compare the two pictures, not restate the rule.** "A null class is drawn as a
+  hidden class is" is asserted by hiding the class and checksumming, then putting it back and
+  nulling it instead, and requiring the two checksums to be *equal* - with "hiding it changed
+  anything at all" as the precondition. A checker that instead re-encoded the expected pixels would
+  agree with itself.
+
+One thing the removal costs, stated so it is not rediscovered as a bug: a volume inside a nulled
+class's cells on a lower layer than the grid is not drawn there. The grid still owns that space as
+far as the picture is concerned - exactly as it does for a hidden class, which is the whole point.

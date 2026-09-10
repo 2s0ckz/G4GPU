@@ -321,6 +321,11 @@ struct App {
   /// transport stays double because the dose depends on it, and the picture does not.
   vis::FloatGeometry render_geom;
   unsigned long long* d_fb = nullptr;
+  /// The wireframe, in a framebuffer of its own rather than in d_fb. See vis::render_edges:
+  /// against other lines atomicMin is the right rule, but against the GEOMETRY it is a pure
+  /// depth test, which discarded every line behind a translucent surface however little of the
+  /// pixel that surface covered. The two are composited in vis::resolve_pixel.
+  unsigned long long* d_fb_lines = nullptr;
   unsigned int* d_rgba = nullptr;
   /// The pixels the anti-aliasing pass should sample again, COMPACTED into a list, and how
   /// many there are. See vis::mark_edges: a per-pixel flag left the refinement running one
@@ -780,12 +785,16 @@ static void RebuildScene(App& a) {
     styles[i].b = static_cast<unsigned char>(st.b * 255);
     styles[i].a = static_cast<unsigned char>(st.opacity * 255 + 0.5f);
     styles[i].solid = st.visible && !st.wireframe;
-    // And its outline, when it is a wireframe volume and visible. Dimmer than its own colour,
-    // so a wireframe box behind a solid one reads as an outline rather than competing with it.
+    // And its outline, when it is a wireframe volume and visible. ITS OWN COLOUR: this used to
+    // scale by 160/255 on the theory that a dimmer line reads as an outline rather than
+    // competing with a solid volume, which is a defensible look and is not what a colour
+    // picker is for - the user picks a colour and the volume comes out at 63% of it, reported
+    // as the wireframe colour not matching the object colour.
     if (st.visible && st.wireframe) {
       edges.AddVolume(scene.volumes[i],
-                      ui::rgb(static_cast<int>(st.r * 160), static_cast<int>(st.g * 160),
-                              static_cast<int>(st.b * 160)));
+                      ui::rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
+                              static_cast<int>(st.b * 255)),
+                      scene.pool.aux.empty() ? nullptr : scene.pool.aux.data());
     }
   }
   CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * std::max<size_t>(1, styles.size())));
@@ -1090,9 +1099,11 @@ static void AllocViewportSurface(App& a) {
   // DrainRender: a free while a kernel is reading is a corruption that surfaces elsewhere.
   DrainRender(a);
   if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
+  if (a.d_fb_lines != nullptr) { cudaFree(a.d_fb_lines); }
   if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
   if (a.d_edge != nullptr) { cudaFree(a.d_edge); }
   CUDA_CHECK(cudaMalloc(&a.d_fb, sizeof(unsigned long long) * w * h));
+  CUDA_CHECK(cudaMalloc(&a.d_fb_lines, sizeof(unsigned long long) * w * h));
   CUDA_CHECK(cudaMalloc(&a.d_rgba, sizeof(unsigned int) * w * h));
   CUDA_CHECK(cudaMalloc(&a.d_edge, sizeof(int) * static_cast<std::size_t>(w) * h));
   if (a.d_edge_count == nullptr) { CUDA_CHECK(cudaMalloc(&a.d_edge_count, sizeof(unsigned int))); }
@@ -1221,20 +1232,27 @@ static void IssueRender(App& a, int w, int h) {
         a.render_geom.geometry(), a.d_styles, cam, a.d_fb, a.d_edge, a.d_edge_count,
         a.vis_attr.voxel_grid_lines, a.d_voxel_class, a.d_class_rgba);
   }
-  // The wireframe outlines. AFTER the anti-aliasing, because refine_edges retraces the
-  // geometry at the pixels it touches and would erase a line drawn under it; and these are
-  // lines, one pixel wide by intent, so there is nothing in them to anti-alias.
-  if (a.vis_attr.show_wireframe && a.n_edges > 0) {
+  // The wireframe outlines, INTO THEIR OWN FRAMEBUFFER, which resolve_to_rgba composites with
+  // the geometry's. Sharing d_fb meant sharing its atomicMin, and against geometry that is a
+  // pure depth test - so a line behind a 3%-opaque surface was thrown away rather than shown
+  // through it. It also used to have to run after the anti-aliasing, because refine_edges
+  // retraces the geometry over the pixels it touches and would erase a line drawn under it;
+  // separate buffers, so that ordering no longer constrains anything.
+  const bool draw_wire = a.vis_attr.show_wireframe && a.n_edges > 0 && a.d_fb_lines != nullptr;
+  if (draw_wire) {
+    CUDA_CHECK(cudaMemsetAsync(a.d_fb_lines, 0xFF, sizeof(unsigned long long) * w * h,
+                               a.render_stream));
     vis::render_edges<<<(a.n_edges + 63) / 64, 64, 0, a.render_stream>>>(
         a.d_ex0, a.d_ey0, a.d_ez0, a.d_ex1, a.d_ey1, a.d_ez1, a.d_ergb, a.n_edges, cam,
-        a.d_fb, 0);
+        a.d_fb_lines, 0);
   }
   if (a.show_tracks && a.n_segments > 0) {
     const int thick = static_cast<int>(a.vis_attr.track_width) - 1;
     vis::render_trajectories<<<(a.n_segments + 127) / 128, 128, 0, a.render_stream>>>(
         a.traj, a.n_segments, cam, a.d_fb, thick > 0 ? thick : 0, 1e-3f, pal);
   }
-  vis::resolve_to_rgba<<<grid, block, 0, a.render_stream>>>(a.d_fb, a.d_rgba, w, h, pal);
+  vis::resolve_to_rgba<<<grid, block, 0, a.render_stream>>>(
+      a.d_fb, a.d_rgba, w, h, pal, draw_wire ? a.d_fb_lines : nullptr);
   // Into the staging buffer the compositor is NOT reading, tightly packed. The old copy went
   // straight into host_rgba with the window's pitch as the destination stride, which cannot be
   // done asynchronously: host_rgba is pageable and the panels are about to be drawn over it.
@@ -1567,7 +1585,7 @@ int main(int argc, char** argv) {
       continue;
     }
     if (std::strcmp(argv[i], "-selftest") == 0) {
-      selftest_frames = 106;
+      selftest_frames = 112;
     } else if (std::strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
       a.width = std::atoi(argv[++i]);
     } else if (std::strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
@@ -2780,71 +2798,66 @@ int main(int argc, char** argv) {
 
       // ---- A VOLUME IN A NULL CLASS'S SPACE IS DRAWN THERE.
       //
-      // Reported: a volume on a non-null layer overlapping a voxel class set to null was not
-      // rendered in the overlap region, while two ordinary volumes were fine.
+      // A NULL CLASS IS DRAWN EXACTLY AS A HIDDEN ONE IS, pixel for pixel.
       //
-      // The cell march walks the grid's whole depth in one go and hands the ray back to the
-      // outer search where something outranks a cell. An absent cell was SKIPPED before that
-      // clamp was consulted, so nothing stopped the march inside a hole - it ran to the far
-      // side of the grid and the search resumed beyond it, where a volume sitting in the hole
-      // can never be found: a grid is not re-enterable from inside itself. And the scan that
-      // collects candidate covers rejected any volume below the grid's lowest class before it
-      // was considered at all, which an absent cell has no business being compared against.
+      // That is the requirement in its own words - "turning off an object's visibility renders
+      // it exactly how I want something in a null layer to be rendered" - and it is the reason
+      // the renderer has no null-layer rule of its own any more. It used to: an absent cell
+      // ranked below everything, so any cover clamped the march there and a volume sitting in
+      // the hole was drawn. That is a second rendering of the same scene, reachable only
+      // through the null layer, and it is not the one that was wanted.
       //
-      // InHole is inside the grid's near half, on a LOWER layer than the grid - so while the
-      // class is present the grid correctly hides it, and when the class is null it has to
-      // appear.
-      static unsigned long long hole_base = 0, hole_recol = 0;
+      // Both pictures are produced HERE, in one session, and compared. Nothing else can
+      // establish "exactly": a rule restated in the checker is a rule that agrees with itself.
+      //
+      // InHole sits inside the class's cells on a LOWER layer than the grid, so it is the
+      // volume that would appear if the grid ever stopped owning that space. Under both
+      // renderings it stays hidden, which is what the recolour below asks.
+      static unsigned long long hole_shown = 0, hole_hidden = 0, hole_nulled = 0;
+      static unsigned long long hole_nulled_recol = 0;
       if (frame == 98) {
         a.target = vis::Vec3f{0.f, 400.f, 0.f};
         a.distance = 160.f;
         a.azimuth = 0.f;
         a.elevation = 1.5f;   // down the z axis, so the near half is in front
-        SetVoxelClassLayer(a, "Uncovered", 0, kNullLayer);
       }
       if (frame == 99) {
-        hole_base = ViewportChecksum(a);
-        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
+        hole_shown = ViewportChecksum(a);
+        SetVoxelClassVisible(a, "Uncovered", 0, false);
       }
       if (frame == 100) {
-        hole_recol = ViewportChecksum(a);
-        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);   // back as it was
+        hole_hidden = ViewportChecksum(a);
+        SetVoxelClassVisible(a, "Uncovered", 0, true);
+        SetVoxelClassLayer(a, "Uncovered", 0, kNullLayer);
       }
       if (frame == 101) {
-        const unsigned long long back = ViewportChecksum(a);
-        // RECOLOURING IS THE QUESTION. "The picture changed when the class was nulled" is also
-        // satisfied by the class vanishing and nothing taking its place; only a box that
-        // responds to its own colour is a box that is being drawn.
-        if (hole_recol == hole_base) {
-          std::printf("selftest: FAILED - a volume inside a null voxel class is not drawn "
-                      "there (recolouring it changed nothing, %llu)\n", hole_base);
-        } else if (back != hole_base) {
-          std::printf("selftest: FAILED - putting the box's colour back did not restore the "
-                      "picture (%llu -> %llu)\n", hole_base, back);
-        } else {
-          std::printf("selftest: a volume overlapping a null voxel class is drawn in the "
-                      "overlap\n");
-        }
-        // And with the class back, the grid owns that space again and hides it.
-        SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
+        hole_nulled = ViewportChecksum(a);
+        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
       }
       if (frame == 102) {
-        const unsigned long long with_class = ViewportChecksum(a);
-        RecolourSolid(a, "InHole", 0.95f, 0.2f, 0.9f);
-        hole_base = with_class;
+        hole_nulled_recol = ViewportChecksum(a);
+        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);   // back as it was
+        SetVoxelClassLayer(a, "Uncovered", 0, kInheritLayer);
       }
       if (frame == 103) {
-        const unsigned long long after = ViewportChecksum(a);
-        // THE OTHER HALF OF THE RULE: with the class present the grid outranks the box
-        // everywhere it covers, so recolouring the box changes nothing. Without this, "drawn
-        // in the hole" would be satisfied by a renderer that ignores the layer rule entirely.
-        if (after != hole_base) {
-          std::printf("selftest: FAILED - the grid does not hide the box when its class is "
-                      "present (%llu -> %llu)\n", hole_base, after);
+        const unsigned long long restored = ViewportChecksum(a);
+        if (hole_hidden == hole_shown) {
+          std::printf("selftest: FAILED - hiding the near class changed nothing (%llu), so "
+                      "there is no reference to compare the null layer against\n", hole_shown);
+        } else if (hole_nulled != hole_hidden) {
+          std::printf("selftest: FAILED - a null class is not drawn the way a hidden one is "
+                      "(hidden %llu, null %llu)\n", hole_hidden, hole_nulled);
+        } else if (hole_nulled_recol != hole_nulled) {
+          std::printf("selftest: FAILED - recolouring a volume inside a null class changed the "
+                      "picture (%llu -> %llu), so the grid stopped owning that space\n",
+                      hole_nulled, hole_nulled_recol);
+        } else if (restored != hole_shown) {
+          std::printf("selftest: FAILED - putting the class layer back did not restore the "
+                      "picture (%llu -> %llu)\n", hole_shown, restored);
         } else {
-          std::printf("selftest: and hidden again when the class is put back\n");
+          std::printf("selftest: a null voxel class draws exactly as a hidden one does, and "
+                      "the volume inside it stays the grid's either way\n");
         }
-        RecolourSolid(a, "InHole", 0.15f, 0.95f, 0.55f);
       }
 
       // ---- AND THE WIREFRAME PASS RUNS AT ALL.
@@ -2870,6 +2883,71 @@ int main(int argc, char** argv) {
                       a.n_edges);
         }
         a.vis_attr.show_wireframe = true;
+      }
+
+      // ---- A ROUND SOLID HAS A WIREFRAME, IN ITS OWN COLOUR, AND IT SHOWS THROUGH GLASS.
+      //
+      // The check above passes on a box, and the world is a box - which is exactly why it
+      // passed while a sphere set to wireframe was invisible: the pass drew boxes and voxel
+      // grids and nothing else. Three separate reports, and one fixture answers all three.
+      //
+      //   the COUNT   an orb is 128 segments against a box's twelve, so the number of edges
+      //               the orb contributes cannot be produced by a box-only pass.
+      //   the COLOUR  recolouring the orb has to move the picture. Edges were dimmed to
+      //               160/255 of the volume's colour, which a recolour still moves - so this
+      //               is the weaker of the two claims and the count is what carries it.
+      //   the GLASS   the orb is wholly behind a translucent pane and smaller than it in
+      //               projection, so any edge of it that reaches the screen came through the
+      //               pane. Turning the pane OPAQUE has to take them away again: without that
+      //               half, an x-ray line pass that ignores depth entirely would pass too.
+      static int wire_edges_off = 0, wire_edges_on = 0;
+      static unsigned long long wg_base = 0, wg_recol = 0, wg_op = 0, wg_op_recol = 0;
+      if (frame == 107) {
+        InsertSelftestWireframe(a);
+        a.target = vis::Vec3f{0.f, -400.f, 0.f};
+        a.distance = 200.f;
+        a.azimuth = 0.f;
+        a.elevation = 1.5f;   // down the z axis, so the pane is between the eye and the orb
+      }
+      if (frame == 108) {
+        wire_edges_off = a.n_edges;
+        SetSolidWireframe(a, "WireOrb", true);
+      }
+      if (frame == 109) {
+        wire_edges_on = a.n_edges;
+        wg_base = ViewportChecksum(a);
+        RecolourSolid(a, "WireOrb", 0.2f, 0.95f, 0.3f);
+      }
+      if (frame == 110) {
+        wg_recol = ViewportChecksum(a);
+        RecolourSolid(a, "WireOrb", 0.95f, 0.25f, 0.85f);   // back as it was
+        SetSolidOpacity(a, "Glass", 1.0f);
+      }
+      if (frame == 111) {
+        wg_op = ViewportChecksum(a);
+        RecolourSolid(a, "WireOrb", 0.2f, 0.95f, 0.3f);
+      }
+      if (frame == 112) {
+        wg_op_recol = ViewportChecksum(a);
+        const int added = wire_edges_on - wire_edges_off;
+        if (added < 64) {
+          std::printf("selftest: FAILED - a round solid in wireframe added %d edges (%d -> "
+                      "%d); an orb is a stack of rings, not a box\n", added, wire_edges_off,
+                      wire_edges_on);
+        } else if (wg_recol == wg_base) {
+          std::printf("selftest: FAILED - recolouring a wireframe orb behind glass changed "
+                      "nothing (%llu), so its edges are not reaching the screen\n", wg_base);
+        } else if (wg_op_recol != wg_op) {
+          std::printf("selftest: FAILED - the orb's edges still respond to its colour with an "
+                      "OPAQUE pane in front (%llu -> %llu), so lines are ignoring depth "
+                      "altogether\n", wg_op, wg_op_recol);
+        } else {
+          std::printf("selftest: a round solid contributes %d wireframe edges, drawn in its "
+                      "own colour, visible through a translucent volume and hidden by an "
+                      "opaque one\n", added);
+        }
+        RecolourSolid(a, "WireOrb", 0.95f, 0.25f, 0.85f);
+        SetSolidOpacity(a, "Glass", 0.35f);
       }
 
       if (frame >= selftest_frames) {

@@ -385,11 +385,12 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
     // mesh_inside parity count, the one traversal the nearest-hit walk exists to avoid. It was
     // being paid once per composited layer, which an opaque volume hides (the walk stops at
     // its first surface) and a translucent one does not. See geom::owns_contained_point.
-    // No special case for an absent entering cell, and there was one while absence was a
-    // layer. An absent cell now reports the volume's own layer here - the layer array holds
-    // that for a class the scene does not contain, since the number is never read as a
-    // priority - so the question asked at the grid's surface is the one it was before the
-    // feature existed, and the march below skips the cells that are not there.
+    //
+    // No special case for a grid entered through a cell whose class is not drawn: this is a
+    // question about which volume owns the space, and a class that is not drawn is still the
+    // grid's. Which is why FloatGeometry::Build withholds the absence array from the render
+    // geometry - owns_contained_point goes through geom::inside_volume, and with the flag set
+    // a ray entering a null class would be told it is not in the grid at all.
     if (!geom::owns_contained_point(geometry, best_vol, hit + kNudge * dir)) { continue; }
 
     const Vec3<real_t> local_dir = geom::dir_to_local(vol.xform, dir);
@@ -457,29 +458,18 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
       {
         // The lowest rank any cell here can have. A volume that cannot beat this cannot cover
         // any cell of the grid, and for a uniform grid that is the whole test.
-        //
-        // EXCEPT WHERE THE GRID HAS HOLES IN IT, and then every volume is a candidate. An
-        // absent cell is not the grid's at all, so a volume of ANY layer takes that space -
-        // including one below the grid's lowest class, which this rank would otherwise reject
-        // before it was ever considered. Reported as a volume overlapping a null voxel class
-        // not being drawn in the overlap region.
         const long long lo_rank =
-            geometry.volumes[best_vol].has_absent_classes
-                ? (-9223372036854775807LL - 1)
-                : geom::volume_rank(geom::layer_lo_of(geometry, best_vol), best_vol);
+            geom::volume_rank(geom::layer_lo_of(geometry, best_vol), best_vol);
         for (int v = 0; v < geometry.n_volumes; ++v) {
-          // NOT THE WORLD, and this is load-bearing rather than an optimisation. box_dist_in
-          // starts its tmin at zero and clamps, so from INSIDE a box it returns 0 - not
-          // infinity - and the world is a box the ray is always inside. Admit it and it enters
-          // this list at distance zero, outranks an absent cell (which ranks below everything),
-          // and the clamp below ends the march at the very first cell: nulling one class of a
-          // phantom deleted the whole phantom. That is what happened, and the check that
-          // caught it is the one asking whether the FAR class still responds to a recolour.
+          // NOT THE WORLD, and not as an optimisation. The world contains everything by
+          // construction, so it can never take space away in front of a cell - which is what
+          // a cover is - and it is drawn as a wireframe outline rather than ray cast, so there
+          // is nothing of it to composite there in any case.
           //
-          // It is also right on its own terms. The world contains everything by construction,
-          // so it can never take space away in front of a cell - which is what a cover is - and
-          // it is drawn as a wireframe outline rather than ray cast, so there is nothing of it
-          // to composite there anyway.
+          // It also has to be excluded on the arithmetic: box_dist_in starts its tmin at zero
+          // and clamps, so from INSIDE a box it returns 0 rather than infinity, and the world
+          // is a box the ray is always inside. Admitted, it enters this list at distance zero
+          // and the clamp below ends the march at the very first cell of every grid.
           if (v == best_vol || v == geometry.world) { continue; }
           if (!geom::could_outrank(geometry, v, lo_rank)) { continue; }
           const real_t t = entry_ahead(v, hit);
@@ -528,28 +518,8 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
           const int cell_layer =
               geom::voxel_cell_layer(geometry.voxels, grid, walk.Index(grid));
 
-          // A CELL THAT IS NOT THERE OWNS NOTHING, so anything at all takes its space.
-          //
-          // Its rank is the lowest a signed 64-bit number holds, which makes every candidate
-          // cover outrank it and the clamp below fire at whichever starts nearest. That is what
-          // hands the space to a volume sitting in the hole - reported as a volume overlapping
-          // a null voxel class not being drawn where they overlap. Skipping the clamp and
-          // walking on, which is what this did first, marches straight past that volume and
-          // resumes the outer search beyond the whole grid, where it can never be found: the
-          // grid is not re-enterable from inside itself.
-          //
-          // It is NOT "covered" on its own account, though. `covered` breaks the march, and
-          // ending the walk at the first absent cell with nothing in the hole would take every
-          // cell behind it too - a phantom whose front class was nulled would disappear
-          // entirely, far side included, which is what absence-as-a-low-layer did by itself.
-          // So the rank is the lowest and the clamp decides: something in the hole stops the
-          // march there, and an empty hole does not stop it at all.
-          const bool gone = geom::voxel_cell_absent(geometry.voxels, grid, walk.Index(grid));
-          const long long cell_rank =
-              gone ? (-9223372036854775807LL - 1)
-                   : geom::volume_rank((cell_layer == geom::kNoClassLayer) ? vol.layer
-                                                                          : cell_layer,
-                                       best_vol);
+          const long long cell_rank = geom::volume_rank(
+              (cell_layer == geom::kNoClassLayer) ? vol.layer : cell_layer, best_vol);
           real_t t_own = geom::kInfinity<real_t>();
           for (int k = 0; k < n_cov; ++k) {
             if (cov_rank[k] > cell_rank && cov_t[k] < t_own) { t_own = cov_t[k]; }
@@ -574,9 +544,11 @@ __device__ unsigned long long trace_pixel(const geom::Geometry<real_t>& geometry
             break;
           }
           const int idx = walk.Index(grid);
-          // An absent cell reaches here - it has to, so the clamp above can see it - and this
-          // is where it stops: not part of the volume, so nothing of it is painted.
-          if (!gone && idx >= 0 && idx < geometry.voxels.count) {
+          // A CELL WHOSE CLASS IS NOT DRAWN IS SKIPPED AND THE MARCH GOES ON, which is the one
+          // rule here - it is what the alpha test below says. A hidden class and a null class
+          // both arrive with zero alpha and both behave this way; the renderer has no separate
+          // notion of a cell that is not in the scene. See FloatGeometry::Build.
+          if (idx >= 0 && idx < geometry.voxels.count) {
             const int cls = static_cast<int>(voxel_class[idx]);
             if (cls >= 0 && cls < ccount) {
               const unsigned int rgba = class_rgba[cbase + cls];
@@ -951,6 +923,16 @@ __global__ void render_trajectories(TrajectoryBuffer traj, int n, Camera cam,
 }
 
 /// Rasterizes an explicit edge list, used for the wireframe volumes.
+///
+/// INTO A FRAMEBUFFER OF ITS OWN, not the geometry's. Lines are opaque, so atomicMin against
+/// other lines is exactly the right rule and stays order-independent; against the GEOMETRY it
+/// is a pure depth test, which threw away every line behind a translucent surface however
+/// little of the pixel that surface covered. The two buffers are composited in resolve_pixel,
+/// which is where both depths and the geometry's coverage are available at once.
+///
+/// It follows that this pass has no ordering constraint against the anti-aliasing any more:
+/// refine_edges retraces the geometry and writes the geometry's buffer, which no longer has
+/// any lines in it to erase.
 __global__ void render_edges(const float* ex0, const float* ey0, const float* ez0,
                              const float* ex1, const float* ey1, const float* ez1,
                              const unsigned int* ergb, int n, Camera cam,
@@ -1012,14 +994,78 @@ __host__ __device__ inline void resolve_pixel(unsigned long long v, int py, int 
   if (b > 255) { b = 255; }
 }
 
+/// The same pixel with the LINE BUFFER composited in: the wireframe lives in a framebuffer of
+/// its own, and this is where the two are put together.
+///
+/// A LINE BEHIND A TRANSLUCENT SURFACE HAS TO SHOW THROUGH IT, and it did not. The line pass
+/// ends in an atomicMin against the geometry's word, which is a pure depth test, so a line
+/// further away than the nearest surface was discarded outright - even where that surface
+/// claimed 3% of the pixel and the other 97% was background. Reported as "I don't see
+/// wireframe behind transparent objects", and a depth test cannot express it: the question is
+/// not which of the two is nearer, it is how much of the pixel the nearer one actually took.
+///
+/// Compositing needs a read-modify-write, and doing that inside the line pass would make the
+/// picture depend on the order in which two lines happened to reach a pixel. So the lines go
+/// into their own buffer, where atomicMin is still exactly right - lines are opaque, so the
+/// nearest one wins and nothing else about it matters - and the single composite happens here,
+/// once per pixel, with both depths in hand. Order-independent by construction, which a
+/// checksum comparison between two frames depends on.
+///
+/// The line is opaque, so there are two cases and no blending weight to choose: in front of the
+/// nearest surface, where the line covers the pixel and that is the answer; or behind it, where
+/// it fills exactly the coverage the geometry left, taking the background's place - nothing is
+/// further away than the background.
+///
+/// What it does not reproduce is a line BETWEEN two translucent surfaces, which comes out
+/// behind both. That would mean carrying the line through the depth peeling inside trace_pixel,
+/// and what it buys is a shade on a line that is already visible.
+__host__ __device__ inline void resolve_pixel(unsigned long long v, unsigned long long line,
+                                              int py, int height, const Palette& pal, int& r,
+                                              int& g, int& b) {
+  if (line == kEmptyPixel) {
+    resolve_pixel(v, py, height, pal, r, g, b);
+    return;
+  }
+  const unsigned int lrgba = static_cast<unsigned int>(line & 0xFFFFFFFFull);
+  const int lr = static_cast<int>((lrgba >> 16) & 0xFFu);
+  const int lg = static_cast<int>((lrgba >> 8) & 0xFFu);
+  const int lb = static_cast<int>(lrgba & 0xFFu);
+  // Positive floats compare correctly as unsigned ints (see pack_pixel), so the two depths can
+  // be ordered without unpacking either - which is what keeps this __host__ __device__:
+  // __uint_as_float is device-only, and the host callers in the tests would not compile.
+  if (v == kEmptyPixel || (line >> 32) <= (v >> 32)) {
+    r = lr;
+    g = lg;
+    b = lb;
+    return;
+  }
+  const unsigned int rgba = static_cast<unsigned int>(v & 0xFFFFFFFFull);
+  const int a = static_cast<int>((rgba >> 24) & 0xFFu);
+  r = static_cast<int>((rgba >> 16) & 0xFFu) + lr * (255 - a) / 255;
+  g = static_cast<int>((rgba >> 8) & 0xFFu) + lg * (255 - a) / 255;
+  b = static_cast<int>(rgba & 0xFFu) + lb * (255 - a) / 255;
+  if (r > 255) { r = 255; }
+  if (g > 255) { g = 255; }
+  if (b > 255) { b = 255; }
+}
+
+/// Reads one pixel of a line buffer that may not exist, so the resolve kernels can take the
+/// buffer or a null pointer without repeating the test.
+__host__ __device__ inline unsigned long long line_at(const unsigned long long* lines,
+                                                      size_t i) {
+  return (lines != nullptr) ? lines[i] : kEmptyPixel;
+}
+
 __global__ void resolve_to_rgb(const unsigned long long* fb, unsigned char* rgb_out, int width,
-                               int height, Palette pal = Palette{}) {
+                               int height, Palette pal = Palette{},
+                               const unsigned long long* lines = nullptr) {
   const int px = blockIdx.x * blockDim.x + threadIdx.x;
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
+  const size_t i = static_cast<size_t>(py) * width + px;
   int r, g, b;
-  resolve_pixel(fb[py * width + px], py, height, pal, r, g, b);
+  resolve_pixel(fb[i], line_at(lines, i), py, height, pal, r, g, b);
   unsigned char* p = rgb_out + (static_cast<size_t>(py) * width + px) * 3;
   p[0] = static_cast<unsigned char>(r);
   p[1] = static_cast<unsigned char>(g);
@@ -1031,13 +1077,15 @@ __global__ void resolve_to_rgb(const unsigned long long* fb, unsigned char* rgb_
 /// same layout as the UI is what lets the panels be composited on the CPU for the cost of one
 /// pass over the pixels they cover.
 __global__ void resolve_to_rgba(const unsigned long long* fb, unsigned int* out, int width,
-                                int height, Palette pal = Palette{}) {
+                                int height, Palette pal = Palette{},
+                                const unsigned long long* lines = nullptr) {
   const int px = blockIdx.x * blockDim.x + threadIdx.x;
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
+  const size_t i = static_cast<size_t>(py) * width + px;
   int r, g, b;
-  resolve_pixel(fb[py * width + px], py, height, pal, r, g, b);
+  resolve_pixel(fb[i], line_at(lines, i), py, height, pal, r, g, b);
   out[static_cast<size_t>(py) * width + px] = 0xFF000000u
                                               | (static_cast<unsigned>(b) << 16)
                                               | (static_cast<unsigned>(g) << 8)
@@ -1047,13 +1095,14 @@ __global__ void resolve_to_rgba(const unsigned long long* fb, unsigned int* out,
 /// Unpacks the framebuffer to 24-bit BGR rows for a bottom-up BMP, on a vertical gradient
 /// background so empty pixels are not flat black.
 __global__ void resolve_to_bgr(const unsigned long long* fb, unsigned char* bgr, int width,
-                               int height) {
+                               int height, const unsigned long long* lines = nullptr) {
   const int px = blockIdx.x * blockDim.x + threadIdx.x;
   const int py = blockIdx.y * blockDim.y + threadIdx.y;
   if (px >= width || py >= height) { return; }
 
+  const size_t i = static_cast<size_t>(py) * width + px;
   int r, g, b;
-  resolve_pixel(fb[py * width + px], py, height, Palette{}, r, g, b);
+  resolve_pixel(fb[i], line_at(lines, i), py, height, Palette{}, r, g, b);
   // BMP rows run bottom-up.
   const int row = height - 1 - py;
   unsigned char* p = bgr + (static_cast<size_t>(row) * width + px) * 3;

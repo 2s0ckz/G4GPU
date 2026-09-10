@@ -104,6 +104,10 @@ struct App {
   /// transport stays double because the dose depends on it, and the picture does not.
   vis::FloatGeometry render_geom;
   unsigned long long* d_fb = nullptr;
+  /// The wireframe, in its own framebuffer. See vis::render_edges and vis::resolve_pixel: an
+  /// atomicMin against the geometry is a pure depth test, which threw away every line behind a
+  /// translucent surface however little of the pixel that surface actually covered.
+  unsigned long long* d_fb_lines = nullptr;
   unsigned int* d_rgba = nullptr;
   std::vector<unsigned int> host_rgba;
   int n_segments = 0;
@@ -227,9 +231,11 @@ static void BeamOn(App& a, int n) {
 
 static void AllocSurface(App& a) {
   if (a.d_fb != nullptr) { cudaFree(a.d_fb); }
+  if (a.d_fb_lines != nullptr) { cudaFree(a.d_fb_lines); }
   if (a.d_rgba != nullptr) { cudaFree(a.d_rgba); }
   const int view_w = std::max(1, a.width - kSidebarW);
   CUDA_CHECK(cudaMalloc(&a.d_fb, sizeof(unsigned long long) * view_w * a.height));
+  CUDA_CHECK(cudaMalloc(&a.d_fb_lines, sizeof(unsigned long long) * view_w * a.height));
   CUDA_CHECK(cudaMalloc(&a.d_rgba, sizeof(unsigned int) * view_w * a.height));
   a.host_rgba.assign(static_cast<size_t>(a.width) * a.height, ui::theme::kPanel);
 
@@ -397,15 +403,22 @@ static void DrawFrame(App& a) {
   } else {
     CUDA_CHECK(cudaMemset(a.d_fb, 0xFF, sizeof(unsigned long long) * view_w * a.height));
   }
-  if (a.show_wireframe && a.n_edges > 0) {
+  // Into the line buffer, which resolve_to_rgba composites with the geometry's. See
+  // vis::resolve_pixel: sharing one framebuffer meant sharing its atomicMin, and against the
+  // geometry that is a pure depth test - a line behind a translucent surface was discarded.
+  const bool draw_wire = a.show_wireframe && a.n_edges > 0 && a.d_fb_lines != nullptr;
+  if (draw_wire) {
+    CUDA_CHECK(cudaMemset(a.d_fb_lines, 0xFF,
+                          sizeof(unsigned long long) * view_w * a.height));
     vis::render_edges<<<(a.n_edges + 63) / 64, 64>>>(a.ex0, a.ey0, a.ez0, a.ex1, a.ey1, a.ez1,
-                                                     a.ergb, a.n_edges, cam, a.d_fb, 0);
+                                                     a.ergb, a.n_edges, cam, a.d_fb_lines, 0);
   }
   if (a.n_segments > 0) {
     vis::render_trajectories<<<(a.n_segments + 127) / 128, 128>>>(
         a.traj, a.n_segments, cam, a.d_fb, 0, a.xray ? 1e-3f : 1.0f);
   }
-  vis::resolve_to_rgba<<<grid, block>>>(a.d_fb, a.d_rgba, view_w, a.height);
+  vis::resolve_to_rgba<<<grid, block>>>(a.d_fb, a.d_rgba, view_w, a.height, vis::Palette{},
+                                        draw_wire ? a.d_fb_lines : nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaGetLastError());
 
@@ -905,12 +918,12 @@ bool Open(const Options& opt) {
       styles[i].a = static_cast<unsigned char>(st.opacity * 255 + 0.5f);
       // The world is left as wireframe: a solid world hides everything inside it.
       styles[i].solid = st.visible && !st.wireframe && static_cast<int>(i) != scene.world;
-      // Wireframe only for boxes, using their real half-lengths. A bounding cube drawn round
-      // a cone or a sphere is not a hint about its shape, it is a lie about it - and the
-      // curved solids are ray-cast as surfaces anyway, so they need no outline.
+      // Every solid that can be said in lines, in the volume's OWN colour - see
+      // vis::EdgeList::AddVolume for both. It drew boxes only, and at 63% brightness.
       edges.AddVolume(scene.volumes[i],
-                      ui::rgb(static_cast<int>(st.r * 160), static_cast<int>(st.g * 160),
-                              static_cast<int>(st.b * 160)));
+                      ui::rgb(static_cast<int>(st.r * 255), static_cast<int>(st.g * 255),
+                              static_cast<int>(st.b * 255)),
+                      scene.pool.aux.empty() ? nullptr : scene.pool.aux.data());
     }
     CUDA_CHECK(cudaMalloc(&a.d_styles, sizeof(vis::VolumeStyle) * styles.size()));
     CUDA_CHECK(cudaMemcpy(a.d_styles, styles.data(),

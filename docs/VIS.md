@@ -589,14 +589,93 @@ reach it. The builder's styles said `solid = visible && !wireframe`, which is ri
 drew the edges: a volume set to wireframe was **invisible** there, and the default world arrives
 with wireframe on, so it never had an outline in the builder at all.
 
-It is `src/render/edges.h` now and both apps use it. The pass runs AFTER the anti-aliasing -
-`refine_edges` retraces the geometry at the pixels it touches and would erase a line drawn under
-it, and these are lines one pixel wide by intent, with nothing in them to anti-alias.
+It is `src/render/edges.h` now and both apps use it.
 
-Edges are drawn for boxes and voxel grids only, using their real half-lengths. A bounding cube
-round a cone or a sphere is not a hint about its shape, it is a lie about it - and the curved
-solids are ray cast as surfaces anyway. A grid gets one because that is what shows where an
-imported phantom actually sits.
+**Every solid, in its own colour, in a framebuffer of its own.** Three things were wrong with the
+first version and each was reported separately:
+
+- **It drew boxes and voxel grids only**, behind a comment of mine arguing that a bounding cube
+  round a cone would be "a lie about its shape". That is an argument against drawing a *cube*, not
+  an argument for drawing *nothing*, and a sphere set to wireframe simply disappeared. Almost all
+  of it turned out to be one function: a cylinder, a cone, a sphere, an ellipsoid, a paraboloid, a
+  hyperboloid and a polycone are all surfaces of revolution about z, so each is a table of
+  `(z, rx, ry)` levels handed to `AddProfile` - rings at the levels, meridians between them - and
+  they differ only in the table. `kTrd` has its eight corners in `p[]`. `kPara`, `kTrap` and
+  `kTet` keep no dimensions at all, only half-spaces `n.q <= d`, so their corners are recovered by
+  intersecting plane triples and keeping the points that satisfy every plane; two vertices lying
+  on the same two planes are the ends of an edge. Exact for any convex polyhedron, and it comes
+  out agreeing with the engine's own plane convention because it uses the same planes.
+
+  A polycone's shape is in the aux pool rather than in `p[]`, so `AddVolume` takes the pool -
+  the same silent zero that `bounding_radius` carries a note about. A mesh and a boolean still
+  get nothing: a CAD import is tens of thousands of triangles, and a boolean's shape is not its
+  operands'.
+
+  One convention had to be derived rather than read, and it was wrong first: **a polyhedra's
+  `rmax` is the apothem, not the corner radius.** `polyhedra_planes` puts face *f* at distance
+  `r` from the axis along a normal at `sphi + step*(f + 0.5)`, so the faces are centred *between*
+  the drawn vertices and a corner is `r / cos(pi/sides)` out - 15% further at six sides, which
+  taken as a corner radius puts the outline inside the solid it is outlining. A probe of
+  `geom::inside` across azimuth settled it in one run where reading the plane builder had not:
+  inside to r = 23 at 0 and 60 degrees, inside only to r = 20 at 15, 30 and 45.
+
+- **It dimmed the colour to 160/255.** A defensible look, and not what a colour picker is for.
+
+- **It shared the geometry's framebuffer, so it inherited a depth test where it needed
+  compositing.** `draw_line` ends in an `atomicMin` against the geometry's packed word. Among
+  lines that is exactly right - they are opaque, so the nearest wins - but against *geometry* it
+  is a pure depth test, and a line further away than the nearest surface was discarded outright
+  even where that surface claimed 3% of the pixel and the other 97% was background. Reported as
+  not seeing wireframe behind transparent objects, and a depth test cannot express it: the
+  question is not which is nearer, it is how much of the pixel the nearer one took.
+
+  The lines go into their own buffer, where `atomicMin` is still the right rule, and
+  `vis::resolve_pixel` composites the two once per pixel with both depths in hand. Doing the
+  read-modify-write inside the line pass instead would have made the picture depend on the order
+  two lines happened to reach a pixel, which a frame-to-frame checksum comparison cannot live
+  with. The line is opaque, so there are only two cases and no blending weight to pick: in front
+  of the nearest surface it covers the pixel, and behind it it fills exactly the coverage the
+  geometry left - taking the background's place, since nothing is further than the background.
+
+  It also frees the ordering. The pass used to have to run after the anti-aliasing, because
+  `refine_edges` retraces the geometry over the pixels it touches and would erase a line drawn
+  under it. Separate buffers, so nothing constrains it.
+
+  What it does not reproduce is a line *between* two translucent surfaces, which comes out behind
+  both. That needs the line carried through the depth peeling in `trace_pixel`, and what it buys
+  is a shade on a line that is already visible.
+
+### The null layer is drawn the way a hidden object is drawn
+
+A volume on the null layer is not placed, so there is nothing to draw and nothing to decide. A
+null voxel *class* is different: the grid is still in the scene and only some of its cells are
+gone, so the renderer has to be told something about them - and what it was told was a rule of its
+own. An absent cell ranked below every volume, so any cover clamped the march there and a volume
+sitting inside the hole was drawn in it; the cover scan admitted volumes it would otherwise reject,
+and the world had to be excluded from that scan to stop the clamp ending the march at the first
+cell.
+
+That is a second rendering of the same scene, reachable only through the null layer, and it is not
+the one that was wanted. The requirement in its own words: *turning off an object's visibility
+renders it exactly how I want something in a null layer to be rendered.*
+
+So a null class now arrives with **zero alpha**, through the same field a hidden class uses, and
+the renderer has no null-layer rule at all. The march's one rule is the one it always had - a cell
+whose class is not drawn is skipped and the walk goes on - and `FloatGeometry::Build` withholds
+`class_absent` from the render geometry entirely, along with the per-volume `has_absent_classes`
+flag. Withheld rather than tested for, because there is no branch to get wrong that way:
+`voxel_cell_absent` returns false with no array, and `inside_volume` is gated on the flag.
+
+Absence still reaches the **transport**, which shares the same arrays and is where a class not
+being in the scene has to mean something: no material, no step, no score. What the removal costs is
+the one thing the special case bought - a volume inside a nulled class's cells on a lower layer
+than the grid is not drawn there, because the grid still owns that space as far as the picture is
+concerned, exactly as it does for a hidden class.
+
+What checks it is a comparison of the two pictures rather than a restatement of the rule: hide the
+class and checksum the viewport, then put it back and null it instead, and require the two
+checksums to be equal - with "hiding it changed the picture at all" as the precondition, since
+without that everything below it passes on a class that was never on screen.
 
 ## The control bar
 
@@ -796,10 +875,11 @@ thing standing between "the picture looks wrong" and knowing whether it is.
   need an ID buffer alongside the colour buffer - cheap, since the packed framebuffer already
   carries spare bits. Clicking a *volume* works.
 - No true alpha blending; only the x-ray trick.
-- A mesh has no wireframe. An imported CAD part is ray cast against its triangles and looks
-  right in surface mode, but the wireframe pass only knows how to draw a box's twelve edges.
-  Drawing every triangle edge of a 100,000-triangle import would be useless anyway; the useful
-  thing is a silhouette, which needs the edges where the surface normal changes sign.
+- A mesh has no wireframe, and neither does a boolean. Every other solid does - see
+  `EdgeList::AddVolume` - but drawing every triangle edge of a 100,000-triangle import would put
+  more line segments in the frame than the ray cast costs, and the useful thing is a silhouette,
+  which needs the edges where the surface normal changes sign. A boolean would need its own
+  surface: a subtraction drawn as both of its operands is drawn wrong.
 - No dose overlay. Deposits are scored but not visualised; colour-mapping deposition onto the
   scoring volume would be a natural next step, and for a voxel volume it is the obvious way to
   look at a dose distribution at all.

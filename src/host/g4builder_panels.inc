@@ -2498,15 +2498,13 @@ static void InsertSelftestNullLayer(App& a) {
   b.opacity = 1.0f;
   a.model.AddSolid(b);
 
-  // AND A GRID WITH NOTHING OVER IT, which is what isolates the renderer's null-cell rule.
+  // AND A GRID WITH NOTHING OVER IT, so that not painting the cell is the only thing that can
+  // remove it.
   //
-  // The "Covered" fixture has a slab across it, and a null class there is removed by the
-  // CLAMP - a cell ranked below everything is covered by the first thing that outranks it, and
-  // the march ends before reaching it. That is correct and it means that fixture cannot tell
-  // whether the paint skip works: breaking the skip deliberately left its check passing.
-  //
-  // Here nothing overlaps the grid, so no cover exists, the clamp never fires, and refusing to
-  // paint the cell is the only thing that can remove it.
+  // The "Covered" fixture has a slab across it, and a class removed there could be removed by
+  // the march's CLAMP against the slab rather than by anything about the class - breaking the
+  // paint skip deliberately left its check passing. Nothing overlaps this grid, so no cover
+  // exists and the clamp never fires.
   const double gh = 30.0;
   const int n = 8;
   Solid g;
@@ -2552,11 +2550,11 @@ static void InsertSelftestNullLayer(App& a) {
 
   // AND A BOX INSIDE THE GRID'S NEAR HALF, which is the class the checks null.
   //
-  // On a LOWER layer than the grid, deliberately: while a class is present the grid owns that
-  // space and the box is correctly hidden, and when the class is null the box has to appear -
-  // it is not that it outranks anything, it is that nothing is there any more. A box on a
-  // lower layer is also the case the cover scan used to reject before it was ever considered,
-  // which is what made a volume overlapping a null class invisible.
+  // On a LOWER layer than the grid, deliberately: it is the volume that would appear if the
+  // grid ever stopped owning that space, so it is what says whether a null class is drawn as a
+  // hidden class or as a hole. A hidden class leaves the space the grid's and the box stays
+  // hidden; the renderer once had a second rule for a null class that handed the space over
+  // and drew the box, and a null class is meant to look like a hidden one.
   Solid h;
   h.shape = Shape::kBox;
   h.name = "InHole";
@@ -2715,6 +2713,88 @@ static void RecolourVoxelClass(App& a, const char* name, int cls, float r, float
     s.voxel_classes[static_cast<std::size_t>(cls)].r = r;
     s.voxel_classes[static_cast<std::size_t>(cls)].g = g;
     s.voxel_classes[static_cast<std::size_t>(cls)].b = b;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// Turns a named solid's wireframe on or off.
+static void SetSolidWireframe(App& a, const char* name, bool on) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    s.wireframe = on;
+    a.model.Touch();
+    a.scene_dirty = true;
+    return;
+  }
+}
+
+/// A ROUND solid in wireframe, behind a pane of glass. Two claims about the wireframe that a
+/// box cannot make either of.
+///
+/// The pass drew boxes and voxel grids and nothing else, so the only thing in the scene with an
+/// outline was the world - which is a box, and which is why "turning the wireframe off changes
+/// the picture" passed while a sphere set to wireframe was invisible. An orb has 128 segments
+/// and a box has twelve, so the count alone separates them.
+///
+/// The glass is what asks the other question. The line pass ends in an atomicMin against the
+/// geometry, which is a pure depth test: an edge behind a surface was discarded however little
+/// of the pixel that surface covered. The orb is smaller than the pane in projection and
+/// directly behind it, so every edge of it that reaches the screen came THROUGH the glass -
+/// and turning the glass opaque has to take them all away again, which is what separates
+/// compositing from an x-ray hack that shows lines through everything.
+static void InsertSelftestWireframe(App& a) {
+  Solid o;
+  o.shape = Shape::kOrb;
+  o.name = "WireOrb";
+  o.p[0] = 40.0;
+  o.pos[0] = 0;
+  o.pos[1] = -400;   // its own corner of the world, so nothing else is what changed
+  o.pos[2] = 0;
+  o.layer = 3;
+  o.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  o.r = 0.95f;
+  o.g = 0.25f;
+  o.b = 0.85f;
+  o.opacity = 1.0f;
+  o.visible = true;
+  o.wireframe = false;   // turned on by the check, so the edge count can be compared
+  a.model.AddSolid(o);
+
+  Solid g;
+  g.shape = Shape::kBox;
+  g.name = "Glass";
+  g.p[0] = 60.0;
+  g.p[1] = 60.0;
+  g.p[2] = 10.0;
+  g.pos[0] = 0;
+  g.pos[1] = -400;
+  g.pos[2] = 60;      // between an eye on the +z axis and the orb
+  g.layer = 3;
+  g.material = a.model.solids.empty() ? -1 : a.model.solids[0].material;
+  g.r = 0.35f;
+  g.g = 0.75f;
+  g.b = 0.95f;
+  g.opacity = 0.35f;   // wider than the orb in projection, so the orb is wholly behind it
+  g.visible = true;
+  a.model.AddSolid(g);
+
+  a.model.Touch();
+  a.scene_dirty = true;
+  Log("selftest: added a 40 mm orb and a translucent pane in front of it, for the wireframe");
+}
+
+/// Shows or hides one voxel class of a named volume, which is the eye toggle's own flag.
+///
+/// The reference the null layer is measured against: a null class has to be drawn exactly the
+/// way a class the user hid is drawn, and the only way to assert "exactly" is to produce both
+/// pictures in one session and compare them.
+static void SetVoxelClassVisible(App& a, const char* name, int cls, bool visible) {
+  for (Solid& s : a.model.solids) {
+    if (s.name != name) { continue; }
+    if (cls < 0 || cls >= static_cast<int>(s.voxel_classes.size())) { return; }
+    s.voxel_classes[static_cast<std::size_t>(cls)].visible = visible;
     a.model.Touch();
     a.scene_dirty = true;
     return;

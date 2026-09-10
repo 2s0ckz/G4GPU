@@ -243,8 +243,16 @@ inline G4VSolid* ModelDetector::BuildSolid(int idx) {
         grid->ClassColours().clear();
         grid->ClassColours().reserve(s.voxel_classes.size());
         for (const VoxelClass& vc : s.voxel_classes) {
+          // A NULL CLASS IS DRAWN THE WAY A HIDDEN ONE IS, through this same alpha and nothing
+          // else. The renderer had a rule of its own for an absent cell - it handed the cell's
+          // space to any volume sitting in the hole - and turning a class's visibility off is
+          // the rendering the null layer is supposed to have, so the special case is gone and
+          // absence is a fact about the TRANSPORT alone. See FloatGeometry::Build, which is
+          // where the render stops being told about it.
           const unsigned int al =
-              vc.visible ? static_cast<unsigned int>(vc.opacity * 255.0f + 0.5f) : 0u;
+              (vc.visible && vc.layer != kNullLayer)
+                  ? static_cast<unsigned int>(vc.opacity * 255.0f + 0.5f)
+                  : 0u;
           grid->ClassColours().push_back(
               (al << 24) | (static_cast<unsigned int>(vc.r * 255.0f + 0.5f) << 16)
               | (static_cast<unsigned int>(vc.g * 255.0f + 0.5f) << 8)
