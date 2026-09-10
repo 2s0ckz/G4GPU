@@ -1,7 +1,7 @@
 // The oracle for P4 (decay): Geant4 11.1.1's own decay tables, lifetimes, interaction
 // lengths, boost and sampled final states.
 //
-// Seven files, and the split is along the line between what has an exact answer and what has
+// Eleven files, and the split is along the line between what has an exact answer and what has
 // only a distribution:
 //
 //   decay_applicable.csv  every particle in the table: lifetime, stable flag, whether
@@ -15,6 +15,16 @@
 //   decay_process.csv     G4Decay::GetMeanFreePath and ::GetMeanLifeTime over a grid of
 //                         (species, kinetic energy) that crosses the gamma = 20 branch.
 //                         Exact.
+//   decay_select.csv      G4DecayTable::SelectADecayChannel sampled, at the PDG mass and at
+//                         masses that CLOSE channels - which is where the algorithm stops
+//                         agreeing with a clean rewrite. See the comment on dump_select.
+//   decay_dalitz.csv      G4KL3DecayChannel::DalitzDensity on a grid, which is what pins the
+//                         KL3 form factors. The sampled spectrum cannot: see dump_dalitz.
+//   decay_atrest.csv      every AT-REST process QBBC registers, per species, with the at-rest
+//                         interaction length each offers a stopped track. The plan says a
+//                         stopped pi- is captured rather than decayed; this is the
+//                         measurement, and it says something stronger than the plan does -
+//                         see the comment on dump_atrest.
 //   decay_boost.csv       G4DecayProducts::Boost applied to a FIXED rest-frame product set,
 //                         so the boost is separated from the sampling. Exact.
 //   decay_moments.csv     per channel and per product SLOT: the first two moments of the
@@ -69,10 +79,13 @@
 #include "G4ParticleDefinition.hh"
 #include "G4ParticleTable.hh"
 #include "G4PhaseSpaceDecayChannel.hh"
+#include "G4ProcessManager.hh"
+#include "G4ProcessVector.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4ThreeVector.hh"
 #include "G4Track.hh"
 #include "G4VDecayChannel.hh"
+#include "G4VProcess.hh"
 #include "Randomize.hh"
 
 namespace {
@@ -114,6 +127,26 @@ double slot_max_kinetic_energy(double parent_mass, G4VDecayChannel* ch, int slot
   if (p <= 0.0) { return 0.0; }
   return std::sqrt(p * p + m * m) - m;
 }
+
+/// G4KL3DecayChannel::DalitzDensity is `protected`; re-exported the same way DecayProbe
+/// re-exports G4Decay's lengths. The two form factor parameters do NOT need this - the data
+/// members pLambda and pXi0 are private but `GetDalitzParameterLambda()` and
+/// `GetDalitzParameterXi()` are public inline accessors (G4KL3DecayChannel.hh:52), which is
+/// worth writing down because this package spent a while believing they were unreachable and
+/// building a spectrum-shape argument around it.
+///
+/// A probe has to be CONSTRUCTED rather than cast from the table's channel: the table holds a
+/// G4KL3DecayChannel* and there is no downcast to a class it does not know. Constructing one
+/// with the same (parent, pion, lepton, neutrino) names runs the same constructor and so
+/// selects the same parameters - which is checked, not assumed, against the accessors on the
+/// channel in the real table.
+class KL3Probe : public G4KL3DecayChannel {
+ public:
+  KL3Probe(const G4String& parent, G4double br, const G4String& pion, const G4String& lepton,
+           const G4String& nu)
+      : G4KL3DecayChannel(parent, br, pion, lepton, nu) {}
+  using G4KL3DecayChannel::DalitzDensity;
+};
 
 /// G4PhaseSpaceDecayChannel::Pmx is public and static, so the two-body kinematic limit can be
 /// asked of Geant4 itself rather than recomputed here.
@@ -166,7 +199,7 @@ void dump_tables(FILE* f) {
                "parent_stable,n_channels,channel,kinematics,br,n_daughters,"
                "d0,d0_pdg,d0_mass_MeV,d0_width_MeV,d1,d1_pdg,d1_mass_MeV,d1_width_MeV,"
                "d2,d2_pdg,d2_mass_MeV,d2_width_MeV,sum_daughter_mass_MeV,"
-               "is_ok_with_pdg_mass,two_body_pmax_MeV\n");
+               "is_ok_with_pdg_mass,two_body_pmax_MeV,kl3_lambda,kl3_xi0\n");
   for (int s = 0; s < kNumSpecies; ++s) {
     G4ParticleDefinition* p = find(kSpecies[s]);
     G4DecayTable* dt = p->GetDecayTable();
@@ -187,17 +220,216 @@ void dump_tables(FILE* f) {
         dw[d] = dd->GetPDGWidth() / MeV;
       }
       for (G4int d = 0; d < nd; ++d) { sum += ch->GetDaughter(d)->GetPDGMass() / MeV; }
+      // The KL3 form factors, straight off the channel in the real table. Zero for every
+      // other kind, which is also what the port's ChannelRow stores.
+      double lambda = 0.0, xi0 = 0.0;
+      if (auto* kl3 = dynamic_cast<G4KL3DecayChannel*>(ch)) {
+        lambda = kl3->GetDalitzParameterLambda();
+        xi0 = kl3->GetDalitzParameterXi();
+      }
       std::fprintf(f,
                    "%s,%d,%.17g,%.17g,%.17g,%d,%d,%d,%s,%.17g,%d,"
                    "%s,%d,%.17g,%.17g,%s,%d,%.17g,%.17g,%s,%d,%.17g,%.17g,"
-                   "%.17g,%d,%.17g\n",
+                   "%.17g,%d,%.17g,%.17g,%.17g\n",
                    p->GetParticleName().c_str(), p->GetPDGEncoding(), pm / MeV,
                    p->GetPDGWidth() / MeV, p->GetPDGLifeTime() / ns,
                    p->GetPDGStable() ? 1 : 0, dt->entries(), i,
                    ch->GetKinematicsName().c_str(), ch->GetBR(), nd, dn[0].c_str(), dpdg[0],
                    dm[0], dw[0], dn[1].c_str(), dpdg[1], dm[1], dw[1], dn[2].c_str(), dpdg[2],
                    dm[2], dw[2], sum, ch->IsOKWithParentMass(pm) ? 1 : 0,
-                   two_body_pmax(pm, ch) / MeV);
+                   two_body_pmax(pm, ch) / MeV, lambda, xi0);
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------
+/// G4KL3DecayChannel::DalitzDensity on a grid, for all four KL3 channels of K+ and K-.
+///
+/// THIS FILE EXISTS BECAUSE THE SPECTRUM CANNOT SEE THE FORM FACTORS. The argument was that
+/// pLambda and pXi0 are unreachable and that the only check on them is the shape of the
+/// sampled pion spectrum. Both halves were wrong. The parameters have public accessors, and
+/// the spectrum is nowhere near sharp enough: substituting K0L's pLambda = 0.0300 for K+'s
+/// 0.0286 changes F = 1 + lambda*q2/m_pi^2 by 1.6% at the edge of the Dalitz region and less
+/// inside it, which moves the sampled pion spectrum by a few parts in a thousand - a third of
+/// a sigma per bin at 400,000 samples. It was measured: the perturbation passed every
+/// assertion in tests/test_decay.cu. And pXi0 for Ke3 multiplies m_e^2 = 0.261 MeV^2 against
+/// a coefficient of order m_K^3, so it is invisible in the spectrum at any sample size.
+///
+/// Dumped as a deterministic grid, the density pins both parameters and the whole Chounet
+/// formula to machine precision. The grid is in KINETIC energies, because that is what
+/// DalitzDensity takes (its first three lines add the masses back); it sweeps the pion and
+/// lepton energies over the released energy and takes the neutrino's from what is left, and
+/// keeps the points where that is non-negative. Rho/RhoMax is negative over part of that
+/// region, which is fine and is why the acceptance test in DecayIt is `r <= w` and not `|w|`.
+void dump_dalitz(FILE* f) {
+  std::fprintf(f, "parent,lepton,lambda,xi0,mass_k_MeV,mass_pi_MeV,mass_l_MeV,mass_nu_MeV,"
+                  "epi_MeV,el_MeV,enu_MeV,density\n");
+  struct Mode { const char* parent; const char* pion; const char* lepton; const char* nu; };
+  const Mode modes[] = {{"kaon+", "pi0", "e+", "nu_e"},
+                        {"kaon+", "pi0", "mu+", "nu_mu"},
+                        {"kaon-", "pi0", "e-", "anti_nu_e"},
+                        {"kaon-", "pi0", "mu-", "anti_nu_mu"}};
+  constexpr int kSteps = 16;
+  for (const Mode& mode : modes) {
+    KL3Probe probe(mode.parent, 1.0, mode.pion, mode.lepton, mode.nu);
+    const double mk = find(mode.parent)->GetPDGMass();
+    const double mpi = find(mode.pion)->GetPDGMass();
+    const double ml = find(mode.lepton)->GetPDGMass();
+    const double mnu = find(mode.nu)->GetPDGMass();
+    const double q = mk - mpi - ml - mnu;
+    for (int i = 0; i <= kSteps; ++i) {
+      for (int j = 0; j <= kSteps; ++j) {
+        const double epi = q * i / double(kSteps);
+        const double el = q * j / double(kSteps);
+        const double enu = q - epi - el;
+        if (enu < 0.0) { continue; }
+        const double d = probe.DalitzDensity(mk, epi, el, enu, mpi, ml, mnu);
+        std::fprintf(f, "%s,%s,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                     mode.parent, mode.lepton, probe.GetDalitzParameterLambda(),
+                     probe.GetDalitzParameterXi(), mk / MeV, mpi / MeV, ml / MeV, mnu / MeV,
+                     epi / MeV, el / MeV, enu / MeV, d);
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------
+/// G4DecayTable::SelectADecayChannel, sampled - the frequency with which each channel index
+/// is chosen, at the PDG mass and at masses that CLOSE some of the channels.
+///
+/// The frequencies at the PDG mass are just BR/sumBR and could have been asserted from the
+/// table. The reduced masses are why this dump exists, because the algorithm's answer there
+/// is not what a clean rewrite produces. `br = sumBR * rand` is drawn against the sum of the
+/// OPEN channels, but the walk accumulates `sum += GetBR()` over EVERY channel and only then
+/// tests the mass. Two consequences, and both are visible in this CSV:
+///
+///   A closed channel's slice of the cumulative axis is absorbed by the next OPEN channel
+///   after it in table order - not redistributed in proportion, and not skipped.
+///
+///   Any channel whose cumulative bound lies beyond sumBR is NEVER selected, because
+///   `br < sumBR` always. For kaon+ at 0.82 of its mass, where pi+pi+pi- and pi+pi0pi0 are
+///   both shut, Kmu3 has a selection probability of exactly zero.
+///
+/// A table with every channel open cannot see either rule, which is why the fractions below
+/// go low enough to shut some. For kaon+ 0.84 shuts pi+pi+pi- and 0.82 also shuts pi+pi0pi0;
+/// measured, Kmu3 is selected 0 times out of 200,000 at both, with a branching ratio of
+/// 0.0335 and IsOKWithParentMass true. Where every channel of a species shuts - pi+/pi- at
+/// 0.70, the neutron at anything below 0.999 - SelectADecayChannel returns nullptr
+/// (sumBR == 0, G4DecayTable.cc:93), which is the port's kNoChannel path with an oracle.
+///
+/// Those all-shut cases are sampled 100 times and not 200,000. G4DecayTable prints "no
+/// possible DecayChannel" to G4cout on every one of them, unconditionally and with no
+/// verbosity gate, and at 200,000 draws per species that was 87 MB on the console of a shared
+/// oracle run. A hundred draws prove the answer is nullptr every time just as well.
+void dump_select(FILE* f) {
+  std::fprintf(f, "parent,parent_pdg,mass_fraction,parent_mass_MeV,n_channels,samples,"
+                  "n_null,channel,br,is_ok,count\n");
+  constexpr int kDraws = 200000;
+  constexpr int kClosedDraws = 100;
+  const double fractions[] = {1.0, 0.86, 0.84, 0.82, 0.70};
+  for (int s = 0; s < kNumSpecies; ++s) {
+    G4ParticleDefinition* p = find(kSpecies[s]);
+    G4DecayTable* dt = p->GetDecayTable();
+    const G4int nch = dt->entries();
+    for (double frac : fractions) {
+      const double pm = p->GetPDGMass() * frac;
+      bool any_open = false;
+      for (G4int c = 0; c < nch; ++c) {
+        any_open = any_open || dt->GetDecayChannel(c)->IsOKWithParentMass(pm);
+      }
+      const int draws = any_open ? kDraws : kClosedDraws;
+      std::vector<int> count(static_cast<std::size_t>(nch), 0);
+      int n_null = 0;
+      CLHEP::HepRandom::setTheSeed(505000UL + 100UL * (unsigned long)(s + 1) +
+                                   (unsigned long)(frac * 100.0));
+      for (int i = 0; i < draws; ++i) {
+        G4VDecayChannel* ch = dt->SelectADecayChannel(pm);
+        if (ch == nullptr) {
+          ++n_null;
+          continue;
+        }
+        for (G4int c = 0; c < nch; ++c) {
+          if (dt->GetDecayChannel(c) == ch) {
+            ++count[static_cast<std::size_t>(c)];
+            break;
+          }
+        }
+      }
+      for (G4int c = 0; c < nch; ++c) {
+        G4VDecayChannel* ch = dt->GetDecayChannel(c);
+        std::fprintf(f, "%s,%d,%.17g,%.17g,%d,%d,%d,%d,%.17g,%d,%d\n",
+                     p->GetParticleName().c_str(), p->GetPDGEncoding(), frac, pm / MeV, nch,
+                     draws, n_null, c, ch->GetBR(), ch->IsOKWithParentMass(pm) ? 1 : 0,
+                     count[static_cast<std::size_t>(c)]);
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------------------------------------
+/// Every AT-REST process QBBC registers, per species, with the at-rest interaction length
+/// each one offers a stopped track. This is the oracle for the plan's "a stopped pi- is
+/// captured, not decayed" - measured, not argued.
+///
+/// `AtRestGetPhysicalInteractionLength` is public virtual on G4VProcess, so the number the
+/// stepper would compare can be asked of each process directly - but only after
+/// `StartTracking`, because G4Decay's answer is
+/// `theNumberOfInteractionLengthLeft * GetMeanLifeTime` (G4Decay.cc:490) and that member is
+/// -1.0 from G4VProcess's constructor until StartTracking calls
+/// ResetNumberOfInteractionLengthLeft. Called without it, every unstable species reported
+/// exactly MINUS its own lifetime, which is what first said the call was being made outside
+/// the state the number belongs to.
+///
+/// So one of the two columns is sampled and one is not, deliberately. G4Decay's length is
+/// `-log(rand) * tau` under the fixed seed below and no port can reproduce the draw (Philox
+/// against MixMax); every G4HadronStoppingProcess answers a hard 0.0 whatever the seed and
+/// whatever the track (G4HadronStoppingProcess.cc:115 ignores both). What the port is
+/// required to reproduce is therefore the ZERO, the ORDER and the SIGN, not the sample.
+///
+/// WHAT THIS FILE IS FOR. A process whose at-rest length is exactly zero is not a competitor
+/// in a smallest-wins race, it is a pre-emption: no sample of `-log(rand) * tau` can beat it.
+/// So for pi-, kaon- AND mu- the at-rest branch of G4Decay never fires, and the port has to
+/// say so rather than describe a race. Rows with n_atrest == 0 are written with index -1, so
+/// "this species has no at-rest process" is a row and not an absence.
+void dump_atrest(FILE* f) {
+  std::fprintf(f,
+               "name,pdg,stable,n_atrest,index,process_name,process_type,process_subtype,"
+               "at_rest_length_ns\n");
+  auto* it = G4ParticleTable::GetParticleTable()->GetIterator();
+  it->reset();
+  while ((*it)()) {
+    G4ParticleDefinition* p = it->value();
+    G4ProcessManager* pm = p->GetProcessManager();
+    // Only the particles QBBC actually built a process manager for. That is the set whose
+    // at-rest queue is a fact about this physics list rather than about the particle table.
+    if (pm == nullptr) { continue; }
+    G4ProcessVector* v = pm->GetAtRestProcessVector();
+    const int n = (v != nullptr) ? static_cast<int>(v->size()) : 0;
+    if (n == 0) {
+      std::fprintf(f, "%s,%d,%d,0,-1,,,,\n", p->GetParticleName().c_str(),
+                   p->GetPDGEncoding(), p->GetPDGStable() ? 1 : 0);
+      continue;
+    }
+    for (int i = 0; i < n; ++i) {
+      G4VProcess* proc = (*v)[i];
+      // A stopped track: zero kinetic energy, no touchable. Neither G4Decay's nor
+      // G4HadronStoppingProcess's at-rest length reads the material or the volume.
+      CLHEP::HepRandom::setTheSeed(4242UL + static_cast<unsigned long>(i));
+      auto* dp = new G4DynamicParticle(p, G4ThreeVector(0, 0, 1), 0.0);
+      G4Track track(dp, 0.0, G4ThreeVector(0, 0, 0));
+      track.SetTrackStatus(fStopButAlive);
+      // StartTracking is what draws theNumberOfInteractionLengthLeft. Without it G4Decay
+      // multiplies G4VProcess's constructor value of -1.0 by the mean life and reports MINUS
+      // the lifetime - which is what this dump did on its first run, for every unstable
+      // species, and is how the missing call was found.
+      proc->StartTracking(&track);
+      G4ForceCondition cond = NotForced;
+      const double len = proc->AtRestGetPhysicalInteractionLength(track, &cond);
+      std::fprintf(f, "%s,%d,%d,%d,%d,%s,%d,%d,%.17g\n", p->GetParticleName().c_str(),
+                   p->GetPDGEncoding(), p->GetPDGStable() ? 1 : 0, n, i,
+                   proc->GetProcessName().c_str(),
+                   static_cast<int>(proc->GetProcessType()),
+                   proc->GetProcessSubType(), len / ns);
     }
   }
 }
@@ -506,6 +738,21 @@ void dump_decay(const DumpContext&) {
     std::fclose(f);
   }
   {
+    FILE* f = std::fopen("decay_select.csv", "w");
+    dump_select(f);
+    std::fclose(f);
+  }
+  {
+    FILE* f = std::fopen("decay_dalitz.csv", "w");
+    dump_dalitz(f);
+    std::fclose(f);
+  }
+  {
+    FILE* f = std::fopen("decay_atrest.csv", "w");
+    dump_atrest(f);
+    std::fclose(f);
+  }
+  {
     FILE* f = std::fopen("decay_boost.csv", "w");
     dump_boost(f);
     std::fclose(f);
@@ -526,6 +773,7 @@ void dump_decay(const DumpContext&) {
 }  // namespace
 
 G4GPU_REGISTER_DUMP("decay",
-                    "decay_applicable.csv decay_tables.csv decay_process.csv decay_boost.csv "
+                    "decay_applicable.csv decay_tables.csv decay_process.csv "
+                    "decay_select.csv decay_dalitz.csv decay_atrest.csv decay_boost.csv "
                     "decay_moments.csv decay_pairs.csv decay_hist.csv decay_closure.csv",
                     dump_decay);
