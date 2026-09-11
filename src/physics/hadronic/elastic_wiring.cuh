@@ -32,8 +32,10 @@
 //    `SampleInvariantT`, not `G4ElasticHadrNucleusHE`'s, even though that model's table has
 //    rows for K+ and K-.
 //  * THE LIGHT IONS GET Gheisha TOO, with the NUCL-NUCL component - `xsNN` in the constructor
-//    is `ElasticXS("Glauber-Gribov Nucl-nucl")` - and `G4NuclNuclDiffuseElastic` is
-//    `G4IonElasticPhysics`' model for GenericIon, which this port does not transport.
+//    is `ElasticXS("Glauber-Gribov Nucl-nucl")` - while `G4NuclNuclDiffuseElastic` is
+//    `G4IonElasticPhysics`' model for GenericIon, a different constructor and a different
+//    process (named `"ionElastic"`, not `"hadElastic"`). P8c transports the ion and did NOT
+//    wire that channel; see `ElasticChannel::kIonDiffuseNotWired`, which is the row.
 //  * pbar HAS A PORTED MODEL AND NO PORTED CROSS SECTION. `lhep2` (a `G4HadronElastic` capped
 //    at 100.1 MeV) covers it below 100 MeV, but the data set is
 //    `G4ComponentAntiNuclNuclearXS`, which P2 refuses by name, and above 100 MeV the model is
@@ -97,6 +99,28 @@ enum class ElasticChannel : int {
   /// pbar - the cross section (G4ComponentAntiNuclNuclearXS) is refused by P2 and the
   /// high-energy model (G4AntiNuclElastic) is not written. Booked, not approximated.
   kAntiNucleusRefused,
+  /// GenericIon - `G4IonElasticPhysics::ConstructProcess` gives it a process named
+  /// `"ionElastic"`, `G4CrossSectionElastic(G4ComponentGGNuclNuclXsc)` with `SetMinKinEnergy(0)`
+  /// and `G4NuclNuclDiffuseElastic` with `SetMinEnergy(0)`, registered straight onto
+  /// `G4GenericIon::GenericIon()->GetProcessManager()` with `AddDiscreteProcess` - and therefore
+  /// active for every real nuclide, which shares that manager.
+  ///
+  /// BOTH HALVES ARE PORTED AND NEITHER IS WIRED. `xs::ggnn_elastic_element` is the cross
+  /// section (`kGheishaLightIon` already reads it) and
+  /// `elastic/nucl_nucl_diffuse_elastic.cuh::sample_invariant_t` is the model. What is missing
+  /// is this row: the channel needs the projectile to be `xs::generic_ion(Z, A)` rather than a
+  /// species constant, which means threading the nuclide through `elastic_xs_fn`,
+  /// `elastic_sample_target` and `elastic_apply`.
+  ///
+  /// Structurally zero rather than booked, for the reason `HadronicRefusal::
+  /// kAntiNucleusElastic` gives at length: the gap is in the CROSS SECTION, so an ion draws no
+  /// hadronic interaction length at all and there is no interaction that could not be applied.
+  /// Booking it per step would count chances rather than interactions. The size is bounded by
+  /// what an ion this port produces could do with it: an elastic recoil of a 200 MeV proton in
+  /// water is an oxygen ion of a few hundred keV whose RANGE is about a micrometre, against a
+  /// nucleus-nucleus elastic mean free path of metres, so the probability that one scatters
+  /// before it stops is of order 1e-9.
+  kIonDiffuseNotWired,
 };
 
 __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
@@ -111,6 +135,7 @@ __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
     case ParticleType::kHe3:
     case ParticleType::kAlpha:      return ElasticChannel::kGheishaLightIon;
     case ParticleType::kAntiProton: return ElasticChannel::kAntiNucleusRefused;
+    case ParticleType::kGenericIon: return ElasticChannel::kIonDiffuseNotWired;
     default:                        return ElasticChannel::kNone;
   }
 }
@@ -128,8 +153,27 @@ __host__ __device__ inline const char* elastic_channel_name(ElasticChannel c) {
       return "G4CrossSectionElastic(G4ComponentGGNuclNuclXsc) + G4HadronElastic";
     case ElasticChannel::kAntiNucleusRefused:
       return "G4ComponentAntiNuclNuclearXS + G4AntiNuclElastic - refused by name";
+    case ElasticChannel::kIonDiffuseNotWired:
+      return "ionElastic: G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic - both ported, "
+             "this channel not wired";
   }
   return "unknown";
+}
+
+/// Does this channel have a cross section this port can evaluate?
+///
+/// Three answers collapse to "no" and they are three different statements, which is why the
+/// enum keeps them apart and only this predicate merges them: `kNone` is a species Geant4 gives
+/// no elastic process to at all, `kAntiNucleusRefused` is a process whose data set P2 refuses,
+/// and `kIonDiffuseNotWired` is a process whose data set and model are both ported and whose
+/// channel nobody has written. All three mean the same thing to `elastic_xs_per_volume` - zero,
+/// and therefore an infinite interaction length and no uniform drawn - and `elastic_apply` must
+/// refuse all three for the reason its own guard gives (a zero `MaterialXs` makes
+/// `store_sample_za_rng` hand element 0 to the sampler on `cross <= cumulative[0]`, both sides
+/// zero, and the sampler is happy to scatter a muon off hydrogen).
+__host__ __device__ inline bool elastic_channel_has_xs(ElasticChannel c) {
+  return c != ElasticChannel::kNone && c != ElasticChannel::kAntiNucleusRefused
+         && c != ElasticChannel::kIonDiffuseNotWired;
 }
 
 /// `G4ElasticHadrNucleusHE`'s table rows this port builds: pi+ at index 0 and pi- at 1, which
@@ -211,6 +255,7 @@ struct ElasticXsFn {
         return hxs::ggnn_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kNone:
       case ElasticChannel::kAntiNucleusRefused:
+      case ElasticChannel::kIonDiffuseNotWired:
         break;
     }
     return {real_t(0), hxs::XsRefusal::kNone};
@@ -247,7 +292,7 @@ __host__ __device__ __noinline__ real_t elastic_xs_per_volume(
     const ElasticTables<real_t>& t, const data::Material<real_t>& mat, ParticleType type,
     real_t ekin, hxs::MaterialXs<real_t>& mxs) {
   const ElasticChannel c = elastic_channel(type);
-  if (c == ElasticChannel::kNone || c == ElasticChannel::kAntiNucleusRefused) {
+  if (!elastic_channel_has_xs(c)) {
     mxs.total = real_t(0);
     mxs.n_elements = 0;
     return real_t(0);
@@ -344,7 +389,7 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
   // reported 132 interactions in 132 cases including the eleven muon rows, which is how this
   // was found; a guard on the caller's side alone would have left a function that answers a
   // question it should refuse.
-  if (c == ElasticChannel::kNone || c == ElasticChannel::kAntiNucleusRefused) { return out; }
+  if (!elastic_channel_has_xs(c)) { return out; }
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
   const hxs::Projectile<real_t> pj = elastic_projectile<real_t>(type);
 

@@ -75,6 +75,10 @@ struct Outcome {
   int alive = 0;
   int n_sec = 0;
   int sec_type[kMaxSec] = {};
+  /// `TrackState::ion_za` - the NUCLIDE, which a species no longer determines. Compared
+  /// exactly, with the species: a recoil that came back as the right species and the wrong
+  /// nucleus is a track that will be stepped with the wrong mass and charge.
+  int sec_za[kMaxSec] = {};
   real_t sec_ekin[kMaxSec] = {};
   real_t sec_dx[kMaxSec] = {}, sec_dy[kMaxSec] = {}, sec_dz[kMaxSec] = {};
 };
@@ -92,17 +96,27 @@ struct RecordingEmitter {
   unsigned int child_count = 0u;
   int last_secondary = -1;
 
-  __host__ __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin, int) {
+  __host__ __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin, int,
+                               unsigned short za = 0) {
     ++child_count;
     if (out->n_sec < kMaxSec) {
       const int i = out->n_sec++;
       out->sec_type[i] = static_cast<int>(type);
+      out->sec_za[i] = za;
       out->sec_ekin[i] = ekin;
       out->sec_dx[i] = dir.x;
       out->sec_dy[i] = dir.y;
       out->sec_dz[i] = dir.z;
     }
     return 0;
+  }
+  /// The elastic recoil's entry point. It has to exist because `step_hadron` calls it, and it
+  /// records the NUCLIDE as well as the species - which is the field P8c added and the one
+  /// section 4 checks, since `particle_type_of_nucleus` answers `kGenericIon` for every recoil
+  /// heavier than an alpha and a species alone no longer says which nucleus it is.
+  __host__ __device__ int push_nucleus(int z, int a, const Vec3<real_t>& dir, real_t ekin,
+                                       int event_id) {
+    return push(particle_type_of_nucleus(z, a), dir, ekin, event_id, ion_za_of(z, a));
   }
 };
 
@@ -278,9 +292,10 @@ int compare(const Outcome& h, const Outcome& d, const char* tag, int idx, double
     ++bad;
   } else {
     for (int j = 0; j < h.n_sec; ++j) {
-      if (h.sec_type[j] != d.sec_type[j]) {
-        std::printf("  FAIL: %s track %d secondary %d: species %d vs %d\n", tag, idx, j,
-                    h.sec_type[j], d.sec_type[j]);
+      if (h.sec_type[j] != d.sec_type[j] || h.sec_za[j] != d.sec_za[j]) {
+        std::printf("  FAIL: %s track %d secondary %d: species %d (Z,A encoded %d) vs "
+                    "%d (%d)\n", tag, idx, j, h.sec_type[j], h.sec_za[j], d.sec_type[j],
+                    d.sec_za[j]);
         ++bad;
       }
       chk(h.sec_ekin[j], d.sec_ekin[j], "secondary ekin");

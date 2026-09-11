@@ -141,6 +141,34 @@ enum class HadronicRefusal : int {
   /// something this transport is throwing away, and it says so instead of the stack quietly
   /// being too small.
   kElasticDropped,
+  /// A `kGenericIon` track with no nuclide, or with one outside AME2012.
+  ///
+  /// `data::nuclear_mass` answers from the particle table for the six light nuclei and from
+  /// G4NucleiPropertiesTableAME12 for everything else, and refuses `G4NucleiProperties`'
+  /// remaining two levels - the Moller-Nix theoretical table and the Cameron/Weizsaecker
+  /// formula - by returning zero (data/nuclei_mass_ame12.hh). Nothing a QBBC elastic recoil can
+  /// be reaches them: the target is one of Geant4's elements and its isotopes are the naturally
+  /// occurring ones, all of which AME2012 carries. So this counter is the tripwire on that
+  /// claim, and it is also where a primary ion would land if one ever got past
+  /// `G4RunManager::CheckSpecies`. The track is killed with its energy deposited locally, which
+  /// is the conservative disposal for a particle whose mass is not known.
+  kIonWithoutNuclide,
+  /// A real nucleus whose delta-ray transfer window is open.
+  ///
+  /// ONE PER STEP, NOT ONE PER INTERACTION, which is the opposite of every other entry here and
+  /// is why it says so. What is missing is the whole delta-ray channel of an ion, on every step
+  /// of it, rather than one final state that could not be applied: `em::hadron_delta_xs` and
+  /// `em::sample_hadron_delta` take a SPECIES and would compute G4GenericIon's placeholder
+  /// (938.2723 MeV, charge 1) for an oxygen recoil, and the projectile form factor needs the
+  /// mass NUMBER as well (`G4NistManager::GetA27`), so the channel is refused rather than
+  /// sampled with the wrong particle.
+  ///
+  /// AT ZERO FOR EVERYTHING THIS PORT CAN PRODUCE, and the threshold is arithmetic rather than
+  /// a hope: an ion's window is `tmax > cut` with `tmax = 2 m_e b2g2/(1 + 2 gamma m_e/M +
+  /// (m_e/M)^2)`, so water's 350 keV electron cut needs `beta^2 gamma^2 > 342`, i.e. an ion
+  /// above about 17 GeV per nucleon. `step_hadron` tests it with the ion's OWN definition,
+  /// which is exact.
+  kIonDeltaRay,
   kNumHadronicRefusals,
 };
 
@@ -167,6 +195,12 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kElasticDropped:
       return "an elastic final state with more than one secondary - G4HadronElasticProcess "
              "keeps only GetSecondary(0)";
+    case HadronicRefusal::kIonWithoutNuclide:
+      return "a GenericIon track with no (Z, A), or one outside AME2012 - killed with its "
+             "energy deposited";
+    case HadronicRefusal::kIonDeltaRay:
+      return "an ion's delta-ray channel (G4ionIonisation above ~17 GeV/u) - counted PER STEP, "
+             "not per interaction";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";

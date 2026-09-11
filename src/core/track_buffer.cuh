@@ -95,7 +95,14 @@ enum TrackSpeciesIndex : int {
   // Neutral hadrons: step_neutral, not step_hadron.
   kSpeciesNeutron = 14,
   kSpeciesPiZero = 15,
-  kNumTrackSpecies = 16,
+  // The two ions `G4EmBuilder` gives `G4ionIonisation`, added by P8c so that the recoil
+  // nucleus an elastic scatter emits is transported rather than refused. He3 is pure plumbing -
+  // its dE/dx, effective charge, fluctuation model and elastic channel were all in place and it
+  // had no index here. `kSpeciesGenericIon` is every OTHER nuclide, and a track in it carries
+  // its own (Z, A) in `TrackState::ion_za`; see `em::SteppedHadron`.
+  kSpeciesHe3 = 16,
+  kSpeciesGenericIon = 17,
+  kNumTrackSpecies = 18,
 };
 
 /// -1 for a particle no kernel steps. The caller decides what that means; nothing here
@@ -118,6 +125,8 @@ __host__ __device__ inline int species_index(ParticleType t) {
     case ParticleType::kTriton:     return kSpeciesTriton;
     case ParticleType::kNeutron:    return kSpeciesNeutron;
     case ParticleType::kPiZero:     return kSpeciesPiZero;
+    case ParticleType::kHe3:        return kSpeciesHe3;
+    case ParticleType::kGenericIon: return kSpeciesGenericIon;
     default:                        return -1;
   }
 }
@@ -143,6 +152,8 @@ __host__ __device__ inline ParticleType species_of_index(int sp) {
     case kSpeciesTriton:     return ParticleType::kTriton;
     case kSpeciesNeutron:    return ParticleType::kNeutron;
     case kSpeciesPiZero:     return ParticleType::kPiZero;
+    case kSpeciesHe3:        return ParticleType::kHe3;
+    case kSpeciesGenericIon: return ParticleType::kGenericIon;
     default:                 return ParticleType::kNumTypes;
   }
 }
@@ -211,6 +222,25 @@ __host__ __device__ inline int max_secondaries_per_step(int sp) {
   }
 }
 
+/// `TrackState::ion_za`'s encoding, in one place so the two halves cannot drift.
+///
+/// `kIonZaBase` is 512 and not 1000 because it has to be a power of two for the decode to be a
+/// shift and a mask, and because Z <= 104 and A <= 295 leave it room - see the field's comment.
+/// `ion_za_of(0, 0)` is zero, which is what every non-ion track carries, so "no nuclide" and
+/// "nuclide (0, 0)" are the same value and both mean the same thing: this is not a real ion.
+constexpr unsigned int kIonZaBase = 512u;
+__host__ __device__ inline unsigned short ion_za_of(int z, int a) {
+  if (z <= 0 || a <= 0 || z >= 128 || a >= static_cast<int>(kIonZaBase)) { return 0; }
+  return static_cast<unsigned short>(static_cast<unsigned int>(z) * kIonZaBase
+                                     + static_cast<unsigned int>(a));
+}
+__host__ __device__ inline int ion_z_of(unsigned short za) {
+  return static_cast<int>(za / kIonZaBase);
+}
+__host__ __device__ inline int ion_a_of(unsigned short za) {
+  return static_cast<int>(za % kIonZaBase);
+}
+
 /// Bits in TrackState::flags.
 enum TrackFlag : unsigned int {
   /// The previous step of this track ended on a boundary, so this step starts on one.
@@ -249,6 +279,28 @@ struct TrackState {
   /// CONTIGUOUS when a kernel launches, which is what the index lists provide - not separate
   /// storage, which is what it used to be conflated with.
   ParticleType species;
+  /// The nuclide a `kGenericIon` track is, as `z * 512 + a`. Zero for everything else.
+  ///
+  /// THE NARROWEST ENCODING, AND IT COSTS THE STRUCT NOTHING. docs/RISK.md V22 names a wider
+  /// `TrackState` as the one thing the register budget cannot afford ("a fourth kernel
+  /// instantiation per species is fine, a wider TrackState is not"), so this was measured
+  /// before it was written. `species` is an int at offset 0 and `pos` is a `Vec3<double>` that
+  /// needs 8-byte alignment, so in the double build there were already four bytes of padding at
+  /// offset 4 - and a `short` lands in them. `sizeof(TrackState<double>)` is unchanged, which
+  /// `tests/test_ion_transport.cu` asserts as arithmetic rather than trusting this comment. In
+  /// a float build `Vec3<float>` aligns to 4, there is no padding, and the struct grows by four
+  /// bytes; that build is not the default and nothing measures it (docs/RISK.md N2).
+  ///
+  /// 512 rather than 1000 because Z <= 104 (docs/RISK.md V54 - that is the highest Z at which a
+  /// G4Element can exist in 11.1.1) and A <= 295 (AME2012's MaxA), so 104*512 + 295 = 53,543
+  /// fits an unsigned short with room to spare. The BUFFER pays two bytes a slot for it, out of
+  /// 236.
+  ///
+  /// Not `user_data`, which is the same width and already there: that field is this port's
+  /// answer to `G4VUserTrackInformation` and its contract is that nothing in the engine reads
+  /// or writes it. Not aliased onto `msc_tlimit` either, which is dead for a hadron today and
+  /// would stop being dead the day `urban_msc.cuh` gains its ion branch.
+  unsigned short ion_za;
   Vec3<real_t> pos;
   Vec3<real_t> dir;
   real_t ekin;
@@ -393,6 +445,9 @@ struct TrackState {
 template <typename real_t>
 struct TrackBuffer {
   int* species;
+  /// `TrackState::ion_za`. Two bytes a slot, and the one array in this struct that is not an
+  /// int, a real_t or an unsigned int - see the field's comment for why it is that narrow.
+  unsigned short* ion_za;
   real_t* x;
   real_t* y;
   real_t* z;
@@ -451,6 +506,7 @@ struct TrackBuffer {
 
   __host__ __device__ void load(int i, TrackState<real_t>& t) const {
     t.species = static_cast<ParticleType>(species[i]);
+    t.ion_za = ion_za[i];
     t.pos = Vec3<real_t>{x[i], y[i], z[i]};
     t.dir = Vec3<real_t>{dx[i], dy[i], dz[i]};
     t.ekin = ekin[i];
@@ -491,6 +547,7 @@ struct TrackBuffer {
       return -1;
     }
     species[slot] = static_cast<int>(t.species);
+    ion_za[slot] = t.ion_za;
     x[slot] = t.pos.x;   y[slot] = t.pos.y;   z[slot] = t.pos.z;
     dx[slot] = t.dir.x;  dy[slot] = t.dir.y;  dz[slot] = t.dir.z;
     ekin[slot] = t.ekin;
@@ -598,6 +655,7 @@ inline cudaError_t allocate_track_buffer(TrackBuffer<real_t>& v, int capacity,
     if (e == cudaSuccess) { e = cudaMalloc(p, n); }
   };
   get(reinterpret_cast<void**>(&v.species), ni);
+  get(reinterpret_cast<void**>(&v.ion_za), sizeof(unsigned short) * capacity);
   get(reinterpret_cast<void**>(&v.x), nr);
   get(reinterpret_cast<void**>(&v.y), nr);
   get(reinterpret_cast<void**>(&v.z), nr);
@@ -714,6 +772,7 @@ inline size_t track_arena_half_bytes(long long pool) {
 template <typename real_t>
 inline void free_track_buffer(TrackBuffer<real_t>& v) {
   cudaFree(v.species);
+  cudaFree(v.ion_za);
   cudaFree(v.x); cudaFree(v.y); cudaFree(v.z);
   cudaFree(v.dx); cudaFree(v.dy); cudaFree(v.dz);
   cudaFree(v.ekin); cudaFree(v.volume); cudaFree(v.event);
@@ -740,6 +799,11 @@ __host__ __device__ inline void seed_track_slot(TrackBuffer<real_t>& v, int slot
                                                 const Vec3<real_t>& pos,
                                                 const Vec3<real_t>& dir, real_t ekin, int vol,
                                                 real_t t0) {
+  // No nuclide: a primary ion would need one, and there is no gun command that supplies (Z, A)
+  // - `G4RunManager::CheckSpecies` refuses `GenericIon` as a primary by name for exactly that
+  // reason. Written rather than left to the caller's memset because this function is the one
+  // place a primary's slot is filled.
+  v.ion_za[slot] = 0;
   v.status[slot] = static_cast<int>(TrackStatus::fAlive);
   // A primary begins its life inside a volume, so its first step is the first in that volume.
   v.flags[slot] = kFirstStepInVolume;
@@ -930,8 +994,29 @@ struct BufferEmitter {
            + TrackState<real_t>::step_delta_time(report->true_length, parent_velocity);
   }
 
+  /// A NUCLEUS, which is the one secondary whose species does not say what it is.
+  ///
+  /// Every other `push` argument is a complete particle: `kElectron` is an electron. A recoil
+  /// nucleus is (Z, A), and `particle_type_of_nucleus` answers with one of five species that
+  /// carry their own definition - proton, deuteron, triton, He3, alpha - or with `kGenericIon`,
+  /// which does not: `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder.
+  /// So the nuclide has to travel with the track, and this overload is the only thing that puts
+  /// it there.
+  ///
+  /// A separate entry point rather than two more parameters on `push`, because every caller
+  /// that emits something other than a nucleus would then have to pass two zeros - and one that
+  /// forgot would be emitting an ion with no nuclide, which is a massless nucleus and therefore
+  /// a particle with beta exactly 1. `step_hadron` refuses a zero `ion_za` by name for the same
+  /// reason, so a track that got here without one is loud rather than fast.
+  __device__ int push_nucleus(int z, int a, const Vec3<real_t>& dir, real_t ekin, int event_id) {
+    return push(particle_type_of_nucleus(z, a), dir, ekin, event_id, ion_za_of(z, a));
+  }
+
+  /// @param za the nuclide, for a `kGenericIon`; zero for everything else. Defaulted so that
+  ///        every existing call site - a delta ray, a brems photon, a decay product that is not
+  ///        a nucleus - is unchanged.
   __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin,
-                      int /*event_id*/) {
+                      int /*event_id*/, unsigned short za = 0) {
     const SpeciesDisposition disp = species_disposition(type);
     if (disp != SpeciesDisposition::kStepped) {
       if (disp == SpeciesDisposition::kCounted) {  // NOLINT - see SpeciesDisposition
@@ -964,6 +1049,7 @@ struct BufferEmitter {
     }
     TrackState<real_t> t{};
     t.species = type;
+    t.ion_za = za;
     t.pos = pos;
     t.dir = dir;
     t.ekin = ekin;

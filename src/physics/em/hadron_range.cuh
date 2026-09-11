@@ -20,6 +20,7 @@
 #include "core/particle.cuh"
 #include "core/units.cuh"
 #include "data/materials.cuh"
+#include "data/nuclei_mass_ame12.hh"
 #include "physics/em/bragg.cuh"
 #include "physics/em/em_corrections.cuh"
 #include "physics/em/hadron_ionisation.cuh"
@@ -396,6 +397,136 @@ __host__ __device__ inline real_t hadron_charge_sq_ratio(const data::Material<re
   return q * q;
 }
 
+// ------------------------------------------------------------------ a nucleus as a particle
+//
+// `ParticleType::kGenericIon` NAMES TWO DIFFERENT PARTICLES, and everything below exists to
+// keep them apart.
+//
+// `G4GenericIon` is a placeholder definition: mass 938.2723 MeV, charge 1, spin 1/2. Its
+// `G4ionIonisation` owns the dE/dx and range TABLES, and every real nuclide reads them - which
+// is why `HadronSpecies::kGenericIon`'s row is built from `particle_def(kGenericIon)` and must
+// stay that way. An oxygen recoil is a different particle: `G4IonTable::CreateIon(8, 16, 0)`
+// builds a `G4Ions` with `GetNucleusMass(8,16)` and charge 8, and - this is the mechanism -
+// gives it G4GenericIon's own process manager by copying its `g4particleDefinitionInstanceID`
+// (`G4IonTable::AddProcessManager`), so O16 and GenericIon share one process vector and one set
+// of tables. `G4EmTableUtil::CheckIon` then makes `G4VEnergyLossProcess::PreparePhysicsTable`
+// return early for every concrete ion, so GenericIon owns the only tables that exist.
+//
+// So the SPECIES decides which processes and which models run, and the DEFINITION is the
+// kinematics. A transport that carries only a `ParticleType` cannot tell them apart, and
+// `particle_def(kGenericIon)` is deliberately the placeholder (core/particle.cuh says so at
+// length: "transporting a carbon recoil as one would step a nucleus twelve times too light").
+
+/// `G4IonTable::CreateIon(Z, A, 0.0)`'s definition, as far as this transport reads it.
+///
+/// mass  `G4IonTable::GetNucleusMass(Z, A)` = `G4NucleiProperties::GetNuclearMass(A, Z)`, which
+///       is `data::nuclear_mass` - the same function the elastic recoil's kinematics were
+///       computed with, so a transported recoil and the recoil that was emitted are the same
+///       particle. Zero for a nuclide outside AME2012; `data::nuclear_mass_known` is the test
+///       and the caller must make it, because a zero mass is a particle with beta exactly 1.
+/// charge  `G4double(Z)*eplus`.
+/// is_ion  `charge > eplus`, which is `G4BetheBlochModel::Initialise`'s own condition. True for
+///       every nuclide this can be called for: (1,1), (1,2), (1,3), (2,3), (2,4) are the five
+///       `particle_type_of_nucleus` answers with a species of their own, so anything reaching
+///       here has Z >= 2 or is a nuclide with no natural isotope.
+///
+/// **SPIN AND THE MAGNETIC MOMENT ARE NOT TRANSCRIBED AND ARE REFUSED RATHER THAN GUESSED.**
+/// Geant4 takes both from `G4IonTable::FindIsotope(Z,A,E)->GetiSpin()` and
+/// `->GetMagneticMoment()`, i.e. from columns 6 and 7 of `$G4ENSDFSTATEDATA/ENSDFSTATE.dat`
+/// (`G4NuclideTable::GenerateNuclide`), where column 6 is **2J**. This port reads
+/// PhotonEvaporation's level scheme but not ENSDFSTATE's ground-state spin and moment table, so
+/// `spin` is 0 and `mag_moment2` is -1 - which is the value Geant4 computes from a zero moment,
+/// and which is EXACTLY RIGHT for an even-even nuclide (C12, O16, Ca40 all have 2J = 0 in
+/// ENSDFSTATE) and wrong for one with spin (N14 has 2J = 2).
+///
+/// The two are read in exactly one place that changes an answer - the projectile form-factor
+/// rejection inside `em::sample_hadron_delta`, and only on its Bethe-Bloch branch - and
+/// `step_hadron` refuses that branch for a real ion by name rather than sampling it with a spin
+/// it cannot state. It is unreachable for anything this port produces: an ion's delta-ray
+/// cross section is zero until `tmax > cut`, which in water's 350 keV cut needs
+/// `beta^2 gamma^2 > 342`, i.e. above about 17 GeV per nucleon.
+template <typename real_t>
+__host__ __device__ inline ParticleDef<real_t> ion_particle_def(int z, int a) {
+  const real_t m = data::nuclear_mass<real_t>(a, z);
+  return {m,
+          static_cast<real_t>(z),
+          real_t(0),                 // spin - see above
+          (z > 1),                   // is_ion, G4BetheBlochModel::Initialise's condition
+          false,                     // is_alpha - (2,4) is kAlpha and never reaches here
+          false,                     // is_lepton
+          real_t(-1)};               // mag_moment2 from a zero moment - see above
+}
+
+/// The particle one step is stepping: the species AND its definition.
+///
+/// For every species but a real nucleus these are two views of one thing and `def` is just
+/// `particle_def(type)`. For `kGenericIon` they are not - see the block above - so a stepper
+/// builds this once per step and hands it to everything that needs a mass or a charge.
+///
+/// `z`/`a` are zero for a non-ion, and `is_real_ion()` is the one predicate the scaling and the
+/// elastic channel branch on. They are NOT redundant with `def`: the delta-ray form factor
+/// needs the mass NUMBER (`G4NistManager::GetA27`) and a charge does not give it.
+template <typename real_t>
+struct SteppedHadron {
+  ParticleType type = ParticleType::kNumTypes;
+  ParticleDef<real_t> def{};
+  int z = 0;
+  int a = 0;
+  __host__ __device__ bool is_real_ion() const { return z > 0 && a > 0; }
+};
+
+template <typename real_t>
+__host__ __device__ inline SteppedHadron<real_t> stepped_hadron(ParticleType t) {
+  return {t, particle_def<real_t>(t), 0, 0};
+}
+
+/// A real nuclide, stepped as `kGenericIon`. (Z, A) must be one `particle_type_of_nucleus` maps
+/// to `kGenericIon`; the five it maps elsewhere have species of their own and go through
+/// `stepped_hadron`.
+template <typename real_t>
+__host__ __device__ inline SteppedHadron<real_t> stepped_ion(int z, int a) {
+  return {ParticleType::kGenericIon, ion_particle_def<real_t>(z, a), z, a};
+}
+
+/// `G4VEnergyLossProcess::massRatio` for the particle being stepped.
+///
+/// For a real ion the base particle is `G4GenericIon` - forced, in `G4EmCalculator::
+/// UpdateParticle` and in `G4VEnergyLossProcess::StartTracking`'s `isIon` branch alike
+/// (`massRatio = proton_mass_c2/newmass` there, and G4GenericIon's mass IS the literal
+/// 0.9382723 GeV, which is not `units::proton_mass_c2`; the two differ by 3e-7 and
+/// core/particle.cuh keeps them apart deliberately).
+template <typename real_t>
+__host__ __device__ inline real_t hadron_mass_ratio(const SteppedHadron<real_t>& h) {
+  if (h.is_real_ion()) {
+    return particle_def<real_t>(ParticleType::kGenericIon).mass / h.def.mass;
+  }
+  const ParticleType base = hadron_base_particle(h.type);
+  if (base == h.type) { return real_t(1); }
+  return particle_def<real_t>(base).mass / h.def.mass;
+}
+
+/// `G4VEnergyLossProcess::chargeSqRatio` for the particle being stepped.
+///
+/// A real ion always takes the DYNAMIC form. `G4EmTableUtil::CheckIon` sets `isIon` for any
+/// particle whose type is "nucleus" except deuteron, triton, alpha+ and alpha by name, and
+/// `PostStepGetPhysicalInteractionLength`'s `if(isIon)` then refreshes `chargeSqRatio` from
+/// `currentModel->ChargeSquareRatio(track)` on every step - which resolves through
+/// `G4Bragg/BetheBlochModel::GetChargeSquareRatio` to `G4EmCorrections::
+/// EffectiveChargeSquareRatio` to `G4ionEffectiveCharge`, i.e. to `ion_effective_charge` times
+/// its `chargeCorrection`, squared. `uses_dynamic_effective_charge` names He3 for the same
+/// reason; a real ion is the general case of it.
+template <typename real_t>
+__host__ __device__ inline real_t hadron_charge_sq_ratio(const data::Material<real_t>& m,
+                                                         const SteppedHadron<real_t>& h,
+                                                         real_t kinetic) {
+  if (h.is_real_ion()) {
+    real_t corr = real_t(1);
+    const real_t qc = ion_effective_charge(m, h.def, kinetic, corr) * corr;
+    return qc * qc;
+  }
+  return hadron_charge_sq_ratio<real_t>(m, h.type, kinetic);
+}
+
 /// Range as a function of energy, per species and material.
 ///
 /// The same shape as em::RangeTable for electrons, and for the same two reasons: a step is
@@ -479,17 +610,27 @@ struct HadronRangeTable {
   /// Restricted ionisation dE/dx for this particle, MeV/mm.
   __host__ __device__ real_t dedx_for(const data::Material<real_t>& m, ParticleType t,
                                       int material, real_t kinetic) const {
-    const real_t mr = hadron_mass_ratio<real_t>(t);
-    return hadron_charge_sq_ratio<real_t>(m, t, kinetic)
-           * dedx_at(hadron_species_of<real_t>(t), material, kinetic * mr);
+    return dedx_for(m, stepped_hadron<real_t>(t), material, kinetic);
+  }
+  __host__ __device__ real_t dedx_for(const data::Material<real_t>& m,
+                                      const SteppedHadron<real_t>& h, int material,
+                                      real_t kinetic) const {
+    const real_t mr = hadron_mass_ratio<real_t>(h);
+    return hadron_charge_sq_ratio<real_t>(m, h, kinetic)
+           * dedx_at(hadron_species_of<real_t>(h.type), material, kinetic * mr);
   }
 
   /// Range for this particle, mm.
   __host__ __device__ real_t range_for(const data::Material<real_t>& m, ParticleType t,
                                        int material, real_t kinetic) const {
-    const real_t mr = hadron_mass_ratio<real_t>(t);
-    const real_t reduce = real_t(1) / (hadron_charge_sq_ratio<real_t>(m, t, kinetic) * mr);
-    return reduce * lookup(hadron_species_of<real_t>(t), material, kinetic * mr);
+    return range_for(m, stepped_hadron<real_t>(t), material, kinetic);
+  }
+  __host__ __device__ real_t range_for(const data::Material<real_t>& m,
+                                       const SteppedHadron<real_t>& h, int material,
+                                       real_t kinetic) const {
+    const real_t mr = hadron_mass_ratio<real_t>(h);
+    const real_t reduce = real_t(1) / (hadron_charge_sq_ratio<real_t>(m, h, kinetic) * mr);
+    return reduce * lookup(hadron_species_of<real_t>(h.type), material, kinetic * mr);
   }
 
   /// The kinetic energy at which this particle has range @p r, MeV.
@@ -506,9 +647,15 @@ struct HadronRangeTable {
   __host__ __device__ real_t energy_from_range_for(const data::Material<real_t>& m,
                                                    ParticleType t, int material, real_t r,
                                                    real_t at_energy) const {
-    const real_t mr = hadron_mass_ratio<real_t>(t);
-    const real_t reduce = real_t(1) / (hadron_charge_sq_ratio<real_t>(m, t, at_energy) * mr);
-    const real_t scaled = energy_from_range(hadron_species_of<real_t>(t), material, r / reduce);
+    return energy_from_range_for(m, stepped_hadron<real_t>(t), material, r, at_energy);
+  }
+  __host__ __device__ real_t energy_from_range_for(const data::Material<real_t>& m,
+                                                   const SteppedHadron<real_t>& h, int material,
+                                                   real_t r, real_t at_energy) const {
+    const real_t mr = hadron_mass_ratio<real_t>(h);
+    const real_t reduce = real_t(1) / (hadron_charge_sq_ratio<real_t>(m, h, at_energy) * mr);
+    const real_t scaled =
+        energy_from_range(hadron_species_of<real_t>(h.type), material, r / reduce);
     return scaled / mr;
   }
 };

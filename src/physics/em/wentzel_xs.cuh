@@ -250,11 +250,16 @@ __host__ __device__ inline real_t wentzel_transport_xs_per_atom(const WentzelSta
 
 /// Transport cross section per volume, 1/mm.
 /// Mirrors G4WentzelVIModel::ComputeTransportXSectionPerVolume.
+/// @param pd the projectile's definition. A parameter and not `particle_def(type)` because for
+///        a real nucleus stepped as `kGenericIon` those are two different particles - see
+///        `em::SteppedHadron` in hadron_range.cuh - and this is the only thing in the WentzelVI
+///        chain that derived one from the other rather than being handed it.
 template <typename real_t>
 __host__ __device__ inline real_t wentzel_transport_xs(const data::Material<real_t>& m,
-                                                       ParticleType type, real_t tkin,
-                                                       real_t cut, real_t cos_theta_lim) {
-  const ParticleDef<real_t> pd = particle_def<real_t>(type);
+                                                       ParticleType type,
+                                                       const ParticleDef<real_t>& pd,
+                                                       real_t tkin, real_t cut,
+                                                       real_t cos_theta_lim) {
   if (pd.mass <= real_t(0) || tkin <= real_t(0)) { return real_t(0); }
   real_t xs = real_t(0);
   for (int i = 0; i < m.n_elements; ++i) {
@@ -276,10 +281,26 @@ __host__ __device__ inline real_t wentzel_transport_xs(const data::Material<real
 /// SampleScattering) is NOT transcribed; only the cross sections are. See docs/RISK.md.
 template <typename real_t>
 __host__ __device__ inline real_t wentzel_lambda(const data::Material<real_t>& m,
+                                                 ParticleType type,
+                                                 const ParticleDef<real_t>& pd, real_t tkin,
+                                                 real_t cut, real_t cos_theta_lim) {
+  const real_t xs = wentzel_transport_xs(m, type, pd, tkin, cut, cos_theta_lim);
+  return (xs > real_t(0)) ? real_t(1) / xs : real_t(1e30);
+}
+
+/// The same, for a species whose definition IS `particle_def(type)` - which is every species
+/// but a real nucleus. Kept so every existing caller and test is unchanged.
+template <typename real_t>
+__host__ __device__ inline real_t wentzel_transport_xs(const data::Material<real_t>& m,
+                                                       ParticleType type, real_t tkin,
+                                                       real_t cut, real_t cos_theta_lim) {
+  return wentzel_transport_xs(m, type, particle_def<real_t>(type), tkin, cut, cos_theta_lim);
+}
+template <typename real_t>
+__host__ __device__ inline real_t wentzel_lambda(const data::Material<real_t>& m,
                                                  ParticleType type, real_t tkin, real_t cut,
                                                  real_t cos_theta_lim) {
-  const real_t xs = wentzel_transport_xs(m, type, tkin, cut, cos_theta_lim);
-  return (xs > real_t(0)) ? real_t(1) / xs : real_t(1e30);
+  return wentzel_lambda(m, type, particle_def<real_t>(type), tkin, cut, cos_theta_lim);
 }
 
 }  // namespace g4gpu::em

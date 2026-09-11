@@ -40,19 +40,28 @@ namespace g4gpu::em {
 /// Zero for a lepton, which is Geant4's `GetLeptonNumber() == 0` guard. That branch is dead in
 /// this transport (leptons go through Moller-Bhabha, not this file) but the guard is cheap and
 /// leaving it out would make the function wrong if it were ever reused.
+///
+/// @param mass_number `G4NistManager::GetA27`'s argument. Zero means "take it as 2Z", which is
+///        the alpha's own A and was the only answer this function needed while the alpha was
+///        the only species reaching the heavy branch. A real nucleus has to pass its own A: the
+///        term is `A^0.27` and for O16 the two differ by (16/16)^0.27 = 1 only by luck - for
+///        Ca40 it is (40/40)^0.27 = 1 as well, and for Li7 it is (7/6)^0.27, 4%. The ratio is
+///        A/2Z, which is 1 for every N = Z nuclide and rises to about 1.3 at the top of the
+///        chart, so a rule written on 2Z is right for the light even-even nuclides and wrong
+///        elsewhere. `em::SteppedHadron` carries A for this.
 template <typename real_t>
-__host__ __device__ inline real_t hadron_formfactor(const ParticleDef<real_t>& pd) {
+__host__ __device__ inline real_t hadron_formfactor(const ParticleDef<real_t>& pd,
+                                                    int mass_number = 0) {
   if (pd.is_lepton) { return real_t(0); }
   constexpr real_t kGeV = real_t(1000);
   real_t x = real_t(0.8426) * kGeV;
   if (pd.spin == real_t(0) && pd.mass < kGeV) {
     x = real_t(0.736) * kGeV;
   } else if (pd.mass > kGeV) {
-    // G4NistManager::GetA27(Z), i.e. A^0.27. Only the alpha reaches this branch here, and its
-    // Z is 2; a generic ion would need the real A27 table, and the source refuses one
-    // (G4RunManager::CheckSpecies) rather than let this approximate it.
+    // G4NistManager::GetA27(Z) is A^0.27 of the projectile's own mass number.
     const int iz = static_cast<int>(fabs(pd.charge) + real_t(0.5));
-    if (iz > 1) { x /= pow(real_t(2) * static_cast<real_t>(iz), real_t(0.27)); }
+    const int ia = (mass_number > 0) ? mass_number : 2 * iz;
+    if (iz > 1) { x /= pow(static_cast<real_t>(ia), real_t(0.27)); }
   }
   return real_t(2) * units::electron_mass_c2<real_t>() / (x * x);
 }

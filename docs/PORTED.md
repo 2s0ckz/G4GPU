@@ -502,7 +502,7 @@ what is left.
 | `G4ElasticHadrNucleusHE`'s `G4ElasticData` tables, built and uploaded | y | **V** | `host/hadronic_upload.cuh`. Per (pion, Z) for the Z the scene contains - 18 tables and 0.35 MB for B1's elements - because the model reads one only for Z > 1 |
 | `G4BGGNucleonElasticXS` / `G4BGGPionElasticXS` `BuildPhysicsTable` output, uploaded | y | **V** | same file, 3352 B and 4600 B |
 | `G4AntiNuclElastic` + `G4ComponentAntiNuclNuclearXS` (the antiproton) | y | **-** | Refused by name. `had::elastic_channel(kAntiProton)` is `kAntiNucleusRefused` and the cross section is zero, so an antiproton draws no hadronic interaction length at all |
-| `G4NuclNuclDiffuseElastic` (`G4IonElasticPhysics`, GenericIon) | y | **-** | Not reachable: this port transports no generic ion |
+| `G4NuclNuclDiffuseElastic` (`G4IonElasticPhysics`, GenericIon) | y | **-** | Reachable since P8c transports the ion, and refused by name rather than left unreachable: `had::elastic_channel(kGenericIon)` is `kIonDiffuseNotWired` and the cross section is zero, so an ion draws no hadronic interaction length. Both halves exist - `xs::ggnn_elastic_element` and `elastic/nucl_nucl_diffuse_elastic.cuh` - and what is missing is the channel, which needs the projectile to be `xs::generic_ion(Z, A)`. Bounded at ~1e-9 per recoil: a micrometre of range against a metre of mean free path. See section 2.1.7 |
 | `G4NuclearLevelData::UploadNuclearLevelData` - PhotonEvaporation5.7 on the device | y | **V** | `host/level_upload.cuh`. 3108 managers, 174,411 levels and 268,190 transitions, **9.52 MB**. Every manager's level count, level energies, lifetimes, spins and transitions are read through the cascade's own accessors on the host and on the device and compared **exactly**: 0 disagreements. The cascade on top of it - `G4NeutronRadCapture::ApplyYourself` through `G4PhotonEvaporation::BreakUpChain` - runs 448 captures over 14 targets and 4 energies on both sides: 1783 secondaries, worst **5.82e-11 MeV** absolute on an energy and **2.23e-11** on a direction component. `tests/test_capture_device.cu` |
 | the same, at initialisation, whether a neutron arrives or not | y | **P** | `TransportEngine::SetNuclearLevelData` is OFF by default, which Geant4's `G4ExcitationHandler::SetParameters` is not. The one consumer is the capture sub-process of `G4NeutronGeneralProcess`, which is not wired, and `read_all_level_data` opens 3110 files against a B1 run whose whole transport is 750 ms. It becomes unconditional the day the neutron is wired |
 
@@ -548,6 +548,93 @@ a 400 MeV K+, 829 mm for an 840 MeV alpha, and no process at all for a muon. `Co
 so **`G4CoulombScattering` cannot move a hadron's B1 dose however it is wired**, which is why
 Geant4's stage-1 numbers barely change when it is inactivated. That is a prediction the port now
 makes rather than an assumption it rests on.
+
+#### 2.1.7 The recoil ion transported, and the depth-dose reference made like for like (P8c)
+
+P8b wired `hadElastic` for every charged hadron, and `build_all.bat`'s proton depth-dose gate
+then failed on what that produced:
+
+```
+*** 929 SECONDARIES OF SPECIES THIS PORT CANNOT TRANSPORT, 515.136 MeV ***
+      GenericIon          929        515.136 MeV
+  total port          599484.86 MeV of 600000 in  (99.9141%)
+  FAIL: port did not deposit the beam energy - 99.9141% of it
+  plateau (0-59.8 mm)  port/G4 per proton = 1.01322  (1.322%)
+  FAIL: plateau dose off by 1.322%, limit 1.000%
+```
+
+Two failures and two different causes: the recoil nucleus of an elastic scatter had no kernel,
+and the reference had been generated with no hadronic process at all.
+
+**`ParticleType::kGenericIon` names two particles, and separating them is the whole of the
+first fix.** `G4GenericIon` is a placeholder definition - 938.2723 MeV, charge 1 - whose
+`G4ionIonisation` owns the dE/dx and range TABLES. An oxygen recoil is a different particle:
+`G4IonTable::CreateIon(8, 16, 0)` builds a `G4Ions` with `GetNucleusMass(8,16)` and charge 8 and
+gives it G4GenericIon's own process manager by copying its `g4particleDefinitionInstanceID`
+(`G4IonTable::AddProcessManager` - it never calls `SetProcessManager`), and
+`G4EmTableUtil::CheckIon` then makes `G4VEnergyLossProcess::PreparePhysicsTable` return early
+for every concrete ion, so GenericIon owns the only tables that exist. So the SPECIES selects
+the processes and the DEFINITION is the kinematics, and `em::SteppedHadron` is the pair.
+
+| Geant4 class / function | QBBC | | Where |
+|---|:--:|:--:|---|
+| `G4IonTable::CreateIon`'s definition - mass `GetNucleusMass(Z,A)`, charge `Z*eplus`, `isIon` | y | **V** | `em::ion_particle_def` in `em/hadron_range.cuh`, on `data::nuclear_mass` - the same function the elastic recoil's own kinematics used, so a transported recoil is the particle that was emitted. Checked against `ref/oracle/ion_definitions.csv` |
+| `G4IonTable::CreateIon`'s spin and magnetic moment (`FindIsotope(Z,A,E)->GetiSpin()/2`, `->GetMagneticMoment()`, i.e. columns 6 and 7 of `$G4ENSDFSTATEDATA/ENSDFSTATE.dat`) | y | **-** | **Refused by name.** This port reads PhotonEvaporation's level scheme and not ENSDFSTATE's ground-state spin and moment table, so `ion_particle_def` reports spin 0 and `mag_moment2` -1 - exactly right for an even-even nuclide (C12, O16, Ca40 all have 2J = 0) and wrong for one with spin (N14 has 2J = 2). The two are read in one place that changes an answer, the projectile form-factor rejection inside `em::sample_hadron_delta`, and `step_hadron` refuses the ion's whole delta-ray channel there rather than sampling it with a spin it cannot state - `had::HadronicRefusal::kIonDeltaRay`. Unreachable for anything this port makes: an ion's window needs `tmax > cut`, so water's 350 keV cut needs beta^2 gamma^2 > 342, above ~17 GeV per nucleon |
+| `G4VEnergyLossProcess`'s `massRatio` / `chargeSqRatio` / `reduceFactor` for an ion, and `PostStepGetPhysicalInteractionLength`'s `if(isIon)` refresh of the charge from `currentModel->ChargeSquareRatio(track)` | y | **V** | `em::hadron_mass_ratio` and `em::hadron_charge_sq_ratio` on a `SteppedHadron`. `massRatio` is `m(G4GenericIon)/m(ion)` - the literal `0.9382723*GeV` and NOT `units::proton_mass_c2`, which differ by 3e-7 - and `chargeSqRatio` is `G4ionEffectiveCharge`'s effective charge times its `chargeCorrection`, squared, recomputed at the pre-step energy |
+| `G4BraggIonModel` / `G4BetheBlochModel` for an ion, split at 2 MeV per nucleon | y | **V** | Not called: the table IS the split. `G4ionIonisation::InitialiseEnergyLossProcess` sets `eth = 2 MeV * m(GenericIon)/m_p` and selects the model at the SCALED energy, so the boundary in the ion's own energy is `2 MeV * m_ion/m_p`, which is what reading GenericIon's row at `E*massRatio` reproduces exactly. docs/PORTED.md 4.3's rule: Geant4 does not run the model, it runs a table built from it |
+| `G4ionIonisation`'s `SetLinearLossLimit(0.02)` | y | **T** | `step_hadron`. `G4EmParameters::LinearLossLimit` is 0.01 and `G4ionIonisation`'s constructor overrides it, so the alpha, He3 and a generic ion invert the range table at twice the fractional loss a proton does. This was a flat 0.01 for all of them; it decides which of `AlongStepDoIt`'s two expressions computes a step's loss and cannot move a total |
+| `G4IonFluctuations` with the ion's effective charge (`SetParticleAndCharge(part, q2)` under `if(isIon)`) | y | **T** | `step_hadron`. The ALPHA keeps the bare 4 - `G4EmTableUtil::CheckIon` excludes deuteron, triton, alpha+ and alpha by name, so `SetParticleAndCharge` is never called for it and `G4IonFluctuations::InitialiseMe` sets `effChargeSquare = charge*charge`. He3 and every real nucleus are not on that list and get the dynamic ratio; He3 was passing a bare 4 until now |
+| `G4hMultipleScattering("ionmsc")` with `G4UrbanMscModel`, `fMinimal`, `facrange` 0.2, no lateral displacement | y | **P** | **Substituted, as for the alpha.** `uses_wentzel_msc` is false for the ion and `step_hadron` runs WentzelVI in Urban's place, which is the substitution `docs/PORTED.md` 1.1 records for alpha, He3, deuteron and triton and which P8c extends rather than retires. Retiring it is generalising `em/urban_msc.cuh`'s stepping half off `is_positron` and off the e-/e+ transport-mfp table - the cross section is already general and exact for eight species (`tests/test_urban_general.cu`). What it costs here is bounded by what an ion can do with it: every elastic recoil a proton beam makes has a range under 10 um and dies on its first step, so no multiple-scattering code runs for it at all |
+| `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` - the `q2(E_mid)/q2(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to an ion and not to an alpha | y | **-** | Not applied. Both models return immediately unless `eloss >= 5%` of the pre-step energy, so it is a correction on the long steps of a slowing ion. Absent rather than approximated, and it is why the ion's `GetDEDX` column of `ion_tables.csv` is the right thing to compare a TABLE against: `G4EmCalculator::GetDEDX` runs the same call over a 1 nm step, where it is inert by its own guard |
+| `G4RadioactiveDecay` for an unstable nuclide | n | **-** | Not in QBBC's chain at all (docs/HADRONIC_PLAN.md section 2), so a real nucleus never decays here and `step_hadron` says so rather than relying on G4GenericIon's placeholder PDG code being absent from every decay table |
+| `TrackSpeciesIndex` entries and kernel instantiations for He3 and GenericIon | - | **T** | `core/track_buffer.cuh`, `host/transport_run_impl.cuh`. He3 was pure plumbing - its dE/dx, effective charge, fluctuation model and elastic channel were all in place and it had no index |
+| the nuclide on the track | - | **T** | `TrackState::ion_za`, `z*512 + a` in an `unsigned short`. **It costs the struct nothing**: `species` is an int at offset 0 and `pos` is a `Vec3<double>` needing 8-byte alignment, so four bytes of padding already sat at offset 4. `sizeof(TrackState<double>)` is 248 before and after, asserted in `tests/test_ion_transport.cu` section 3 rather than claimed. The buffer pays two bytes a slot out of 236. In a float build `Vec3<float>` aligns to 4 and the struct would grow; that build is not the default (docs/RISK.md N2) |
+| a primary GenericIon | - | **-** | Refused by name in `G4RunManager::CheckSpecies`, ahead of the disposition test: a primary ion needs (Z, A) and there is no `/gun/ion` here. Every ion this transport steps arrives through `BufferEmitter::push_nucleus` |
+
+**The second fix is the reference.** `ref/proton/proton_depth.cc` ran `G4EmStandardPhysics` and
+nothing else, with a note explaining that comparing against QBBC "would measure that absence
+rather than the stepper". That stopped being true when P8 and P8b wired `G4Decay`, `hadElastic`
+and `CoulombScat`. It is QBBC on both sides now, with **only what the port lacks inactivated on
+the Geant4 side** - the plan's own rule (section 4) - and the run prints
+`/particle/process/dump` for the proton and for GenericIon so the configuration is recorded by
+what ran rather than by what was intended.
+
+What the dump reads, and it is the whole statement of the comparison:
+
+```
+G4ProcessManager: particle[proton]                G4ProcessManager: particle[GenericIon]
+[0] Transportation      Active                    [0] Transportation      Active
+[1] msc                 Active                    [1] msc                 Active
+[2] hIoni               Active                    [2] ionIoni             Active
+[3] hBrems              InActive                  [3] ionInelastic        InActive
+[4] hPairProd           InActive                  [4] ionElastic          InActive
+[5] CoulombScat         Active
+[6] hadElastic          Active
+[7] protonInelastic     InActive
+```
+
+**Two names the UI refuses, and both are V53's mechanism.** `/process/inactivate
+neutronInelastic` and `/process/inactivate photonNuclear` both answer `illegal process (or
+type) name`, because each is a sub-process inside a general process and is on no manager:
+`G4HadProcesses::BuildNeutronInelasticAndCapture` hands the neutron's to
+`G4NeutronGeneralProcess::SetInelasticProcess`, and
+`G4EmExtraPhysics::ConstructGammaElectroNuclear` hands the gamma's to
+`gproc->AddHadProcess(gnuc)` because `G4EmStandardPhysics::ConstructProcess` calls
+`SetGeneralProcessActive(true)`. The neutron's comes off with `NeutronGeneralProc`, which is in
+the list. The gamma's cannot come off at all without taking Compton, the photoelectric effect,
+Rayleigh and conversion with it - processes this port HAS - so it is left on, and the arithmetic
+that makes it inert is in the source: nothing in this configuration makes a photon above about
+0.5 MeV, and `G4GammaNuclearXS` is a giant-resonance cross section starting near 10 MeV.
+
+**And the phantom is 150 mm wide rather than 50.** `tools/compare_depth.ps1`'s first metric is
+energy in against energy deposited, limit 1e-6, justified as "it should be exact on both sides -
+the phantom is deeper than the range". Deeper is not wider: an elastic scatter off oxygen leaves
+a 100 MeV proton nearly all of its energy at any angle, so one scattered near 90 degrees runs
+its whole 77 mm range sideways and out of a 50 mm half-width box. Measured on the new reference,
+100,000 events: **112 MeV of 10,000,000 left the phantom, 1.1e-5, eleven times the limit**. That
+is energy Geant4 genuinely transported out of the box, so the phantom was widened to hold it
+rather than the limit widened to excuse it - the same rule this package applied to the plateau.
+At 150 mm the deposited total is 100.0000% of the beam energy on both sides.
 
 ### 2.2 What QBBC needs and is not there
 

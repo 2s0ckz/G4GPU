@@ -338,6 +338,29 @@ class G4RunManager {
     using g4gpu::ParticleType;
     using g4gpu::SpeciesDisposition;
     const ParticleType t = src.particle;
+    // `GenericIon` IS stepped now and is still not a primary, which is why this test is ahead
+    // of the disposition one.
+    //
+    // A `kGenericIon` track is a real nuclide and carries its (Z, A) in `TrackState::ion_za`;
+    // `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder, which is the
+    // particle the dE/dx TABLES belong to and not a particle anything can be. Every ion this
+    // transport steps arrives as a secondary through `BufferEmitter::push_nucleus`, which is
+    // the only thing that sets the nuclide; there is no `/gun/ion Z A` in this port's
+    // G4UImanager, so a primary GenericIon would be a nucleus with no nuclide - and
+    // `step_hadron` would refuse every one of them as `kIonWithoutNuclide` and deposit its
+    // energy where it stood. Refusing here says so once instead of a million times.
+    if (t == ParticleType::kGenericIon) {
+      std::printf(
+          "\nFATAL: \"GenericIon\" is not a primary this transport will fire.\n"
+          "  G4GenericIon is a PLACEHOLDER definition - 938.2723 MeV, charge 1 - whose\n"
+          "  G4ionIonisation owns the dE/dx and range tables every real nuclide reads at a\n"
+          "  scaled energy. It is not a particle: firing one would step a nucleus of unknown\n"
+          "  (Z, A). Real ions ARE transported, as secondaries: an elastic recoil arrives\n"
+          "  through BufferEmitter::push_nucleus carrying its own nuclide.\n"
+          "  A primary ion needs a gun that takes (Z, A) - Geant4's `/gun/ion` - which this\n"
+          "  port does not have. Add it, and `em::stepped_ion(Z, A)` is what it feeds.\n");
+      std::exit(2);
+    }
     if (g4gpu::species_disposition(t) == SpeciesDisposition::kStepped) { return; }
     const G4String name = (gun_ != nullptr) ? gun_->GetParticleName() : G4String("?");
 
@@ -357,18 +380,11 @@ class G4RunManager {
         "\nFATAL: \"%s\" is not transported.\n"
         "\n"
         "  Stepped today: gamma, e-, e+, mu-, mu+, pi+, pi-, kaon+, kaon-, proton,\n"
-        "  anti_proton, deuteron, triton, alpha, neutron, pi0.\n"
+        "  anti_proton, deuteron, triton, alpha, He3, neutron, pi0, and every real nuclide\n"
+        "  (as a secondary - see the GenericIon message above).\n"
         "\n"
         "  What each remaining species needs:\n"
         "\n"
-        "    He3, GenericIon - the dE/dx, the effective-charge scaling and the range table\n"
-        "      are all in place (em/hadron_range.cuh, tests/test_hadron_range.cu). What is\n"
-        "      missing is multiple scattering: G4EmBuilder gives every ion a\n"
-        "      G4hMultipleScattering with no model, so Geant4 scatters them by URBAN, and\n"
-        "      em/urban_msc.cuh's stepping half is transcribed for e-/e+ only. The alpha,\n"
-        "      the deuteron and the triton are transported with WentzelVI in its place and\n"
-        "      that substitution is measured (docs/PORTED.md 1.1); it is not extended to a\n"
-        "      fully stripped heavy ion, where the two models differ by much more.\n"
         "    hyperons, K0L, K0S, anti-nuclei, b/c hadrons - no transport and no physics.\n"
         "      They are reachable only through a cascade, and a cascade that emits one has\n"
         "      it counted by name and reported rather than dropped (see RunStats).\n"

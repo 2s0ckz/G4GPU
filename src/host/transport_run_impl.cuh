@@ -512,10 +512,18 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   Philox<real_t> rng(p.rng_key, p.step, 0xB19Du);
   // See run_step_gamma: the emitter needs the species' mass, for the POST-step birth time.
   constexpr ParticleType kSpecies = kType;
+  // ...AND FOR `kGenericIon` THE SPECIES' MASS IS NOT THE TRACK'S. `particle_def(kGenericIon)`
+  // is G4GenericIon's 938.2723 MeV placeholder and the track is a real nuclide; both the
+  // pre-step velocity (which times the step, sets every secondary's birth clock and advances
+  // the three clocks below) and the proper time need the ion's own mass. The test is on a
+  // template parameter, so the branch does not exist in the other fifteen instantiations.
+  const real_t track_mass =
+      (kType == ParticleType::kGenericIon)
+          ? em::ion_particle_def<real_t>(ion_z_of(p.ion_za), ion_a_of(p.ion_za)).mass
+          : particle_def<real_t>(kSpecies).mass;
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
                            0u, p.global_time, p.weight,
-                           TrackState<real_t>::pre_step_velocity(
-                               p.ekin, particle_def<real_t>(kSpecies).mass),
+                           TrackState<real_t>::pre_step_velocity(p.ekin, track_mass),
                            sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
@@ -530,7 +538,7 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
   // G4Transportation::AlongStepDoIt. Done before the hook so a stepping action reads the
   // time at the end of its own step, as it would in Geant4.
-  p.advance(srep.true_length, ekin_pre, particle_def<real_t>(kSpecies).mass);
+  p.advance(srep.true_length, ekin_pre, track_mass);
   // Whether the NEXT step of this track starts on a boundary. What THIS step should report
   // was captured into first_in_vol before the step ran.
   p.flags = (srep.status == StepStatus::fGeomBoundary) ? (p.flags | kFirstStepInVolume)
@@ -1554,6 +1562,10 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             case kSpeciesAntiProton: G4GPU_LAUNCH_HADRON(ParticleType::kAntiProton); break;
             case kSpeciesDeuteron:   G4GPU_LAUNCH_HADRON(ParticleType::kDeuteron); break;
             case kSpeciesTriton:     G4GPU_LAUNCH_HADRON(ParticleType::kTriton); break;
+            case kSpeciesHe3:        G4GPU_LAUNCH_HADRON(ParticleType::kHe3); break;
+            // The sixteenth instantiation, and the only one whose tracks are not all the same
+            // particle: each carries its own nuclide in `TrackState::ion_za`.
+            case kSpeciesGenericIon: G4GPU_LAUNCH_HADRON(ParticleType::kGenericIon); break;
             case kSpeciesNeutron:    G4GPU_LAUNCH_NEUTRAL(ParticleType::kNeutron); break;
             case kSpeciesPiZero:     G4GPU_LAUNCH_NEUTRAL(ParticleType::kPiZero); break;
             default:

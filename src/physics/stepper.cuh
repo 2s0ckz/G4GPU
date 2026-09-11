@@ -101,7 +101,7 @@ __host__ __device__ __noinline__ void coulomb_apply(const Scene<real_t>& s, Trac
     // kinetic energy. That is a hole in the answer with a number attached rather than a silent
     // drop - see EmitterBooks::refused_energy, which P8 added for exactly this shape of
     // secondary.
-    em.push(particle_type_of_nucleus(r.ion_z, r.ion_a), r.ion_dir, r.ion_ekin, p.event);
+    em.push_nucleus(r.ion_z, r.ion_a, r.ion_dir, r.ion_ekin, p.event);
   }
 }
 
@@ -732,11 +732,40 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld || s.hadron_range == nullptr) { return false; }
 
-  const ParticleDef<real_t> pd = particle_def<real_t>(type);
+  // ---- WHICH PARTICLE THIS IS, and for `kGenericIon` that is two answers.
+  //
+  // `type` is the species: it selects the process, the model, the table row and the elastic
+  // channel. `h.def` is the DEFINITION: the mass and the charge. For every species but a real
+  // nucleus they are two views of one thing; for `kGenericIon` they are not, because
+  // `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder and the track is an
+  // oxygen recoil. See `em::SteppedHadron`, which carries both plus the nuclide.
+  const em::SteppedHadron<real_t> h =
+      (type == ParticleType::kGenericIon)
+          ? em::stepped_ion<real_t>(ion_z_of(p.ion_za), ion_a_of(p.ion_za))
+          : em::stepped_hadron<real_t>(type);
+  const ParticleDef<real_t> pd = h.def;
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
   rep.material = mat;
   const data::Material<real_t>& mm = s.materials[mat];
+
+  // ---- a nucleus with no nuclide, or one outside AME2012, is refused by name.
+  //
+  // Two ways to get here and both are loud rather than fast. A `kGenericIon` track whose
+  // `ion_za` is zero is a bug in whatever emitted it - `BufferEmitter::push_nucleus` is the only
+  // thing that sets the field and `seed_track_slot` sets it to zero, so a primary ion would be
+  // one (and `G4RunManager::CheckSpecies` refuses that by name before a run starts). A nuclide
+  // outside `data::nuclear_mass`'s AME2012 table gives mass zero, which
+  // `dynamic_particle_beta` reads as a photon: beta exactly 1, no stopping power, and a nucleus
+  // that crosses the geometry depositing nothing. That is the shape of failure this project
+  // keeps writing up, so it is a counter and a deposit instead.
+  if (h.type == ParticleType::kGenericIon && !(pd.mass > real_t(0))) {
+    had::book_refusal<real_t>(had.books, had::HadronicRefusal::kIonWithoutNuclide, p.ekin);
+    rep.status = StepStatus::fStopAndKill;
+    rep.process = ProcessId::fBelowTrackingCut;
+    if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
+    return false;
+  }
 
   // ---- the range, THROUGH THE SCALING, and that is not a cosmetic change.
   //
@@ -755,7 +784,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // ("a deuteron's range would have come out as a proton's of the same kinetic energy, which is
   // a factor of about two") and the fix it describes was made in the table and not at the call
   // site. docs/RISK.md V57 has the measurement.
-  const real_t range = s.hadron_range->range_for(mm, type, mat, p.ekin);
+  const real_t range = s.hadron_range->range_for(mm, h, mat, p.ekin);
 
   // The same two termination guards step_lepton needs, for the same reason: without them a
   // track can stop making progress near the end of its range and never fall below the cut, and
@@ -769,7 +798,31 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
     // Discrete delta-ray production competes with the boundary and the step limits.
-    const real_t delta_xs = em::hadron_delta_xs(mm, type, p.ekin, cut, real_t(1e30));
+    //
+    // REFUSED BY NAME FOR A REAL ION, AND THE REFUSAL IS UNREACHABLE RATHER THAN APPROXIMATE.
+    //
+    // `em::hadron_delta_xs` and `em::sample_hadron_delta` both derive the projectile's
+    // definition from its SPECIES, and for `kGenericIon` that is G4GenericIon's placeholder - so
+    // handing either of them an oxygen recoil would compute the delta-ray rate of a singly
+    // charged 938 MeV particle. Threading `h.def` and `h.a` through them is a change in three
+    // shared EM headers for a branch that cannot fire: an ion's transfer window opens only when
+    // `tmax > cut`, and `tmax = 2 m_e b2g2 / (1 + 2 gamma m_e/M + (m_e/M)^2)`, so water's
+    // 350 keV cut needs `beta^2 gamma^2 > 342` - above about 17 GeV per nucleon. The ions this
+    // transport makes are elastic recoils of tens of MeV at most.
+    //
+    // So the window is tested with the ion's OWN definition, which is exact, and an ion that
+    // opens it is counted rather than sampled. The count is per STEP and not per interaction,
+    // which is the opposite of every other entry in that ledger: what is missing here is the
+    // whole delta-ray channel of an ion above 17 GeV/u, on every step of it, rather than one
+    // final state that could not be applied. `hadronic_refusal_name` says so.
+    real_t delta_xs = real_t(0);
+    if (h.is_real_ion()) {
+      if (em::hadron_max_secondary_energy(pd, p.ekin) > cut) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kIonDeltaRay, p.ekin);
+      }
+    } else {
+      delta_xs = em::hadron_delta_xs(mm, type, p.ekin, cut, real_t(1e30));
+    }
     const real_t d_delta = (delta_xs > real_t(0)) ? -log(rng.uniform()) / delta_xs
                                                   : geom::kInfinity<real_t>();
 
@@ -784,8 +837,17 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // The triton is the interesting row: `G4Decay::IsApplicable` reads the LIFETIME, so the
     // triton gets the process (17.774 years >= 0), and `GetPDGStable()` is true, so it never
     // fires. `decays_in_flight` asks both questions in that order, as P4's file does.
+    //
+    // A REAL NUCLEUS NEVER DECAYS HERE, and that is QBBC rather than a gap. An unstable
+    // nuclide's decay is `G4RadioactiveDecay`, which QBBC does not register at all -
+    // docs/HADRONIC_PLAN.md section 2 lists the `RadioactiveDecay` dataset as present on this
+    // machine and out of scope - and `G4Decay` is given to a species by `G4DecayPhysics`'s loop
+    // over the particle table, which runs before any real ion exists. `decays_in_flight` would
+    // be asked about G4GenericIon's own placeholder PDG code (1000000000, Z = A = 0), which is
+    // not a nuclide and is in no decay table, so the answer would be right by accident; this
+    // says it on purpose.
     const real_t d_decay =
-        (had.decay && had::decays_in_flight(type))
+        (had.decay && !h.is_real_ion() && had::decays_in_flight(type))
             ? had::decay_in_flight_length<real_t>(type, pd.mass, p.ekin, rng)
             : geom::kInfinity<real_t>();
 
@@ -888,7 +950,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // and no warning anywhere.
     em::wv_transport_xs(mm, pd, type, p.ekin, cut, kCosThetaLim, real_t(1), st.cos_tet_max_nuc,
                         els, st.xtsec);
-    st.lambda_eff = em::wentzel_lambda(mm, type, p.ekin, cut, kCosThetaLim);
+    st.lambda_eff = em::wentzel_lambda(mm, type, pd, p.ekin, cut, kCosThetaLim);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
@@ -911,7 +973,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // header, and G4VEnergyLossProcess, which sets chargeSqRatio in
     // AlongStepGetPhysicalInteractionLength and holds it for the whole step.
     const real_t e_end = s.hadron_range->energy_from_range_for(
-        mm, type, mat, fmax(range - t_step, real_t(0)), p.ekin);
+        mm, h, mat, fmax(range - t_step, real_t(0)), p.ekin);
     real_t lambda_eff_end = st.lambda_eff;
     real_t cos_tet_max_end = st.cos_tet_max_nuc;
     {
@@ -925,7 +987,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         cos_tet_max_end = sm.cos_tet_max_nuc;
         (void)em::wv_transport_xs(mm, pd, type, e_mid, cut, kCosThetaLim, real_t(1),
                                   cos_tet_max_end, tmp, xt);
-        lambda_eff_end = em::wentzel_lambda(mm, type, e_mid, cut, kCosThetaLim);
+        lambda_eff_end = em::wentzel_lambda(mm, type, pd, e_mid, cut, kCosThetaLim);
       }
     }
 
@@ -1010,15 +1072,24 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     const real_t e_before = p.ekin;
     real_t e_after = real_t(0);
     real_t loss;
-    constexpr real_t kLinLossLimit = real_t(0.01);  // G4EmParameters::LinearLossLimit
+    // `G4EmParameters::LinearLossLimit` is 0.01 - and `G4ionIonisation`'s constructor calls
+    // `SetLinearLossLimit(0.02)`, which overrides it for every species that process is
+    // registered for. So the alpha, He3 and a generic ion invert the range table at twice the
+    // fractional loss the proton does, and this was a flat 0.01 for all of them until the ion
+    // needed the distinction. It changes which of the two expressions computes a step's loss,
+    // not the loss - both are `G4VEnergyLossProcess::AlongStepDoIt`'s, and the long branch is
+    // the accurate one - so it moves a stepped alpha's numbers slightly and cannot move a
+    // total.
+    const real_t kLinLossLimit =
+        uses_ion_ionisation(type) ? real_t(0.02) : real_t(0.01);
     if (step_len >= range || e_before <= em::kHadronTrackingCut<real_t>()) {
       loss = e_before;
     } else {
-      loss = step_len * s.hadron_range->dedx_for(mm, type, mat, e_before);
+      loss = step_len * s.hadron_range->dedx_for(mm, h, mat, e_before);
       if (loss > e_before * kLinLossLimit) {
         loss = e_before
                - s.hadron_range->energy_from_range_for(
-                     mm, type, mat, fmax(range - step_len, real_t(0)), e_before);
+                     mm, h, mat, fmax(range - step_len, real_t(0)), e_before);
       }
       loss = fmin(fmax(loss, real_t(0)), e_before);
 
@@ -1044,14 +1115,24 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         const real_t tmax = em::hadron_max_secondary_energy(pd, e_before);
         const real_t tcut = fmin(cut, tmax);
         if (uses_ion_fluctuations(type)) {
-          // The effective charge squared is the bare charge squared for an alpha:
-          // G4IonFluctuations only ever sees an effective charge through
-          // SetParticleAndCharge, which G4VEnergyLossProcess calls under `if(isIon)`, and
-          // G4EmTableUtil::CheckIon leaves isIon false for deuteron, triton, alpha+ and alpha
-          // by name. A generic ion will need the real ratio here; it is a parameter rather
-          // than a constant inside the model for exactly that reason.
-          loss = em::sample_ion_fluctuation(mm, pd, e_before, tcut, tmax, step_len, loss,
-                                            pd.charge * pd.charge, rng);
+          // THE EFFECTIVE CHARGE SQUARED, and which species get one is `isIon`.
+          //
+          // `G4IonFluctuations` only ever sees an effective charge through
+          // `SetParticleAndCharge`, which `G4VEnergyLossProcess::PostStepGetPhysicalInteraction
+          // Length` calls under `if(isIon)` with the `q2` it just read from
+          // `currentModel->ChargeSquareRatio(track)`. `G4EmTableUtil::CheckIon` leaves `isIon`
+          // false for deuteron, triton, alpha+ and alpha by name, so an ALPHA keeps the bare 4
+          // (`G4IonFluctuations::InitialiseMe` sets `effChargeSquare = charge*charge`) - and
+          // He3 and every real nucleus do not, because neither is on that exclusion list.
+          //
+          // The comment this replaces said "a generic ion will need the real ratio here"; it
+          // was also He3's, which was not transported when it was written.
+          const real_t q2 =
+              (h.is_real_ion() || em::uses_dynamic_effective_charge(type))
+                  ? em::hadron_charge_sq_ratio<real_t>(mm, h, e_before)
+                  : pd.charge * pd.charge;
+          loss = em::sample_ion_fluctuation(mm, pd, e_before, tcut, tmax, step_len, loss, q2,
+                                            rng);
         } else {
           loss = em::sample_fluctuation(mm, pd, e_before, tcut, tmax, step_len, loss,
                                         pd.charge * pd.charge, rng);
@@ -1149,14 +1230,13 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
           em.pos = p.pos;
           em.volume = p.volume;
           em.event = p.event;
-          // Hydrogen recoils as a proton and is transported; anything heavier than an alpha
-          // maps to `kGenericIon`, which has no kernel, so `BufferEmitter::push` counts it by
-          // name with its kinetic energy. A 200 MeV proton in water above the 70 keV recoil
-          // threshold therefore loses its oxygen recoils to that ledger, which is a hole with
-          // a number attached rather than a silent drop - EmitterBooks::refused_energy exists
-          // for exactly this secondary.
-          em.push(particle_type_of_nucleus(er.recoil_z, er.recoil_a), er.recoil_dir,
-                  er.recoil_ekin, p.event);
+          // TRANSPORTED, as of P8c. Hydrogen recoils as a proton and the five light nuclei as
+          // themselves; everything heavier is `kGenericIon` carrying its own (Z, A), which is
+          // what `push_nucleus` is for and what `TrackState::ion_za` holds. This used to read
+          // "which has no kernel, so BufferEmitter::push counts it by name with its kinetic
+          // energy" - a 200 MeV proton in water lost its oxygen recoils to that ledger, and
+          // `build_all.bat`'s depth-dose gate failed on the 515 MeV of them in 6000 protons.
+          em.push_nucleus(er.recoil_z, er.recoil_a, er.recoil_dir, er.recoil_ekin, p.event);
         }
         if (er.dropped_secondaries > 0) {
           had::book_refusal<real_t>(had.books, had::HadronicRefusal::kElasticDropped,
@@ -1228,7 +1308,10 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   if (rep.process == ProcessId::fNotDefined) { rep.process = ProcessId::fBelowTrackingCut; }
   if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
 
-  if (stopped_in_world && had.decay && had::decay_at_rest_allowed(type, had.stage)) {
+  // `!h.is_real_ion()` for the reason the in-flight draw gives: a stopped nuclide's decay is
+  // G4RadioactiveDecay's and QBBC registers none.
+  if (stopped_in_world && had.decay && !h.is_real_ion()
+      && had::decay_at_rest_allowed(type, had.stage)) {
     // The at-rest branch does NOT boost: the products are built in the parent's rest frame and
     // stay there. See P4's `sample_decay`, whose `at_rest` argument is exactly this.
     const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};

@@ -271,7 +271,9 @@ closed - the same question has the mechanism.
 | proton, alpha | **transported** |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name |
 | neutron, π⁰ | **transported** by the neutral kernel: the neutron streams to the world boundary under the 10 µs tracking cut with no process acting yet; π⁰ decays at once |
-| He3, GenericIon | dE/dx and range validated; not transported |
+| He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic` |
+| **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
+| `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
 | hyperons, K⁰L/K⁰S, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species, fatal as a primary |
 
@@ -283,7 +285,10 @@ closed - the same question has the mechanism.
 | `G4BinaryCascade`, `G4BinaryLightIonReaction`, `G4CascadeInterface` (Bertini), FTF + Lund fragmentation, `G4GeneratorPrecompoundInterface` | inelastic final states | Phase 3, not started; the largest part of the port |
 | `G4StoppingPhysics`, gamma-/electro-/muon-nuclear | capture at rest, `G4EmExtraPhysics` | Phase 3 (P12, P13) |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
-| `G4UrbanMscModel::ComputeTruePathLengthLimit`, ion branch | the `fMinimal` step limit and the `mass ≥ masslimite` path | the Urban *cross section* is general and exact; the *stepping* half is still the electron's, so alpha and He3 currently scatter by WentzelVI, which is the wrong model for them |
+| `G4UrbanMscModel::ComputeTruePathLengthLimit`, ion branch | the `fMinimal` step limit and the `mass ≥ masslimite` path | the Urban *cross section* is general and exact; the *stepping* half is still the electron's, so alpha, He3, the deuteron, the triton and every real nuclide scatter by WentzelVI, which is the wrong model for them. What it costs the recoil ions is nothing measurable: each has a range under 10 µm and dies on its first step, so no scattering code runs for it |
+| `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | absent. It returns immediately unless a step loses ≥ 5% of the energy, so it is a correction on the long steps of a slowing ion; the recoil ions stop in one step |
+| `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead |
+| `G4NuclNuclDiffuseElastic` + `G4ComponentGGNuclNuclXsc` as `ionElastic` | the ion's OWN elastic scattering | both halves are ported; the channel is not wired, so a transported ion draws no hadronic interaction length. Bounded at ~1e-9 per recoil — a micrometre of range against a metre of mean free path |
 | Penelope, PAI, Goudsmit-Saunderson, Livermore polarised, DNA, adjoint, PIXE, optical, transition radiation | alternative and specialist models | none are in QBBC's chain |
 
 A class-by-class inventory of all three Geant4 process trees — 568 electromagnetic headers,
