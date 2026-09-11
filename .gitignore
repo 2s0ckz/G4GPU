@@ -11,6 +11,7 @@
 # CMake / MSBuild trees for the programs that link the real Geant4
 /ref/dumpbuild/
 /ref/protonbuild/
+/ref/chargeoddbuild/
 /ref/B1build/
 /examples/B1/build/
 /examples/B1/*/build/

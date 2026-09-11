@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(chargeodd)
+find_package(Geant4 REQUIRED)
+include(${Geant4_USE_FILE})
+add_executable(chargeodd chargeodd.cc)
+target_link_libraries(chargeodd ${Geant4_LIBRARIES})
