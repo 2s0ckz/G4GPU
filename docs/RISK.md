@@ -6464,3 +6464,35 @@ exists to leave behind:
 B1's 6 MeV gamma gate through the row-4 binary - the only engine ever built with this code -
 reads **425.847 pGy against 427.385, 1.2514 sigma**, which is main's recorded number to every
 digit it prints. The lepton path did not move, which is the other half of what P14b had to show.
+
+### V64: every electron above 100 MeV was a 100 MeV electron
+
+Found by the twelve-beam B1 sweep of 2026-09-11 (docs/B1_SWEEP.md), the first time this port was
+run with an electron above 100 MeV and compared to anything. At 1 GeV the port deposits 46% of
+Geant4's dose in B1's trapezoid; at 150, 300, 600 and 1000 MeV it deposits 110.6, 110.8, 110.7 and
+110.6 nGy per 100,000 electrons - the 100 MeV row's 110.4 - while Geant4 rises from 110.7 to 240.3.
+
+The mechanism is a table ceiling. `src/physics/em/electron_processes.cuh` builds the e+- dE/dx,
+range and inverse-range table from `e_min = 1 keV` to `e_max = 100 MeV` in 128 bins; `range()`
+returns the last bin for any kinetic energy at or above `e_max`, and `energy_from_range()` returns
+`e_max` for any range past the table. So a 1 GeV electron's first step reads a 100 MeV range,
+takes its step, inverts the remaining range and comes out at or below 100 MeV. The other 900 MeV
+is not deposited, not carried away by a secondary and not counted: it is gone. Every dose
+downstream of that step is a 100 MeV electron's. Geant4 builds these tables from 100 eV to 100 TeV
+at 7 bins per decade (`G4EmParameters`: `minKinEnergy`, `maxKinEnergy`, `nbinsPerDecade`), and the
+port's hadron tables already use that grid through the same `G4LossTableBuilder` transcription.
+
+Three things let it sit there. The B1 gate is a 6 MeV photon beam, whose electrons never reach
+10 MeV. Every electron oracle compares a model function at a point, which is right for any energy
+the caller passes - the ceiling is in the table the transport reads, not in the physics. And the
+missing energy went nowhere that any counter watched: the refusal ledger counts species, the
+overflow counter counts tracks, and neither counts an energy that a clamp discarded. The lesson
+for the checks is the one V29 drew for assertions: a transport needs an energy balance, primary
+energy in against deposited plus escaped plus refused, and this port has one only in the
+depth-dose gate, for protons.
+
+The fix is package P14c: the e+- tables on Geant4's grid with the clamp replaced by a loud refusal,
+`G4eBremsstrahlungRelModel` dispatched above 1 GeV (it is ported and tested, and used nowhere in
+transport), `G4WentzelVIModel` for e+- above `MscEnergyLimit()` where Geant4 switches from Urban,
+and an energy balance in the device stepping test. Until it lands the port is not to be used for
+electrons or positrons above 100 MeV.

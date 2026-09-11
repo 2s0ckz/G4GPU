@@ -355,6 +355,14 @@ Four things are measured, documented and unresolved rather than unknown:
    the inelastic final state itself, which is Phase 3's: in the final configuration it is
    selectable, refused by name, and the neutron is then killed with its energy deposited
    locally, which is not what Geant4 does.
+ 5. **Electrons and positrons above 100 MeV are 100 MeV electrons.** The B1 sweep of
+   2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first time and the
+   port deposited 46% of Geant4's dose; at 150, 300, 600 and 1000 MeV it deposits exactly its
+   100 MeV dose. The e+- range table stops at 100 MeV and clamps, so the excess energy of a
+   higher-energy electron vanishes after its first step (RISK V64). Photons to 100 MeV, protons to
+   1 GeV and alphas to 4 GeV agreed with Geant4 within statistics in the same sweep. Fix in
+   progress (P14c); do not use the port for e+- above 100 MeV until it lands.
+
 
 ---
 
@@ -554,6 +562,7 @@ docs/         HADRONIC_PLAN.md (the port plan), RESULT.md (what is measured), RI
 ## Documentation
 
 - [`docs/RESULT.md`](docs/RESULT.md) — every validation number and how it was obtained.
+- [`docs/B1_SWEEP.md`](docs/B1_SWEEP.md) - the twelve-beam sweep against Geant4: four species, three energies each, dose and time.
 - [`docs/HADRONIC_PLAN.md`](docs/HADRONIC_PLAN.md) - the QBBC hadronic and decay port: the target constructor by
   constructor, how every stage is checked, the packages and their order.
 - [`docs/VIS.md`](docs/VIS.md) - the viewer: what it draws, what it costs, and how that is measured.
