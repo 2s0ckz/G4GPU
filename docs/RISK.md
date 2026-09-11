@@ -6654,3 +6654,85 @@ costing that file - and ran the gate's own command:
 With the declaration in place the same command matches nothing. Both halves measured on the real
 engine rather than on the ten-line pair, and the declaration put back afterwards.
 
+
+### V66: two switches that had been shut by a compiler and by a package boundary
+
+V65 split the transport translation unit. This is what the split freed, and both halves are the
+same shape: a piece of Geant4 that had been transcribed, checked against the oracle and then
+left switched off for a reason that was not the physics.
+
+#### `kUrbanIonMscWired`: the flag V63 could not turn on
+
+The dispatch, the model and three oracle files were all in place when V63 was written, and the
+flag was false for one reason: `transport_run.cu` would not compile with it true. With V65's
+split it does. The five species Geant4 scatters by Urban are five translation units now, and
+all five compiled first time, in the same ninety seconds each as the eight WentzelVI ones -
+which is also the answer to V63's own open question, because V63 could not distinguish "the
+Urban branch is too big" from "the translation unit is too big" and the one-kernel units settle
+it: the branch was never the problem.
+
+**Nothing in the physics changed to make that happen**, and this entry claims no new physics.
+`tests/test_ion_msc.cu` with the flag true reproduces every number V63 recorded, against
+`ref/oracle/ion_msc_{step,limit,sample}.csv`: the transport mean free path to **6.93e-16** over
+1,200 points, the Zeff coefficients to **exactly 0**, the step limit and both path conversions
+to **exactly 0** over 750 rows, the randomised limit within **1.10 sigma** of its mean and 1.49
+of its standard deviation on the 7 of 450 cells it is reached in (436 rows the limit does not
+touch at all), and the angle to **3.43 sigma** on `<1 - cos>` at **chi2/bin 2.18** over 300
+cells of 400,000 draws.
+
+**And it runs on the device.** `tests/test_step_hadron.cu` agrees host against device to
+**1.060e-13** over 900 steps of six species, and `tests/test_ion_transport.cu` steps all five to
+a stop: alpha 200 MeV in **16.0** steps, deuteron 50 MeV in **14.0**, He3 20 MeV in **3.0**, O16
+20 MeV in **1.0** - V63's after-column, now taken through the shipped engine rather than through
+a test.
+
+**The Urban branch is CHEAPER than the WentzelVI it replaces**, which is V63's finding confirmed
+in the shipped units. `-Xptxas -v`, the same per-species unit with the flag off and on:
+
+| kernel | stack frame | spill st/ld | registers | cmem[0] |
+|---|---|---|---|---|
+| alpha | 3920 -> **3760** B | 252/344 -> **148/208** | 255 | 1616 |
+| He3 | 3984 -> **3760** B | 192/396 -> **144/192** | 255 | 1616 |
+| GenericIon | 4000 -> **3760** B | 360/432 -> **228/296** | 255 | 1616 |
+| deuteron, triton | 3920 -> **4112** B | 184/396 -> **132/180** | 255 | 1616 |
+| proton | 3920 B, unchanged | 200/444, unchanged | 255 | 1616 |
+| gamma, lepton, neutral | unchanged | unchanged | 255 | unchanged |
+
+Urban's stepping half has no per-element table, where WentzelVI's `WentzelElementXs` is two
+arrays of sixteen doubles the sampler picks a target atom out of. So the register budget V63 was
+warned about had room it did not need, and the thing that killed ptxas was never the size of
+this branch. The last two rows are the other half of the claim: only the five species Geant4
+gives an Urban model moved at all, and the proton's kernel is identical in every column, which
+it has to be because `uses_wentzel_msc(kType)` is a compile-time constant in each instantiation.
+The whole engine took **376.4 s** to build with the flag true against 391.1 s with it false -
+the branch is cheaper to compile as well as to run.
+
+**The dose, which is the number V63 could not take.** Example B1's stage-1 alpha, 840 MeV,
+500,000 events, against the Geant4 side V60 and V63 record:
+
+| | dose in the scoring volume | vs Geant4 |
+|---|---|---|
+| Geant4 11.1.1, stage 1 | 12,336.9 +/- 13.0077 nGy | - |
+| the port with WentzelVI substituted (2a6b379) | 12,313.6 +/- 12.9789 nGy | -0.19%, 1.27 sigma |
+| **the port with Urban, this branch** | **12,316.4 +/- 12.9790 nGy** | **-0.17%, 1.12 sigma** |
+
+So the substitution was worth **+2.8 nGy, +0.023%**, and it moved the row TOWARD Geant4 by 0.15
+sigma. That difference is not resolvable and was never going to be: the two port runs are
+independent samples whose difference carries 13*sqrt(2) = 18.4 nGy of noise, B1's scoring volume
+is 12 cm wide, and multiple scattering moves a track sideways. **The order of the three
+measurements is the lesson, and it is V61's:** the step count moved 3%, the step limit's
+behaviour changed qualitatively in the 14 of 450 oracle cells where it bites at all, and the
+dose did not move measurably - so a package with only the dose to go on could not have told
+whether it had changed anything. What told it was the oracle.
+
+**And B1's gamma gate could not move, which is worth measuring rather than assuming.** A 6 MeV
+photon beam makes no ion: Compton, the photoelectric effect, Rayleigh and pair production make
+electrons and positrons, and nothing in that chain reaches `run_step_hadron` at all. Measured:
+**425.847 pGy +/- 0.867682, 1.25138 sigma**, and 426.195 / 426.917 / 427.489 / 427.288 on the
+four extra seeds - bit-identical to the flag-off engine in all five, to every digit printed.
+
+#### The electron's `extremesmallstep`: V62's gap, decided by measurement
+
+TBD_ESS
+
+

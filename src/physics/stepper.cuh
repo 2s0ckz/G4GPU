@@ -105,8 +105,9 @@ __host__ __device__ __noinline__ void coulomb_apply(const Scene<real_t>& s, Trac
   }
 }
 
-/// THE ION'S URBAN MSC IS WRITTEN, ORACLED AND SWITCHED OFF, AND THE THING THAT SWITCHES IT
-/// OFF IS A COMPILER BUG. Read docs/RISK.md V63 before touching this.
+/// THE ION'S URBAN MSC IS LIVE. It was written and oracled by P14b and then held off for a
+/// whole package by a compiler rather than by the physics: docs/RISK.md V63 is the wall, and
+/// V65 is the translation-unit split that took it down.
 ///
 /// Every piece of physics below is transcribed and checked: `tests/test_ion_msc.cu` compares it
 /// against `ref/oracle/ion_msc_{step,limit,sample}.csv` - the transport mean free path to
@@ -116,21 +117,50 @@ __host__ __device__ __noinline__ void coulomb_apply(const Scene<real_t>& s, Trac
 /// steps, with `tests/test_ion_transport.cu` stepping an alpha, a deuteron, a triton, He3 and
 /// an oxygen recoil to a stop through it.
 ///
-/// What it does not survive is `transport_run.cu`, the one translation unit that instantiates
-/// all twenty kernels: `nvcc error : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)`,
-/// deterministically, against the same file at 2a6b379 which takes twenty-four minutes and
-/// succeeds. Nine arrangements of this same code were built; one of them compiled, and it then
-/// hit a device-side misaligned access that could not be localised because compute-sanitizer's
-/// device memcheck is unsupported on this card. The remaining fix is to SPLIT that translation
-/// unit - the hadron kernels into one object and the rest into another - which is the same
-/// medicine docs/RISK.md V55 prescribed one size smaller, and `src/host/transport_run.cu`,
-/// `build_engine.bat` and `build_all.bat` are not P14b's files to change.
+/// WHAT HELD IT OFF. `src/host/transport_run.cu` instantiated all eighteen stepping kernels in
+/// one translation unit, and with this branch live ptxas died there with
+/// `0xC0000005 (ACCESS_VIOLATION)`, deterministically, in every one of the nine arrangements
+/// V63 tried - none of which was a fault in the physics or in the register budget, and one of
+/// which compiled and then faulted on the device in a way that could not be localised. There is
+/// now one translation unit per kernel, so the five species Geant4 scatters by Urban - alpha,
+/// He3, deuteron, triton, GenericIon - are five units of their own, each compiling in about 90
+/// seconds, which is the shape V55's one-kernel reproducer always compiled in.
 ///
-/// So `kUrbanIonMscWired` is false and every ion is still scattered by WentzelVI, which is the
-/// substitution docs/PORTED.md has recorded since the alpha was first transported. It is one
-/// line rather than a rewrite, and flipping it is the whole of the remaining work. What it
-/// costs is measured rather than assumed - V63 has the step counts and the stage-1 alpha dose.
-constexpr bool kUrbanIonMscWired = false;
+/// WHAT THE SUBSTITUTION COST, measured with the flag true rather than asserted. The step count
+/// is the sensitive end and the dose is the insensitive one, and the order of the three is the
+/// lesson: alpha 200 MeV 16.5 steps -> 16.0, deuteron 50 MeV 14.5 -> 14.0, He3 20 MeV 3.5 ->
+/// 3.0, O16 20 MeV 1.6 -> 1.0 with the total path length unmoved to 4e-7 and the proton
+/// bit-identical; `facrange*max(range, lambda0)` exceeds the whole remaining range in 436 of 450
+/// oracle cells, so Geant4's model mostly declines to shorten an ion's step where the
+/// substituted one shortened it; and example B1's stage-1 alpha at 840 MeV over 500,000 events
+/// moves from 12,313.6 +/- 13.0 nGy to what docs/RISK.md V66 records, against Geant4's 12,336.9
+/// +/- 13.0. B1's scoring volume is 12 cm wide and multiple scattering moves a track sideways.
+///
+/// Keep the Urban code out of the kernel body all the same. The three `urban_hadron_*` functions
+/// below are entered once per step each and everything they need is computed inside them; their
+/// shared header says why, and that reason did not go away with the split.
+constexpr bool kUrbanIonMscWired = true;
+
+/// THE ELECTRON'S `extremesmallstep` BRANCH. docs/RISK.md V62 found it missing from the lepton
+/// path and left it off; V66 decides it by measurement, and this comment carries the numbers.
+///
+/// `G4UrbanMscModel::SampleCosineTheta` has a sub-case for a step shorter than
+/// `tsmall = min(tlimitmin, lambdalimit)`: it evaluates theta0 at `tsmall` and scales it by
+/// `sqrt(t/tsmall)`, and sixteen lines further down it takes the tail parameter `u` from
+/// `log(tsmall/lambda0)` rather than from `log(tau)`. Both halves are in
+/// `em::urban_sample_cos_theta` and have been since P14b generalised it; what the lepton path
+/// lacked was the THRESHOLD, which it passed as zero.
+///
+/// It is reachable for an electron. `ComputeTlimitmin` gives `0.87*Z23*stepmin`, about 2.3e-4 mm
+/// for a 1 MeV electron in water against `lambdalimit`'s 1 mm, and steps that short happen at
+/// the end of a range, which is where most of the dose is.
+///
+/// THE THRESHOLD IS THE ONE THE TRACK CARRIES and that is the whole correctness of the branch.
+/// `p.msc_tlimitmin` is written by `urban_step_limit` at the first step and after each boundary
+/// and held for every step in between, exactly as Geant4 holds its member; a tlimitmin
+/// recomputed at the sampling site would be a different number wherever the branch actually
+/// fires, which is many steps after the last refresh. See `em::urban_t_small`.
+constexpr bool kLeptonExtremeSmallStep = false;
 
 /// URBAN'S STEP FOR A HEAVY PARTICLE IS THREE `__noinline__` FUNCTIONS AND THE KERNEL BODY
 /// HOLDS ONLY THE CALLS, BECAUSE OTHERWISE ptxas DIES SOONER. docs/RISK.md V55 and V63.
@@ -628,7 +658,11 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const auto msc_out = em::urban_sample_scattering(
         s.materials[mat], uc, lambda0, p.dir, step_len, geom_step, e_scat, e_before, lat_disp,
         is_positron, rng,
-        (e_scat > real_t(0)) ? s.msc->lambda_at(mat, is_positron, e_scat) : real_t(-1));
+        (e_scat > real_t(0)) ? s.msc->lambda_at(mat, is_positron, e_scat) : real_t(-1),
+        // `tsmall`, from the tlimitmin `urban_step_limit` FROZE above and not from this step's
+        // energy - see kLeptonExtremeSmallStep, where that distinction is the whole
+        // correctness of the branch.
+        kLeptonExtremeSmallStep ? em::urban_t_small(p.msc_tlimitmin) : real_t(0));
     if (s.processes.multiple_scattering) { p.dir = msc_out.dir; }
 
     // Apply the displacement only as far as the post-step safety allows, exactly as
@@ -1097,9 +1131,10 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // branch instead would put both models' registers and both models' inlined tables into
     // every kernel, which docs/RISK.md V55 says is the thing that kills ptxas in this file.
     //
-    // AND `kUrbanIonMscWired` IS FALSE, so today it is WentzelVI for everything here and the
-    // Urban branch below is compile-time dead. That is a compiler wall and not a gap in the
-    // physics; the flag's own comment has it, docs/RISK.md V63 has the evidence.
+    // AND `kUrbanIonMscWired` IS TRUE SINCE P8e, so this really is Urban for the five species
+    // Geant4 gives an Urban model and WentzelVI for the eight it does not. It was false for one
+    // package because ptxas would not compile the branch in a translation unit holding eighteen
+    // kernels: docs/RISK.md V63 is the wall and V65 is the split that removed it.
     const bool urban_msc = kUrbanIonMscWired && !uses_wentzel_msc(type);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);

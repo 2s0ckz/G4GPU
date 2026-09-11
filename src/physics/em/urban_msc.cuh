@@ -511,14 +511,22 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
 
 /// The e-/e+ form, for the call sites that only ever have a lepton.
 ///
-/// `t_small` IS ZERO HERE AND THAT IS A KNOWN GAP, not a property of the lepton. Geant4's
-/// `tsmall = min(tlimitmin, lambdalimit)` is real for an electron - `ComputeTlimitmin` gives
-/// 0.87*Z23*stepmin, about 2.3e-4 mm for a 1 MeV electron in water against lambdalimit's 1 mm -
-/// and steps that short do happen at the end of an electron's range, so the branch is
-/// reachable. It has never been in this file, and turning it on moves every electron number in
-/// the port including B1's gamma dose, which P14b is not allowed to move (its whole claim is
-/// that the ion path changed and the lepton path did not). Named here, measured in
-/// docs/RISK.md V62, and left for whoever owns the lepton path next.
+/// `t_small` DEFAULTS TO ZERO, WHICH TURNS THE EXTREME-SMALL-STEP BRANCH OFF, and a transport
+/// caller is expected to pass the real value. Geant4's is `tsmall = min(tlimitmin,
+/// lambdalimit)` with `tlimitmin` the value `ComputeTruePathLengthLimit` froze at the last
+/// boundary - the same carried state `urban_step_limit` writes through its `tlimitmin`
+/// reference - so the caller is the only place that has it. `urban_t_small` does the min.
+///
+/// The default is zero rather than "compute it here from the step's own energy" because those
+/// are different numbers: Geant4 refreshes tlimitmin on the first step and after a boundary
+/// and holds it for every step in between, and the branch fires at the END of a range, many
+/// steps after the last refresh. An overload that recomputed would be right exactly where the
+/// branch never fires. Zero is a refusal that shows up in the answer; a plausible wrong tsmall
+/// would not.
+///
+/// The gap this closes is docs/RISK.md V62: the branch was missing from the lepton path
+/// entirely until P8e, was measured to move every electron number in the port including B1's
+/// gamma dose, and was left off by P14b because moving that gate was outside its claim.
 template <typename real_t, typename Rng>
 __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<real_t>& m,
                                                          const UrbanCoeffs<real_t>& c,
@@ -526,10 +534,11 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
                                                          real_t current_kinetic, real_t lambda0,
                                                          bool is_positron, Rng& rng,
                                                          real_t lambda_end = real_t(-1),
-                                                         UrbanDebug<real_t>* dbg = nullptr) {
+                                                         UrbanDebug<real_t>* dbg = nullptr,
+                                                         real_t t_small = real_t(0)) {
   return urban_sample_cos_theta<real_t, Rng>(
       m, c, true_step, kinetic, current_kinetic, lambda0, units::electron_mass_c2<real_t>(),
-      is_positron ? real_t(1) : real_t(-1), is_positron, real_t(0), rng, lambda_end, dbg);
+      is_positron ? real_t(1) : real_t(-1), is_positron, t_small, rng, lambda_end, dbg);
 }
 
 /// Per-material Urban table: transport mean free path on a log energy grid, plus the
@@ -654,6 +663,22 @@ __host__ __device__ inline real_t urban_stepmin(const UrbanCoeffs<real_t>& c, re
                                                 real_t kinetic) {
   const real_t rat = kinetic;  // invmev = 1/MeV, and energies here are already in MeV
   return lambda0 * real_t(1e-3) / (real_t(2e-3) + rat * (c.stepmina + c.stepminb * rat));
+}
+
+/// `SampleCosineTheta`'s `tsmall = std::min(tlimitmin, lambdalimit)`, from the tlimitmin the
+/// track carries.
+///
+/// One line, and a function rather than a `fmin` at its one call site so that the CAP lives
+/// beside the constant it is - `lambdalimit`, `G4UrbanMscModel`'s 1 mm - rather than in
+/// stepper.cuh where `kLambdaLimit` would have to be named again. An electron's tlimitmin is
+/// about 2.3e-4 mm in water, so the min is almost always tlimitmin; almost always is not
+/// always, which is why the min is here rather than dropped. A lepton in a low-density
+/// material has a transport mean free path of metres, `ComputeStepmin` scales with it, and
+/// tlimitmin goes over 1 mm. `tests/test_ion_msc.cu` section 7 exercises the branch on the
+/// ION path, where the threshold is `kTlimitMinMinimal` and `fMinimal` never recomputes it.
+template <typename real_t>
+__host__ __device__ inline real_t urban_t_small(real_t tlimitmin) {
+  return fmin(tlimitmin, kLambdaLimit<real_t>());
 }
 
 /// Transcribed from G4UrbanMscModel::ComputeTlimitmin.
@@ -903,18 +928,20 @@ __host__ __device__ inline MscResult<real_t> urban_sample_scattering(
   return out;
 }
 
-/// The e-/e+ form, for the call sites that only ever have a lepton. `t_small` zero, for the
-/// reason the lepton overload of urban_sample_cos_theta gives.
+/// The e-/e+ form, for the call sites that only ever have a lepton. @p t_small defaults to
+/// zero, which turns the extreme-small-step branch off; see the lepton overload of
+/// urban_sample_cos_theta for why the default is a refusal rather than a recomputation, and
+/// pass `urban_t_small(tlimitmin)` with the tlimitmin the track carries.
 template <typename real_t, typename Rng>
 __host__ __device__ inline MscResult<real_t> urban_sample_scattering(
     const data::Material<real_t>& m, const UrbanCoeffs<real_t>& c, real_t lambda0,
     const Vec3<real_t>& old_dir, real_t t_path, real_t z_path, real_t kinetic,
     real_t current_kinetic, bool lat_displacement, bool is_positron, Rng& rng,
-    real_t lambda_end = real_t(-1)) {
+    real_t lambda_end = real_t(-1), real_t t_small = real_t(0)) {
   return urban_sample_scattering<real_t, Rng>(
       m, c, lambda0, old_dir, t_path, z_path, kinetic, current_kinetic, lat_displacement,
       units::electron_mass_c2<real_t>(), is_positron ? real_t(1) : real_t(-1), is_positron,
-      real_t(0), rng, lambda_end);
+      t_small, rng, lambda_end);
 }
 
 /// End-of-step energy the model scatters at, from the top of SampleScattering. For a step

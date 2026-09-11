@@ -305,7 +305,10 @@ A class-by-class inventory of all three Geant4 process trees — 568 electromagn
 
 ### Open questions
 
-Four things are measured, documented and unresolved rather than unknown:
+Three things are measured, documented and unresolved rather than unknown. Two more were on this
+list until P8e and are closed; **they keep their numbers**, because RISK entries, PORTED rows and
+source comments cite "open question 2" and "open question 3" by number and a renumbering would
+send every one of them somewhere else.
 
 1. **Negative hadrons.** Two discrepancies, one closed. Geant4's own transport gave μ⁻, π⁻ and
    K⁻ a B1 dose 4.4%, 5.4% and 9.6% below their positive partners at 200 MeV while its dE/dx
@@ -319,24 +322,23 @@ Four things are measured, documented and unresolved rather than unknown:
    table level: `test_hadron_range` shows K⁻ and p̄ in air off Geant4's `GetDEDX` by 11% and 15%
    between 1 and 3 MeV and nowhere else, undiagnosed, left visible rather than absorbed into a
    tolerance.
-2. **The ion's multiple scattering is written, checked and one line from being live — and the
-   line is held by a compiler, not by the physics.** QBBC scatters alpha, He3, the deuteron, the
-   triton and every real nuclide by `G4UrbanMscModel` and only the muons and the singly charged
-   hadrons by WentzelVI (`G4EmBuilder::ConstructLightHadrons` calls `SetEmModel` on theirs and
-   nothing calls it on the ions'). `em/urban_msc.cuh` is now general across mass and charge, the
-   step limit is `fMinimal` with `facrange` 0.2 and no lateral displacement as
-   `G4EmParameters` gives a particle over 1 MeV, and `tests/test_ion_msc.cu` pins it against
-   three new oracle files — transport mean free path 6.9e-16 over 1,200 points, step limit and
-   both path conversions exactly 0 over 750 rows, angle within 3.4 σ at χ²/bin 2.18 over 300
-   cells of 400,000 draws, lateral displacement exactly zero on both sides. It runs on the
-   device in `test_step_hadron` (host against device to 1.06e-13 over 900 steps) and
-   `test_ion_transport`. What it does not survive is `src/host/transport_run.cu`, the single
-   translation unit that instantiates all twenty kernels: `ptxas died with status 0xC0000005`,
-   deterministically, where the same file without it takes 24 minutes and succeeds. Nine
-   arrangements were built and one compiled. `kUrbanIonMscWired` in `src/physics/stepper.cuh`
-   therefore holds it off, every ion is still scattered by WentzelVI, and the fix is to split
-   that translation unit — RISK **V63** has the builds, the measurements and what the
-   substitution is worth.
+2. **CLOSED by P8e. The ion's multiple scattering is live.** QBBC scatters alpha, He3, the
+   deuteron, the triton and every real nuclide by `G4UrbanMscModel` and only the muons and the
+   singly charged hadrons by WentzelVI, and a transported ion in this port is now scattered by
+   the model Geant4 gives it: `kUrbanIonMscWired` is true. What had held it off for a package
+   was not the physics but `src/host/transport_run.cu`, the single translation unit that
+   instantiated all eighteen stepping kernels — `ptxas died with status 0xC0000005`,
+   deterministically, in all nine arrangements RISK **V63** tried. The engine is seventeen
+   translation units now, one per stepping kernel, and the five Urban species are five of them.
+   The correction that came out of the split is worth more than the flag: **a translation unit
+   does not get safer by being made smaller.** Four charged-meson kernels in a unit of their own
+   kill ptxas where the same four inside the eighteen-kernel unit compiled fine, so V63's cliff
+   faces both ways. RISK **V65** has the split, the compile times (25 min 02 s → 6 min 31 s) and
+   the register table; RISK **V66** has what the substitution cost, PORTED 2.1.9 the summary.
+   The number: example B1's stage-1 alpha at 840 MeV over 500,000 events goes from 12,313.6 ±
+   13.0 to **12,316.4 ± 13.0 nGy** against Geant4's 12,336.9 ± 13.0 — 1.27 σ to **1.12 σ**,
+   +0.023%, a fifth of a sigma toward Geant4 and not resolvable. The step counts are where the
+   model shows: alpha 16.5 → 16.0, deuteron 14.5 → 14.0, He3 3.5 → 3.0, O16 1.6 → 1.0.
 3. **The electron's `extremesmallstep` branch.** `G4UrbanMscModel::SampleCosineTheta` evaluates
    `theta0` at `tsmall = min(tlimitmin, lambdalimit)` and scales it by `sqrt(t/tsmall)` for a
    step below that, and takes the tail parameter `u` from `log(tsmall/lambda0)` rather than from
