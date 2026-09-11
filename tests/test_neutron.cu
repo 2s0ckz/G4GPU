@@ -153,18 +153,38 @@ __global__ void RunNeutral(Scene<real_t> scene, const TrackState<real_t>* in, in
   out[i] = o;
 }
 
+/// The parent this test's emitter belongs to: a 200 MeV pi+, which is B1's stage-1 pion beam.
+///
+/// Chosen so the clock numbers below are the ones a real run produces rather than round
+/// figures: the step length is the continuous-loss limit
+/// `range*dRoverRange + finalRange*(1-dRoverRange)*(2 - finalRange/range)` at a 782.2 mm range
+/// in water with the mu/hadron step function (0.2, 0.1 mm), which is what limits a pion's first
+/// step in B1's phantom.
+constexpr real_t kParentTime0 = real_t(3.25);       ///< ns, the parent's PRE-step clock
+constexpr real_t kParentEkin = real_t(200);         ///< MeV
+constexpr real_t kParentStepLen = real_t(156.4783); ///< mm
+
 /// Pushes one of each disposition through a real BufferEmitter and reports what came back.
 ///
 /// One thread, because what is being checked is the decision and the ledgers, not a race. The
 /// event ids are chosen so that the carried-away array is indexed rather than summed: both
 /// neutrinos belong to event 2, so a bug that booked against event 0 or against a running total
 /// would show as a zero in the slot that should hold 18 MeV.
+///
+/// IT IS ALSO WHERE THE SECONDARY'S CLOCK IS PINNED. `rep.true_length` is non-zero and the
+/// emitter carries the parent's pre-step velocity, so the proton's `global_time` must come out
+/// at the POST-step time and not at `kParentTime0`. With `parent_time` alone - which is what
+/// every kernel passed before P8b - it came out one step's flight time early.
 __global__ void PushDispositions(TrackBuffer<real_t> pool, SecondaryArena arena,
-                                 EmitterBooks books, int* slots, unsigned int* children) {
+                                 EmitterBooks books, int* slots, unsigned int* children,
+                                 real_t* clocks) {
   StepReport<real_t> rep{};
   rep.process = ProcessId::fDecay;
-  BufferEmitter<real_t> em{pool, Vec3<real_t>{1, 2, 3}, 0, 2, 999u, 0u, 0u,
-                           real_t(0), real_t(1), arena, -1, &rep, books};
+  rep.true_length = kParentStepLen;
+  const real_t v = TrackState<real_t>::pre_step_velocity(
+      kParentEkin, particle_def<real_t>(ParticleType::kPionPlus).mass);
+  BufferEmitter<real_t> em{pool,      Vec3<real_t>{1, 2, 3}, 0,  2,    999u, 0u, 0u,
+                           kParentTime0, real_t(1), v, arena, -1, &rep, books};
   const Vec3<real_t> d{0, 0, 1};
   // A proton first, as the control: a species that IS stepped must still get a slot.
   slots[0] = em.push(ParticleType::kProton, d, real_t(5), 2);
@@ -172,6 +192,17 @@ __global__ void PushDispositions(TrackBuffer<real_t> pool, SecondaryArena arena,
   slots[2] = em.push(ParticleType::kAntiNeutrinoE, d, real_t(11), 2);
   slots[3] = em.push(ParticleType::kLambda, d, real_t(13), 2);
   *children = em.child_count;
+
+  // Three numbers, so the host can compare the emitter's answer against the parent's own
+  // advance() rather than against a formula retyped on the host.
+  clocks[0] = em.post_step_time();
+  clocks[1] = v;
+  TrackState<real_t> parent{};
+  parent.begin(Vec3<real_t>{1, 2, 3}, d, kParentEkin, 0, 0u, ProcessId::fNotDefined,
+               kParentTime0, real_t(1));
+  parent.advance(kParentStepLen, kParentEkin,
+                 particle_def<real_t>(ParticleType::kPionPlus).mass);
+  clocks[2] = parent.global_time;
 }
 
 }  // namespace
@@ -432,9 +463,11 @@ int main() {
 
       int* d_slots = nullptr;
       unsigned int* d_children = nullptr;
+      real_t* d_clocks = nullptr;
       cudaMalloc(&d_slots, sizeof(int) * 4);
       cudaMalloc(&d_children, sizeof(unsigned int));
-      PushDispositions<<<1, 1>>>(pool, arena, books, d_slots, d_children);
+      cudaMalloc(&d_clocks, sizeof(real_t) * 3);
+      PushDispositions<<<1, 1>>>(pool, arena, books, d_slots, d_children, d_clocks);
       err = cudaDeviceSynchronize();
       if (err != cudaSuccess) {
         std::printf("  FAIL: %s\n", cudaGetErrorString(err));
@@ -488,9 +521,42 @@ int main() {
         std::printf("    slots %d/%d/%d/%d, %d live, child_count %u, %g MeV carried from"
                     " event 2\n", slots[0], slots[1], slots[2], slots[3], live, children,
                     away[2]);
+
+        // ---- A SECONDARY'S CLOCK IS THE POST-STEP POINT'S, NOT THE PRE-STEP ONE.
+        //
+        // Geant4 advances the parent track's clock in `G4Step::UpdateTrack`, called from
+        // `G4SteppingManager::InvokeAlongStepDoItProcs` before any PostStepDoIt runs, and every
+        // producer of a secondary then reads `track.GetGlobalTime()` for its t0 - see
+        // BufferEmitter::parent_velocity for the four places. This transport built its emitter
+        // before the step and advanced the track after it, so every secondary of every species
+        // started one step's flight time early.
+        //
+        // Pinned against the parent's own `advance()` rather than against a formula retyped
+        // here: if the two ever diverge it is because one of them changed, and that is the
+        // failure worth catching.
+        real_t clocks[3] = {0, 0, 0};
+        real_t born = 0;
+        cudaMemcpy(clocks, d_clocks, sizeof(clocks), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&born, pool.global_time + slots[0], sizeof(real_t),
+                   cudaMemcpyDeviceToHost);
+        const real_t dt = kParentStepLen / clocks[1];
+        CheckClose(clocks[0], clocks[2], 0.0,
+                   "post_step_time() is exactly what the parent's advance() produces");
+        CheckClose(born, clocks[2], 0.0,
+                   "the pushed track's global_time is the parent's POST-step time");
+        Check(born != kParentTime0, "and is not the parent's PRE-step time");
+        CheckClose(born - kParentTime0, dt, 1e-15,
+                   "the difference is exactly the step's flight time");
+        std::printf("    parent pi+ 200 MeV: v = %.6f mm/ns, a %.4f mm step is %.6f ns;\n"
+                    "    secondary born at %.6f ns, pre-step clock was %.6f ns - the old\n"
+                    "    value was early by %.6f ns, which is 1.1%% of the pi+'s 57.0 ns lab\n"
+                    "    lifetime at this energy\n",
+                    double(clocks[1]), double(kParentStepLen), double(dt), double(born),
+                    double(kParentTime0), double(dt));
       }
       cudaFree(d_slots);
       cudaFree(d_children);
+      cudaFree(d_clocks);
       cudaFree(books.carried_away);
       cudaFree(books.carried_by_type);
       cudaFree(books.refused_by_type);

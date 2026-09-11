@@ -363,13 +363,29 @@ struct TrackState {
   __host__ __device__ void advance(real_t length, real_t ekin_pre, real_t mass) {
     if (!kFullTrackState) { return; }
     track_length += length;
-    const real_t velocity = units::c_light<real_t>() * dynamic_particle_beta(ekin_pre, mass);
+    const real_t velocity = pre_step_velocity(ekin_pre, mass);
     if (velocity <= real_t(0)) { return; }
     const real_t dt = length / velocity;
     global_time += dt;
     local_time += dt;
     const real_t e_total = ekin_pre + mass;
     if (e_total > real_t(0)) { proper_time += dt * (mass / e_total); }
+  }
+
+  /// `stepData.GetPreStepPoint()->GetVelocity()` - the one velocity a whole step is timed with.
+  ///
+  /// Factored out of advance() because the EMITTER needs the same number: a secondary is given
+  /// the POST-step global time, which is `global_time + length/velocity`, and it is created
+  /// while the step is still in progress. See BufferEmitter::parent_velocity. One function, so
+  /// the clock a secondary starts on and the clock its parent ends on cannot drift apart.
+  __host__ __device__ static real_t pre_step_velocity(real_t ekin_pre, real_t mass) {
+    return units::c_light<real_t>() * dynamic_particle_beta(ekin_pre, mass);
+  }
+
+  /// The time a step of `length` takes at that velocity - advance()'s `dt`, and zero for a
+  /// track that is not moving, which is the same guard advance() applies.
+  __host__ __device__ static real_t step_delta_time(real_t length, real_t velocity) {
+    return (velocity > real_t(0)) ? length / velocity : real_t(0);
   }
 };
 
@@ -853,10 +869,44 @@ struct BufferEmitter {
   /// one step of one track, so it is a deterministic child index - not a shared atomic.
   unsigned int child_count;
 
-  /// The parent's clock and weight, so a secondary starts where its parent is rather than at
-  /// zero. Set once in the kernel, alongside the buffer.
+  /// The parent's PRE-step clock and its weight, so a secondary starts where its parent is
+  /// rather than at zero. Set once in the kernel, alongside the buffer.
+  ///
+  /// PRE-step, and the secondary does NOT get this value - see `parent_velocity` below and
+  /// `post_step_time()`.
   real_t parent_time;
   real_t parent_weight;
+  /// The parent's pre-step velocity, mm/ns, so push() can work out the POST-step time.
+  ///
+  /// A SECONDARY IS BORN AT THE POST-STEP POINT'S TIME, AND THIS FIELD IS WHAT MAKES THAT
+  /// POSSIBLE HERE.
+  ///
+  /// In Geant4 the parent track's clock is already advanced by the time any process creates a
+  /// secondary. `G4SteppingManager::InvokeAlongStepDoItProcs` ends with `fStep->UpdateTrack()`,
+  /// and `G4Step::UpdateTrack` copies the POST-step point's global, local and proper times onto
+  /// the track; `InvokePSDIP` calls it again after each PostStepDoIt. Every producer of a
+  /// secondary then reads that clock: `G4ParticleChange::AddSecondary` builds
+  /// `new G4Track(dp, theTimeChange, *thePositionChange)` where `theTimeChange` came from
+  /// `track.GetGlobalTime()` in Initialize; `G4VEmProcess::PostStepDoIt` and
+  /// `G4VEnergyLossProcess::PostStepDoIt` both do `G4double time = track.GetGlobalTime()`
+  /// before the loop that wraps each G4DynamicParticle in a G4Track; and
+  /// `G4HadronicProcess::FillResult` does `if(time < 0.0) { time = aT.GetGlobalTime(); }` on the
+  /// same already-advanced track. So a secondary's t0 is the end of its parent's step, not the
+  /// beginning.
+  ///
+  /// This emitter is constructed before the step runs and `TrackState::advance` is called after
+  /// it, so `parent_time` alone is one step's flight time early on EVERY secondary this
+  /// transport has ever made. Carrying the velocity instead of restructuring the kernels is
+  /// what makes the fix one field: `report->true_length` is set by every stepper before its
+  /// first push - it has to be, because the step report is written in the same block that
+  /// decides which process won - so the post-step time is available at push time as
+  /// `parent_time + length/velocity`, computed by the same two statics `advance` uses, on the
+  /// same pre-step velocity Geant4 times the whole step with.
+  ///
+  /// One real_t rather than the parent's mass and pre-step energy, because
+  /// `run_step_hadron`/`run_step_neutral` are at 255 registers with spill already
+  /// (docs/RISK.md V22) and the kernel has both numbers at construction anyway.
+  real_t parent_velocity;
   /// Where to record each secondary, and the last slot this step took. A null arena disables
   /// recording; `last_secondary` is then never anything but -1.
   SecondaryArena arena;
@@ -867,6 +917,18 @@ struct BufferEmitter {
 
   /// Where the two non-track dispositions are recorded. See EmitterBooks.
   EmitterBooks books{};
+
+  /// The global time a secondary created by this step starts at: the POST-step point's.
+  ///
+  /// `parent_time + true_length/pre_step_velocity`, which is exactly what
+  /// `TrackState::advance` adds to the parent after the step. With no step report - the emitter
+  /// allows a null one - there is no step length to time, so the answer is the parent's clock,
+  /// which is also what a zero-length step gives.
+  __host__ __device__ real_t post_step_time() const {
+    if (report == nullptr) { return parent_time; }
+    return parent_time
+           + TrackState<real_t>::step_delta_time(report->true_length, parent_velocity);
+  }
 
   __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin,
                       int /*event_id*/) {
@@ -912,7 +974,7 @@ struct BufferEmitter {
     t.rng_key = child_rng_key(parent_key, parent_step, child_count++);
     t.step = 0u;
     t.begin(pos, dir, ekin, volume, parent_key,
-            (report != nullptr) ? report->process : ProcessId::fNotDefined, parent_time,
+            (report != nullptr) ? report->process : ProcessId::fNotDefined, post_step_time(),
             parent_weight);
     const int slot = out.append(t);
     if (slot < 0) { return slot; }

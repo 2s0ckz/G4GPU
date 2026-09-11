@@ -273,8 +273,16 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
 
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0u);
+  // kSpecies is here rather than below the emitter because the emitter needs the mass: a
+  // secondary is born at the POST-step point's time, which is `parent_time + length/velocity`
+  // on the PRE-step velocity, and push() computes it from parent_velocity. See
+  // BufferEmitter::parent_velocity for the Geant4 sources that say so.
+  constexpr ParticleType kSpecies = ParticleType::kGamma;
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep, books};
+                           0u, p.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(
+                               p.ekin, particle_def<real_t>(kSpecies).mass),
+                           sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -283,7 +291,6 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  constexpr ParticleType kSpecies = ParticleType::kGamma;
   const bool alive = step_gamma(scene, p, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
@@ -382,8 +389,14 @@ __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, con
 
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0x5A5Au);
+  // See run_step_gamma: the emitter needs the species' mass, for the POST-step birth time.
+  constexpr ParticleType kSpecies =
+      kIsPositron ? ParticleType::kPositron : ParticleType::kElectron;
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep, books};
+                           0u, p.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(
+                               p.ekin, particle_def<real_t>(kSpecies).mass),
+                           sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -392,8 +405,6 @@ __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, con
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  constexpr ParticleType kSpecies =
-      kIsPositron ? ParticleType::kPositron : ParticleType::kElectron;
   const bool alive = step_lepton(scene, p, kIsPositron, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
@@ -499,8 +510,13 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   // a track of the same key would have drawn.
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0xB19Du);
+  // See run_step_gamma: the emitter needs the species' mass, for the POST-step birth time.
+  constexpr ParticleType kSpecies = kType;
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep, books};
+                           0u, p.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(
+                               p.ekin, particle_def<real_t>(kSpecies).mass),
+                           sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -509,7 +525,6 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  constexpr ParticleType kSpecies = kType;
   const bool alive = step_hadron(scene, p, kType, had, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
@@ -624,8 +639,13 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   // and charged-hadron streams a track of the same key would have drawn.
   StepReport<real_t> srep;
   Philox<real_t> rng(p.rng_key, p.step, 0x4E7Au);
+  // See run_step_gamma: the emitter needs the species' mass, for the POST-step birth time.
+  constexpr ParticleType kSpecies = kType;
   BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
-                           0u, p.global_time, p.weight, sec, -1, &srep, books};
+                           0u, p.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(
+                               p.ekin, particle_def<real_t>(kSpecies).mass),
+                           sec, -1, &srep, books};
 
   const real_t ekin_pre = p.ekin;
   const Vec3<real_t> pos_pre = p.pos;
@@ -634,7 +654,6 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  constexpr ParticleType kSpecies = kType;
   const bool alive = step_neutral(scene, p, kType, neutron_xs, had, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance. This is the one that decides
