@@ -40,27 +40,62 @@ other direction, and keeping it is what lets "the port followed Geant4's move" b
 against how big the move was. P8's table below has both columns for the state before the wiring;
 P8b's has both for the state after it.
 
-## The neutron is a special case and it is not this port's fault
+## The neutron needs its own binary, and the reason is one line of C++
 
-There is no stage-1 configuration for the neutron in which elastic and capture are active and
-inelastic is not, **and no UI command can make one**. With `EnableNeutronGeneralProcess = 1` -
-which `G4HadronInelasticQBBC::ConstructProcess` sets unconditionally, with no messenger anywhere
-in 11.1.1 - the neutron's process manager holds `Transportation`, `Decay` and
-`NeutronGeneralProc` and nothing else. Elastic, inelastic and capture are sub-processes inside
-that one object, reachable only through its own summed cross-section table, so
-`/process/inactivate` can take all three or none.
+**This section used to say "the neutron is a special case and it is not this port's fault", and
+that there was no stage-1 configuration for it and no UI command could make one.** The second
+half is true. The first half was not, and the difference is P8d's finding (docs/RISK.md V60):
 
-So `stage1_neutron.mac` inactivates `NeutronGeneralProc`, which is stage 0 for a neutron:
-both sides give exactly zero in B1's scoring volume, and that zero is a prediction rather than
-an absence (see `neutron_nogeneral.mac`). The neutron's hadronic transport cannot be validated
-by a dose comparison until P9-P11 land; until then it is validated by its cross-section table
-(bit-exact, `tests/test_particlexs.cu`), its sub-process selection, and its final states
-(`tests/test_elastic_models.cu`, `tests/test_capture.cu`). docs/RISK.md V53.
+* `EnableNeutronGeneralProcess` is set by `G4HadronInelasticQBBC`'s **CONSTRUCTOR**, not by its
+  `ConstructProcess` - which is what V53, docs/PORTED.md 2.1.2 and the old text here all said.
+  The constructor runs when `new QBBC` registers its physics constructors; `ConstructProcess`
+  runs at `/run/initialize`. Between them the state is `G4State_PreInit`.
+* `G4HadronicParameters::SetEnableNeutronGeneralProcess` is public and its only guard is
+  `if(!IsLocked())`, and `IsLocked()` is false on the master thread in `G4State_PreInit`.
+* There is still **no messenger**: `G4HadronicParametersMessenger` builds exactly three
+  commands - `/process/had/verbose`, `/process/had/maxEnergy`,
+  `/process/had/enableCRCoalescence`. So it cannot be a macro line, and that is why the
+  configuration looked impossible.
+
+`ref/b1neutron/` is Geant4's own `examples/basic/B1`, compiled from the Geant4 source tree, with
+that one statement in a main of ours and no visualisation manager. Everything else - the
+geometry, the scoring volume, the dose accumulation, the printed "Cumulated dose per run" line -
+is the same B1 every other row below was measured with, which is the point of compiling Geant4's
+sources rather than copying them.
+
+With the flag off the neutron's process manager holds six entries where it held three, and the
+macros print them:
+
+```
+[0] Transportation      Active
+[1] Decay               Active
+[2] hadElastic          Active     G4NeutronElasticXS:   0 eV ---> 100 TeV
+[3] neutronInelastic    InActive   G4NeutronInelasticXS: 0 eV ---> 100 TeV
+[4] nCapture            Active     G4NeutronCaptureXS:   0 eV ---> 100 TeV
+[5] nKiller             General    TimeCut(ns)= 10000  KinEnergyCut(MeV)= 0
+```
+
+`/process/inactivate neutronInelastic` reaches entry 3 - the command V53 records as answering
+`illegal process (or type) name`, which it does whenever the flag is on - and
+`G4NeutronTrackingCut::ConstructProcess` no longer returns early, so the 10 us cut arrives as a
+real `G4NeutronKiller` carrying the same two numbers the general process carries internally.
+
+**And it is a different competition, not the general table minus a term.** In this configuration
+the neutron has two independent discrete processes, each evaluating its own
+`G4CrossSectionDataStore` at the track's energy and drawing its own interaction length. The
+general process has ONE interaction length off a 401-node linear interpolation of the summed
+cross section at its own node energies. `had::HadronicStage` switches the port between the two
+and `tests/test_neutron_general.cu` predicts them by two different formulas; the port runs
+`kStage1` here.
 
 ## How to run
 
     ref\b1hadron\stage1_compare.ps1 -Events 500000 -SkipNoElastic     the like-for-like
     ref\b1hadron\stage1_compare.ps1 -Events 500000                    plus the diagnostic column
+
+The neutron needs `ref\b1neutron\build.bat` run once in this worktree first; the script says so
+and skips its Geant4 columns rather than falling back to the wrong binary. Every other species
+uses `D:\g4gpu\ref\B1build`, which is safe for the reason the header of the script gives.
 
 500,000 events per run per side, and the count is part of the measurement: B1's printed rms is
 the standard error and scales as 1/sqrt(N), so a 2,000-event run is +/-1.7% and can neither

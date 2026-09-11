@@ -60,12 +60,20 @@
 // before measuring anything".
 //
 // Measured with V55's one-kernel reproducer on `run_step_neutral<double, kNeutron>`, which is
-// the only affordable way to iterate on `transport_run.cu` (P8c recorded ninety minutes for the
-// whole translation unit):
+// the only affordable way to iterate on `transport_run.cu` - the reproducer compiles in 75 s
+// against the translation unit's 22 minutes (P8c recorded ninety, with three Geant4 cmake builds
+// running beside it):
 //
-//   baseline, main at 2a6b379                         3408 B stack,  88/52 B spill, 255 registers
-//   both sub-processes inlined                         (see the report - the frame is the cost)
-//   both __noinline__                                  (ditto)
+//   baseline, main at 2a6b379, no neutron physics  3408 B stack,  88/52 B spill, 255 registers
+//   the elastic sub-process alone                  3056 B
+//   both sub-processes, capacity 32               13120 B
+//   both sub-processes, capacity 16                7472 B       296/516, 255 registers
+//
+// The capacity is `kNeutronCaptureSecondaryCap` below and the whole of the difference between
+// the second and third rows; the ELASTIC branch costs the frame almost nothing, because
+// `HadFinalState<real_t, 1>` is 56 bytes. So the `__noinline__` on the elastic side is not what
+// saves the frame - it is what stops G4ChipsElasticModel's tables being a second copy of what
+// `step_hadron` already inlines - and the one on the capture side is both.
 //
 // And it is the right answer for the hot path for the same reason it was there: the capture
 // cascade walks a nuclide's level scheme and the elastic branch carries G4ChipsElasticModel's

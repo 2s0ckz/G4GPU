@@ -1452,6 +1452,31 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
   const real_t d_boundary =
       geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
+  // ---- G4Decay in flight, competing with the hadronic processes and with geometry.
+  //
+  // DRAWN BEFORE THEM, which is both the process-manager order (Transportation, Decay,
+  // hadElastic, neutronInelastic, nCapture, nKiller - see `ref/b1hadron/stage1_neutron.mac`'s
+  // printed dump) and the order `step_hadron` uses for the same two processes. The port re-draws
+  // every interaction length every step, so its stream differs from Geant4's by construction
+  // either way; what this buys is that the two steppers agree with each other, which is what a
+  // reader comparing them will assume.
+  //
+  // Both neutral hadrons have it and they are at opposite extremes. A free neutron's proper
+  // lifetime is 880 s, so `beta*gamma*c*tau` is 2.6e11 mm at 100 MeV - the process is present
+  // and inert, which is why the stage-1 macros leave Decay ACTIVE on the Geant4 side rather than
+  // inactivating something that cannot fire. A pi0's is 8.5e-8 ns, so `c*tau` is 2.55e-5 mm and
+  // `p/m * c*tau` at 100 MeV is about 3e-5 mm: it decays inside the first step, always, wherever
+  // it was made. "pi0 decays at once" is that number and not a special case - the same
+  // competition produces it.
+  //
+  // Conditional, for the reason `step_hadron` gives: a species that does not decay must draw
+  // no uniform, or every existing result for it moves.
+  const real_t d_decay =
+      (had.decay && had::decays_in_flight(type))
+          ? had::decay_in_flight_length<real_t>(type, particle_def<real_t>(type).mass, p.ekin,
+                                                rng)
+          : geom::kInfinity<real_t>();
+
   // Zero for a pi0, and for a neutron whose tables were never uploaded.
   //
   // ONE LOGARITHM OF THE ENERGY, taken here and handed to every lookup below, as
@@ -1513,24 +1538,6 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
           : real_t(0);
   const real_t s_cap =
       (sigma_cap > real_t(0)) ? -log(rng.uniform()) / sigma_cap : geom::kInfinity<real_t>();
-
-  // ---- G4Decay in flight, competing with the general process and with geometry.
-  //
-  // Both neutral hadrons have it and they are at opposite extremes. A free neutron's proper
-  // lifetime is 880 s, so `beta*gamma*c*tau` is 2.6e11 mm at 100 MeV - the process is present
-  // and inert, which is why `neutron_nogeneral.mac` leaves Decay ACTIVE on the Geant4 side
-  // rather than inactivating something that cannot fire. A pi0's is 8.5e-8 ns, so `c*tau` is
-  // 2.55e-5 mm and `p/m * c*tau` at 100 MeV is about 3e-5 mm: it decays inside the first step,
-  // always, wherever it was made. "pi0 decays at once" is that number and not a special case -
-  // the same competition produces it.
-  //
-  // Conditional, for the reason `step_hadron` gives: a species that does not decay must draw
-  // no uniform, or every existing result for it moves.
-  const real_t d_decay =
-      (had.decay && had::decays_in_flight(type))
-          ? had::decay_in_flight_length<real_t>(type, particle_def<real_t>(type).mass, p.ekin,
-                                                rng)
-          : geom::kInfinity<real_t>();
 
   // The shortest of the discrete lengths, and which one it was. `G4SteppingManager` asks every
   // process for a length and keeps the smallest; with the general process there is one hadronic
