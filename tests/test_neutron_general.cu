@@ -878,7 +878,7 @@ int main() {
       if (stage == 2) { dw.hadron_elastic = hw.hadron_elastic = false; }
       double worst = 0;
       int printed = 0, bad = 0;
-      int n_el = 0, n_cap = 0, n_inel = 0, n_sec_total = 0, max_sec = 0;
+      int n_el = 0, n_cap = 0, n_inel = 0, n_sec_total = 0, max_sec = 0, det_bad = 0;
       double balance_worst = 0;
       // ONE LAUNCH PER MATERIAL, because each scene holds one volume - see the note above.
       for (int mi = 0; mi < kNMat; ++mi) {
@@ -913,6 +913,28 @@ int main() {
         }
         std::vector<Outcome> dev(nm);
         cudaMemcpy(dev.data(), d_out, sizeof(Outcome) * nm, cudaMemcpyDeviceToHost);
+
+        // DETERMINISM ACROSS THE LAUNCH GEOMETRY, which is the property every dose in this
+        // repository rests on and which `tests/test_step_hadron.cu` section 5 asserts for the
+        // charged stepper. The same tracks at a different block size must give IDENTICAL
+        // results - tolerance zero - because nothing in a step may depend on which thread ran
+        // it. It is worth asserting here and not only there because P8d is the first thing to
+        // emit a secondary out of `step_neutral`, and a secondary's RNG key is derived from its
+        // parent's `child_count` rather than from a slot index for exactly this reason.
+        cudaMemset(d_out, 0, sizeof(Outcome) * nm);
+        RunNeutral<<<(nm + 255) / 256, 256>>>(dscene[mi], d_in, nm, nown.d_general, dw, d_out);
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+          fail("the 256-thread relaunch failed");
+        } else {
+          std::vector<Outcome> dev2(nm);
+          cudaMemcpy(dev2.data(), d_out, sizeof(Outcome) * nm, cudaMemcpyDeviceToHost);
+          double wd = 0;
+          int pd = 0;
+          for (int i = 0; i < nm; ++i) {
+            det_bad += compare(dev[i], dev2[i], "block size", i, 0.0, &wd, &pd);
+          }
+        }
+
         for (int i = 0; i < nm; ++i) {
           Outcome h{};
           one_step(hscene[mi], tracks[i], &h_xs, hw, &h);
@@ -944,7 +966,11 @@ int main() {
                   "secondaries, at most %d in one step\n",
                   n_el, n_cap, n_inel, n_sec_total, max_sec);
       std::printf("    elastic energy balance, worst ABSOLUTE: %.3e MeV\n", balance_worst);
+      std::printf("    64 threads against 256, bit for bit: %d disagreements\n", det_bad);
       if (bad != 0) { ++g_fails; }
+      if (det_bad != 0) {
+        fail("the same tracks gave different answers at a different block size");
+      }
       // ABSOLUTE, for the reason `compare` gives at length: the recoil term is a difference of
       // two numbers of order the target mass, so a relative limit on a 6e-5 MeV deposit is a
       // limit on an ulp of 1.9e5.

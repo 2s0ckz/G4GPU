@@ -332,7 +332,9 @@ other row's third column makes, and it says what this measurement is of:
   tracks because of P8c;
 * and `nCapture` contributes nothing at 100 MeV in 500,000 events on its own, because without
   elastic scattering the neutron never slows to where its capture cross section matters. Its
-  share of the interactions at 100 MeV is about 6e-5.
+  share of the interactions is 5.1e-5 in water at 10 MeV and 3.4e-5 in air
+  (`tests/test_neutron_general.cu`), and a 100 MeV neutron's path through B1 is a few mean free
+  paths of a process that is itself thousands of millimetres long in air.
 
 So the neutron row is an unusually clean test of exactly three things and nothing else:
 `G4NeutronElasticXS` (P2, bit-exact against the oracle), `G4ChipsElasticModel` (P5, bitwise on

@@ -80,8 +80,9 @@
 // 52-parameter tables, and neither runs on a step that does not interact. The mean free paths
 // make that a quantity rather than a hope - measured in `tests/test_neutron_general.cu`, a
 // 10 MeV neutron's total mean free path in AIR is about 62 m (at a half-width of 1 km, 3,249 of
-// 200,000 tracks left the box), and the capture sub-process is 6e-5 of the interactions there.
-// So the cascade runs on about one step in sixteen thousand that interact at all.
+// 200,000 tracks left the box), and the capture sub-process is 3.4e-5 of the interactions there
+// - 5.1e-5 in water, 6.7e-5 in bone, 3.3e-4 in lead. So the cascade runs on about one
+// interacting step in twenty thousand.
 #pragma once
 
 #include <cmath>
