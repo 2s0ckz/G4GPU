@@ -8,8 +8,10 @@
 #   port          this port's examples\B1\exampleB1.exe
 #   G4 EM-only    the real Geant4 with ONLY what the port still lacks after Phase 2 inactivated:
 #                 the inelastic processes, the hadron radiative processes hBrems/hPairProd (left
-#                 at P by P1) and the photo-/electro-nuclear ones. Elastic, capture, decay and
-#                 single Coulomb scattering stay active on both sides. This is the LIKE-FOR-LIKE
+#                 at P by P1), the photo-/electro-nuclear ones, and ionElastic/ionInelastic for
+#                 the recoil nuclei (transported since P8c, their own hadronic processes not
+#                 wired). Elastic, capture, decay and single Coulomb scattering stay active on
+#                 both sides. This is the LIKE-FOR-LIKE
 #                 column; agreement here is the claim
 #   G4 QBBC       the real Geant4 as QBBC ships; its distance from EM-only is what the missing
 #                 physics is worth for that beam, measured rather than argued
@@ -65,10 +67,10 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 
 # Per species: what the port does not transport, by the process names QBBC's managers carry.
 $emOnly = @{
-  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear") }
-  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear") }
-  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "protonInelastic") }
-  "alpha"  = @{ PreInit = @(); Inactivate = @("alphaInelastic", "ionInelastic") }
+  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic", "ionInelastic") }
+  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic", "ionInelastic") }
+  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "protonInelastic", "ionElastic", "ionInelastic") }
+  "alpha"  = @{ PreInit = @(); Inactivate = @("alphaInelastic", "ionElastic", "ionInelastic") }
 }
 
 $beams = @(
