@@ -125,6 +125,16 @@ struct SchedEmitter {
       default:                      return -1;
     }
   }
+
+  /// A recoil nucleus has nowhere to go in this driver, as nothing but a photon or a lepton has -
+  /// see push()'s default. It is reachable only through single Coulomb scattering of an e+- above
+  /// 100 MeV (P8b/P8c), which the 6 MeV photon beam this driver is run at cannot make; the engine
+  /// driver is the one that counts a refused species and prints it. The child index is consumed
+  /// so that the sibling keys stay what BufferEmitter would have given them.
+  __device__ int push_nucleus(int, int, const Vec3<real_t>&, real_t, int) {
+    ++child_count;
+    return -1;
+  }
 };
 
 /// Seeds one primary photon per event directly into the gamma buffer. Slot == local event
