@@ -5199,6 +5199,43 @@ IS linear interpolation. `tests/test_chargeodd.cu` checks the composition `E - R
 against Geant4's own two lookups: 0.02-0.36% for all eight species after, 10-83% for the four
 negatives before.
 
+#### The like-for-like that closes V44
+
+Example B1 at 200 MeV, 500,000 events a side, docs/RESULT.md's method; the port built from the
+`phys/em_extra` worktree and the Geant4 EM-only column unchanged from what `ref/b1hadron/
+*_emonly.mac` recorded for V44. The macro headers carry the same table.
+
+| dose, nGy | port BEFORE | port AFTER | Geant4 EM-only | after |
+|---|---|---|---|---|
+| mu- | 597.326 +/- 0.633 | **575.145 +/- 0.611** | 575.568 +/- 0.611 | -0.073%, **0.49 sigma** |
+| mu+ | 598.660 +/- 0.634 | 598.660 +/- 0.634 | 600.681 +/- 0.634 | -0.34%, 2.25 sigma |
+| pi- | 630.922 +/- 0.666 | **600.871 +/- 0.636** | 600.831 +/- 0.636 | +0.007%, **0.04 sigma** |
+| pi+ | 632.349 +/- 0.668 | 632.349 +/- 0.668 | 633.446 +/- 0.668 | -0.17%, 1.16 sigma |
+| kaon- | 1239.62 +/- 1.303 | **1132.65 +/- 1.199** | 1131.87 +/- 1.195 | +0.069%, **0.46 sigma** |
+| kaon+ | 1242.97 +/- 1.306 | 1242.97 +/- 1.306 | 1240.74 +/- 1.302 | +0.18%, 1.21 sigma |
+
+So 24.7, 32.7 and 61.0 sigma became 0.49, 0.04 and 0.46, and the port's own charge splits are
+4.09%, 5.24% and 9.74% against Geant4's 4.36%, 5.43% and 9.62% - against 0.223%, 0.226% and
+0.270% before.
+
+**The three positives are bit-identical**, to every digit B1 prints, and that is the
+load-bearing half of the table rather than a courtesy: `hadron_table_uses_spline` names four
+species out of ten, and a fix that had rescaled everything, or named the wrong four, would have
+moved them. It also means those three rows are not a re-measurement - they are the same
+computation - so quoting them as "still agrees" would claim more than was run.
+
+The rms tracked the mean, which is a second and independent sign: pi- 0.666 -> 0.636 nGy
+against the reference's 0.636, mu- 0.633 -> 0.611 against 0.611, kaon- 1.303 -> 1.199 against
+1.195. Nothing in the fix touches fluctuations, so a per-event spread that lands on the
+reference's says the distribution moved and not only its first moment.
+
+**What this cost in event count.** The three `*_port.mac` files asked for 20,000, 20,000 and
+2,000 events while their headers already quoted 500,000-event numbers, which the macros as
+written could not produce - B1's printed dose is CUMULATIVE, so 20,000 events give 23.8 nGy
+where 500,000 give 597. The effect being measured after the fix is 0.2% rather than 5%, and
+V44's own rule applies to its closure: choose the event count from the size of the effect
+before running, and write it into the macro.
+
 **What this is worth reporting upstream.** Nothing in the Geant4 code is a typo. Each of the
 five steps is defensible on its own; the defect is that step 2's correct local decision about a
 radiative table leaks into step 4's choice of template vector, and step 3's ordering decides
