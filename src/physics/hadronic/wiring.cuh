@@ -16,13 +16,13 @@
 // (`capture/`) and P2's cross sections; this file is where a stepper asks them the right
 // question in the right order.
 //
-// WHAT IS ACTUALLY ASKED TODAY IS P4's DECAY, and nothing else. The elastic and capture flags
-// below exist and are wired through to the kernels, and the models behind them are transcribed
-// and tested, but neither is reached: `step_neutral` is handed a null cross-section table and
-// `step_hadron` computes no hadronic interaction length. The reason in each case is a piece of
-// DATA that is not on the device rather than a model that is not written, and it is written out
-// where the flag is declared so that reading this struct cannot leave the impression that the
-// processes are running.
+// WHAT IS ACTUALLY ASKED TODAY IS ALL THREE OF THEM. That paragraph used to read "P4's decay,
+// and nothing else", with the elastic and capture flags wired through to the kernels and neither
+// reached - `step_neutral` handed a null cross-section table and `step_hadron` computing no
+// hadronic interaction length - because in each case a piece of DATA was not on the device.
+// P8b closed the first (the isotope abundances) and P8d the second (P2's five combined tables
+// and the two per-process ones, `host/neutron_upload.cuh`), so every flag in `HadronicWiring`
+// now changes an answer and the notes below say for which species.
 #pragma once
 
 #include <cmath>
@@ -32,6 +32,7 @@
 #include "data/level_data.cuh"
 #include "physics/decay/decay.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
+#include "physics/hadronic/neutron_wiring.cuh"
 
 namespace g4gpu::had {
 
@@ -59,21 +60,37 @@ namespace g4gpu::had {
 /// and its neighbours. docs/RISK.md V38 is the entry about getting that wrong in the other
 /// direction, and P4's `decay_at_rest_competitor` is the hook that made it impossible to forget
 /// here.
+/// AND FOR THE NEUTRON THE STAGE IS NOT A SUBSET, IT IS A DIFFERENT PROCESS LIST. P8d found
+/// this where P8b and P8c had left it as "the inelastic partial is left out of the sum".
+/// `EnableNeutronGeneralProcess` is set in `G4HadronInelasticQBBC`'s CONSTRUCTOR (not, as V53
+/// and docs/PORTED.md 2.1.2 both say, in its `ConstructProcess`), and there is no UI command for
+/// it anywhere in 11.1.1 - `G4HadronicParametersMessenger` builds exactly three commands, and
+/// `enableNeutronGeneralProcess` is not one of them. So the only stage-1 reference that exists
+/// is a Geant4 whose flag is turned off in C++ before `G4State_PreInit` ends, after which
+/// `neutronInelastic` IS a process on the neutron's manager and `/process/inactivate` reaches
+/// it. In that configuration the neutron has separate `hadElastic` and `nCapture` processes,
+/// each with its own cross-section data store and its own interaction length, and a real
+/// `G4NeutronKiller` carrying the 10 us cut - not one table with a term removed.
 enum class HadronicStage : int {
   /// Geant4 with `*Inelastic`, `hBertiniCaptureAtRest`, `hFritiofCaptureAtRest` and
-  /// `muMinusCaptureAtRest` inactivated and the neutron general process off. A stopped negative
-  /// hadron decays on both sides.
+  /// `muMinusCaptureAtRest` inactivated. A stopped negative hadron decays on both sides. The
+  /// NEUTRON's half of it is `EnableNeutronGeneralProcess(false)` plus
+  /// `/process/inactivate neutronInelastic`, so its elastic and capture run as two competing
+  /// processes on their own tables - which is what `step_neutral` does in this stage.
   kStage1 = 0,
   /// QBBC as it ships. A stopped negative hadron is captured, which this port does not have, so
-  /// it is refused by name and its rest mass is lost from the answer.
+  /// it is refused by name and its rest mass is lost from the answer; and the neutron's one
+  /// interaction length comes from `G4NeutronGeneralProcess`'s combined table, whose inelastic
+  /// sub-process is refused by name (`HadronicRefusal::kNeutronInelastic`) until P9-P11.
   kFinal = 1,
 };
 
 __host__ __device__ inline const char* hadronic_stage_name(HadronicStage s) {
   return (s == HadronicStage::kStage1)
-             ? "stage1 (QBBC with *Inelastic and the three at-rest captures inactivated, "
-               "NeutronGeneralProc off)"
-             : "final (QBBC as it ships; stopping is refused by name)";
+             ? "stage1 (QBBC with *Inelastic and the three at-rest captures inactivated; the "
+               "neutron with EnableNeutronGeneralProcess false and neutronInelastic off, i.e. "
+               "hadElastic and nCapture as separate processes)"
+             : "final (QBBC as it ships; stopping and neutronInelastic are refused by name)";
 }
 
 // =============================================================================================
@@ -89,13 +106,19 @@ __host__ __device__ inline const char* hadronic_stage_name(HadronicStage s) {
 enum class HadronicRefusal : int {
   /// The neutron general process selected `inelastic`. P9/P10/P11.
   ///
-  /// AT ZERO TODAY, AND FOR A BLUNTER REASON THAN THE STAGE. `step_neutral` is handed a null
-  /// cross-section table - `TransportEngine::Upload` refuses a non-null one until the final
-  /// states land with it - so no sub-process of any kind is selected and this counter cannot
-  /// move. When the table is uploaded it will be selectable above the capture threshold, and
-  /// this is the counter that says how often; the stage-1 configuration is the one in which
-  /// the inelastic partial is left out of the sum, matching Geant4 with `neutronInelastic`
-  /// inactivated and the general process off.
+  /// REACHED, AND ONLY IN `kFinal`, WHICH IS THE WHOLE DIFFERENCE BETWEEN THE TWO STAGES.
+  /// `G4NeutronGeneralProcess::BuildPhysicsTable` sums elastic + inelastic + capture
+  /// unconditionally, so in the final configuration the interaction length includes the
+  /// inelastic term, `select()` can name it, and this counter says how often with what energy
+  /// on it. The neutron is then killed with its kinetic energy deposited locally, which is the
+  /// conservative disposal and is NOT what Geant4 does with it.
+  ///
+  /// In `kStage1` it stays at zero, and not by omitting a term from a sum: the stage-1
+  /// reference is a Geant4 whose `EnableNeutronGeneralProcess` is false and whose
+  /// `neutronInelastic` is then inactivated by name, so the neutron carries separate
+  /// `hadElastic` and `nCapture` processes on their OWN data stores and there is no inelastic
+  /// process to select. docs/RISK.md V53's addendum is why "left out of the total" was the
+  /// wrong description of it.
   kNeutronInelastic = 0,
   /// A charged hadron's inelastic process. Also P9/P10/P11, and also absent from the cross
   /// section rather than present and refused - a charged hadron in this transport has NO
@@ -130,7 +153,33 @@ enum class HadronicRefusal : int {
   /// products are missing.
   kDecayChannel,
   /// A capture cascade that produced more secondaries than the final state can hold.
+  ///
+  /// A TRIPWIRE ON A MEASURED NUMBER, since P8d reached it. The capacity is 32
+  /// (`had::kNeutronCaptureSecondaryCap`), which is what `tests/test_capture_device.cu` ran 448
+  /// captures at and what P7's statistical oracle ran 20,000 per (target, energy) at. If this
+  /// moves, a cascade got longer than anything either of those saw and the gammas past the
+  /// thirty-second are missing from the answer.
   kCaptureOverflow,
+  /// A capture secondary whose PDG code `core/particle.cuh` has no row for.
+  ///
+  /// Unreachable from a radiative capture, whose every secondary is a gamma, an
+  /// internal-conversion electron or a nucleus - and counted rather than dropped so that a
+  /// cascade which starts emitting something else is loud. The same shape as
+  /// `kDecayChannel`'s unmapped-daughter arm and for the same reason.
+  kCaptureSecondarySpecies,
+  /// A capture the model could not complete: `CaptureRefusal::kUnphysicalTarget` (a target with
+  /// Z > A, A < 1 or Z < 1, for which `G4NucleiProperties::GetNuclearMass` is zero) or
+  /// `CheckResult` rejecting a hundred attempts in a row, where Geant4 raises its `had006`
+  /// FatalException. Both are tripwires: `SampleZandA` draws from `data/isotope_abundance.hh`,
+  /// whose isotopes are all physical, and the check's levels are (2%, 1 GeV) with BOTH required,
+  /// so a capture releasing 2 to 9 MeV cannot fail it.
+  ///
+  /// `CaptureRefusal::kIsomerIonMass` is deliberately NOT booked here. It fires on 101 of the
+  /// 600 points of P7's deterministic oracle and it is not a missing interaction: it says the
+  /// residual's excitation went through `G4IonTable::GetIon`'s snapping, whose MASS this port
+  /// reproduces to the last bit for all 568 residuals and whose run-dependent isomer DIGIT it
+  /// does not carry. Booking it would fill this ledger with a fact about a PDG code.
+  kCaptureRefused,
   /// An elastic final state with a secondary beyond the first.
   ///
   /// A TRIPWIRE, NOT AN EXPECTED COUNT. `G4HadronElasticProcess::PostStepDoIt` looks at
@@ -191,7 +240,12 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kDecayChannel:
       return "a decay channel P4 refused (see DecayStatus)";
     case HadronicRefusal::kCaptureOverflow:
-      return "a capture cascade longer than the final state can hold";
+      return "a capture cascade longer than the final state can hold (capacity 32)";
+    case HadronicRefusal::kCaptureSecondarySpecies:
+      return "a capture secondary whose PDG code core/particle.cuh has no row for";
+    case HadronicRefusal::kCaptureRefused:
+      return "a capture G4NeutronRadCapture could not complete - an unphysical target, or "
+             "CheckResult rejecting 100 attempts (G4Exception had006)";
     case HadronicRefusal::kElasticDropped:
       return "an elastic final state with more than one secondary - G4HadronElasticProcess "
              "keeps only GetSecondary(0)";
@@ -277,21 +331,33 @@ struct HadronicWiring {
   /// hadron, which costs nothing and behaves exactly as a species with no elastic process
   /// does. `host/hadronic_upload.cuh` fills them.
   ElasticTables<real_t> elastic{};
-  /// `nCapture` - the capture sub-process of the neutron general process. Read by
-  /// `step_neutral`'s cross-section gate and inert because that table is null: the neutron
-  /// general process is not wired. P7's model is written and tested
-  /// (`tests/test_capture.cu`), and since P8b so is the device form of the level scheme it
-  /// walks (`tests/test_capture_device.cu`, `level_data` below).
+  /// `nCapture` - the capture sub-process of the neutron general process, or in `kStage1` a
+  /// process of its own on the neutron's manager.
+  ///
+  /// REACHED SINCE P8d. P7's model is written and tested (`tests/test_capture.cu`), P8b put the
+  /// level scheme it walks on the device (`tests/test_capture_device.cu`, `level_data` below),
+  /// and P8d supplies the cross section (`neutron.capture`) and the branch in `step_neutral`.
+  /// Off means a neutron draws no capture interaction length at all, which is
+  /// `/process/inactivate nCapture` in the stage-1 configuration and has no Geant4 equivalent
+  /// in the final one (V53: the sub-processes cannot be inactivated one at a time).
   bool neutron_capture = true;
+  /// The neutron's two per-process cross sections, `G4NeutronElasticXS` and
+  /// `G4NeutronCaptureXS`, on the device. Null in a run whose `G4PARTICLEXSDATA` could not be
+  /// resolved, which is the same "no process" state a species with no elastic channel is in.
+  /// `host/neutron_upload.cuh` fills them; `physics/hadronic/neutron_wiring.cuh` says which
+  /// stage reads them for what.
+  NeutronSubTables<real_t> neutron{};
   /// P3's PhotonEvaporation5.7 level scheme, or a null view.
   ///
   /// The second of the two tables P8 named as blocking the neutron: 174,411 levels and 268,190
   /// transitions, 9.52 MB on the device, which `G4PhotonEvaporation::BreakUpChain` walks inside
-  /// a capture. `host/level_upload.cuh` fills it and `TransportEngine::SetNuclearLevelData`
-  /// decides whether a run pays for it - off by default, because the one consumer is
-  /// unreachable until the neutron general process is wired and reading 3110 files in every
-  /// gamma run is not free. A null view is exactly the state a species with no capture process
-  /// is in.
+  /// a capture. `host/level_upload.cuh` fills it. It was off by default while nothing read it;
+  /// `TransportEngine::SetNuclearLevelData` defaults to ON since P8d, because the consumer
+  /// exists now and Geant4's own answer is unconditional
+  /// (`G4ExcitationHandler::SetParameters` calls `UploadNuclearLevelData(Zmax+1)` at
+  /// initialisation whether a neutron arrives or not). A null view is what a capture cascade
+  /// with no levels to walk sees, and `neutron_capture_apply` then reports the model's own
+  /// refusal rather than inventing a gamma.
   data::LevelTable level_data{};
   HadronicRefusalBooks books{};
 };

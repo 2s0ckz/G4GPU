@@ -1389,12 +1389,36 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
 /// The energy half of the cut is inert: `kineticEnergyLimit` is 0.0 and the test is
 /// `GetKineticEnergy() < kinEnergyThreshold`. See kNeutronEnergyLimit.
 ///
-/// @param xs the combined table, or null. Null is the state before P8: the cross section is
-///        then zero, `s_int` is infinite, and the neutron streams to the world boundary - which
-///        is what a Geant4 neutron does with `NeutronGeneralProc` inactivated, and the only
-///        honest thing to do with a process that does not exist yet.
+/// THE STAGE DECIDES HOW MANY DISCRETE PROCESSES THERE ARE, and for the neutron that is not a
+/// subset relation (P8d). `had::HadronicStage`'s own comment has the source; the consequence
+/// here is two different competitions:
+///
+///   kStage1   `hadElastic` and `nCapture` are separate processes on the neutron's manager -
+///             which is what Geant4 builds when `EnableNeutronGeneralProcess` is false - so each
+///             evaluates its OWN data store per step and draws its OWN interaction length, and
+///             the smallest of the two (and of the decay length, and of the boundary) wins.
+///             `neutronInelastic` is inactivated on the reference side and absent here.
+///   kFinal    one interaction length from `G4NeutronGeneralProcess`'s combined table, then the
+///             sub-process from the cumulative partials on the same grid. `inelastic` is
+///             selectable and refused by name.
+///
+/// The two are not the same arithmetic applied twice: the general process's table is a 401-node
+/// linear interpolation of the summed cross section at ITS node energies, and the per-process
+/// path evaluates each G4PARTICLEXS data set at the track's own energy. Both are what Geant4
+/// reads in the configuration they belong to (docs/PORTED.md 4.3), so both are here.
+///
+/// @param xs the combined table, or null. Null is the state a run with no `G4PARTICLEXSDATA`
+///        is in: the cross section is then zero, `s_int` is infinite, and the neutron streams to
+///        the world boundary - which is what a Geant4 neutron does with `NeutronGeneralProc`
+///        inactivated.
+/// `__host__ __device__` SINCE P8d, for the reason P8b gave when it did the same to
+/// `step_hadron`: a wiring this size needs a host/device comparison, and the only device-only
+/// things in it were `had::book_refusal`'s atomics and `vis::TrajectoryBuffer::add`'s cursor,
+/// both of which already have host arms. `tests/test_neutron_general.cu` runs the same source
+/// on both sides and compares every field; without it the only check on the sub-process branch
+/// would be a whole B1 run, where a wiring defect is a dose a few per cent out.
 template <typename real_t, typename Rng, typename Emitter>
-__device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& p,
+__host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& p,
                                     ParticleType type,
                                     const had::NeutronGeneralXs<real_t>* xs,
                                     const had::HadronicWiring<real_t>& had, Rng& rng,
@@ -1428,20 +1452,67 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
   const real_t d_boundary =
       geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
-  // Zero for a pi0, and for a neutron with no table or with the general process switched off.
+  // Zero for a pi0, and for a neutron whose tables were never uploaded.
   //
-  // ONE LOGARITHM OF THE ENERGY, taken here and handed to both `total()` and `select()`, as
+  // ONE LOGARITHM OF THE ENERGY, taken here and handed to every lookup below, as
   // G4NeutronGeneralProcess takes one `fLogEnergy` per step and reads it from
-  // ComputeGeneralLambda and GetProbability alike. Only taken when there is a table to look
-  // up in: `log` of a kinetic energy is defined for every track this function sees, but a
-  // transcendental per step for a pi0 that has no table is a cost with no answer attached.
+  // ComputeGeneralLambda and GetProbability alike - and as every G4PARTICLEXS data set takes
+  // `G4DynamicParticle::GetLogKineticEnergy()`. Only taken when there is a table to look up in:
+  // `log` of a kinetic energy is defined for every track this function sees, but a transcendental
+  // per step for a pi0 that has no table is a cost with no answer attached.
+  const bool is_neutron = (type == ParticleType::kNeutron);
+  const bool final_stage = (had.stage == had::HadronicStage::kFinal);
+  // BOTH FLAGS, AND BOTH TABLES. `G4NeutronGeneralProcess` is ONE process holding three
+  // sub-processes, so `/process/inactivate` takes all of them or none (docs/RISK.md V53) and
+  // there is no Geant4 configuration in which the general process runs with its elastic
+  // sub-process off. Requiring both flags says that rather than offering a configuration whose
+  // reference does not exist. And both data sets, because the sub-process branch below
+  // dereferences them - which is the state `Upload` refuses to let a table arrive without.
   const bool has_general_process =
-      (xs != nullptr && type == ParticleType::kNeutron
-       && (had.hadron_elastic || had.neutron_capture));
-  const real_t loge = has_general_process ? log(p.ekin) : real_t(0);
+      (xs != nullptr && is_neutron && final_stage && had.hadron_elastic && had.neutron_capture
+       && had.neutron.elastic != nullptr && had.neutron.capture != nullptr);
+  // In stage 1 the two sub-processes are separate processes with separate tables, so the gate is
+  // per process rather than one gate for the pair - `/process/inactivate nCapture` really does
+  // take capture off on its own there, which it cannot do in the final stage.
+  const bool has_stage1_elastic = (is_neutron && !final_stage && had.hadron_elastic
+                                   && had.neutron.elastic != nullptr);
+  const bool has_stage1_capture = (is_neutron && !final_stage && had.neutron_capture
+                                   && had.neutron.capture != nullptr);
+  const real_t loge = (has_general_process || has_stage1_elastic || has_stage1_capture)
+                          ? log(p.ekin)
+                          : real_t(0);
+
+  // The combined table's interaction length, in the final stage only.
   const real_t sigma = has_general_process ? xs->total(mat, p.ekin, loge) : real_t(0);
   const real_t s_int =
       (sigma > real_t(0)) ? -log(rng.uniform()) / sigma : geom::kInfinity<real_t>();
+
+  // ---- stage 1: two processes, two data stores, two interaction lengths.
+  //
+  // The partial sums each `ComputeCrossSection` leaves behind are what that process's own
+  // `SampleZandA` reads, and they are computed at the PRE-step energy - which for a neutral
+  // particle is also the post-step energy, since there is no continuous loss. So the `MaterialXs`
+  // filled here is the one the final state uses, and nothing recomputes it: `fXSType` is
+  // `fHadNoIntegral` for a neutron (`G4HadronicProcess::BuildPhysicsTable` guards the integral
+  // approach with `charge != 0.0`), so its PostStepDoIt skips the recompute entirely.
+  //
+  // The order is the neutron's process-manager order with the general process off - hadElastic
+  // before nCapture - because the order is the random stream.
+  hadronic::xs::MaterialXs<real_t> mxs_el{}, mxs_cap{};
+  const real_t sigma_el =
+      has_stage1_elastic
+          ? had::neutron_sub_xs_per_volume<real_t>(had.neutron.elastic, s.materials[mat],
+                                                   p.ekin, loge, mxs_el)
+          : real_t(0);
+  const real_t s_el =
+      (sigma_el > real_t(0)) ? -log(rng.uniform()) / sigma_el : geom::kInfinity<real_t>();
+  const real_t sigma_cap =
+      has_stage1_capture
+          ? had::neutron_sub_xs_per_volume<real_t>(had.neutron.capture, s.materials[mat],
+                                                   p.ekin, loge, mxs_cap)
+          : real_t(0);
+  const real_t s_cap =
+      (sigma_cap > real_t(0)) ? -log(rng.uniform()) / sigma_cap : geom::kInfinity<real_t>();
 
   // ---- G4Decay in flight, competing with the general process and with geometry.
   //
@@ -1461,7 +1532,28 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
                                                 rng)
           : geom::kInfinity<real_t>();
 
-  if (d_decay < s_int && d_decay < d_boundary) {
+  // The shortest of the discrete lengths, and which one it was. `G4SteppingManager` asks every
+  // process for a length and keeps the smallest; with the general process there is one hadronic
+  // length and in stage 1 there are two, so this is the one place that has to know the stage.
+  //
+  // STRICTLY LESS THAN, in the order hadElastic-then-nCapture, so a tie goes to the process the
+  // neutron's manager holds first - which is what a `<` loop over the manager does.
+  real_t s_hadronic = s_int;
+  had::NeutronSubProcess sub = had::NeutronSubProcess::kElastic;
+  bool sub_from_general = has_general_process;
+  if (!final_stage) {
+    s_hadronic = geom::kInfinity<real_t>();
+    if (s_el < s_hadronic) {
+      s_hadronic = s_el;
+      sub = had::NeutronSubProcess::kElastic;
+    }
+    if (s_cap < s_hadronic) {
+      s_hadronic = s_cap;
+      sub = had::NeutronSubProcess::kCapture;
+    }
+  }
+
+  if (d_decay < s_hadronic && d_decay < d_boundary) {
     // Decay wins. The step ends where it fired, the parent is killed with no deposit, and the
     // products carry the whole four-momentum.
     rep.true_length = d_decay;
@@ -1484,7 +1576,7 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
     return false;
   }
 
-  if (s_int >= d_boundary) {
+  if (s_hadronic >= d_boundary) {
     // Streaming. One step, requeued unless it left the world - the same shape as step_gamma's
     // boundary branch, including the push past the surface.
     rep.true_length = d_boundary + geom::kPushDistance<real_t>();
@@ -1496,36 +1588,124 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
     return p.volume != geom::kOutsideWorld;
   }
 
-  // ---- a sub-process fired.
+  // ---- a sub-process fired. P8d; this branch reported `fNotDefined` until it did.
   //
-  // UNREACHABLE TODAY, and it says so in the only way the build can hear. `sigma` is zero
-  // unless a table is present, and TransportEngine::Upload refuses to hold a table without the
-  // final states to go with it - so nothing can arrive here until both exist. When they do,
-  // this is where `xs->select(mat, p.ekin, loge, rng.uniform())` chooses between elastic
-  // (P5), inelastic (P9-P11, refused by name) and capture (P7) and the chosen model's final
-  // state is applied; `loge` above is already the one logarithm that choice needs.
-  //
-  // WHAT P8 DID NOT FINISH, stated where it would go rather than only in a report. The table
-  // is buildable today - `xs::ngp_build_table` is bit-exact against the oracle and
-  // `neutron_general_view` turns it into the socket above - and the two final states that are
-  // selectable in stage 1 are written (`elastic/elastic_process.cuh`, `capture/
-  // capture_process.cuh`). What is missing is device MEMORY for two datasets neither of which
-  // has an upload path: the isotope abundances `SampleZandA` draws a target from, and P3's
-  // PhotonEvaporation5.7 level data that a capture cascade walks (174,411 levels, 268,190
-  // transitions). Until those are uploaded a neutron that reached here could choose a
-  // sub-process and not apply it, which is the one combination Upload refuses.
-  //
-  // Until then the step is left annotated with `fNotDefined`, which is not laziness: it is the
-  // one value `g4dose -verify-step-hook` fails the build on, and it is reserved for exactly
-  // this - a branch nobody has annotated because nobody has written it. A track reaching here
-  // is killed with its energy deposited locally, which is the conservative disposal, but the
-  // verifier refuses the run before that number can be used for anything.
-  rep.true_length = s_int;
-  rep.status = StepStatus::fStopAndKill;
-  rep.process = ProcessId::fNotDefined;
-  p.pos = p.pos + s_int * p.dir;
+  // The step ends at the interaction point first, because every final state below is written
+  // there and because a track that does not survive has already moved.
+  rep.true_length = s_hadronic;
+  p.pos = p.pos + s_hadronic * p.dir;
   traj.add(pos_before, p.pos, type, p.event, p.rng_key);
-  if (s.geometry.volumes[p.volume].score_index >= 0) { edep = p.ekin; }
+  em.pos = p.pos;
+  em.volume = p.volume;
+  em.event = p.event;
+  const bool scores = (s.geometry.volumes[p.volume].score_index >= 0);
+
+  // In the final stage the sub-process comes from the general table's cumulative partials, and
+  // it costs ONE uniform - `G4double q = G4UniformRand()` is the second statement of
+  // `G4NeutronGeneralProcess::PostStepDoIt`. In stage 1 the competition already named it and no
+  // uniform is drawn, which is what having two processes means.
+  if (sub_from_general) { sub = xs->select(mat, p.ekin, loge, rng.uniform()); }
+
+  if (sub == had::NeutronSubProcess::kInelastic) {
+    // REFUSED BY NAME, with the energy it costs the answer. P9-P11 own
+    // `G4BinaryCascade`/Bertini/FTFP; until one of them lands there is no final state to apply,
+    // and Geant4 would have replaced this neutron with a shower of nucleons and fragments.
+    //
+    // The neutron is killed with its kinetic energy deposited locally. That is the conservative
+    // disposal this file uses for every refusal (`kIonWithoutNuclide`, `kDecayChannel`) and it
+    // is NOT what Geant4 does: an inelastic reaction spreads the energy over secondaries that
+    // leave the volume. So a `kFinal` dose is wrong by this counter's energy, and the counter
+    // exists so the size of that is read off a run rather than inferred from a disagreement.
+    // Unreachable in `kStage1`, where the reference has `neutronInelastic` inactivated.
+    had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNeutronInelastic, p.ekin);
+    rep.status = StepStatus::fStopAndKill;
+    rep.process = ProcessId::fHadronInelastic;
+    if (scores) { edep = p.ekin; }
+    return false;
+  }
+
+  if (sub == had::NeutronSubProcess::kElastic) {
+    rep.status = StepStatus::fPostStepDoItProc;
+    rep.process = ProcessId::fHadronElastic;
+    // THE PARTIAL SUMS THIS READS ARE THE ELASTIC DATA STORE'S, AT THIS ENERGY. In stage 1 they
+    // were filled above by the process that won; in the final stage nothing has filled them yet,
+    // and `G4NeutronGeneralProcess::PostStepDoIt` fills them here - `fCurrentXSS->
+    // ComputeCrossSection`, and ONLY for a material with more than one element, because
+    // `SampleZandA`'s element loop is skipped otherwise and reads nothing.
+    if (sub_from_general && s.materials[mat].n_elements > 1) {
+      (void)had::neutron_sub_xs_per_volume<real_t>(had.neutron.elastic, s.materials[mat],
+                                                   p.ekin, loge, mxs_el);
+    }
+    const auto er = had::neutron_elastic_apply<real_t>(*had.neutron.elastic, s.materials[mat],
+                                                       p.ekin, loge, p.dir, s.range_cut,
+                                                       mxs_el, rng);
+    if (er.interacted) {
+      p.dir = er.dir;
+      p.ekin = er.energy;
+      // Both deposits with the same value, as note 5 of elastic/elastic_process.cuh records:
+      // a sub-threshold recoil is proposed as LOCAL and as NON-IONIZING, which is what makes
+      // elastic scattering contribute to NIEL and not to dose in a scorer that separates them.
+      if (er.edep > real_t(0)) {
+        if (scores) { edep += er.edep; }
+        rep.non_ionizing += er.edep;
+      }
+      if (er.emit_recoil) {
+        // The recoil of a neutron elastic scatter is the same population P8c's kernel
+        // transports: hydrogen as a proton, the five light nuclei as themselves, everything
+        // heavier as `kGenericIon` carrying its own (Z, A).
+        em.push_nucleus(er.recoil_z, er.recoil_a, er.recoil_dir, er.recoil_ekin, p.event);
+      }
+      if (er.dropped_secondaries > 0) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kElasticDropped,
+                                  er.recoil_ekin);
+      }
+    }
+    if (!er.primary_survives) {
+      // `efinal == 0`, which an elastic scatter off hydrogen at 180 degrees produces. Geant4
+      // proposes fStopButAlive here (the neutron has `G4Decay` on its at-rest vector) and keeps
+      // a zero-energy track; this transport cannot step one, because `TrackState::advance`
+      // moves the clock by `L/(beta c)`. Killed with nothing left to deposit - which is where
+      // Geant4's track ends up as well, one step later and through the 10 us cut.
+      rep.status = StepStatus::fStopAndKill;
+      p.ekin = real_t(0);
+      return false;
+    }
+    return true;
+  }
+
+  // ---- capture. G4NeutronRadCapture, through P3's photon-evaporation cascade.
+  //
+  // The neutron always dies: `SetStatusChange(stopAndKill)` is the second line of
+  // `ApplyYourself`, and it dies even on the branch that emits nothing (an unbound capture -
+  // H3 + n has Q = -1.60 MeV, which is the case in P7's oracle grid where it fires).
+  rep.status = StepStatus::fStopAndKill;
+  rep.process = ProcessId::fNeutronCapture;
+  if (sub_from_general && s.materials[mat].n_elements > 1) {
+    (void)had::neutron_sub_xs_per_volume<real_t>(had.neutron.capture, s.materials[mat], p.ekin,
+                                                 loge, mxs_cap);
+  }
+  {
+    const auto cr = had::neutron_capture_apply<real_t>(
+        *had.neutron.capture, s.materials[mat], p.ekin, loge, p.dir, p.global_time, p.weight,
+        had.level_data, mxs_cap, rng, em, p.event);
+    if (cr.edep > real_t(0) && scores) { edep += cr.edep; }
+    if (cr.overflow > 0) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kCaptureOverflow, p.ekin);
+    }
+    if (cr.unmapped > 0) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kCaptureSecondarySpecies,
+                                p.ekin);
+    }
+    // `CaptureRefusal::kUnphysicalTarget` is 3 and `kIsomerIonMass` is 1; only the first and
+    // the resample limit mean the answer is missing something. See the enum's own note.
+    if (cr.refused_resample_limit
+        || cr.capture_refusal
+               == static_cast<int>(
+                      physics::hadronic::capture::CaptureRefusal::kUnphysicalTarget)) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kCaptureRefused, p.ekin);
+    }
+  }
+  p.ekin = real_t(0);
   return false;
 }
 

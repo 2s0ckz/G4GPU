@@ -20,6 +20,7 @@
 #include "g4/G4Flatten.hh"
 #include "host/hadronic_upload.cuh"
 #include "host/level_upload.cuh"
+#include "host/neutron_upload.cuh"
 #include "host/pe_upload.cuh"
 #include "physics/source.cuh"
 #include "physics/stepper.cuh"
@@ -363,16 +364,21 @@ class TransportEngine {
   }
 
   /// Read PhotonEvaporation5.7 and upload it, so a capture cascade on the device has a level
-  /// scheme to walk. Set before Upload. **Off by default, and that is a statement about the
-  /// port and not a preference.**
+  /// scheme to walk. Set before Upload. **ON by default since P8d**, which is what
+  /// `SetNuclearLevelData`'s own comment promised: "this port will too, the day the neutron
+  /// general process is wired".
   ///
-  /// Geant4 does this unconditionally - `G4ExcitationHandler::SetParameters` calls
+  /// Geant4 does it unconditionally - `G4ExcitationHandler::SetParameters` calls
   /// `G4NuclearLevelData::UploadNuclearLevelData(Zmax+1)` at initialisation whether a neutron
-  /// ever arrives or not - and this port will too, the day the neutron general process is
-  /// wired. Today it is not (`physics/hadronic/neutron_general_xs.cuh`, and `Upload`'s refusal
-  /// below), so the only consumer of the table is unreachable, and the table costs
-  /// `read_all_level_data` opening **3110 files** against a B1 run whose whole transport is
-  /// 750 ms. Paying that in every gamma run for something nothing reads is the wrong default.
+  /// ever arrives or not - and the reason this was off was that the only consumer, the capture
+  /// sub-process of the neutron general process, was unreachable. It is reachable now
+  /// (`physics/hadronic/neutron_wiring.cuh`), and a neutron that captures with a null level
+  /// table gets whatever `G4PhotonEvaporation::BreakUpChain` does with no levels rather than the
+  /// cascade Geant4 produces - which is a wrong dose rather than a missing feature.
+  ///
+  /// THE COST IS REAL AND IS THE REASON THE SETTER SURVIVES: `read_all_level_data` opens 3110
+  /// files and uploads 9.52 MB. Turning it off is the right thing for a gamma- or electron-only
+  /// run that cannot make a neutron, and `Upload` prints what it cost when it is on.
   ///
   /// What it is NOT is a switch on the physics: the table is checked against the host copy
   /// level by level and the cascade on top of it by `tests/test_capture_device.cu`, which calls
@@ -466,11 +472,16 @@ class TransportEngine {
   /// host/hadronic_upload.cuh; the view inside it is copied into every kernel launch as part
   /// of `had::HadronicWiring`.
   ElasticTableOwner<real_t> elastic_tables_{};
-  /// PhotonEvaporation5.7 on the device, and the host copy it was uploaded from. Empty unless
-  /// `SetNuclearLevelData(true)` was called before Upload; see that setter for why.
+  /// PhotonEvaporation5.7 on the device, and the host copy it was uploaded from. Empty only if
+  /// `SetNuclearLevelData(false)` was called before Upload; see that setter for why the default
+  /// changed with P8d.
   LevelTableOwner level_tables_{};
   data::LevelTableStorage level_storage_{};
-  bool load_level_data_ = false;
+  bool load_level_data_ = true;
+  /// The neutron's cross sections on the device: G4NeutronElasticXS and G4NeutronCaptureXS for
+  /// `HadronicStage::kStage1`, and G4NeutronGeneralProcess's five combined tables for `kFinal`.
+  /// `d_neutron_xs_` below points into this. See host/neutron_upload.cuh.
+  NeutronTableOwner<real_t> neutron_tables_{};
   std::vector<data::Material<real_t>> h_mats_;
   std::vector<double> h_voxel_score_;
   geom::Geometry<real_t> geom_{};
@@ -528,10 +539,11 @@ class TransportEngine {
   int* d_killed_n_ = nullptr;
   /// The neutron's combined cross-section table, or null.
   ///
-  /// Null in every run today and that is the state the port is in, not a switch: P2 produces
-  /// the four cross sections and P8 sums them onto G4NeutronGeneralProcess's grid and writes
-  /// the final states. See physics/hadronic/neutron_general_xs.cuh for the contract, and the
-  /// refusal in Upload() for why a table without final states is not an allowed state.
+  /// NON-NULL SINCE P8d, in every run whose `G4PARTICLEXSDATA` resolves - it is
+  /// `neutron_tables_.d_general`, not a separate allocation. `Upload`'s refusal is still there
+  /// and is still what keeps a table from arriving without its final states; what changed is
+  /// that the final states arrived, so the refusal now checks that the two per-process data
+  /// sets and the level scheme came with the table instead of refusing the table outright.
   had::NeutronGeneralXs<real_t>* d_neutron_xs_ = nullptr;
 };
 

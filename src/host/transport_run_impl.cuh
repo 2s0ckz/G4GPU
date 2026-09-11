@@ -868,10 +868,18 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // the detector is actually made of rather than for all 92. See host/hadronic_upload.cuh.
     elastic_tables_ = upload_elastic_tables<real_t>(zs);
 
-    // P3's nuclear level data, when the caller asked for it. See SetNuclearLevelData for why
-    // that is not the default and why Geant4's own answer (unconditional, in
-    // G4ExcitationHandler::SetParameters) will be this port's the day the neutron general
-    // process is wired.
+    // The neutron's cross sections. Both configurations, because the stage is a run-time switch
+    // and the same binary has to produce both columns of the comparison table: the two
+    // per-process G4PARTICLEXS data sets for `kStage1` and G4NeutronGeneralProcess's five
+    // combined tables for `kFinal`. The combined ones are per SCENE, not per element, because
+    // `BuildPhysicsTable` sums MACROSCOPIC cross sections and so needs the atom densities.
+    neutron_tables_ = upload_neutron_tables<real_t>(h_mats_.data(), n_materials_);
+    d_neutron_xs_ = neutron_tables_.d_general;
+
+    // P3's nuclear level data, which the capture sub-process walks. Unconditional by default
+    // since P8d - `SetNuclearLevelData` has the reason, and it is Geant4's own answer
+    // (`G4ExcitationHandler::SetParameters` at initialisation, whether a neutron arrives or
+    // not).
     if (load_level_data_) {
       // `Zmax + 1`, which is the convention G4ExcitationHandler::SetParameters applies -
       // `UploadNuclearLevelData(Zmax+1)` - and `read_all_level_data`'s strict `Z < mZ` is why
@@ -1087,21 +1095,42 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
 
     // ---- a neutron cross section without a final state is not an allowed state.
     //
-    // Refused here rather than discovered on the device. If a table is ever uploaded without
-    // the samplers to go with it, every neutron would draw a finite interaction length, arrive
-    // at a branch with nothing to do, and be killed with its energy dumped locally - a dose
-    // that looks like hadronic transport and is a deposit at the first interaction point. The
-    // device cannot report that usefully at kernel rates, so the combination is refused where
-    // it is set up. Today d_neutron_xs_ is always null and this never fires, which is exactly
-    // the state the message describes; it fires the first time half of P8 lands.
-    if (d_neutron_xs_ != nullptr) {
+    // Refused here rather than discovered on the device. If a table is uploaded without the
+    // samplers to go with it, every neutron draws a finite interaction length, arrives at a
+    // sub-process branch with nothing to apply, and is killed with its energy dumped locally -
+    // a dose that looks like hadronic transport and is a deposit at the first interaction
+    // point. The device cannot report that usefully at kernel rates, so the combination is
+    // refused where it is set up.
+    //
+    // P8d LANDED THE FINAL STATES AND THE REFUSAL STAYED, with what it checks turned around.
+    // It used to fire on any non-null table, because there were no final states at all; what it
+    // now asserts is that the three things `step_neutral` dereferences arrived together. Two of
+    // them are cross sections the elastic and capture sub-processes draw a TARGET from
+    // (`SampleZandA` on their own data stores, which the general process's table cannot
+    // answer), and the third is the level scheme the capture cascade walks. A table with no
+    // levels is the subtler of the two failures and the one worth refusing out loud: the
+    // capture would still run, and `G4PhotonEvaporation::BreakUpChain` with nothing to walk
+    // emits no gamma - so the neutron's binding energy would silently vanish instead of
+    // becoming a 2 to 9 MeV photon.
+    if (d_neutron_xs_ != nullptr
+        && (neutron_tables_.sub.elastic == nullptr || neutron_tables_.sub.capture == nullptr)) {
       std::printf(
-          "\nFATAL: a neutron cross-section table is present but no final states are wired.\n"
-          "  step_neutral would sample an interaction length, reach the sub-process branch\n"
-          "  with nothing to apply, and kill the neutron with its energy deposited at that\n"
-          "  point - which is a plausible-looking dose for physics that did not run.\n"
-          "  See physics/hadronic/neutron_general_xs.cuh for the contract: the table and the\n"
-          "  final states land together.\n");
+          "\nFATAL: the neutron's combined cross-section table is present but a sub-process\n"
+          "  data set is not (elastic %s, capture %s). `SampleZandA` draws the target from the\n"
+          "  sub-process's OWN data store - G4NeutronGeneralProcess::PostStepDoIt calls\n"
+          "  `fCurrentXSS->ComputeCrossSection` before delegating - so the combined table\n"
+          "  cannot stand in for it. See physics/hadronic/neutron_wiring.cuh.\n",
+          (neutron_tables_.sub.elastic != nullptr) ? "present" : "MISSING",
+          (neutron_tables_.sub.capture != nullptr) ? "present" : "MISSING");
+      std::exit(2);
+    }
+    if (d_neutron_xs_ != nullptr && level_tables_.view.n_managers == 0) {
+      std::printf(
+          "\nFATAL: the neutron's cross sections are on the device and the nuclear level\n"
+          "  scheme is not, so a capture would kill the neutron and emit no gamma - its\n"
+          "  binding energy, 2 to 9 MeV per capture, would vanish rather than be deposited.\n"
+          "  Either let SetNuclearLevelData stay on (the default since P8d) or resolve\n"
+          "  G4LEVELGAMMADATA; see host/level_upload.cuh.\n");
       std::exit(2);
     }
 
@@ -1514,10 +1543,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // the hadron range table - and `elastic_xs_per_volume` then returns zero, which is the
         // same "no process" state a lepton is in.
         had_wiring.elastic = elastic_tables_.view;
-        // Null unless SetNuclearLevelData(true) preceded Upload. The one consumer - the capture
-        // sub-process of the neutron general process - is not wired, so this is here to be
-        // reached rather than because anything reaches it; `Upload`'s refusal below is what
-        // keeps the two from arriving separately.
+        // The neutron's two per-process cross sections. Read in `kStage1` as two whole processes
+        // with their own interaction lengths, and in `kFinal` as the data stores the chosen
+        // sub-process draws its target from. `host/neutron_upload.cuh`.
+        had_wiring.neutron = neutron_tables_.sub;
+        // P3's level scheme. Reached since P8d - the capture sub-process walks it - and
+        // `Upload`'s refusal above is what keeps it from arriving separately from the cross
+        // sections.
         had_wiring.level_data = level_tables_.view;
         had_wiring.books.count = d_had_refused_n_;
         had_wiring.books.energy = d_had_refused_e_;
@@ -1900,8 +1932,11 @@ void TransportEngine<real_t, StepHook>::Free() {
     d_had_refused_e_ = nullptr;
     d_killed_energy_ = nullptr;
     d_killed_n_ = nullptr;
-    cudaFree(d_neutron_xs_);
+    // NOT a cudaFree of d_neutron_xs_: it points INTO neutron_tables_, which owns every
+    // allocation behind it, so freeing both would be a double free. It used to be its own
+    // allocation - and it used to be permanently null, which is why nobody noticed.
     d_neutron_xs_ = nullptr;
+    free_neutron_tables<real_t>(neutron_tables_);
     free_elastic_tables<real_t>(elastic_tables_);
     free_level_data(level_tables_);
     cudaFree(d_vols_);
