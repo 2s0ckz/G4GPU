@@ -355,7 +355,8 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       if (e_rfin > real_t(0)) { lambda1 = s.msc->lambda_at(mat, is_positron, e_rfin); }
     }
     em::MscStep<real_t> msc_state;
-    const real_t z_step = em::urban_geom_path(t_step, lambda0, range, lambda1, p.ekin, msc_state);
+    const real_t z_step = em::urban_geom_path(t_step, lambda0, range, lambda1, p.ekin,
+                                              units::electron_mass_c2<real_t>(), msc_state);
 
     // Geometry acts on the *geometric* length; a boundary can cut the step short.
     const bool hits_boundary = (d_boundary < z_step);

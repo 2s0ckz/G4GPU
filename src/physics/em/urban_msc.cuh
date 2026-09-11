@@ -1,20 +1,47 @@
 // Urban multiple scattering, transcribed from Geant4 11.1.1 G4UrbanMscModel.
 //
-// Covers the parts that set the scattering angle:
 //   ComputeCrossSectionPerAtom  -> the transport cross section and mean free path
 //   ComputeTheta0               -> the width, Highland form with Urban's Z corrections
 //   SampleCosineTheta           -> the core-plus-tail angular distribution
 //   SimpleScattering            -> the large-angle fallback
-//
-// NOT transcribed, and these are real gaps rather than judgement calls (docs/RISK.md):
-//   ComputeTruePathLengthLimit  -> Geant4's step limitation; the port keeps its own
-//                                  fraction-of-range limiter
+//   ComputeTruePathLengthLimit  -> the step limit, in the two branches option0 can reach:
+//                                  fUseSafety for e-/e+ and fMinimal for everything heavier
 //   ComputeGeomPathLength / ComputeTrueStepLength -> the true<->geometric path correction
-//   SampleDisplacement          -> lateral displacement at the end of a step
+//   SampleDisplacement          -> lateral displacement (dispAlg96, the default)
 //
-// So the angular distribution should be right and the path-length detour factor is not
-// modelled. Unlike every other process here there is no Geant4 table to diff this against,
-// so it is transcription discipline only - no numerical confirmation.
+// GENERAL ACROSS MASS AND CHARGE SINCE P14b, and that is not a generalisation for its own
+// sake. Urban is not the electron's model. `G4hMultipleScattering::InitialiseProcess` defaults
+// to `new G4UrbanMscModel()` and `G4EmBuilder::ConstructIonEmPhysics` hands alpha, He3,
+// deuteron, triton and GenericIon a `G4hMultipleScattering` with no model set, so every ion in
+// QBBC scatters by Urban; only the muons and the singly charged hadrons get WentzelVI, because
+// `ConstructLightHadrons` calls SetEmModel on theirs. The stepping half of this file used to
+// take `is_positron` and read an e-/e+ transport-mfp table, so those five species were stepped
+// with WentzelVI instead - the substitution docs/PORTED.md recorded and this file retires.
+//
+// WHAT A HEAVY PARTICLE GETS THAT A LEPTON DOES NOT, all of it read out of the source rather
+// than inferred from the model (`G4EmTableUtil::PrepareMscProcess` for the process-level
+// parameters, `G4VMscModel::InitialiseParameters` for the model's own):
+//
+//   * the step limit TYPE is `fMinimal`, not `fUseSafety`. G4EmParameters initialises
+//     `mscStepLimitMuHad = fMinimal` against `mscStepLimit = fUseSafety`, and the split is on
+//     the PARTICLE (`GetPDGMass() > CLHEP::MeV`, or `abs(PDGEncoding) == 11` at the model
+//     level) and not on the model - so a proton's WentzelVI and an alpha's Urban take the same
+//     branch type and the same facrange.
+//   * `facrange` 0.2 rather than 0.04 (`rangeFactorMuHad` against `rangeFactor`), and it is
+//     used raw: the `rangeinit = max(range, lambda0)` floor and the `fr *= 0.75 + 0.25*lambda0
+//     /lambdalimit` boost are inside `if(mass < masslimite)`, masslimite = 0.6 MeV.
+//   * NO lateral displacement. `muhadLateralDisplacement` is false, so `latDisplasmentbackup`
+//     is false and SampleScattering's displacement branch never runs - which also means it
+//     consumes no random numbers.
+//   * `tlimitmin` is never recomputed. `ComputeStepmin`/`ComputeTlimitmin` are called only in
+//     the three other branches, so under fMinimal tlimitmin keeps StartTracking's
+//     `10*tlimitminfix` = 1e-7 mm for the whole track.
+//   * the transport mean free path is NOT tabulated. See `urban_heavy_lambda`.
+//
+// Unlike every other process here there is no Geant4 accessor that returns a whole step, so
+// the deterministic half is checked against `ref/oracle/ion_msc_step.csv` (a G4UrbanMscModel
+// driven through its own public calls) and the sampler statistically against
+// `ref/oracle/ion_msc_sample.csv`. See tests/test_ion_msc.cu.
 #pragma once
 #include <cmath>
 #include "core/units.cuh"
@@ -189,15 +216,62 @@ __host__ __device__ inline real_t urban_xs_per_atom(real_t Z, real_t kinetic,
                                    is_positron ? real_t(1) : real_t(-1));
 }
 
-/// Transport mean free path, mm.
+/// Transport mean free path, mm, for a particle of any mass and charge.
+///
+/// `G4VMscModel::GetTransportMeanFreePath` is `1/(pFactor*CrossSectionPerVolume)` when the
+/// model has no cross-section table, and pFactor is 1 unless the run uses base materials.
+/// `G4VEmModel::CrossSectionPerVolume` is this sum: `ComputeCrossSectionPerAtom` per element
+/// weighted by that element's atom density, with no cut and no maximum energy.
+template <typename real_t>
+__host__ __device__ inline real_t urban_lambda(const data::Material<real_t>& m, real_t kinetic,
+                                               real_t mass, real_t charge) {
+  real_t inv = real_t(0);
+  for (int i = 0; i < m.n_elements; ++i) {
+    inv += m.n_atoms[i] * urban_xs_per_atom(m.z[i], kinetic, mass, charge);
+  }
+  return (inv > real_t(0)) ? real_t(1) / inv : real_t(1e30);
+}
+
+/// The e-/e+ form, for the call sites that only ever have a lepton.
 template <typename real_t>
 __host__ __device__ inline real_t urban_lambda(const data::Material<real_t>& m, real_t kinetic,
                                                bool is_positron) {
-  real_t inv = real_t(0);
-  for (int i = 0; i < m.n_elements; ++i) {
-    inv += m.n_atoms[i] * urban_xs_per_atom(m.z[i], kinetic, is_positron);
-  }
-  return (inv > real_t(0)) ? real_t(1) / inv : real_t(1e30);
+  return urban_lambda<real_t>(m, kinetic, units::electron_mass_c2<real_t>(),
+                              is_positron ? real_t(1) : real_t(-1));
+}
+
+/// THE HEAVY PARTICLE'S TRANSPORT MEAN FREE PATH IS NOT READ FROM A TABLE, AND THAT IS THE
+/// OPPOSITE OF THIS PORT'S USUAL RULE.
+///
+/// docs/PORTED.md 4.3 says it as a rule: Geant4 does not run the model, it runs a table built
+/// from the model, so match the grid and the spline. For Urban and a heavy particle the rule
+/// inverts, and the condition is one line of `G4VMscModel::GetParticleChangeForMSC`
+/// (G4VMscModel.cc:94):
+///
+///     if(p->GetParticleName() != "GenericIon" &&
+///        (p->GetPDGMass() < CLHEP::GeV || ForceBuildTableFlag()) ) { ... build xSectionTable }
+///
+/// `SetForceBuildTable` is called nowhere in 11.1.1 - `grep -rn "SetForceBuildTable" source/`
+/// finds only its own declaration, definition and the flag - so the flag is always false and
+/// the table is built only for a particle under 1 GeV that is not named GenericIon. Every
+/// species Urban serves here fails that test: GenericIon by name, and alpha (3727.4 MeV),
+/// He3 (2808.4), triton (2808.9) and deuteron (1875.6) by mass. `GetTransportMeanFreePath`
+/// then takes its other branch and evaluates `CrossSectionPerVolume` at the energy asked for.
+///
+/// So an ion's lambda here is EXACT rather than interpolated, and building a 240-bin log grid
+/// for it - the shape `UrbanTable` has for the electron, whose table Geant4 really does build -
+/// would have been a discrepancy dressed up as an optimisation. The electron keeps its table
+/// for the same reason: Geant4 has one.
+///
+/// `__noinline__` for docs/RISK.md V55's reason. `run_step_hadron` is instantiated once per
+/// charged species and this is ~30 transcendentals; inlining it into thirteen kernels is the
+/// shape of compile that killed ptxas when `hadElastic` went in. It is called two or three
+/// times per step against a step that is a tenth of a range, so the call overhead is noise.
+template <typename real_t>
+__host__ __device__ __noinline__ real_t urban_heavy_lambda(const data::Material<real_t>& m,
+                                                           real_t kinetic, real_t mass,
+                                                           real_t charge) {
+  return urban_lambda<real_t>(m, kinetic, mass, charge);
 }
 
 /// Width of the angular distribution. Transcribed from G4UrbanMscModel::ComputeTheta0,
@@ -276,12 +350,23 @@ struct UrbanDebug {
 /// cos(theta) for one step. Transcribed from G4UrbanMscModel::SampleCosineTheta.
 ///
 /// @param current_kinetic energy at the start of the step; @p kinetic is the end energy
+/// @param mass,charge     the PDG mass and the PDG charge in units of eplus, signed. Urban
+///                        reads both from the particle DEFINITION in `SetParticle` and never
+///                        refreshes them, so a recoil ion's charge here is its BARE Z and not
+///                        the effective charge `G4ionEffectiveCharge` gives its energy loss.
+/// @param t_small         `min(tlimitmin, lambdalimit)`, the threshold below which Geant4
+///                        evaluates theta0 at t_small and scales it by sqrt(t/t_small) instead
+///                        (the `extremesmallstep` branch, which also changes what `u` is
+///                        computed from). Pass 0 to disable that branch - see the note on the
+///                        lepton overload below, which does.
 template <typename real_t, typename Rng>
 __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<real_t>& m,
                                                          const UrbanCoeffs<real_t>& c,
                                                          real_t true_step, real_t kinetic,
                                                          real_t current_kinetic, real_t lambda0,
-                                                         bool is_positron, Rng& rng,
+                                                         real_t mass, real_t charge,
+                                                         bool is_positron, real_t t_small,
+                                                         Rng& rng,
                                                          real_t lambda_end = real_t(-1),
                                                          UrbanDebug<real_t>* dbg = nullptr) {
   constexpr real_t taubig = real_t(8.0);
@@ -297,7 +382,7 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
   if (current_kinetic != kinetic && kinetic > real_t(0)) {
     // Supplied from the tabulated lambda when there is one; evaluated directly otherwise.
     const real_t lambda1 =
-        (lambda_end > real_t(0)) ? lambda_end : urban_lambda(m, kinetic, is_positron);
+        (lambda_end > real_t(0)) ? lambda_end : urban_lambda(m, kinetic, mass, charge);
     if (fabs(lambda1 - lambda0) > lambda0 * real_t(0.01) && lambda1 > real_t(0)) {
       tau = true_step * log(lambda0 / lambda1) / (lambda0 - lambda1);
     }
@@ -327,7 +412,17 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
   constexpr real_t rellossmax = real_t(0.50);
   if (relloss > rellossmax) { return urban_simple_scattering(xmeanth, x2meanth, rng); }
 
-  const real_t theta0 = urban_theta0(m, c, true_step, kinetic, current_kinetic, is_positron);
+  // The extreme-small-step branch. Below t_small = min(tlimitmin, lambdalimit) Geant4 does not
+  // evaluate theta0 at the step at all: it evaluates it at t_small and scales by
+  // sqrt(t/t_small), and it then computes the tail parameter `u` from t_small/lambda0 rather
+  // than from tau. Both halves matter - the second is easy to miss, because it sits sixteen
+  // lines below the flag that sets it.
+  const bool extreme_small = (t_small > real_t(0)) && !(true_step > t_small);
+  const real_t theta0 =
+      extreme_small
+          ? sqrt(true_step / t_small)
+                * urban_theta0(m, c, t_small, kinetic, current_kinetic, is_positron, mass, charge)
+          : urban_theta0(m, c, true_step, kinetic, current_kinetic, is_positron, mass, charge);
   constexpr real_t theta0max = real_t(3.14159265358979323846) * onesixth;
   const real_t theta2 = theta0 * theta0;
   if (theta2 < tausmall) { return cth; }
@@ -340,7 +435,7 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
   }
 
   const real_t ltau = log(tau);
-  const real_t u = exp(ltau * onesixth);
+  const real_t u = extreme_small ? exp(log(t_small / lambda0) * onesixth) : exp(ltau * onesixth);
   const real_t xx = log(lambdaeff / m.radiation_length);
   real_t xsi = c.coeffc1 + u * (c.coeffc2 + c.coeffc3 * u) + c.coeffc4 * xx;
   xsi = fmax(xsi, real_t(1.9));
@@ -395,6 +490,29 @@ __host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<re
   if (cth < real_t(-1)) { cth = real_t(-1); }
   if (cth > real_t(1)) { cth = real_t(1); }
   return cth;
+}
+
+/// The e-/e+ form, for the call sites that only ever have a lepton.
+///
+/// `t_small` IS ZERO HERE AND THAT IS A KNOWN GAP, not a property of the lepton. Geant4's
+/// `tsmall = min(tlimitmin, lambdalimit)` is real for an electron - `ComputeTlimitmin` gives
+/// 0.87*Z23*stepmin, about 2.3e-4 mm for a 1 MeV electron in water against lambdalimit's 1 mm -
+/// and steps that short do happen at the end of an electron's range, so the branch is
+/// reachable. It has never been in this file, and turning it on moves every electron number in
+/// the port including B1's gamma dose, which P14b is not allowed to move (its whole claim is
+/// that the ion path changed and the lepton path did not). Named here, measured in
+/// docs/RISK.md V62, and left for whoever owns the lepton path next.
+template <typename real_t, typename Rng>
+__host__ __device__ inline real_t urban_sample_cos_theta(const data::Material<real_t>& m,
+                                                         const UrbanCoeffs<real_t>& c,
+                                                         real_t true_step, real_t kinetic,
+                                                         real_t current_kinetic, real_t lambda0,
+                                                         bool is_positron, Rng& rng,
+                                                         real_t lambda_end = real_t(-1),
+                                                         UrbanDebug<real_t>* dbg = nullptr) {
+  return urban_sample_cos_theta<real_t, Rng>(
+      m, c, true_step, kinetic, current_kinetic, lambda0, units::electron_mass_c2<real_t>(),
+      is_positron ? real_t(1) : real_t(-1), is_positron, real_t(0), rng, lambda_end, dbg);
 }
 
 /// Per-material Urban table: transport mean free path on a log energy grid, plus the
@@ -458,6 +576,46 @@ template <typename real_t> __host__ __device__ constexpr real_t kTlimitMinFix2()
 template <typename real_t> __host__ __device__ constexpr real_t kTauLim() { return real_t(1e-6); }
 template <typename real_t> __host__ __device__ constexpr real_t kDtrl() { return real_t(0.05); }
 template <typename real_t> __host__ __device__ constexpr real_t kTlow() { return real_t(5e-3); }
+
+/// G4UrbanMscModel's constructor: `masslimite = 0.6*CLHEP::MeV`. Above it a particle skips the
+/// `rangeinit = max(rangeinit, lambda0)` floor, the `fr` boost and the doverra distance
+/// estimate. Every species this port steps is either well below it (e-/e+, 0.511 MeV) or well
+/// above (the muon at 105.7 MeV is the lightest), so nothing sits near the boundary.
+template <typename real_t> __host__ __device__ constexpr real_t kMassLimite() {
+  return real_t(0.6);  // MeV
+}
+
+/// `G4EmParameters::MscMuHadRangeFactor`, `rangeFactorMuHad = 0.2`. The same number
+/// `em::kHadronFacRange` carries for WentzelVI, and it is the same number for the same reason:
+/// `G4EmTableUtil::PrepareMscProcess` picks it by the PARTICLE's mass, not by the model. A
+/// comment that attributes 0.2 to WentzelVI and 0.04 to Urban has the mechanism backwards.
+template <typename real_t> __host__ __device__ constexpr real_t kFacRangeMuHad() {
+  return real_t(0.2);
+}
+
+/// `StartTracking`'s `tlimitmin = 10.*tlimitminfix`, 1e-7 mm. Under fMinimal this is the value
+/// for the whole track: `ComputeStepmin` and `ComputeTlimitmin` are called in the
+/// fUseDistanceToBoundary, fUseSafety and fUseSafetyPlus branches only.
+template <typename real_t> __host__ __device__ constexpr real_t kTlimitMinMinimal() {
+  return real_t(1e-7);  // mm
+}
+
+/// The fMinimal step-limit state a track carries between steps, packed into one real.
+///
+/// `StartTracking` sets `tlimit = geombig` (1e50 mm) and the fMinimal branch recomputes it ONLY
+/// when the pre-step point is a geometry boundary - not on the first step, which is the
+/// difference from fUseSafety and is why this needs three states rather than two:
+///
+///     == 0  the value every track is seeded with: geombig. No msc limit at all yet.
+///      < 0  the previous step ended on a boundary. Recompute tlimit this step.
+///      > 0  the tlimit frozen at the last boundary crossing.
+///
+/// So an ion launched into a homogeneous volume is never step-limited by multiple scattering,
+/// and after one boundary it is limited by a tlimit computed at that boundary's energy for the
+/// rest of the track. Geant4's, not this port's; see docs/RISK.md V61.
+template <typename real_t> __host__ __device__ constexpr real_t kMscAtBoundary() {
+  return real_t(-1);
+}
 
 // G4VEnergyLossProcess continuous-step-limit parameters, from G4EmExtraParameters
 // (dRoverRange) and G4VEnergyLossProcess (finalRange). QBBC leaves both at their defaults.
@@ -535,15 +693,83 @@ __host__ __device__ inline real_t urban_step_limit(const UrbanCoeffs<real_t>& c,
   return fmin(range, res);
 }
 
+/// Step limitation for a MUON, HADRON OR ION: the whole of ComputeTruePathLengthLimit as
+/// 11.1.1 evaluates it for `mass >= masslimite` under `steppingAlgorithm == fMinimal`, which is
+/// what `G4EmParameters::mscStepLimitMuHad` gives every particle over 1 MeV.
+///
+/// Four things happen before the branch and all four are in the function rather than at the
+/// call site, because three of them are early returns that skip the branch entirely:
+///
+///   1. `tPathLength = min(tPathLength, currentRange)`.
+///   2. `if(tPathLength < tlimitminfix)` - 1e-8 mm - return with no limit. It also sets
+///      latDisplasment false, which for a heavy particle it already is.
+///   3. `distance = currentRange*doverrb` for `mass >= masslimite` (doverra is the e-/e+
+///      branch), and `if(distance < presafety)` return with no limit. This is what makes an
+///      elastic recoil free: its range is under 10 um, so `1.14*range` is under 12 um, and
+///      anywhere but a hair from a boundary the safety beats it and no step limit is applied.
+///   4. NEITHER early return reaches `firstStep = false`, and neither reaches the tlimit
+///      recompute - so a step that starts on a boundary but exits at 3 keeps the PREVIOUS
+///      boundary's tlimit. That ordering is the function's, and it is why these guards are
+///      here and not folded into the caller.
+///
+/// Then the fMinimal branch, which is six lines and has no `firstStep` in it:
+///
+///     if (stepStatus == fGeomBoundary) {
+///       tlimit = (currentRange > lambda0) ? facrange*currentRange : facrange*lambda0;
+///       tlimit = std::max(tlimit, tlimitmin);
+///     }
+///     tPathLength = (tlimit < tPathLength) ? std::min(tPathLength, Randomizetlimit())
+///                                          : tPathLength;
+///
+/// @param t_path   the step length proposed by everything else, which Geant4 passes in as
+///                 currentMinimalStep and this function only ever shortens
+/// @param tlimit   the carried state; see kMscAtBoundary for the three cases
+/// @return the limited TRUE path length
+template <typename real_t, typename Rng>
+__host__ __device__ inline real_t urban_step_limit_heavy(const UrbanCoeffs<real_t>& c,
+                                                         real_t lambda0, real_t facrange,
+                                                         real_t kinetic, real_t mass,
+                                                         real_t range, real_t safety,
+                                                         real_t t_path, Rng& rng,
+                                                         real_t& tlimit) {
+  (void)kinetic;  // ComputeStepmin/ComputeTlimitmin are not reached under fMinimal
+  t_path = fmin(t_path, range);
+  if (t_path < kTlimitMinFix<real_t>()) { return t_path; }
+  // `mass < masslimite` would take doverra here. Asserted rather than assumed so that a
+  // sub-MeV species routed to this function is caught instead of silently reading the wrong
+  // one of two material coefficients that differ by 20%.
+  const real_t distance = (mass < kMassLimite<real_t>()) ? range * c.doverra : range * c.doverrb;
+  if (distance < safety) { return t_path; }
+
+  constexpr real_t tlimitmin = kTlimitMinMinimal<real_t>();
+  if (tlimit < real_t(0)) {  // stepStatus == fGeomBoundary
+    tlimit = (range > lambda0) ? facrange * range : facrange * lambda0;
+    tlimit = fmax(tlimit, tlimitmin);
+  }
+  if (!(tlimit > real_t(0))) { return t_path; }  // still geombig: the track has no limit yet
+  if (tlimit >= t_path) { return t_path; }
+  // Randomizetlimit
+  real_t res = tlimitmin;
+  if (tlimit > tlimitmin) {
+    res = fmax(urban_gauss(tlimit, real_t(0.1) * (tlimit - tlimitmin), rng), tlimitmin);
+  }
+  return fmin(t_path, res);
+}
+
 /// True -> geometric path length, transcribed from ComputeGeomPathLength. Fills par1..par3
 /// so the inverse conversion can undo it.
 ///
 /// @param lambda_at_rfin transport mfp at the energy left after the whole true step; pass a
 ///                       non-positive value to take the tPathLength == range branch
+/// @param mass           the particle's PDG mass. Geant4's third branch tests
+///                       `currentKinEnergy < mass`, which this file used to write as
+///                       `kinetic < electron_mass_c2` - right for the only species that
+///                       reached it and a factor of 7300 out for an alpha, which spends its
+///                       whole sub-3.7 GeV life in that branch rather than the general one.
 template <typename real_t>
 __host__ __device__ inline real_t urban_geom_path(real_t t_path, real_t lambda0, real_t range,
                                                   real_t lambda_at_rfin, real_t kinetic,
-                                                  MscStep<real_t>& st) {
+                                                  real_t mass, MscStep<real_t>& st) {
   st.lambda0 = lambda0;
   st.par1 = real_t(-1);
   st.par2 = st.par3 = real_t(0);
@@ -558,8 +784,7 @@ __host__ __device__ inline real_t urban_geom_path(real_t t_path, real_t lambda0,
   } else if (t_path < range * kDtrl<real_t>()) {
     z = (tau < kTauLim<real_t>()) ? t_path * (real_t(1) - real_t(0.5) * tau)
                                   : lambda0 * (real_t(1) - exp(-tau));
-  } else if (kinetic < units::electron_mass_c2<real_t>() || t_path >= range
-             || lambda_at_rfin <= real_t(0)) {
+  } else if (kinetic < mass || t_path >= range || lambda_at_rfin <= real_t(0)) {
     // Geant4: currentKinEnergy < mass || tPathLength == currentRange.
     st.par1 = real_t(1) / range;
     st.par2 = range / lambda0;
@@ -620,12 +845,13 @@ struct MscResult {
 ///
 /// @param t_path true path length of the step
 /// @param z_path geometric length of the step; the displacement scales with sqrt(t^2 - z^2)
+/// @param mass,charge,t_small see urban_sample_cos_theta
 template <typename real_t, typename Rng>
 __host__ __device__ inline MscResult<real_t> urban_sample_scattering(
     const data::Material<real_t>& m, const UrbanCoeffs<real_t>& c, real_t lambda0,
     const Vec3<real_t>& old_dir, real_t t_path, real_t z_path, real_t kinetic,
-    real_t current_kinetic, bool lat_displacement, bool is_positron, Rng& rng,
-    real_t lambda_end = real_t(-1)) {
+    real_t current_kinetic, bool lat_displacement, real_t mass, real_t charge, bool is_positron,
+    real_t t_small, Rng& rng, real_t lambda_end = real_t(-1)) {
   MscResult<real_t> out{old_dir, Vec3<real_t>{real_t(0), real_t(0), real_t(0)}};
   constexpr real_t tausmall = real_t(1e-16);
   if (t_path <= kTlimitMinFix<real_t>() || t_path < tausmall * lambda0
@@ -633,8 +859,8 @@ __host__ __device__ inline MscResult<real_t> urban_sample_scattering(
     return out;
   }
 
-  const real_t ct = urban_sample_cos_theta(m, c, t_path, kinetic, current_kinetic, lambda0,
-                                           is_positron, rng, lambda_end);
+  const real_t ct = urban_sample_cos_theta(m, c, t_path, kinetic, current_kinetic, lambda0, mass,
+                                           charge, is_positron, t_small, rng, lambda_end);
   if (fabs(ct) >= real_t(1)) { return out; }
   const real_t st = sqrt((real_t(1) - ct) * (real_t(1) + ct));
   const real_t phi = units::twopi<real_t>() * rng.uniform();
@@ -654,6 +880,20 @@ __host__ __device__ inline MscResult<real_t> urban_sample_scattering(
     }
   }
   return out;
+}
+
+/// The e-/e+ form, for the call sites that only ever have a lepton. `t_small` zero, for the
+/// reason the lepton overload of urban_sample_cos_theta gives.
+template <typename real_t, typename Rng>
+__host__ __device__ inline MscResult<real_t> urban_sample_scattering(
+    const data::Material<real_t>& m, const UrbanCoeffs<real_t>& c, real_t lambda0,
+    const Vec3<real_t>& old_dir, real_t t_path, real_t z_path, real_t kinetic,
+    real_t current_kinetic, bool lat_displacement, bool is_positron, Rng& rng,
+    real_t lambda_end = real_t(-1)) {
+  return urban_sample_scattering<real_t, Rng>(
+      m, c, lambda0, old_dir, t_path, z_path, kinetic, current_kinetic, lat_displacement,
+      units::electron_mass_c2<real_t>(), is_positron ? real_t(1) : real_t(-1), is_positron,
+      real_t(0), rng, lambda_end);
 }
 
 /// End-of-step energy the model scatters at, from the top of SampleScattering. For a step
