@@ -5618,6 +5618,17 @@ whether the input is read at all, and the answer is usually two lines up in the 
 
 ### V53: a neutron that cannot be validated by a dose, and two transcriptions of its table
 
+> **CLOSED BY P8d, AND THE TITLE IS THE PART THAT WAS WRONG.** The neutron's stage-1 row is
+> `54.4573 +/- 0.5361 nGy` on the Geant4 side now, against `0.0000 +/- 0.0000` here, and the
+> configuration that produces it took one line of C++ rather than a UI command. What this entry
+> got wrong is one function name - the flag is set in `G4HadronInelasticQBBC`'s CONSTRUCTOR, not
+> in its `ConstructProcess`, and there is a `G4State_PreInit` window between them in which
+> `SetEnableNeutronGeneralProcess(false)` takes. Everything below about the process manager, the
+> two transcriptions of the grid and the 7.62e-14 is unchanged and still the reason the socket is
+> a view of P2's tables. **docs/RISK.md V60** is the finding and `ref/b1neutron/` the reference.
+> The paragraph beginning "What follows is that the port's neutron transport cannot be validated
+> by a B1 dose comparison until P9-P11 land" is the sentence that is now false.
+
 **The neutron has no stage-1 configuration, and no UI command can make one.**
 
 Every other species in `ref/b1hadron/` can be run against a Geant4 whose process list matches

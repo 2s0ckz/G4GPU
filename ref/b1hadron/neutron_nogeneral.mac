@@ -30,6 +30,17 @@
 # The port's side: `species_disposition` reports the neutron as stepped, `step_neutral` is handed
 # a null table, and its cross section is zero. `TransportEngine::Upload` refuses a table without
 # final states, so this cannot silently become a half-wired run.
+#
+# **P8d: THAT LAST PARAGRAPH IS HISTORY AND THIS MACRO IS NOW STAGE 0 FOR THE PORT AS WELL AS
+# FOR GEANT4.** `step_neutral` is handed real tables in every run whose G4PARTICLEXSDATA
+# resolves, so the port's half of THIS pair is no longer a zero and the two sides no longer
+# agree: running it against the port measures the whole of the neutron's hadronic physics, which
+# is what the header above says the difference between the two Geant4 runs is. The pair to use
+# for a like-for-like is `stage1_neutron.mac` + `stage1_neutron_port.mac`, through
+# `ref/b1neutron/run.bat`. This file is kept because its prediction - a neutron with no cross
+# section streams and deposits exactly nothing - is still what `tests/test_neutron.cu` asserts
+# with a null table, and because the EM-only column for a neutron is still what it produces on
+# the Geant4 side.
 
 /run/initialize
 /control/verbose 0

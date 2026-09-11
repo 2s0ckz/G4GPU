@@ -764,6 +764,90 @@ int main() {
     cudaFree(d_tal);
   }
 
+  // ============================ 2b. the same frequencies, on the HOST and on the host tables
+  std::printf("\n-- 2b. the choice functions on the host, against the host-built tables\n");
+  {
+    // WHY THIS IS NOT THE SAME TEST AS 2. Section 2 ran `step_neutral` on the DEVICE, because
+    // 8 million steps with a capture cascade in them is a GPU's work and minutes of a host's.
+    // What that leaves unchecked is the choice read off the tables the HOST built, which is a
+    // different object from the uploaded copy - and section 1 compared the two only through the
+    // accessors, at fixed q values. So this draws the uniforms and counts, on the host, with no
+    // transport in it at all: `select()` for the final configuration and the two exponentials
+    // for stage 1, 200,000 draws per cell.
+    //
+    // It is cheap because there is no final state in it - four million log-vector lookups - and
+    // it is the section the brief asked for in as many words. Section 3's field-by-field
+    // host-against-device comparison is what ties the two together.
+    const real_t kEnergies[] = {real_t(2.53e-8), real_t(1e-3), real_t(0.1), real_t(1),
+                                real_t(10)};
+    const char* ename[] = {"thermal", "1 keV", "100 keV", "1 MeV", "10 MeV"};
+    const int kN = 200000;
+    double worst_overall = 0;
+    for (int stage = 0; stage < 2; ++stage) {
+      for (int mi = 0; mi < kNMat; ++mi) {
+        for (int ei = 0; ei < 5; ++ei) {
+          const real_t e = kEnergies[ei];
+          const real_t loge = std::log(e);
+          const int imat = mat_index[mi];
+          Philox<real_t> rng(0x5EEDu + 97u * static_cast<unsigned int>(stage * 100 + mi * 5
+                                                                       + ei),
+                             0u, 0x2B1Cu);
+          long long n_el = 0, n_cap = 0, n_inel = 0;
+          double p_el = 0, p_cap = 0, p_inel = 0;
+          if (stage == 1) {
+            for (int i = 0; i < kN; ++i) {
+              switch (h_xs.select(imat, e, loge, rng.uniform())) {
+                case had::NeutronSubProcess::kElastic: ++n_el; break;
+                case had::NeutronSubProcess::kInelastic: ++n_inel; break;
+                default: ++n_cap; break;
+              }
+            }
+            if (e <= had::kNeutronXsEMiddle<real_t>()) {
+              p_el = double(hxs::phys_vec_log_value(h_xs.t1[imat], e, loge));
+              p_inel = double(hxs::phys_vec_log_value(h_xs.t2[imat], e, loge)) - p_el;
+              p_cap = 1.0 - p_el - p_inel;
+            } else {
+              p_inel = double(hxs::phys_vec_log_value(h_xs.t4[imat], e, loge));
+              p_el = 1.0 - p_inel;
+            }
+          } else {
+            hxs::MaterialXs<real_t> m1{}, m2{};
+            const real_t xe = had::neutron_sub_xs_per_volume<real_t>(h_ds_el, mats[imat], e,
+                                                                     loge, m1);
+            const real_t xc = had::neutron_sub_xs_per_volume<real_t>(h_ds_cap, mats[imat], e,
+                                                                     loge, m2);
+            // The two exponentials `step_neutral` draws in stage 1, in its order, so this
+            // counts the same competition and not a formula for it.
+            for (int i = 0; i < kN; ++i) {
+              const real_t s_el = (xe > real_t(0)) ? -std::log(rng.uniform()) / xe
+                                                   : geom::kInfinity<real_t>();
+              const real_t s_cap = (xc > real_t(0)) ? -std::log(rng.uniform()) / xc
+                                                    : geom::kInfinity<real_t>();
+              if (s_cap < s_el) { ++n_cap; } else { ++n_el; }
+            }
+            if (double(xe) + double(xc) > 0) {
+              p_el = double(xe) / (double(xe) + double(xc));
+              p_cap = double(xc) / (double(xe) + double(xc));
+            }
+          }
+          const double z = std::fmax(zscore(n_el, p_el, kN),
+                                     std::fmax(zscore(n_cap, p_cap, kN),
+                                               (p_inel > 0) ? zscore(n_inel, p_inel, kN)
+                                                            : ((n_inel == 0) ? 0.0 : 1e9)));
+          if (z > worst_overall) { worst_overall = z; }
+          if (z > 5.0) {
+            std::printf("  FAIL: %s %s %s: worst z = %.2f (P(el) %.6f measured %.6f)\n",
+                        (stage == 0) ? "stage1" : "final", mat_name[mi], ename[ei], z, p_el,
+                        double(n_el) / kN);
+            ++g_fails;
+          }
+        }
+      }
+    }
+    std::printf("  40 cells x %d draws on the host tables: worst z = %.2f against a 5-sigma "
+                "gate\n", kN, worst_overall);
+  }
+
   // ============================================ 3. step_neutral, host against device
   std::printf("\n-- 3. step_neutral on the device against the same function on the host\n");
   {

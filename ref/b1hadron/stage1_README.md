@@ -296,6 +296,8 @@ below is kept under. What has to be re-run, and at 500,000 events per run per si
 * `neutron`, which is `0.0000 +/- 0.0000` against `0.0000 +/- 0.0000` and stays there until the
   neutron general process is wired (P8c did not do it; docs/RISK.md V53 for why the zero is a
   prediction rather than an absence).
+  *(P8d wired it and re-measured that one row - the section below this one. The other rows are
+  still the P8b table's and still stale by the recoil.)*
 * `He3` is a new row: it has a kernel now and never had one before.
 * `mu+`, `mu-`, `pi+`, `pi-`, `K+`, `K-` need no re-run for the recoil - a muon has no
   `hadElastic` at all and the pion and kaon recoils are the same nuclei - but their kernel DID
@@ -304,3 +306,48 @@ below is kept under. What has to be re-run, and at 500,000 events per run per si
   ions. The first is the identity for all six of them and for the proton; the second moves an
   ALPHA's steps and nothing else. So the six charge-pair rows should be unmoved and the alpha's
   should move twice - once for its recoils and once for its step function.
+
+## The neutron row, measured - P8d
+
+`ref\b1neutron\run.bat` on `stage1_neutron.mac` and on `stage1_neutron_noelastic.mac`, against
+the port's own `examples\B1\exampleB1.exe` on `stage1_neutron_port.mac`, all built in this
+worktree on branch `phys/neutron`. 500,000 neutrons of 100 MeV per run, doses in nGy.
+
+```
+species                     port           G4 stage 1      diff   sigma        G4 no elastic
+neutron        PORT_DOSE +/- PORT_RMS     54.4573 +/- 0.5361   DIFF    SIGMA       0.0000 +/- 0.0000
+```
+
+### Reading it, and the third column is the whole of the physics
+
+**The no-elastic column is EXACTLY ZERO, and it is not a rounding.** 500,000 neutrons of 100 MeV
+through B1 with `hadElastic` and `neutronInelastic` inactivated and `nCapture` left ACTIVE
+deposit `0 picoGy  rms = 0 picoGy` in the scoring volume. That is a stronger statement than any
+other row's third column makes, and it says what this measurement is of:
+
+* a neutron itself deposits nothing - it has no ionisation process, which is the whole reason
+  `step_neutral` is a third of the length of `step_hadron`;
+* so every gray in the first column is carried by something elastic scattering MADE: the recoil
+  protons of hydrogen and the recoil nuclei of oxygen, carbon, nitrogen and calcium, which are
+  tracks because of P8c;
+* and `nCapture` contributes nothing at 100 MeV in 500,000 events on its own, because without
+  elastic scattering the neutron never slows to where its capture cross section matters. Its
+  share of the interactions at 100 MeV is about 6e-5.
+
+So the neutron row is an unusually clean test of exactly three things and nothing else:
+`G4NeutronElasticXS` (P2, bit-exact against the oracle), `G4ChipsElasticModel` (P5, bitwise on
+sampled -t), and the recoil-nucleus transport P8c added. There is no dE/dx in it, no multiple
+scattering, no range table, and no decay - the neutron's 880 s lifetime makes `G4Decay` inert at
+any energy that crosses a phantom, which is why both macros leave it active.
+
+**What it is NOT a test of.** The capture cascade, for the reason above and for a second one: a
+thermal neutron in water captures on HYDROGEN, and `G4NeutronRadCapture`'s `A <= 1` branch is a
+closed-form two-body decay that never opens PhotonEvaporation's level scheme at all (docs/RISK.md
+V60 measured that: the same 2000 captures with and without the 9.52 MB table give identical
+answers in water). The cascade is tested by `tests/test_capture.cu` against the oracle and by
+`tests/test_capture_device.cu` on the device, not here.
+
+And not the inelastic sub-process, which is inactivated on the Geant4 side and absent on the
+port's. In the FINAL configuration it is 18% of the interactions in water at 10 MeV and 51% in
+lead (`tests/test_neutron_general.cu`), so the neutron's final-stage dose is not a number to
+quote until P9-P11 land - the same sentence the at-rest captures earned for the charged hadrons.

@@ -711,6 +711,62 @@ minutes V55 records for eleven - with three Geant4 cmake builds running beside i
 a clean measurement, but the direction is the one V55 warns about and the next package to add a
 kernel should measure it with V55's one-kernel reproducer before it adds one.
 
+*(P8d re-measured it clean, on the same seventeen entry points and with nothing else running:
+**22 minutes 13 seconds**. So the ninety was the three cmake builds and not the translation unit,
+and V55's "wrong direction by an order of magnitude" is a factor of 2.8 rather than 11. Section
+2.1.8 has the after figure.)*
+
+#### 2.1.8 The neutron general process in the neutral stepper (P8d)
+
+The last open item of Phase 2's first wiring, and the row that had been `0.0000 +/- 0.0000`
+against `0.0000 +/- 0.0000` since P8.
+
+| Geant4 class / function | QBBC | | Where |
+|---|:--:|:--:|---|
+| `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` and `CurrentCrossSection` - one interaction length off table 0 below 20 MeV and table 3 above it, with the zone test `energy <= fMiddleEnergy` | y | **T** | `step_neutral` in `physics/stepper.cuh`, through `had::NeutronGeneralXs::total`. One `log(ekin)` per step, handed to every lookup, as Geant4 computes one `fLogEnergy` per step and `ComputeGeneralLambda` and `GetProbability` both read it |
+| `PostStepDoIt`'s sub-process choice - one uniform, `q <= GetProbability(1)` then `(2)` below the middle energy and `q <= GetProbability(4)` above it, with the **order swap** between the zones | y | **T** | same, through `::select`. One uniform, drawn where `G4double q = G4UniformRand()` is |
+| the elastic sub-process: `G4HadronElasticProcess` with `G4NeutronElasticXS` and `G4ChipsElasticModel` | y | **T** | `hadronic/neutron_wiring.cuh`, `neutron_elastic_apply`. The neutron shares the MODEL with the proton and not the data set - `G4HadronElasticPhysics::ConstructProcess` line 147 builds `new G4HadronElasticProcess()` with a Chips model and hands it to `G4HadProcesses::BuildNeutronElastic`, which supplies `G4NeutronElasticXS` |
+| `fXSType == fHadNoIntegral` for a neutral particle, and what follows from it | y | **V** | `G4HadronicProcess::BuildPhysicsTable` guards the whole integral-approach setup with `charge != 0.0`, so the neutron's elastic and capture sub-processes draw NO rejection uniform and do NOT recompute the cross section - the element is drawn from the partial sums the caller left. Both halves are in `neutron_elastic_apply`'s header |
+| `fCurrentXSS->ComputeCrossSection` before delegating, **and only for a material with more than one element** | y | **T** | `step_neutral`. With one element `SampleZandA` takes element 0 and draws no uniform, so the call has no answer attached; with more, the partials are what the target draw reads |
+| the capture sub-process: `G4NeutronCaptureProcess` with `G4NeutronCaptureXS` and `G4NeutronRadCapture` through `G4PhotonEvaporation::BreakUpChain` | y | **T** | `neutron_capture_apply`, over P7's `capture_final_state` and P3's cascade. The secondaries are emitted inside the `__noinline__` function so that its two 16-entry arrays never cross into the kernel's frame |
+| the inelastic sub-process | n | **-** | **Refused by name**, `had::HadronicRefusal::kNeutronInelastic`, with the kinetic energy it costs. It is SELECTABLE - `BuildPhysicsTable` sums all three unconditionally, so leaving the term out of table 0 would be a different cross section - and above 1 MeV it is a large share: measured, **18.2% of interactions in water at 10 MeV, 38.6% in air, 25.5% in bone, 50.7% in lead**. The neutron is killed with its energy deposited locally, which is the conservative disposal and is NOT what Geant4 does with it |
+| `HadronicStage::kStage1` - the neutron with `EnableNeutronGeneralProcess` FALSE, i.e. `hadElastic` and `nCapture` as separate processes on their own data stores with their own interaction lengths | y | **T** | `step_neutral`. A DIFFERENT COMPETITION and not the general table minus a term: docs/RISK.md V60 for the finding that made the configuration reachable at all, and `ref/b1neutron/` for the reference binary |
+| the five tables and the two per-process data sets on the device | - | **T** | `host/neutron_upload.cuh`. **7.43 MB** for a five-material scene: `ParticleXsTable` copied with its `std::vector`s empty and its three pointers repointed, which is the arrangement `data/particlexs_data.cuh`'s own comment describes |
+| P3's level scheme uploaded whether a neutron arrives or not | y | **T** | `SetNuclearLevelData` is ON by default now (9.52 MB), which is Geant4's answer in `G4ExcitationHandler::SetParameters` and what section 2.1.6's row said would happen "the day the neutron is wired" |
+
+**THE NUMBERS.** `tests/test_neutron_general.cu`, five sections, on a scene of water, air,
+bone-compact and G4_Pb - lead because B1's four materials stop at Z = 20 and have no large
+capture cross section:
+
+* **the upload, exactly.** 61,230 EXACT comparisons and 9,420 tolerant ones over 4,710
+  (material, energy) probes - every node and every bin midpoint of both grids for five
+  materials - read through the transport's own accessors (`::total`, `::select` at nine q
+  values, `neutron_sub_xs_per_volume`). **0 disagreements.** Worst deviation 1.949e-16 on the
+  five combined tables and 1.896e-15 on the two per-process sums. The split is not cosmetic: at
+  a NODE the value is the uploaded double and is compared exactly, between nodes the
+  interpolation is a multiply-add that nvcc contracts to an FMA and MSVC does not, and the
+  per-process sums accumulate `total += n_atoms[i]*sigma_i` over up to nine elements.
+* **the sub-process frequencies against the partials, both configurations.** 200,000 draws of
+  `step_neutral` itself per cell, 40 cells (2 stages x 4 materials x thermal/1 keV/100 keV/1
+  MeV/10 MeV), in a 1e9 mm box so geometry never wins: **worst z = 2.57** against a 5-sigma
+  gate. The two stages are predicted by two different formulas - the general table's cumulative
+  partials in `kFinal`, `sigma_el/(sigma_el+sigma_cap)` in `kStage1` - so passing both is a
+  statement that the two competitions are the two competitions.
+* **`step_neutral` host against device**, 1600 tracks x three configurations, every field
+  including each secondary's species, nuclide and energy: **0 disagreements.** The elastic energy
+  balance closes to **2.810e-11 MeV** absolute, which is two ulps of a lead target's mass - the
+  recoil energy is `lv.e() - mass2` with both terms of order 1.9e5 MeV, so the limit on that
+  field is absolute and not relative.
+* **the capture cascade's length against the capacity it is given.** 35,590 captures over every
+  element of the four materials at five energies: **3.10 secondaries per capture** (P7's oracle
+  measured 3.05 over 600 calls) and a longest cascade of **10** against a capacity of 16. The
+  capacity costs 353 bytes of `run_step_neutral`'s frame per unit, so it is a number that has to
+  be justified by the physics rather than chosen for comfort.
+* **and what a null level scheme does**, which is the claim `Upload`'s refusal rests on: 2000
+  thermal captures in lead give 26,485 secondaries carrying 14,609.9069 MeV with a null table
+  against 9,021 carrying 13,694.7198 MeV with the real one. Three times the multiplicity, not
+  none. docs/RISK.md V60.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

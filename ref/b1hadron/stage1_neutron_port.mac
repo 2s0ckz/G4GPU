@@ -1,5 +1,13 @@
 # The port's half of the stage-1 neutron like-for-like. Its partners are stage1_neutron.mac and
-# stage1_neutron_noelastic.mac, run with ref/run/runb1.bat against the real Geant4 build of B1.
+# stage1_neutron_noelastic.mac, run with **ref/b1neutron/run.bat** - not ref/run/runb1.bat, which
+# is what every other species uses. The neutron's reference needs a binary with one extra line of
+# C++ in it, because `EnableNeutronGeneralProcess` has no UI command; see stage1_neutron.mac's
+# own header and docs/RISK.md V60.
+#
+# THE PORT'S SIDE NEEDS NOTHING SWITCHED ON EITHER. `HadronicStage` defaults to `kStage1`, which
+# is the configuration those two macros produce: `hadElastic` and `nCapture` as two competing
+# processes on their own tables, no inelastic. The engine uploads the tables for both stages at
+# `Upload` so that one binary can produce both columns (docs/RISK.md V45).
 #
 # NO /process/inactivate LINES, and that is the convention P1 set rather than an omission: this
 # port's G4UImanager rejects an unknown command instead of ignoring it, so a macro that named
