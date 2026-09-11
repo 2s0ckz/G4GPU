@@ -340,6 +340,134 @@ __host__ __device__ inline const char* particle_name(ParticleType t) {
   }
 }
 
+/// The PDG code of a species, and its inverse.
+///
+/// P8 needs both because every hadronic process and every decay channel names its products by
+/// PDG code - P4's `decay_tables.hh` and P5's `HadSecondary` both do, deliberately, because
+/// `core/particle.cuh` belongs to a different package from either - and the transport has to
+/// turn that code into a species with a kernel, a refusal, or a neutrino to book.
+///
+/// A NUCLEUS IS NOT A PDG CODE THIS TABLE CAN LIST. `10LZZZAAAI` encodes (Z, A) and a
+/// run-dependent isomer index, so it is DECODED rather than matched: see
+/// `particle_type_of_nucleus`. The six light nuclei have fixed codes and are listed anyway,
+/// because a model that emits an alpha writes `1000020040` and a reader that only decoded would
+/// have to agree with the encoding in two places.
+__host__ __device__ inline int pdg_code(ParticleType t) {
+  switch (t) {
+    case ParticleType::kGamma: return 22;
+    case ParticleType::kElectron: return 11;
+    case ParticleType::kPositron: return -11;
+    case ParticleType::kMuonMinus: return 13;
+    case ParticleType::kMuonPlus: return -13;
+    case ParticleType::kPionPlus: return 211;
+    case ParticleType::kPionMinus: return -211;
+    case ParticleType::kKaonPlus: return 321;
+    case ParticleType::kKaonMinus: return -321;
+    case ParticleType::kProton: return 2212;
+    case ParticleType::kAntiProton: return -2212;
+    case ParticleType::kAlpha: return 1000020040;
+    case ParticleType::kHe3: return 1000020030;
+    // G4GenericIon's own code is 1000000000 - Z = 0, A = 0, which is not a nuclide. It is a
+    // placeholder definition whose tables every real ion scales from, and no process emits one.
+    case ParticleType::kGenericIon: return 1000000000;
+    case ParticleType::kNeutron: return 2112;
+    case ParticleType::kPiZero: return 111;
+    case ParticleType::kDeuteron: return 1000010020;
+    case ParticleType::kTriton: return 1000010030;
+    case ParticleType::kNeutrinoE: return 12;
+    case ParticleType::kAntiNeutrinoE: return -12;
+    case ParticleType::kNeutrinoMu: return 14;
+    case ParticleType::kAntiNeutrinoMu: return -14;
+    case ParticleType::kNeutrinoTau: return 16;
+    case ParticleType::kAntiNeutrinoTau: return -16;
+    case ParticleType::kKaonZeroLong: return 130;
+    case ParticleType::kKaonZeroShort: return 310;
+    case ParticleType::kLambda: return 3122;
+    case ParticleType::kSigmaPlus: return 3222;
+    case ParticleType::kSigmaMinus: return 3112;
+    case ParticleType::kXiMinus: return 3312;
+    case ParticleType::kNumTypes: break;
+  }
+  return 0;
+}
+
+/// The species of a nucleus (Z, A), as every hadronic model in Geant4 resolves one: six light
+/// nuclei by name and `G4IonTable::GetIon` for the rest.
+///
+/// Returns `kGenericIon` for everything heavier, which in this port is a REFUSED species - it
+/// has no kernel, so `species_disposition` reports it and the run counts it. That is the honest
+/// answer and not a shortcut: `particle_def(kGenericIon)` carries G4GenericIon's own
+/// 938.2723 MeV placeholder mass, so transporting a carbon recoil as one would step a nucleus
+/// twelve times too light. Whoever gives this port real ion transport replaces this line, not
+/// the ParticleDef.
+///
+/// (Z, A) = (0, 1) is a neutron and (1, 1) a proton, which are not ions at all - the mapping is
+/// here rather than at the call sites because a de-excitation product list holds all of them.
+__host__ __device__ inline ParticleType particle_type_of_nucleus(int z, int a) {
+  if (a == 1 && z == 0) { return ParticleType::kNeutron; }
+  if (a == 1 && z == 1) { return ParticleType::kProton; }
+  if (a == 2 && z == 1) { return ParticleType::kDeuteron; }
+  if (a == 3 && z == 1) { return ParticleType::kTriton; }
+  if (a == 3 && z == 2) { return ParticleType::kHe3; }
+  if (a == 4 && z == 2) { return ParticleType::kAlpha; }
+  return ParticleType::kGenericIon;
+}
+
+/// A PDG code back to a species. `kNumTypes` for a code this port has no row for at all, which
+/// is distinct from a code it has a row for and refuses to transport - the first is "I do not
+/// know what that is" and the second is "I know and cannot".
+///
+/// The nuclear branch decodes rather than matches, and it ignores the isomer digit: an excited
+/// ion and its ground state are the same SPECIES, and the excitation is carried beside the code
+/// by whichever module produced it (see `capture/neutron_rad_capture.cuh`).
+///
+/// IT DOES NOT IGNORE L. `10LZZZAAAI` has a lambda count in it, and Geant4 11.1.1's particle
+/// table really does hold hypertriton (1010010030), hyperalpha, hyperH4, doublehyperH4 and
+/// doublehyperdoubleneutron - `ref/oracle/decay_applicable.csv` lists all five. Decoding only
+/// (Z, A) turns a hypertriton into a triton and a hyperalpha into an alpha, which is a species
+/// with the wrong mass and the wrong lifetime rather than an unknown one. P3's excitation
+/// handler refuses `nL != 0` by name for the same reason; this is the same refusal at the
+/// species boundary, and `tests/test_wiring.cu` found it by asking whether the round trip
+/// closes for every code in the oracle rather than for the ones this port emits.
+__host__ __device__ inline ParticleType particle_type_of_pdg(int pdg) {
+  if (pdg > 1000000000) {
+    const int l = (pdg / 10000000) % 100;
+    if (l != 0) { return ParticleType::kNumTypes; }
+    const int z = (pdg / 10000) % 1000;
+    const int a = (pdg / 10) % 1000;
+    return particle_type_of_nucleus(z, a);
+  }
+  switch (pdg) {
+    case 22: return ParticleType::kGamma;
+    case 11: return ParticleType::kElectron;
+    case -11: return ParticleType::kPositron;
+    case 13: return ParticleType::kMuonMinus;
+    case -13: return ParticleType::kMuonPlus;
+    case 211: return ParticleType::kPionPlus;
+    case -211: return ParticleType::kPionMinus;
+    case 111: return ParticleType::kPiZero;
+    case 321: return ParticleType::kKaonPlus;
+    case -321: return ParticleType::kKaonMinus;
+    case 2212: return ParticleType::kProton;
+    case -2212: return ParticleType::kAntiProton;
+    case 2112: return ParticleType::kNeutron;
+    case 12: return ParticleType::kNeutrinoE;
+    case -12: return ParticleType::kAntiNeutrinoE;
+    case 14: return ParticleType::kNeutrinoMu;
+    case -14: return ParticleType::kAntiNeutrinoMu;
+    case 16: return ParticleType::kNeutrinoTau;
+    case -16: return ParticleType::kAntiNeutrinoTau;
+    case 130: return ParticleType::kKaonZeroLong;
+    case 310: return ParticleType::kKaonZeroShort;
+    case 3122: return ParticleType::kLambda;
+    case 3222: return ParticleType::kSigmaPlus;
+    case 3112: return ParticleType::kSigmaMinus;
+    case 3312: return ParticleType::kXiMinus;
+    default: break;
+  }
+  return ParticleType::kNumTypes;
+}
+
 /// A species whose energy leaves the event without being transported.
 ///
 /// QBBC registers nothing but G4Transportation for a neutrino, so in Geant4 one is created,

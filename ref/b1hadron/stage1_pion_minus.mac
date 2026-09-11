@@ -1,0 +1,34 @@
+# Stage 1: example B1 with a pi- beam, everything P9-P14 owes inactivated,
+# and Decay and hadElastic LEFT ACTIVE.
+#
+# One line more than pi+: `hBertiniCaptureAtRest`. See muon_minus for what that switch
+# means on both sides. Nothing stops here anyway (779.3 mm of range against 300 mm), so
+# what the line buys is that the comparison is not resting on a process that cannot fire
+# being left active - which is a different claim from it not mattering.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for pi- - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+/process/inactivate pi-Inelastic
+/process/inactivate hBertiniCaptureAtRest
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select pi-
+/particle/process/dump
+
+/gun/particle pi-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

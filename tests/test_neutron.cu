@@ -104,6 +104,14 @@ struct CountingEmitter {
   int* pushes;
   unsigned int child_count = 0u;
   int last_secondary = -1;
+  /// The three fields every stepper sets on its emitter before pushing, so that a secondary
+  /// starts where its parent is. Unused here - what is counted is the call - but present,
+  /// because the assignment is part of the interface BufferEmitter offers and a test emitter
+  /// that lacked them would only fail to compile once a stepper started using them. Which is
+  /// what happened when P8 gave the pi0 a decay.
+  Vec3<real_t> pos{};
+  int volume = 0;
+  int event = 0;
   __device__ int push(ParticleType, const Vec3<real_t>&, real_t, int) {
     atomicAdd(pushes, 1);
     ++child_count;
@@ -111,9 +119,15 @@ struct CountingEmitter {
   }
 };
 
+/// @param had P8's wiring. The default has every hadronic process ON, and that is what the
+///        three claims below are checked against; what makes them still hold with no table
+///        uploaded is that a null `xs` gives a zero cross section however the flags are set.
+///        The DECAY flag is the one that matters here: with it on, a neutron draws a decay
+///        length (880 s of proper lifetime, so 2.6e11 mm at 100 MeV) and a pi0 draws one it
+///        cannot survive. See the cases below, which say which is which.
 __global__ void RunNeutral(Scene<real_t> scene, const TrackState<real_t>* in, int n,
                            ParticleType type, const had::NeutronGeneralXs<real_t>* xs,
-                           Outcome* out, int* pushes) {
+                           had::HadronicWiring<real_t> had, Outcome* out, int* pushes) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   TrackState<real_t> p = in[i];
@@ -122,7 +136,7 @@ __global__ void RunNeutral(Scene<real_t> scene, const TrackState<real_t>* in, in
   FixedRng rng{real_t(0.5)};
   CountingEmitter em{pushes};
   real_t edep = 0;
-  const bool alive = step_neutral(scene, p, type, xs, rng, em, edep, rep);
+  const bool alive = step_neutral(scene, p, type, xs, had, rng, em, edep, rep);
   // The clocks, exactly as run_step_neutral advances them: from the PRE-step energy.
   p.advance(rep.true_length, ekin_pre, particle_def<real_t>(type).mass);
   Outcome o{};
@@ -239,6 +253,7 @@ int main() {
       make(ParticleType::kNeutron, kEkin, had::kNeutronTimeLimit<real_t>()),  // 1: exactly at 10 us
       make(ParticleType::kNeutron, kEkin, real_t(9999.9)),               // 2: a hair under 10 us
       make(ParticleType::kPiZero, kEkin, real_t(2e6)),                   // 3: a very old pi0
+      make(ParticleType::kPiZero, kEkin, real_t(0)),                     // 4: a fresh pi0
   };
   TrackState<real_t>* d_in = nullptr;
   cudaMalloc(&d_in, sizeof(TrackState<real_t>) * tracks.size());
@@ -255,18 +270,42 @@ int main() {
   // the real kernel - so they are launched as two kernels, as the engine launches them, rather
   // than by passing the species per track. That is the arrangement being tested: a pi0 that
   // reached the neutron's kernel would get the neutron's time cut.
-  RunNeutral<<<1, 3>>>(scene, d_in, 3, ParticleType::kNeutron, nullptr, d_out, d_pushes);
+  //
+  // THREE launches and not two, because P8 gave both species a decay and the pi0's fires
+  // instantly. Track 3 is launched with `decay` OFF, so what it checks is the claim it was
+  // written for - a pi0 of any age is not touched by the neutron's time cut - in isolation from
+  // the process that would otherwise end its step first. Track 4 is the same pi0 with decay ON,
+  // and it checks the opposite: a pi0 does not survive one step anywhere.
+  had::HadronicWiring<real_t> on{};
+  had::HadronicWiring<real_t> no_decay{};
+  no_decay.decay = false;
+  RunNeutral<<<1, 3>>>(scene, d_in, 3, ParticleType::kNeutron, nullptr, on, d_out, d_pushes);
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     std::printf("FATAL (neutron launch): %s\n", cudaGetErrorString(err));
     return 2;
   }
-  RunNeutral<<<1, 1>>>(scene, d_in + 3, 1, ParticleType::kPiZero, nullptr, d_out + 3, d_pushes);
+  RunNeutral<<<1, 1>>>(scene, d_in + 3, 1, ParticleType::kPiZero, nullptr, no_decay, d_out + 3,
+                       d_pushes);
   err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
-    std::printf("FATAL (pi0 launch): %s\n", cudaGetErrorString(err));
+    std::printf("FATAL (pi0 launch, decay off): %s\n", cudaGetErrorString(err));
     return 2;
   }
+  // A separate counter for the decaying pi0, so the "nothing was emitted" assertion below stays
+  // a statement about the four streaming steps rather than being widened until it passes.
+  int* d_pushes_decay = nullptr;
+  cudaMalloc(&d_pushes_decay, sizeof(int));
+  cudaMemset(d_pushes_decay, 0, sizeof(int));
+  RunNeutral<<<1, 1>>>(scene, d_in + 4, 1, ParticleType::kPiZero, nullptr, on, d_out + 4,
+                       d_pushes_decay);
+  err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    std::printf("FATAL (pi0 launch, decay on): %s\n", cudaGetErrorString(err));
+    return 2;
+  }
+  int pushes_decay = -1;
+  cudaMemcpy(&pushes_decay, d_pushes_decay, sizeof(int), cudaMemcpyDeviceToHost);
   cudaMemcpy(got.data(), d_out, sizeof(Outcome) * tracks.size(), cudaMemcpyDeviceToHost);
   int pushes = -1;
   cudaMemcpy(&pushes, d_pushes, sizeof(int), cudaMemcpyDeviceToHost);
@@ -322,6 +361,9 @@ int main() {
   CheckClose(got[2].true_length, len, 1e-14, "at 9999.9 ns: a full step");
 
   // ---------------------------------------------------------------- 3. the pi0 has no time cut
+  //
+  // Decay OFF for this one, so the time cut is the only thing that could end the step. See the
+  // launch above.
   std::printf("== a pi0 has no time cut, at any age ==\n");
   Check(got[3].status == static_cast<int>(StepStatus::fGeomBoundary),
         "a 2 ms pi0 still streams");
@@ -331,7 +373,33 @@ int main() {
 
   // ---------------------------------------------------------------- 4. nothing was emitted
   std::printf("== the emitter was never called ==\n");
-  Check(pushes == 0, "no secondary pushed by any of the four steps");
+  Check(pushes == 0, "no secondary pushed by any of the four streaming steps");
+
+  // ---------------------------------------------------------------- 4b. the pi0 decays at once
+  //
+  // `c*tau` for a pi0 is 2.55e-5 mm, and `in_flight_mean_free_path` at 100 MeV multiplies it by
+  // `p/m` = 1.62 - so the mean free path is 4.1e-5 mm against a 150 mm half-world. With this
+  // test's constant 0.5 uniform the sampled length is `-log(0.5)` of that, 2.9e-5 mm. The
+  // number is checked rather than "it is small", because a pi0 that decayed in the right place
+  // for the wrong reason - a zero length from the DBL_MIN sentinel, say - would pass a loose
+  // assertion and is a different branch.
+  {
+    const real_t m0 = particle_def<real_t>(ParticleType::kPiZero).mass;
+    const real_t mfp = decay::in_flight_mean_free_path<real_t>(111, m0, kEkin);
+    const real_t want = -std::log(real_t(0.5)) * mfp;
+    std::printf("== a pi0 decays inside its first step, wherever it was made ==\n");
+    std::printf("    mean free path %.6g mm at 100 MeV, so this step is %.6g mm\n", mfp, want);
+    Check(got[4].status == static_cast<int>(StepStatus::fPostStepDoItProc),
+          "a fresh pi0: fPostStepDoItProc");
+    Check(got[4].process == static_cast<int>(ProcessId::fDecay), "a fresh pi0: process fDecay");
+    CheckClose(got[4].true_length, want, 1e-14, "step = -log(u) * beta*gamma*c*tau");
+    Check(got[4].alive == 0, "a decayed pi0 is not requeued");
+    CheckClose(got[4].edep, 0.0, 0.0, "an in-flight decay deposits nothing, exactly");
+    // pi0 -> gamma gamma is 98.8% and the Dalitz channel 1.2%, so two or three products. Both
+    // are correct; what would be wrong is zero, which is what a refused channel gives.
+    Check(pushes_decay == 2 || pushes_decay == 3,
+          "two products (gamma gamma) or three (Dalitz)");
+  }
 
   // ---------------------------------------------------------------- 5. the other two dispositions
   //

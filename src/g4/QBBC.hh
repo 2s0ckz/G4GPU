@@ -34,13 +34,17 @@ class QBBC : public G4VModularPhysicsList {
     }
     std::printf(
         "\n"
-        "      The HADRONIC and DECAY components of QBBC are still not implemented. The\n"
-        "      charged hadrons above are transported by their electromagnetic physics alone:\n"
-        "      no elastic scattering, no inelastic reaction, no decay, no capture at rest.\n"
-        "      A neutron has no cross section at all and streams to the world boundary or\n"
-        "      dies on the 10 us tracking cut, which is what a Geant4 neutron does with\n"
-        "      NeutronGeneralProc inactivated. Neutrinos are counted as carrying their energy\n"
-        "      out of the event. Any other primary is refused at /run/beamOn rather than\n"
-        "      transported as something it is not. See docs/HADRONIC_PLAN.md.\n");
+        "      DECAY is active (G4Decay: in flight for pi+- pi0 K+- mu+- and the neutron, at\n"
+        "      rest for pi+ K+ mu+ - and, in stage 1, for the negatives too, because stage 1\n"
+        "      is compared against a Geant4 run with the three at-rest captures inactivated).\n"
+        "      The HADRONIC component is still not implemented: no elastic scattering, no\n"
+        "      inelastic reaction, no capture at rest. A neutron has no cross section at all\n"
+        "      and streams to the world boundary or dies on the 10 us tracking cut, which is\n"
+        "      what a Geant4 neutron does with NeutronGeneralProc inactivated. Neutrinos are\n"
+        "      counted as carrying their energy out of the event. Any other primary is refused\n"
+        "      at /run/beamOn rather than transported as something it is not. What a hadronic\n"
+        "      process the transport reaches and cannot apply costs is counted BY NAME and\n"
+        "      printed at the end of the run, with the energy it took with it. See\n"
+        "      docs/HADRONIC_PLAN.md and docs/PORTED.md 2.1.5.\n");
   }
 };

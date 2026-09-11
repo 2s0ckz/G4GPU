@@ -1,0 +1,33 @@
+# Stage 1: example B1 with a kaon- beam, everything P9-P14 owes inactivated,
+# and Decay and hadElastic LEFT ACTIVE.
+#
+# See kaon_plus and muon_minus. This is also the row with the largest stage-0 disagreement
+# on record - the port was 9.52% high at 61 sigma (docs/RISK.md V44) - so it is the one
+# whose stage-1 number says least about P8 and most about the open EM question.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for kaon- - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+/process/inactivate kaon-Inelastic
+/process/inactivate hBertiniCaptureAtRest
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select kaon-
+/particle/process/dump
+
+/gun/particle kaon-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

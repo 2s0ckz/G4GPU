@@ -1,0 +1,40 @@
+# Stage 1: example B1 with a kaon+ beam, everything P9-P14 owes inactivated,
+# and Decay LEFT ACTIVE.
+#
+# The kaon is the shortest-lived of the three positives - 12.380 ns proper, against the
+# pion's 26.033 - and the slowest at 200 MeV (beta 0.703), so it decays the most: about
+# 10% of tracks inside B1. Its range is 411.1 mm against the 300 mm envelope, so it still
+# crosses. The largest decay signal of the nine rows.
+#
+# THE _noelastic VARIANT. `hadElastic` is inactivated here as well, so this is the
+# like-for-like for a port that has DECAY AND NOT ELASTIC. The difference between this
+# file's dose and stage1_kaon_plus.mac's is what hadElastic is worth for this species and
+# this geometry - a measurement of the remaining gap rather than a claim about it.
+# See stage1_README.md.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for kaon+ - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+/process/inactivate kaon+Inelastic
+/process/inactivate hadElastic
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select kaon+
+/particle/process/dump
+
+/gun/particle kaon+
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

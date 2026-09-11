@@ -177,6 +177,17 @@ struct RunStats {
   /// of a refused species never gets this far: BeamOn ends the run instead.
   long long refused_by_species[static_cast<int>(ParticleType::kNumTypes)] = {};
   long long refused_total = 0;
+  /// The kinetic energy of those refused secondaries, MeV, by species and in total. See
+  /// EmitterBooks::refused_energy: a count is not a size, and an elastic recoil heavier than an
+  /// alpha is refused for want of ion transport rather than for want of physics.
+  double refused_energy_by_species[static_cast<int>(ParticleType::kNumTypes)] = {};
+  double refused_energy_total = 0;
+  /// Hadronic processes this transport reached and could not apply, by
+  /// `had::HadronicRefusal`, with the energy each one cost. See physics/hadronic/wiring.cuh.
+  long long had_refused_count[static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals)] =
+      {};
+  double had_refused_energy[static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals)] = {};
+  long long had_refused_total = 0;
   /// Energy discarded by the neutron time cut, MeV, and how many neutrons it killed.
   ///
   /// Separate from `carried_away` because it is a different kind of loss and conflating them
@@ -335,6 +346,20 @@ class TransportEngine {
   void SetProcesses(const ProcessFlags& f) { processes_ = f; }
   const ProcessFlags& GetProcesses() const { return processes_; }
 
+  /// Which Geant4 configuration this run is the like-for-like partner of, and which of P8's
+  /// hadronic processes are active. See physics/hadronic/wiring.cuh.
+  ///
+  /// A RUN-TIME setting, so that both columns of the comparison table come out of one binary -
+  /// docs/RISK.md V45 is what a second binary costs. Set before BeamOn; the wiring struct is
+  /// built at each launch, so this can change between runs in one process.
+  void SetHadronicStage(had::HadronicStage s) { had_stage_ = s; }
+  had::HadronicStage GetHadronicStage() const { return had_stage_; }
+  void SetHadronicProcesses(bool decay, bool elastic, bool capture) {
+    had_decay_ = decay;
+    had_elastic_ = elastic;
+    had_capture_ = capture;
+  }
+
   /// How many secondaries the arena behind GetSecondaryInCurrentStep() can hold in one kernel
   /// launch, across every track in flight. Not a per-step limit - a step may create as many
   /// secondaries as physics makes - and the default is sized against the batch. Set before
@@ -461,6 +486,14 @@ class TransportEngine {
   /// at emission by BufferEmitter::push through EmitterBooks.
   int* d_carried_n_ = nullptr;
   int* d_refused_ = nullptr;
+  double* d_refused_e_ = nullptr;
+  /// P8's per-refusal ledgers: one count and one energy per `had::HadronicRefusal`.
+  int* d_had_refused_n_ = nullptr;
+  double* d_had_refused_e_ = nullptr;
+  had::HadronicStage had_stage_ = had::HadronicStage::kStage1;
+  bool had_decay_ = true;
+  bool had_elastic_ = true;
+  bool had_capture_ = true;
   /// Energy and count discarded by the neutron time cut. Two words, written by run_step_neutral.
   double* d_killed_energy_ = nullptr;
   int* d_killed_n_ = nullptr;

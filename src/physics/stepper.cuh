@@ -22,7 +22,9 @@
 #include "physics/em/annihilation.cuh"
 #include "physics/em/pair_production.cuh"
 #include "physics/em/urban_msc.cuh"
+#include "physics/decay/decay.cuh"
 #include "physics/hadronic/neutron_general_xs.cuh"
+#include "physics/hadronic/wiring.cuh"
 #include "physics/scene.cuh"
 #include "render/trajectory.cuh"
 
@@ -562,12 +564,36 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     as long as it has been stepped. docs/PORTED.md 1.3 and docs/RISK.md V38 carry the numbers
 ///     and the reason no energy refusal was added.
 ///
-///   * **There are no nuclear interactions.** This is EM transport: a proton here is stopped by
-///     electrons, never by a nucleus. That is a real omission with a known size rather than an
-///     approximation - see docs/RISK.md.
+///   * **The one nuclear interaction here is DECAY.** This used to read "there are no nuclear
+///     interactions"; P8 added `G4Decay`, as a discrete process competing with the delta ray
+///     and geometry, and as an at-rest process on the dying branch. Everything else QBBC gives
+///     a charged hadron is still absent, and each absence has a package and a counter:
+///
+///       - `hadElastic`. P5's models are transcribed and bit-exact against the oracle and P2's
+///         cross sections are device-callable, so what is missing is neither the physics nor
+///         the framework - it is the TARGET DRAW. `xs::store_sample_za` needs an
+///         `ElementIsotopes` per element (mass numbers and relative abundances) and no table
+///         in this port holds abundances: `data/natural_isotopes.hh` is deliberately the SET
+///         and not the weights, `data/isotope_list.hh` is amin/amax/aeff, and
+///         `data::Material` has no isotope field to upload one into. An elastic recoil is
+///         (Z, A)-resolved - `G4ChipsElasticModel` reads both and the CHIPS tables are
+///         per-isotope - so there is no version of this that draws an element and stops.
+///         Named here rather than approximated by aeff[Z], which would be a plausible number
+///         from a different physics. Its size, per species, is the difference between the two
+///         Geant4 columns of `ref/b1hadron/stage1_compare.ps1`.
+///       - the inelastic final state (P9-P11), the large hole: docs/RESULT.md puts it at 19%
+///         of a 210 MeV proton's dose and 33% of an 840 MeV alpha's.
+///       - the at-rest capture of a stopped negative hadron (P12), refused by name and
+///         counted with the rest mass it costs - see `had::HadronicRefusal`, and note that in
+///         stage 1 it is Geant4 that has it switched off and both sides decay instead.
+///
+///     Only the third is reachable from this function today, because the first two are absent
+///     from the cross section rather than present and refused: a charged hadron here draws no
+///     hadronic interaction length at all.
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
-                                   ParticleType type, Rng& rng, Emitter& em, real_t& edep,
+                                   ParticleType type, const had::HadronicWiring<real_t>& had,
+                                   Rng& rng, Emitter& em, real_t& edep,
                                    StepReport<real_t>& rep,
                                    vis::TrajectoryBuffer traj = vis::no_capture()) {
   edep = real_t(0);
@@ -598,6 +624,22 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     const real_t delta_xs = em::hadron_delta_xs(mm, type, p.ekin, cut, real_t(1e30));
     const real_t d_delta = (delta_xs > real_t(0)) ? -log(rng.uniform()) / delta_xs
                                                   : geom::kInfinity<real_t>();
+
+    // ---- G4Decay in flight, a second discrete competitor.
+    //
+    // THE DRAW IS CONDITIONAL AND THAT IS LOAD-BEARING. `decays_in_flight` is false for every
+    // stable species, so a proton, an alpha, a deuteron and a He3 consume exactly the uniforms
+    // they consumed before P8 and their B1 doses are unmoved - which matters because the
+    // proton's is this project's headline number and is checked to a fraction of a sigma. An
+    // unconditional `-log(rand)` here would shift it, and the shift would look like physics.
+    //
+    // The triton is the interesting row: `G4Decay::IsApplicable` reads the LIFETIME, so the
+    // triton gets the process (17.774 years >= 0), and `GetPDGStable()` is true, so it never
+    // fires. `decays_in_flight` asks both questions in that order, as P4's file does.
+    const real_t d_decay =
+        (had.decay && had::decays_in_flight(type))
+            ? had::decay_in_flight_length<real_t>(type, pd.mass, p.ekin, rng)
+            : geom::kInfinity<real_t>();
 
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
@@ -651,7 +693,7 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
             : geom::kInfinity<real_t>();
 
     // The true path length this step would take if geometry did not interrupt it.
-    real_t t_step = fmin(fmin(max_step, t_msc), d_delta);
+    real_t t_step = fmin(fmin(max_step, t_msc), fmin(d_delta, d_decay));
     t_step = fmin(t_step, range);
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
@@ -698,14 +740,22 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     rep.true_length = step_len;
 
     // A discrete process fires only if it was the limiting true length and geometry did not
-    // cut in first.
-    const bool emits_delta = !hits_boundary && (d_delta <= t_step);
+    // cut in first. Decay is tested FIRST and strictly, so a tie goes to the delta ray - which
+    // is arbitrary, exactly as Geant4's is: `G4SteppingManager::DefinePhysicalStepLength` keeps
+    // the smallest with a strict `<`, so the winner of a tie is whichever process the process
+    // manager holds first, which is the order the physics list registered them in. A tie between
+    // two continuous distributions has probability zero; what it must not do is fire both.
+    const bool decays = !hits_boundary && (d_decay <= t_step) && (d_decay < d_delta);
+    const bool emits_delta = !hits_boundary && !decays && (d_delta <= t_step);
 
     // Read back out as G4StepPoint::GetProcessDefinedStep would report it. See the same block
     // in step_lepton.
     if (hits_boundary) {
       rep.status = StepStatus::fGeomBoundary;
       rep.process = ProcessId::fTransportation;
+    } else if (decays) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fDecay;
     } else if (emits_delta) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fIonisation;
@@ -838,16 +888,95 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
       }
     }
 
+    // ---- the decay itself, G4Decay::DecayIt on the POST-step state.
+    //
+    // After the continuous loss and after the scattering, because that is the order Geant4
+    // runs them in - AlongStepDoIt for every process, then the one PostStepDoIt that won - so
+    // the decay sees the energy and direction the step left the particle with. It deposits
+    // nothing: `energyDeposit` in DecayIt is zero on the in-flight branch, and the parent's
+    // whole four-momentum goes into the products.
+    if (decays) {
+      const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};
+      decay::DecayProducts<real_t> products;
+      decay::sample_decay<real_t>(pdg_code(type), pd.mass, p.ekin, dir3, false, rng, products);
+      em.pos = p.pos;
+      em.volume = p.volume;
+      em.event = p.event;
+      if (products.status == decay::DecayStatus::kOK) {
+        had::emit_decay_products<real_t>(products, em, had.books);
+      } else if (products.status != decay::DecayStatus::kStable) {
+        // G4Decay's DECAY101 path: the parent is killed with no secondaries and a zero deposit.
+        // kStable is NOT that path and is not a refusal - it is DecayIt returning an untouched
+        // particle change, a no-op rather than an error, and P4's DecayStatus says so. It is
+        // also unreachable from here, because `decays_in_flight` asked the same question before
+        // the length was drawn. Every other status means P4 refused the channel, which cannot
+        // happen for the species this stepper transports - so it is counted rather than trusted.
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, p.ekin);
+      }
+      // The step report was already written in the read-back block above -
+      // `(fPostStepDoItProc, fDecay)` - and it is NOT rewritten here. This branch used to set
+      // `fStopAndKill`, which is wrong twice over. `core/step_report.cuh` reserves
+      // `fStopAndKill` for the tracking-cut death and pairs it with `fBelowTrackingCut`, and
+      // the port's own at-rest decay below reports `(fStopAndKill, fDecay)` because
+      // G4StepStatus has no `fAtRestDoItProc` equivalent here - so an in-flight decay marked
+      // `fStopAndKill` was indistinguishable from an at-rest one, and a stepping action
+      // counting stopped pions would have counted every pion that decayed in flight as well.
+      // `step_lepton`'s in-flight annihilation - the same shape of process, a PostStepDoIt that
+      // consumes its primary - leaves `fPostStepDoItProc` standing for exactly this reason.
+      return false;
+    }
+
     if (p.ekin >= em::kHadronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld) {
       return true;
     }
   }
 
-  // Dying: whatever is left is deposited here. A stopped proton in this transport does not
-  // capture on a nucleus - there is no hadronic physics - so there is nothing else to do.
+  // Dying: whatever is left is deposited here.
+  //
+  // WHICH DEATH THIS IS matters, because only one of the two has an at-rest process. A track
+  // that crossed the world boundary is gone with its energy; a track that ran out of range
+  // STOPPED, and a stopped unstable particle is what `G4Decay`'s at-rest branch and P12's
+  // stopping processes compete for. The port's stop is at `kHadronTrackingCut` or 10 um of
+  // residual range rather than at exactly zero energy, so the residual kinetic energy is
+  // deposited - which is also `G4Decay::DecayIt`'s own `energyDeposit` on the at-rest branch
+  // (the parent is at rest by definition, so it is normally zero).
+  const bool stopped_in_world = (p.volume >= 0) && (p.volume != geom::kOutsideWorld);
   rep.status = StepStatus::fStopAndKill;
   if (rep.process == ProcessId::fNotDefined) { rep.process = ProcessId::fBelowTrackingCut; }
   if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
+
+  if (stopped_in_world && had.decay && had::decay_at_rest_allowed(type, had.stage)) {
+    // The at-rest branch does NOT boost: the products are built in the parent's rest frame and
+    // stay there. See P4's `sample_decay`, whose `at_rest` argument is exactly this.
+    const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};
+    decay::DecayProducts<real_t> products;
+    decay::sample_decay<real_t>(pdg_code(type), pd.mass, p.ekin, dir3, true, rng, products);
+    em.pos = p.pos;
+    em.volume = p.volume;
+    em.event = p.event;
+    if (products.status == decay::DecayStatus::kOK) {
+      had::emit_decay_products<real_t>(products, em, had.books);
+      rep.process = ProcessId::fDecay;
+    } else if (products.status != decay::DecayStatus::kStable) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, p.ekin);
+    }
+  } else if (stopped_in_world && had.stage == had::HadronicStage::kFinal) {
+    // No decay at rest, in the FINAL stage: a stopping process pre-empted it and this port does
+    // not have it. A hole worth the whole rest mass, so it is booked by name.
+    //
+    // THE STAGE CONDITION IS NOT DECORATION. In stage 1 the three at-rest captures are
+    // inactivated on the Geant4 side, so a stopped pi-, K- or mu- decays there and here -
+    // `decay_at_rest_allowed` took that branch - and a stopped ANTIPROTON does nothing on
+    // either side, because it is stable (so `G4Decay::IsApplicable` is false for it) and its
+    // only at-rest process is the one that was switched off. Booking a refusal for it in
+    // stage 1 would count agreement as a gap and put a number in the report that says the
+    // answer is missing energy it is not missing.
+    const had::HadronicRefusal r = had::stopped_refusal(type);
+    if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+      had::book_refusal<real_t>(had.books, r,
+                                had::stopped_refusal_energy<real_t>(type, p.ekin));
+    }
+  }
   return false;
 }
 
@@ -901,7 +1030,8 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& p,
                                     ParticleType type,
-                                    const had::NeutronGeneralXs<real_t>* xs, Rng& rng,
+                                    const had::NeutronGeneralXs<real_t>* xs,
+                                    const had::HadronicWiring<real_t>& had, Rng& rng,
                                     Emitter& em, real_t& edep, StepReport<real_t>& rep,
                                     vis::TrajectoryBuffer traj = vis::no_capture()) {
   edep = real_t(0);
@@ -932,11 +1062,61 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
   const real_t d_boundary =
       geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
-  // Zero for a pi0 and for a neutron with no table, which is every run today.
-  const real_t sigma = (xs != nullptr && type == ParticleType::kNeutron)
-                           ? xs->total(mat, p.ekin) : real_t(0);
+  // Zero for a pi0, and for a neutron with no table or with the general process switched off.
+  //
+  // ONE LOGARITHM OF THE ENERGY, taken here and handed to both `total()` and `select()`, as
+  // G4NeutronGeneralProcess takes one `fLogEnergy` per step and reads it from
+  // ComputeGeneralLambda and GetProbability alike. Only taken when there is a table to look
+  // up in: `log` of a kinetic energy is defined for every track this function sees, but a
+  // transcendental per step for a pi0 that has no table is a cost with no answer attached.
+  const bool has_general_process =
+      (xs != nullptr && type == ParticleType::kNeutron
+       && (had.hadron_elastic || had.neutron_capture));
+  const real_t loge = has_general_process ? log(p.ekin) : real_t(0);
+  const real_t sigma = has_general_process ? xs->total(mat, p.ekin, loge) : real_t(0);
   const real_t s_int =
       (sigma > real_t(0)) ? -log(rng.uniform()) / sigma : geom::kInfinity<real_t>();
+
+  // ---- G4Decay in flight, competing with the general process and with geometry.
+  //
+  // Both neutral hadrons have it and they are at opposite extremes. A free neutron's proper
+  // lifetime is 880 s, so `beta*gamma*c*tau` is 2.6e11 mm at 100 MeV - the process is present
+  // and inert, which is why `neutron_nogeneral.mac` leaves Decay ACTIVE on the Geant4 side
+  // rather than inactivating something that cannot fire. A pi0's is 8.5e-8 ns, so `c*tau` is
+  // 2.55e-5 mm and `p/m * c*tau` at 100 MeV is about 3e-5 mm: it decays inside the first step,
+  // always, wherever it was made. "pi0 decays at once" is that number and not a special case -
+  // the same competition produces it.
+  //
+  // Conditional, for the reason `step_hadron` gives: a species that does not decay must draw
+  // no uniform, or every existing result for it moves.
+  const real_t d_decay =
+      (had.decay && had::decays_in_flight(type))
+          ? had::decay_in_flight_length<real_t>(type, particle_def<real_t>(type).mass, p.ekin,
+                                                rng)
+          : geom::kInfinity<real_t>();
+
+  if (d_decay < s_int && d_decay < d_boundary) {
+    // Decay wins. The step ends where it fired, the parent is killed with no deposit, and the
+    // products carry the whole four-momentum.
+    rep.true_length = d_decay;
+    rep.status = StepStatus::fPostStepDoItProc;
+    rep.process = ProcessId::fDecay;
+    p.pos = p.pos + d_decay * p.dir;
+    traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+    const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};
+    decay::DecayProducts<real_t> products;
+    decay::sample_decay<real_t>(pdg_code(type), particle_def<real_t>(type).mass, p.ekin, dir3,
+                                false, rng, products);
+    em.pos = p.pos;
+    em.volume = p.volume;
+    em.event = p.event;
+    if (products.status == decay::DecayStatus::kOK) {
+      had::emit_decay_products<real_t>(products, em, had.books);
+    } else if (products.status != decay::DecayStatus::kStable) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, p.ekin);
+    }
+    return false;
+  }
 
   if (s_int >= d_boundary) {
     // Streaming. One step, requeued unless it left the world - the same shape as step_gamma's
@@ -954,9 +1134,20 @@ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<real_t>& 
   //
   // UNREACHABLE TODAY, and it says so in the only way the build can hear. `sigma` is zero
   // unless a table is present, and TransportEngine::Upload refuses to hold a table without the
-  // final states to go with it - so nothing can arrive here until P8 has written both. When it
-  // has, this is where `xs->select(mat, p.ekin, rng.uniform())` chooses between elastic,
-  // inelastic and capture and the chosen model's final state is applied.
+  // final states to go with it - so nothing can arrive here until both exist. When they do,
+  // this is where `xs->select(mat, p.ekin, loge, rng.uniform())` chooses between elastic
+  // (P5), inelastic (P9-P11, refused by name) and capture (P7) and the chosen model's final
+  // state is applied; `loge` above is already the one logarithm that choice needs.
+  //
+  // WHAT P8 DID NOT FINISH, stated where it would go rather than only in a report. The table
+  // is buildable today - `xs::ngp_build_table` is bit-exact against the oracle and
+  // `neutron_general_view` turns it into the socket above - and the two final states that are
+  // selectable in stage 1 are written (`elastic/elastic_process.cuh`, `capture/
+  // capture_process.cuh`). What is missing is device MEMORY for two datasets neither of which
+  // has an upload path: the isotope abundances `SampleZandA` draws a target from, and P3's
+  // PhotonEvaporation5.7 level data that a capture cascade walks (174,411 levels, 268,190
+  // transitions). Until those are uploaded a neutron that reached here could choose a
+  // sub-process and not apply it, which is the one combination Upload refuses.
   //
   // Until then the step is left annotated with `fNotDefined`, which is not laziness: it is the
   // one value `g4dose -verify-step-hook` fails the build on, and it is reserved for exactly

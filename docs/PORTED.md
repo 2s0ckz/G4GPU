@@ -156,7 +156,6 @@ physics lists.
 | G4ComponentBarNucleonNucleusXsc | **P** | `hadronic/barashenkov_xs.cuh` |
 | G4PiData (the interpolation it calls) | **T** | same |
 | G4BarashenkovData (the tables) | **T** | `data/barashenkov.hh`, 17 elements, 776 points |
-<<<<<<< HEAD
 | G4NuclearRadii (all 7 radii + both CoulombFactor) | **V** | `hadronic/xs/nuclear_radii.cuh` |
 | G4NucleiPropertiesTableAME12 / G4NucleiProperties | **P** | `data/nuclei_mass_ame12.hh`, 3353 nuclides |
 | G4PhysicsVector / LogVector / LinearVector (evaluation) | **V** | `hadronic/xs/physics_vector.cuh` |
@@ -180,7 +179,6 @@ physics lists.
 | G4HadXSHelper::FillPeaksStructure | **V** | checked in `tests/test_particlexs.cu`; P5 owns the port |
 | G4ComponentSAIDTotalXS | **-** | not reachable - see below |
 | G4ComponentAntiNuclNuclearXS | **-** | refused by name in `hadronic/xs/refusal.cuh` |
-=======
 | G4NeutronGeneralProcess | **P** | `hadronic/neutron_general_xs.cuh` and `step_neutral` in `physics/stepper.cuh`. The *shape* of the process, not its numbers: `EnableNeutronGeneralProcess` is 1 in 11.1.1, so a neutron has one discrete interaction length over elastic + inelastic + capture summed and picks the sub-process from cumulative partials afterwards, and `G4NeutronTrackingCut::ConstructProcess` returns early so the 10 us cut lives inside it. Ported: the grid `PreparePhysicsTable` builds (400 log bins 1 keV - 20 MeV, 70 more to 100 TeV, **linear** interpolation - the spline flag is `false`), the `G4PhysicsVector::LogVectorValue` lookup, the sub-process choice including the **order swap** either side of 20 MeV, and the time cut with its energy half correctly inert. Not ported: the table's contents (P2) and the final states (P8). The pointer is null, the cross section is zero, and a neutron streams to the world boundary or dies on the clock - which is what a Geant4 neutron does with `NeutronGeneralProc` inactivated. `Upload` refuses a table without final states. |
 
 Nucleon-nucleus total, inelastic and elastic, Z = 2..92, 14 MeV - 1 TeV, protons and neutrons,
@@ -380,6 +378,106 @@ transcription can get wrong while still producing a plausible answer.
 
 Tests: `test_precompound.cu` - 374,345 exact comparisons at worst 1.2e-14, plus 21 statistical
 campaigns of 20,000 events.
+#### 2.1.5 Neutron radiative capture (P7), and the first wiring (P8)
+
+`nCapture` end to end - `G4NeutronCaptureProcess` through P5's framework, on P2's
+`G4NeutronCaptureXS`, with `G4NeutronRadCapture` as its one model and P3's photon evaporation
+as that model's cascade. Plus the wiring layer P8 adds around it: the stage switch, the
+per-process refusal ledger, and `G4Decay` in the steppers.
+
+| Geant4 class / function | QBBC | | Where |
+|---|:--:|:--:|---|
+| G4NeutronRadCapture::ApplyYourself, both branches (A <= 1 two-body, A >= 5 compound) | y | **V** | `hadronic/capture/neutron_rad_capture.cuh` |
+| `lowestEnergyLimit` (the A <= 1 branch's "emit nothing and still kill the neutron") and `minExcitation` | y | **V** | same. H3 + n is the case in the oracle grid where it fires: Q = -1.60 MeV, so the capture is unbound and emits nothing |
+| G4DynamicParticle's four-momentum constructor / `Set4Momentum` (the `EnergyMRA2` shell test) | y | **V** | same. The comparison is on mass SQUARED with an allowance of 1e-10 MeV^2, and one ulp of a deuteron's mass squared is 7.8e-10 - so the middle branch always runs for a nucleus and a residual's kinetic energy is `t - sqrt(t^2-|p|^2)`, never `t - M(Z,A)`. Writing it the other way is 4.15e-10 out, measured |
+| G4NeutronCaptureProcess (the composition: `fHadNoIntegral`, the evaluated cross section, SampleZandA, one model, CheckResult, FillResult) | y | **V** | `hadronic/capture/capture_process.cuh` |
+| G4NucleiProperties::GetNuclearMass, as the capture mass balance uses it | y | **V** | `deexcitation/nuclear_masses.cuh`; 75 numbers over 15 targets and their compounds, worst 0 |
+| G4PhotonEvaporation::BreakUpChain as the capture cascade | y | **V** | `deexcitation/photon_evaporation.cuh`, reused unchanged except for the two fixes below |
+| **G4Decay in the transport** - in flight as a discrete competitor, at rest on the dying branch | y | **T** | `physics/stepper.cuh` (`step_hadron`, `step_neutral`) through `hadronic/wiring.cuh`. See section 3 for the channel-by-channel table, now `T` |
+| `theNumberOfInteractionLengthLeft` (`G4VDiscreteProcess`'s carried count) | y | **-** | Not carried, and not an approximation: over one step lambda is a constant (Geant4 evaluates it at the pre-step energy too), so `-log(u)*lambda` re-drawn per step and `n*lambda` decremented per step are the SAME distribution - the exponential is memoryless. `decay_in_flight_length`'s header has the argument and docs/RISK.md V22 has the reason (a wider `TrackState` is what the register budget cannot afford). Every EM discrete process in this stepper already works this way |
+| G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength as a COMPETITOR | y | **P** | `hadronic/wiring.cuh`. It returns 0.0, which is a pre-emption and not a race: no `-log(u)*tau` beats zero, so a stopped pi-, K-, mu- or pbar is captured in Geant4 and never decayed. The port refuses it by name (`HadronicRefusal::kStopped*`) with the rest mass it costs - 139.6 MeV for a pi-, 1876 for a pbar - and in `kStage1`, where Geant4's own three at-rest captures are inactivated, both sides decay instead |
+
+**What is refused, by name.**
+
+- **The isomer index of an excited residual.** Geant4 ends a capture with
+  `G4IonTable::GetIon(Z, A, eexc, noFloat, 0)`, which snaps E* onto G4ENSDFSTATE and writes a
+  run-dependent isomer digit into the PDG code's last place (1000260572 for Fe57 at 136 keV).
+  P3 refuses that digit and this module does too; 101 of the 600 deterministic oracle points
+  have a non-zero one, so it is not a corner. The MASS is a separate question and was measured
+  rather than refused - all 568 residuals agree with Geant4's snapped mass to the last bit - so
+  `CaptureRefusal::kIsomerIonMass` reads "this row went through the snapping", not "this number
+  is wrong". docs/RISK.md V40 is why it had to be asked.
+- **A stale `fIndex` across captures.** `G4NeutronRadCapture` owns one `G4PhotonEvaporation` for
+  the life of the run, and `G4LevelManager::NearestLevelIndex(energy, index)` short-circuits when
+  the hinted level is within 10 eV of the energy asked for - so the answer can depend on the
+  previous capture. It agrees with a fresh state whenever the predecessor's cascade reached the
+  ground state (`GenerateGamma` leaves `fIndex = 0` there); only an isomer-terminated cascade
+  leaves it elsewhere. `neutron_rad_capture_apply` takes the state as an optional argument, the
+  deterministic oracle uses a fresh model per call and the statistical one uses a single model
+  for 20,000 calls as a run does, and the 3.49 sigma the second passes at is the bound on the
+  difference.
+- **Everything P3 refuses inside photon evaporation**, unchanged: the correlated-gamma angular
+  correlation, the hyper-nucleus path, and the PDG code of an excited heavy ion.
+- **A cascade longer than the final state can hold** (`kSecondaryOverflow`), and an unphysical
+  target (`kUnphysicalTarget`).
+
+**Two ulps that only a recoil could see, fixed here.** `deexcitation/fragment.cuh`'s
+`LorentzVector::boost_vector` divided by the energy; `HepLorentzVector::boostVector()` is
+`pp * (1./ee)` (LorentzVector.cc:189), which is docs/RISK.md V37's finding for the elastic
+models arriving a second time. And P3's `generate_gamma` discarded the sampled level lifetime.
+Neither was visible to P3's own five tests, whose fragments are at rest - the boost vector is
+then zero and the arithmetic never runs. Putting the division back moves 5493 direction
+components from exactly 0 to 1.4e-13 and the kinetic energies to 2.0e-16; discarding the
+lifetime again makes every secondary time wrong by 100%.
+
+**The numbers.** `ref/oracle/capture_masses.csv` 75 masses, worst 0. `capture_det.csv`
+`ApplyYourself` under a prescribed eight-value uniform cycle, so the model is a deterministic
+function of (target, energy, phase): 600 calls, 1831 secondaries, and secondary count, uniforms
+consumed, primary energy change, both secondary masses, kinetic energy, direction and time all
+worst **0**. `capture_stat.csv` 20,000 captures per (target, energy) at a fixed seed: 1162
+comparisons of moments and histogram bins, worst **3.49 sigma** against a stated limit of 5.
+Tests: `test_capture.cu`, `test_wiring.cu`.
+
+**The stage-1 like-for-like.** Geant4 QBBC B1 with every `*Inelastic`, the three at-rest
+captures, `muonNuclear`, `hBrems`/`hPairProd`/`muBrems`/`muPairProd`, `CoulombScat` and
+`NeutronGeneralProc` inactivated - `Decay` and `hadElastic` left active - against the port in
+`HadronicStage::kStage1`, 500,000 events per run per side, nine species, 27 runs. Macros,
+script, the full table and the Geant4 process dump of the stage are in `ref/b1hadron/`
+(`stage1_README.md`). Against the column that is the true like-for-like for a port with decay
+and no elastic scattering:
+
+| | proton | alpha | mu+ | pi+ | K+ | mu- | pi- | K- | neutron |
+|---|---|---|---|---|---|---|---|---|---|
+| diff | -0.29% | -0.08% | -0.24% | -0.25% | +0.30% | +3.72% | +4.86% | +9.83% | 0 vs 0 |
+| sigma | 1.9 | 0.5 | 1.6 | 1.7 | 1.9 | 24.3 | 31.7 | 58.3 | - |
+
+The five positive-or-neutral species agree at 0.5 to 1.9 sigma with `Decay` active on both
+sides, which is what P8 was for. The three negatives carry docs/RISK.md **V44** - a range-table
+interpolation rule that differs for the negative of each charge pair, in this port's EM code,
+found and fixed by P14 on its own branch - and not a decay defect: the port's own pi+/pi- pair
+agrees with itself to 0.2% and Geant4's differs by 5%. **mu+ is the one row with nothing
+missing**: `G4HadronElasticPhysics::ConstructProcess` registers an elastic process for no
+lepton, so the two Geant4 columns for mu+ are bit-identical and its 1.6 sigma is a complete
+comparison. What `hadElastic` is worth, from the difference between the two Geant4 columns, is
+-2.42% for the proton, -4.08% for pi+, -2.16% for pi-, -0.22% for alpha, +0.22% for K+ and
++0.72% for K-.
+
+**What P8 wired, and what it did not.** `G4Decay` is reached, for every species Geant4 gives
+one and P4 has a table for, in flight and at rest. `hadElastic` and the neutron general
+process are NOT reached, and the reason in both cases is data that is not on the device rather
+than a model that is not written:
+
+- **hadElastic** needs `SampleZandA` to pick an isotope, and no table in this port holds
+  isotope ABUNDANCES - `data/natural_isotopes.hh` is deliberately the set and not the weights,
+  `data/isotope_list.hh` is amin/amax/aeff, and `data::Material` has no isotope field to
+  upload one into. The recoil is (Z, A)-resolved (G4ChipsElasticModel's tables are
+  per-isotope), so there is no version that draws an element and stops. Its size per species is
+  the difference between the two Geant4 columns of `ref/b1hadron/stage1_compare.ps1`.
+- **The neutron general process** needs P2's five tables uploaded per material, and its capture
+  sub-process needs P3's PhotonEvaporation5.7 level data on the device - 174,411 levels and
+  268,190 transitions, with no upload path today. `TransportEngine::Upload` refuses a
+  cross-section table that arrives without its final states, so the state is enforced and not
+  merely current.
 
 ### 2.2 What QBBC needs and is not there
 
@@ -507,16 +605,16 @@ for which `IsApplicable` is true. Invisible for gamma / e± / p / alpha - all st
 
 | Geant4 class | QBBC | | Where |
 |---|---|---|---|
-| G4Decay | y | **V** | `physics/decay/decay.cuh` |
-| G4DecayTable (`SelectADecayChannel`, `Insert`'s order) | y | **V** | `physics/decay/decay.cuh`, `physics/decay/decay_tables.hh` |
-| G4DecayProducts (`Boost`) | y | **V** | `physics/decay/decay_products.cuh` |
-| G4DynamicParticle (`Set4Momentum`, `SetMomentum`, `Get4Momentum`, the mass snap) | y | **V** | `physics/decay/decay_products.cuh` |
+| G4Decay | y | **T** | `physics/decay/decay.cuh`, wired by P8 in `physics/stepper.cuh` (in flight for pi+-, pi0, K+-, mu+- and the neutron; at rest for pi+, K+, mu+ always and for the negatives under the stage switch) |
+| G4DecayTable (`SelectADecayChannel`, `Insert`'s order) | y | **T** | `physics/decay/decay.cuh`, `physics/decay/decay_tables.hh` |
+| G4DecayProducts (`Boost`) | y | **T** | `physics/decay/decay_products.cuh` |
+| G4DynamicParticle (`Set4Momentum`, `SetMomentum`, `Get4Momentum`, the mass snap) | y | **T** | `physics/decay/decay_products.cuh`; and `Set4Momentum` again in `hadronic/capture/neutron_rad_capture.cuh`, where the `EnergyMRA2` branch that the decay path never reaches decides a capture residual's kinetic energy - see 2.1.5 |
 | G4VDecayChannel (`IsOKWithParentMass`, `rangeMass`) | y | **P** | `physics/decay/decay_channels.cuh` - `DynamicalMass`'s Breit-Wigner resampling is refused; no daughter of any ported table has a width above 1e-3 of its mass |
-| G4PhaseSpaceDecayChannel (1-, 2-, 3- and N-body) | y | **V** | `physics/decay/decay_channels.cuh` |
-| G4MuonDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` - the plain channel is what `G4MuonPlus.cc`/`G4MuonMinus.cc` install |
-| G4KL3DecayChannel (+ `DalitzDensity`) | y | **V** | `physics/decay/decay_channels.cuh` |
-| G4DalitzDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` |
-| G4NeutronBetaDecayChannel | y | **V** | `physics/decay/decay_channels.cuh` |
+| G4PhaseSpaceDecayChannel (1-, 2-, 3- and N-body) | y | **T** | `physics/decay/decay_channels.cuh` |
+| G4MuonDecayChannel | y | **T** | `physics/decay/decay_channels.cuh` - the plain channel is what `G4MuonPlus.cc`/`G4MuonMinus.cc` install |
+| G4KL3DecayChannel (+ `DalitzDensity`) | y | **T** | `physics/decay/decay_channels.cuh` |
+| G4DalitzDecayChannel | y | **T** | `physics/decay/decay_channels.cuh` - reached by 1.2% of pi0 decays, and a pi0 decays inside its first step wherever it is made (`beta*gamma*c*tau` is 4e-5 mm at 100 MeV) |
+| G4NeutronBetaDecayChannel | y | **V** | `physics/decay/decay_channels.cuh`. The neutron HAS the process now and this channel is the only one in its table, so it is reachable in principle and unreachable in practice: 880 s of proper lifetime is 2.6e11 mm of decay length at 100 MeV against a 300 mm phantom. `V` and not `T` for that reason, which is a statement about the geometry rather than about the code. |
 | G4MuonDecayChannelWithSpin | n | **-** | exists in 11.1.1; only `G4SpinDecayPhysics` installs it, and QBBC does not register that |
 | G4MuonRadiativeDecayChannelWithSpin | n | **-** | same |
 | G4PionRadiativeDecayChannel | n | **-** | in the release, in no table |
@@ -536,8 +634,11 @@ muon's bound decay lives inside `G4MuonMinusBoundDecay` with its own K-shell Mic
 belongs to P12, not here. `decay_at_rest_competitor` names the species so a wiring package
 cannot forget silently.
 
-Wiring (P8) still owes: a `ParticleType` for each PDG code, the process in the stepper's
-at-rest and post-step queues, and the competition above.
+Wiring (P8) HAS DELIVERED the three things this paragraph asked for, and section 2.1.5 says how:
+a `ParticleType` for each PDG code (`pdg_code` / `particle_type_of_pdg` /
+`particle_type_of_nucleus` in `core/particle.cuh`), the process in the stepper's post-step and
+at-rest paths, and the competition - which turned out to be a stage SWITCH rather than a race,
+because Geant4's own answer depends on whether the at-rest captures are inactivated.
 
 **That moment has arrived.** pi±, K±, mu±, the triton and the neutron all have stepping kernels
 now and all five are unstable (`ref/oracle/species_tables.csv` carries each one's lifetime and

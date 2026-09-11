@@ -1,0 +1,36 @@
+# Stage 1: example B1 with a neutron beam, everything P9-P14 owes inactivated,
+# and Decay and hadElastic LEFT ACTIVE.
+#
+# THE ONE ROW THAT IS NOT A STAGE-1 CONFIGURATION, and it cannot be made one. Elastic,
+# inelastic and capture are sub-processes of `NeutronGeneralProc`, whose
+# EnableNeutronGeneralProcess flag `G4HadronInelasticQBBC::ConstructProcess` sets
+# unconditionally with no messenger anywhere in 11.1.1 - so /process/inactivate takes all
+# three or none. This macro takes all three, which is stage ZERO for a neutron: both sides
+# deposit exactly nothing in the scoring volume, and that zero is a prediction rather than
+# an absence. `Decay` is left active because a free neutron's 880 s lifetime makes it inert
+# at any energy that crosses a phantom, and inactivating an inert process would make the
+# macro differ from Geant4's default for no reason. See stage1_README.md and
+# docs/RISK.md V53.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for neutron - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate NeutronGeneralProc
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select neutron
+/particle/process/dump
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

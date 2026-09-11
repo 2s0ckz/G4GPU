@@ -1,0 +1,24 @@
+# The port's half of the stage-1 pi- like-for-like. Its partners are stage1_pion_minus.mac and
+# stage1_pion_minus_noelastic.mac, run with ref/run/runb1.bat against the real Geant4 build of B1.
+#
+# NO /process/inactivate LINES, and that is the convention P1 set rather than an omission: this
+# port's G4UImanager rejects an unknown command instead of ignoring it, so a macro that named
+# Geant4's processes would fail here - and the two sides therefore cannot be the same file. What
+# each side switches off is in its own file, next to the number it produced.
+#
+# NO STAGE COMMAND EITHER. The engine's HadronicStage defaults to kStage1, which is what these
+# runs compare against, and there is no UI command for the other value on purpose: the final
+# configuration refuses the at-rest capture of every stopped negative hadron by name (P12), so
+# its dose is missing a rest mass per stopped track and is not a number to quote. When P12
+# lands, TransportEngine::SetHadronicStage is the one line that changes.
+#
+# See stage1_README.md for what stage 1 is and why there are two Geant4-side macros.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle pi-
+/gun/energy 200 MeV
+
+/run/beamOn 500000

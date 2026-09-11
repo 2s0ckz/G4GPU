@@ -1,0 +1,41 @@
+# Stage 1: example B1 with a proton beam, everything P9-P14 owes inactivated,
+# and Decay LEFT ACTIVE.
+#
+# B1's own hadronic beam. 210 MeV is the energy docs/RESULT.md's headline comparison uses:
+# the proton stops inside the scoring volume, so this row is a Bragg-peak dose and not a
+# plateau one - which makes it the most sensitive of the nine to anything that changes a
+# range. The proton is STABLE, so `Decay` is not on its manager at all and there is
+# nothing for stage 1 to switch on for it: what this row measures is hadElastic alone.
+#
+# THE _noelastic VARIANT. `hadElastic` is inactivated here as well, so this is the
+# like-for-like for a port that has DECAY AND NOT ELASTIC. The difference between this
+# file's dose and stage1_proton.mac's is what hadElastic is worth for this species and
+# this geometry - a measurement of the remaining gap rather than a claim about it.
+# See stage1_README.md.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for proton - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate CoulombScat
+/process/inactivate protonInelastic
+/process/inactivate hadElastic
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select proton
+/particle/process/dump
+
+/gun/particle proton
+/gun/energy 210 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

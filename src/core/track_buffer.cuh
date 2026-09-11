@@ -805,6 +805,19 @@ struct EmitterBooks {
   int* carried_by_type = nullptr;
   /// One counter per ParticleType, for species this port refuses to transport.
   int* refused_by_type = nullptr;
+  /// The kinetic ENERGY of those refused secondaries, MeV, one per ParticleType.
+  ///
+  /// Added by P8 because a count is not a size. Elastic scattering makes recoil nuclei, and
+  /// every recoil heavier than an alpha maps to `kGenericIon`, which has no kernel and is
+  /// refused - so a proton beam in water now loses the oxygen recoils above the 70 keV
+  /// production threshold, and "how many" does not say how much dose that is. `carried_away`
+  /// has had the same field for neutrinos since P1 for the same reason; this is the other
+  /// disposition catching up.
+  ///
+  /// Not per event, unlike `carried_away`: a refused particle is a defect in the port rather
+  /// than a term in an energy balance, so what is wanted is one number per run per species and
+  /// not a distribution.
+  double* refused_energy = nullptr;
 };
 
 /// Adapter giving the physics models the push() signature they already expect.
@@ -881,6 +894,9 @@ struct BufferEmitter {
       // here rather than that it exists and was mislaid.
       if (books.refused_by_type != nullptr) {
         atomicAdd(&books.refused_by_type[static_cast<int>(type)], 1);
+      }
+      if (books.refused_energy != nullptr) {
+        atomicAdd(&books.refused_energy[static_cast<int>(type)], static_cast<double>(ekin));
       }
       return -1;
     }

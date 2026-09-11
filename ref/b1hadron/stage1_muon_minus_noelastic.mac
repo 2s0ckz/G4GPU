@@ -1,0 +1,46 @@
+# Stage 1: example B1 with a mu- beam, everything P9-P14 owes inactivated,
+# and Decay LEFT ACTIVE.
+#
+# One line more than mu+: `muMinusCaptureAtRest`. With it inactivated a stopped mu- has
+# `G4Decay` as its only at-rest process and decays, which is what the port does in
+# HadronicStage::kStage1. In the final configuration it is captured -
+# G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength returns 0.0 and pre-empts the
+# decay outright (docs/RISK.md V38) - and the port refuses that by name.
+# This row also carries the charge-odd dose split docs/RISK.md V44 records: the port's mu-
+# was 3.78% high against Geant4 at stage 0 for reasons inside the EM ionisation chain, so
+# read the difference between this row and muon_plus against that number and not against
+# zero.
+#
+# THE _noelastic VARIANT. `hadElastic` is inactivated here as well, so this is the
+# like-for-like for a port that has DECAY AND NOT ELASTIC. The difference between this
+# file's dose and stage1_muon_minus.mac's is what hadElastic is worth for this species and
+# this geometry - a measurement of the remaining gap rather than a claim about it.
+# See stage1_README.md.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for mu- - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate muBrems
+/process/inactivate muPairProd
+/process/inactivate CoulombScat
+/process/inactivate muonNuclear
+/process/inactivate muMinusCaptureAtRest
+/process/inactivate hadElastic
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select mu-
+/particle/process/dump
+
+/gun/particle mu-
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

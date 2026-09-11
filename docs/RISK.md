@@ -5615,3 +5615,68 @@ what settles it is whether the two forms can differ on any reachable input.
 
 The third of those is the one to copy: when an input perturbation passes, the next question is
 whether the input is read at all, and the answer is usually two lines up in the function.
+
+### V53: a neutron that cannot be validated by a dose, and two transcriptions of its table
+
+**The neutron has no stage-1 configuration, and no UI command can make one.**
+
+Every other species in `ref/b1hadron/` can be run against a Geant4 whose process list matches
+the port's, one process at a time, because `/process/inactivate <name>` names a process on that
+species' process manager. The neutron's manager holds three entries and that is all
+(`ref/oracle/neutron_processes.csv`, dumped from the constructed QBBC):
+
+```
+Transportation        type 1  subtype 91
+Decay                 type 6  subtype 201
+NeutronGeneralProc    type 4  subtype 116
+```
+
+Elastic, inelastic and capture are **sub-processes inside** `G4NeutronGeneralProcess`, reachable
+only through its own summed cross-section table, and `EnableNeutronGeneralProcess` is set
+unconditionally by `G4HadronInelasticQBBC::ConstructProcess` with no messenger anywhere in
+11.1.1. So `/process/inactivate NeutronGeneralProc` takes elastic, inelastic AND capture
+together, or nothing. There is no configuration in which elastic and capture are active and
+inelastic is not.
+
+What follows is that the port's neutron transport **cannot be validated by a B1 dose comparison
+until P9-P11 land**. `ref/b1hadron/stage1_neutron.mac` inactivates the general process, both
+sides deposit exactly zero in the scoring volume, and the stage-1 table's neutron row is
+`0.0000 +/- 0.0000` against `0.0000 +/- 0.0000`. That zero is a prediction and worth having -
+it is what a Geant4 neutron does with its one hadronic process switched off, and the port
+reproduces the streaming and the 10 us time cut that produce it - but it is not evidence about a
+cross section or a final state. Until P9-P11 the neutron is validated by its table (bit-exact,
+`tests/test_particlexs.cu`), its sub-process selection (`tests/test_wiring.cu` section 5) and
+its final states (`tests/test_elastic_models.cu`, `tests/test_capture.cu`), and by nothing that
+looks like a dose.
+
+**And the table had two transcriptions.** P1 wrote the socket `step_neutral` reads -
+`src/physics/hadronic/neutron_general_xs.cuh` - including its own `G4PhysicsLogVector` lookup;
+P2 wrote the builder - `src/physics/hadronic/xs/neutron_general_xs.cuh` - whose output is
+compared with the oracle bit for bit. Both compute the grid's node energies, and they disagree:
+
+```
+P1   x[j] = e_min * pow(r, j),  r = exp((log(e_max) - log(e_min)) / n_bins)
+P2   x[j] = e_min * exp(j / invdBin),  invdBin = (n_nodes-1) / log(e_max/e_min),
+     x[0] and x[n-1] assigned exactly            <- G4PhysicsLogVector::Initialise
+```
+
+`log(a) - log(b)` is not `log(a/b)` and `pow(r, j)` is not `exp(j*ln r)`. On the real table -
+the three G4PARTICLEXS4.0 neutron data sets summed onto both grids for water and lead, every
+node and every bin midpoint, 1884 points - the socket's own formula differed from P2's by up to
+**7.62e-14** relative in the low zone and **2.02e-16** in the high one. The factor of 400
+between the zones is amplification, not noise: a log vector's interpolation divides by a bin
+width, the low grid's 400 bins over 4.301 decades are 23 times narrower in log(e) than the high
+grid's 70 over 6.699, and an ulp of node energy is that much larger a fraction of `x2 - x1`.
+7.6e-14 out from inputs correct to an ulp is V37's mechanism a third time.
+
+Fixed by P8: the socket is now a view of P2's `PhysVec` tables and evaluates them with P2's
+`phys_vec_log_value`, there is one grid and one lookup, and `tests/test_wiring.cu` section 5
+asserts the two agree bitwise over those 1884 points and over 5664 (energy, q) sub-process
+choices. The size is far below anything a dose resolves. That is not why it is written up: the
+transport was reading the transcription no oracle had seen while the validated one sat in the
+next directory, which is how V5/V7 and V40 each started.
+
+`NeutronGeneralXs::log_vector_value` is kept, because `tests/test_species.cu` checks the lookup
+MECHANICS through it - that the bin comes from log(e) and the interpolation is then linear in e -
+and that claim is still true and still worth a test. It is marked as not being what the transport
+reads.

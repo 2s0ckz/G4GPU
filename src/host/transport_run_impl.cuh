@@ -465,6 +465,7 @@ template <typename real_t, ParticleType kType, typename StepHook>
 __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, const int* idx,
                                 TrackBuffer<real_t> out, int n, int batch, double* score,
                                 double* voxel_score, int n_step,
+                                had::HadronicWiring<real_t> had,
                                 vis::TrajectoryBuffer traj, int* status_warn,
                                 SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -509,7 +510,7 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
 
   real_t edep = 0;
   constexpr ParticleType kSpecies = kType;
-  const bool alive = step_hadron(scene, p, kType, rng, em, edep, srep, traj);
+  const bool alive = step_hadron(scene, p, kType, had, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
   // G4Transportation::AlongStepDoIt. Done before the hook so a stepping action reads the
@@ -591,6 +592,7 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
                                  TrackBuffer<real_t> out, int n, int batch, double* score,
                                  double* voxel_score, int n_step,
                                  const had::NeutronGeneralXs<real_t>* neutron_xs,
+                                 had::HadronicWiring<real_t> had,
                                  double* killed_energy, int* killed_n,
                                  vis::TrajectoryBuffer traj, int* status_warn,
                                  SecondaryArena sec, EmitterBooks books, StepHook hook) {
@@ -633,7 +635,7 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
 
   real_t edep = 0;
   constexpr ParticleType kSpecies = kType;
-  const bool alive = step_neutral(scene, p, kType, neutron_xs, rng, em, edep, srep, traj);
+  const bool alive = step_neutral(scene, p, kType, neutron_xs, had, rng, em, edep, srep, traj);
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance. This is the one that decides
   // whether the neutron time cut ever fires, so it is load-bearing here in a way it is not for
@@ -1025,6 +1027,13 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                                 sizeof(int) * static_cast<int>(ParticleType::kNumTypes)));
     G4GPU_CUDA_CHECK(cudaMalloc(&d_refused_,
                                 sizeof(int) * static_cast<int>(ParticleType::kNumTypes)));
+    G4GPU_CUDA_CHECK(cudaMalloc(&d_refused_e_,
+                                sizeof(double) * static_cast<int>(ParticleType::kNumTypes)));
+    {
+      const int nr = static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals);
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_had_refused_n_, sizeof(int) * nr));
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_had_refused_e_, sizeof(double) * nr));
+    }
     G4GPU_CUDA_CHECK(cudaMalloc(&d_killed_energy_, sizeof(double)));
     G4GPU_CUDA_CHECK(cudaMalloc(&d_killed_n_, sizeof(int)));
 
@@ -1126,6 +1135,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       G4GPU_CUDA_CHECK(cudaMemset(d_carried_n_, 0, kTypeBytes));
     }
     if (d_refused_ != nullptr) { G4GPU_CUDA_CHECK(cudaMemset(d_refused_, 0, kTypeBytes)); }
+    if (d_refused_e_ != nullptr) {
+      G4GPU_CUDA_CHECK(cudaMemset(d_refused_e_, 0,
+                                  sizeof(double) * static_cast<size_t>(ParticleType::kNumTypes)));
+    }
+    {
+      const size_t nr = static_cast<size_t>(had::HadronicRefusal::kNumHadronicRefusals);
+      if (d_had_refused_n_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemset(d_had_refused_n_, 0, sizeof(int) * nr));
+      }
+      if (d_had_refused_e_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemset(d_had_refused_e_, 0, sizeof(double) * nr));
+      }
+    }
     if (d_killed_energy_ != nullptr) {
       G4GPU_CUDA_CHECK(cudaMemset(d_killed_energy_, 0, sizeof(double)));
     }
@@ -1429,7 +1451,18 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // portably, and because each line names the specialisation it launches - which is what
         // makes a missing species a compile error in the switch rather than a track that is
         // counted and never stepped.
-        const EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_};
+        const EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_, d_refused_e_};
+        // P8's wiring, built here and passed by value into every hadronic launch. One struct
+        // rather than five arguments, and built per launch rather than at Upload so that the
+        // stage can change between two BeamOn calls in one process - which is what
+        // ref/b1hadron/stage1_compare.ps1 needs of it.
+        had::HadronicWiring<real_t> had_wiring{};
+        had_wiring.stage = had_stage_;
+        had_wiring.decay = had_decay_;
+        had_wiring.hadron_elastic = had_elastic_;
+        had_wiring.neutron_capture = had_capture_;
+        had_wiring.books.count = d_had_refused_n_;
+        had_wiring.books.energy = d_had_refused_e_;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
           const int n_sp = nsp[sp];
           if (n_sp <= 0) { continue; }
@@ -1438,12 +1471,12 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 #define G4GPU_LAUNCH_HADRON(TYPE)                                                            \
   run_step_hadron<real_t, TYPE><<<blocks, threads_>>>(                                       \
       scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
-      d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_)
+      d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books, hook_)
 #define G4GPU_LAUNCH_NEUTRAL(TYPE)                                                           \
   run_step_neutral<real_t, TYPE><<<blocks, threads_>>>(                                      \
       scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
-      d_voxel_score_, step_n[sp], d_neutron_xs_, d_killed_energy_, d_killed_n_, traj,         \
-      d_status_warn_, sec_, books, hook_)
+      d_voxel_score_, step_n[sp], d_neutron_xs_, had_wiring, d_killed_energy_, d_killed_n_,   \
+      traj, d_status_warn_, sec_, books, hook_)
           switch (sp) {
             case kSpeciesGamma:
               run_step_gamma<real_t><<<blocks, threads_>>>(
@@ -1607,11 +1640,18 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         G4GPU_CUDA_CHECK(cudaMemcpy(n_refused.data(), d_refused_, sizeof(int) * kNT,
                                     cudaMemcpyDeviceToHost));
       }
+      std::vector<double> e_refused(kNT, 0.0);
+      if (d_refused_e_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(e_refused.data(), d_refused_e_, sizeof(double) * kNT,
+                                    cudaMemcpyDeviceToHost));
+      }
       for (int t = 0; t < kNT; ++t) {
         st.carried_by_species[t] = n_carried[t];
         st.carried_away_n += n_carried[t];
         st.refused_by_species[t] = n_refused[t];
         st.refused_total += n_refused[t];
+        st.refused_energy_by_species[t] = e_refused[t];
+        st.refused_energy_total += e_refused[t];
       }
       if (d_killed_n_ != nullptr) {
         int kn = 0;
@@ -1647,14 +1687,60 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // the shower had and this port did not carry, so the dose is low by whatever those
         // particles would have deposited - the same failure mode as a dropped track, arrived at
         // for a different reason.
-        std::printf("\n*** %lld SECONDARIES OF SPECIES THIS PORT CANNOT TRANSPORT ***\n\n"
+        std::printf("\n*** %lld SECONDARIES OF SPECIES THIS PORT CANNOT TRANSPORT, %.6g MeV"
+                    " ***\n\n"
                     "    They were counted at the point a process created them and no track\n"
                     "    was made, so the dose from this run is TOO LOW by whatever they\n"
-                    "    would have deposited.\n\n", st.refused_total);
+                    "    would have deposited. The energy column is what the answer is\n"
+                    "    missing; the count alone does not say.\n\n",
+                    st.refused_total, st.refused_energy_total);
         for (int t = 0; t < kNT; ++t) {
           if (n_refused[t] > 0) {
-            std::printf("      %-12s %lld\n", particle_name(static_cast<ParticleType>(t)),
-                        st.refused_by_species[t]);
+            std::printf("      %-12s %10lld   %12.6g MeV\n",
+                        particle_name(static_cast<ParticleType>(t)),
+                        st.refused_by_species[t], st.refused_energy_by_species[t]);
+          }
+        }
+        std::printf("\n");
+      }
+    }
+
+    // ---- P8's per-process refusals.
+    //
+    // Separate from the species ledger above and NOT foldable into it: that one is "this
+    // transport has no kernel for that particle", this one is "this transport reached that
+    // PROCESS and has no final state for it". A stopped pi- is not a refused species - pi- has
+    // a kernel and was transported all the way to rest - it is a refused capture, and the
+    // energy it costs is a rest mass rather than a kinetic one.
+    {
+      const int kNR = static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals);
+      std::vector<int> hn(kNR, 0);
+      std::vector<double> he(kNR, 0.0);
+      if (d_had_refused_n_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(hn.data(), d_had_refused_n_, sizeof(int) * kNR,
+                                    cudaMemcpyDeviceToHost));
+      }
+      if (d_had_refused_e_ != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemcpy(he.data(), d_had_refused_e_, sizeof(double) * kNR,
+                                    cudaMemcpyDeviceToHost));
+      }
+      for (int r = 0; r < kNR; ++r) {
+        st.had_refused_count[r] = hn[r];
+        st.had_refused_energy[r] = he[r];
+        st.had_refused_total += hn[r];
+      }
+      if (st.had_refused_total > 0) {
+        std::printf("\n*** %lld HADRONIC INTERACTIONS WITH NO FINAL STATE IN THIS PORT ***\n\n"
+                    "    Stage: %s\n"
+                    "    The cross section decided each of these happened; the model that\n"
+                    "    would have said what came out is not written. The dose is low by the\n"
+                    "    energy column, which is what the missing model would have moved.\n\n",
+                    st.had_refused_total, had::hadronic_stage_name(had_stage_));
+        for (int r = 0; r < kNR; ++r) {
+          if (hn[r] > 0) {
+            std::printf("      %10lld   %12.6g MeV   %s\n", st.had_refused_count[r],
+                        st.had_refused_energy[r],
+                        had::hadronic_refusal_name(static_cast<had::HadronicRefusal>(r)));
           }
         }
         std::printf("\n");
@@ -1739,11 +1825,17 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_carried_away_);
     cudaFree(d_carried_n_);
     cudaFree(d_refused_);
+    cudaFree(d_refused_e_);
+    cudaFree(d_had_refused_n_);
+    cudaFree(d_had_refused_e_);
     cudaFree(d_killed_energy_);
     cudaFree(d_killed_n_);
     d_carried_away_ = nullptr;
     d_carried_n_ = nullptr;
     d_refused_ = nullptr;
+    d_refused_e_ = nullptr;
+    d_had_refused_n_ = nullptr;
+    d_had_refused_e_ = nullptr;
     d_killed_energy_ = nullptr;
     d_killed_n_ = nullptr;
     cudaFree(d_neutron_xs_);

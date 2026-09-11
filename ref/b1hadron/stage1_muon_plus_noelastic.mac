@@ -1,0 +1,44 @@
+# Stage 1: example B1 with a mu+ beam, everything P9-P14 owes inactivated,
+# and Decay LEFT ACTIVE.
+#
+# A muon has NO hadElastic and no inelastic: `muonNuclear` (subtype 121) is the only
+# nuclear process on its manager and it is P13's. So this row is decay against
+# electromagnetic transport, and it is the cleanest test of P8's decay wiring - nothing
+# else about the muon changed between stage 0 and stage 1.
+# 200 MeV mu+ range in G4_WATER is 855.0 mm (hadron_tables.csv) against B1's 300 mm
+# envelope, so it CROSSES and does not stop: what fires is decay in flight, at about
+# 1 - exp(-1.24 ns / 2565 ns) = 0.05% of tracks. A small effect, deliberately: the muon is
+# the row that says the wiring did not break anything.
+#
+# THE _noelastic VARIANT. `hadElastic` is inactivated here as well, so this is the
+# like-for-like for a port that has DECAY AND NOT ELASTIC. The difference between this
+# file's dose and stage1_muon_plus.mac's is what hadElastic is worth for this species and
+# this geometry - a measurement of the remaining gap rather than a claim about it.
+# See stage1_README.md.
+#
+# Every name below is a row of ref/oracle/species_processes.csv for mu+ - the dump of
+# the constructed QBBC's own process manager. /process/inactivate ignores a name the
+# species does not have, silently, so a macro written from the source rather than from
+# the object can look like it switched something off. docs/RISK.md V43.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate muBrems
+/process/inactivate muPairProd
+/process/inactivate CoulombScat
+/process/inactivate muonNuclear
+/process/inactivate hadElastic
+
+# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
+# lesson: ask the object. This prints Active/InActive for every process on the
+# particle's manager, after the inactivations above.
+/particle/select mu+
+/particle/process/dump
+
+/gun/particle mu+
+/gun/energy 200 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

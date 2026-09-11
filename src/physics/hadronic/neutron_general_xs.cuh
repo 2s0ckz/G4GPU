@@ -38,12 +38,63 @@
 // element from `G4PARTICLEXSDATA` and do not overlap with it; when P8 fills these rows from
 // them, the lookup should move to whatever shared G4PhysicsVector helper P2 has by then and
 // this file keeps the grid, the contract and the sub-process order.
+//
+// That last sentence is now history rather than a plan: P8 did it, and the paragraph below says
+// what it found on the way.
+// ---------------------------------------------------------------------------------------------
+// P8: THE TWO HALVES ARE ONE FILE'S WORTH OF PHYSICS AND WERE TWO TRANSCRIPTIONS OF IT
+//
+// This header and `xs/neutron_general_xs.cuh` were written by different packages against the
+// same Geant4 class. P1 wrote the socket - the grid constants, the contract, and a
+// `log_vector_value` so that `step_neutral` could look a row up; P2 wrote the table - the same
+// grid, built as `G4PhysicsLogVector`'s constructor builds it, and `phys_vec_log_value`, and
+// checked the result against the oracle bit for bit.
+//
+// They did not agree. Both compute a log vector's node energies, and P2's own header names the
+// two wrong ways of doing it:
+//
+//     P1  x[j] = e_min * pow(r, j),  r = exp((log(e_max) - log(e_min)) / n_bins)
+//     P2  x[j] = e_min * exp(j / invdBin),  invdBin = (n_nodes-1) / log(e_max/e_min),
+//         with x[0] and x[n-1] assigned exactly - which is G4PhysicsLogVector::Initialise
+//
+// `log(a) - log(b)` and `log(a/b)` are different doubles, and `pow(r, j)` is not `exp(j*ln r)`,
+// so the interior nodes differ in the last places - and an interpolation AMPLIFIES that,
+// because `(e - x1)/(x2 - x1)` divides by a bin width. `tests/test_wiring.cu` section 5
+// measures it on the real table - G4NeutronElasticXS + G4NeutronInelasticXS +
+// G4NeutronCaptureXS out of G4PARTICLEXS4.0, summed onto both grids for water and lead, at
+// every node and every bin midpoint, 1884 points:
+//
+//     low zone (400 bins over 4.301 decades)    worst 7.62e-14 relative
+//     high zone (70 bins over 6.699 decades)    worst 2.02e-16 relative
+//
+// The factor of 400 between the two zones is the amplification and not noise: the low grid's
+// bins are 23 times narrower in log(e), so the same ulp of node energy is a larger fraction of
+// `x2 - x1`. 7.6e-14 is two orders of magnitude above an ulp of the value being interpolated,
+// from an input that was correct to an ulp - which is docs/RISK.md V37's mechanism again, and
+// the reason a "few ulps" note in a header is not a reason to keep the second transcription.
+//
+// The size is still small compared with anything a dose comparison resolves. That is not the
+// point either: the point is that the transport was reading the transcription no oracle had
+// seen, while the one that is bit-exact against Geant4 sat in the next directory.
+// docs/RISK.md V5/V7 is a Bragg peak 0.3% out for the same reason at a larger scale, and V40 is
+// two answers to one question about a level table.
+//
+// So `NeutronGeneralXs` now holds P2's `PhysVec` views and evaluates them with P2's
+// `phys_vec_log_value`. There is one grid, one lookup and one owner. What stays here is what is
+// about the PROCESS rather than about the table: the tracking cut, the sub-process order, and
+// the contract that a table may not arrive without its final states.
 #pragma once
 #include <cmath>
 
 #include "core/units.cuh"
+#include "physics/hadronic/xs/neutron_general_xs.cuh"
 
 namespace g4gpu::had {
+
+/// P2's cross sections live in `g4gpu::hadronic::xs`, which unqualified lookup cannot reach
+/// from inside `g4gpu::had` without help on every mention. Named once, as
+/// `capture/capture_process.cuh` does.
+namespace xs = g4gpu::hadronic::xs;
 
 // ---------------------------------------------------------------- the grid
 //
@@ -110,27 +161,29 @@ template <typename real_t> __host__ __device__ constexpr real_t kNeutronEnergyLi
 /// Which sub-process of the general process fired.
 enum class NeutronSubProcess : int { kElastic = 0, kInelastic = 1, kCapture = 2 };
 
-/// The combined table, per material.
+/// The combined table, per material - as a DEVICE VIEW of the five tables
+/// `xs::ngp_build_table` builds.
 ///
-/// Rows are pointers rather than fixed arrays, and that is deliberate: 471 doubles x 5 rows x
-/// however many materials a scene has is P8's allocation to size and upload, and fixing it here
-/// would put a `data::kMaxMaterials`-shaped block in every Scene whether a neutron can appear
-/// or not. A null table is the state the engine is in today.
+/// Five arrays of `xs::PhysVec`, one entry per material, and not five arrays of doubles: a
+/// `PhysVec` is what P2's builder already produces (`NeutronGeneralTable::p0 .. p4`), it carries
+/// the `Initialise()` results so no logarithm is recomputed per lookup, and it makes the node
+/// energies the ones the table was BUILT on rather than a formula that agrees with them to a few
+/// ulps. See the P8 note at the top of this file for what that formula cost.
+///
+/// A null view is the state the engine is in today, and `total()` then returns zero.
 ///
 /// THE CONTRACT, which is what this file is for:
 ///
-///   * `total_low[m * kNeutronXsLowNodes + j]` is the MACROSCOPIC cross section in 1/mm -
-///     sum over elements of n_atoms[i] * sigma_i - of elastic + inelastic + capture, at node j
-///     of the low zone for material m. `total_high` is the same for elastic + inelastic only.
-///     G4NeutronGeneralProcess::BuildPhysicsTable computes exactly these and stores them in
-///     tables[0] and tables[3].
-///   * `p_elastic_low` is sigma_el/sigma_total and `p_el_inel_low` is
-///     (sigma_el+sigma_inel)/sigma_total - CUMULATIVE, in that order, as tables[1] and
-///     tables[2]. `p_inelastic_high` is sigma_inel/sigma_total, as tables[4]. Note the
-///     ORDER SWAP between the zones: PostStepDoIt tests elastic first below the middle energy
-///     and inelastic first above it, so the high zone's single partial is the INELASTIC one.
-///     Getting that backwards exchanges two cross sections that differ by a factor of a few
-///     and would still look like a plausible neutron.
+///   * `t0[m]` is the MACROSCOPIC cross section in 1/mm - sum over elements of
+///     n_atoms[i] * sigma_i - of elastic + inelastic + capture, on the low grid, for material m.
+///     `t3[m]` is the same for elastic + inelastic only. G4NeutronGeneralProcess::
+///     BuildPhysicsTable computes exactly these and stores them in tables[0] and tables[3].
+///   * `t1[m]` is sigma_el/sigma_total and `t2[m]` is (sigma_el+sigma_inel)/sigma_total -
+///     CUMULATIVE, in that order, as tables[1] and tables[2]. `t4[m]` is sigma_inel/sigma_total,
+///     as tables[4]. Note the ORDER SWAP between the zones: PostStepDoIt tests elastic first
+///     below the middle energy and inelastic first above it, so the high zone's single partial
+///     is the INELASTIC one. Getting that backwards exchanges two cross sections that differ by
+///     a factor of a few and would still look like a plausible neutron.
 ///   * `n_materials` must match the scene's material count. A lookup with `material` outside
 ///     it is a caller error, not a clamped answer.
 ///
@@ -139,25 +192,27 @@ enum class NeutronSubProcess : int { kElastic = 0, kInelastic = 1, kCapture = 2 
 /// combination rather than letting the device discover it - see the note in step_neutral.
 template <typename real_t>
 struct NeutronGeneralXs {
-  const real_t* total_low = nullptr;
-  const real_t* p_elastic_low = nullptr;
-  const real_t* p_el_inel_low = nullptr;
-  const real_t* total_high = nullptr;
-  const real_t* p_inelastic_high = nullptr;
+  const xs::PhysVec<real_t>* t0 = nullptr;  ///< low grid, elastic + inelastic + capture
+  const xs::PhysVec<real_t>* t1 = nullptr;  ///< low grid, sigma_el / total
+  const xs::PhysVec<real_t>* t2 = nullptr;  ///< low grid, (sigma_el + sigma_inel) / total
+  const xs::PhysVec<real_t>* t3 = nullptr;  ///< high grid, elastic + inelastic
+  const xs::PhysVec<real_t>* t4 = nullptr;  ///< high grid, sigma_inel / total
   int n_materials = 0;
 
-  /// G4PhysicsVector::LogVectorValue + ComputeLogVectorBin + Interpolation, with useSpline
-  /// false, transcribed:
+  /// G4PhysicsVector::LogVectorValue on the node energies of a G4PhysicsLogVector recomputed
+  /// from its two ends, which is what this socket did before P8 unified it with P2's table.
   ///
-  ///     if (e > edgeMin && e < edgeMax) { idx = min(int((loge-logemin)*invdBin), idxmax);
-  ///                                       res = y[idx] + (e-x[idx])/(x[idx+1]-x[idx])*dy; }
-  ///     else if (e <= edgeMin) res = y[0];
-  ///     else                   res = y[N-1];
+  /// **NOT WHAT `total()` AND `select()` READ ANY MORE**, and kept for one reason:
+  /// `tests/test_species.cu` (P1's) checks the lookup MECHANICS through it - that the bin is
+  /// found from log(e) and the interpolation is then linear in e, which a row that is exactly
+  /// linear in energy detects - and that claim is still true and still worth a test. What it
+  /// cannot check is the node energies, because it generates its synthetic row from the same
+  /// formula; `tests/test_wiring.cu` section 5 compares this function against
+  /// `xs::phys_vec_log_value` on the grid P2's builder actually produces, which is where the
+  /// disagreement is.
   ///
-  /// Two details that a rewrite gets wrong. The bin is found from log(e) and the interpolation
-  /// is then LINEAR IN e, not in log(e) - mixing those up is a smooth, plausible, wrong curve.
-  /// And `idxmax` is `numberOfNodes - 2`, so the last bin's index is clamped rather than the
-  /// energy: an e a hair below edgeMax still interpolates inside the final bin.
+  /// Do not call it from new code. `xs::phys_vec_log_value` is the transcription that has been
+  /// compared with Geant4.
   __host__ __device__ static real_t log_vector_value(const real_t* row, int n_nodes,
                                                      real_t e_min, real_t e_max, real_t e) {
     if (e <= e_min) { return row[0]; }
@@ -176,17 +231,23 @@ struct NeutronGeneralXs {
     return y1 + (e - x1) / (x2 - x1) * (row[idx + 1] - y1);
   }
 
-  /// Combined macroscopic cross section, 1/mm. Zero when the row is absent, which is the only
-  /// state a caller can be in before P8 lands.
-  __host__ __device__ real_t total(int material, real_t ekin) const {
+  /// Combined macroscopic cross section, 1/mm. G4NeutronGeneralProcess::CurrentCrossSection,
+  /// which is `xs::ngp_lambda`.
+  ///
+  /// `loge` IS AN ARGUMENT AND NOT COMPUTED HERE, because Geant4 computes it once per step:
+  /// `ComputeGeneralLambda` and `GetProbability` both read the same `fLogEnergy`. A socket that
+  /// took the logarithm twice would still be right and would be two transcendentals per step in
+  /// a kernel that is already spilling (docs/RISK.md V22).
+  ///
+  /// The zone test is `energy <= fMiddleEnergy`, so exactly 20 MeV reads the LOW table - the one
+  /// that includes capture.
+  __host__ __device__ real_t total(int material, real_t ekin, real_t loge) const {
     if (ekin <= kNeutronXsEMiddle<real_t>()) {
-      if (total_low == nullptr) { return real_t(0); }
-      return log_vector_value(total_low + material * kNeutronXsLowNodes, kNeutronXsLowNodes,
-                              kNeutronXsEMin<real_t>(), kNeutronXsEMiddle<real_t>(), ekin);
+      if (t0 == nullptr) { return real_t(0); }
+      return xs::phys_vec_log_value(t0[material], ekin, loge);
     }
-    if (total_high == nullptr) { return real_t(0); }
-    return log_vector_value(total_high + material * kNeutronXsHighNodes, kNeutronXsHighNodes,
-                            kNeutronXsEMiddle<real_t>(), kNeutronXsEMax<real_t>(), ekin);
+    if (t3 == nullptr) { return real_t(0); }
+    return xs::phys_vec_log_value(t3[material], ekin, loge);
   }
 
   /// Which sub-process fired, from one uniform random @p q in [0,1).
@@ -201,23 +262,42 @@ struct NeutronGeneralXs {
   ///       if (q <= GetProbability(4)) inelastic
   ///       else                        elastic
   ///     }
-  __host__ __device__ NeutronSubProcess select(int material, real_t ekin, real_t q) const {
+  ///
+  /// One `xs::ngp_select_subprocess`, with the enum this port names the answer by. The two are
+  /// asserted equal for every material, every node and both zones in `tests/test_wiring.cu`.
+  __host__ __device__ NeutronSubProcess select(int material, real_t ekin, real_t loge,
+                                               real_t q) const {
     if (ekin <= kNeutronXsEMiddle<real_t>()) {
-      const real_t p_el =
-          log_vector_value(p_elastic_low + material * kNeutronXsLowNodes, kNeutronXsLowNodes,
-                           kNeutronXsEMin<real_t>(), kNeutronXsEMiddle<real_t>(), ekin);
-      if (q <= p_el) { return NeutronSubProcess::kElastic; }
-      const real_t p_ei =
-          log_vector_value(p_el_inel_low + material * kNeutronXsLowNodes, kNeutronXsLowNodes,
-                           kNeutronXsEMin<real_t>(), kNeutronXsEMiddle<real_t>(), ekin);
-      if (q <= p_ei) { return NeutronSubProcess::kInelastic; }
+      if (q <= xs::phys_vec_log_value(t1[material], ekin, loge)) {
+        return NeutronSubProcess::kElastic;
+      }
+      if (q <= xs::phys_vec_log_value(t2[material], ekin, loge)) {
+        return NeutronSubProcess::kInelastic;
+      }
       return NeutronSubProcess::kCapture;
     }
-    const real_t p_inel = log_vector_value(p_inelastic_high + material * kNeutronXsHighNodes,
-                                           kNeutronXsHighNodes, kNeutronXsEMiddle<real_t>(),
-                                           kNeutronXsEMax<real_t>(), ekin);
-    return (q <= p_inel) ? NeutronSubProcess::kInelastic : NeutronSubProcess::kElastic;
+    return (q <= xs::phys_vec_log_value(t4[material], ekin, loge))
+               ? NeutronSubProcess::kInelastic
+               : NeutronSubProcess::kElastic;
   }
 };
+
+/// The socket built from P2's host-side table. Host-only: `NeutronGeneralTable` holds
+/// `std::vector`s, and what this returns points INTO them - so the result is valid as long as
+/// the table is, and an upload to a device has to copy the PhysVec arrays and repoint their
+/// `e`/`v` members. Written here rather than at the future call site because the mapping
+/// t0..t4 -> the five contract rows above is the thing that must not be guessed twice.
+template <typename real_t>
+__host__ inline NeutronGeneralXs<real_t> neutron_general_view(
+    const xs::NeutronGeneralTable<real_t>& t) {
+  NeutronGeneralXs<real_t> v;
+  v.t0 = t.p0;
+  v.t1 = t.p1;
+  v.t2 = t.p2;
+  v.t3 = t.p3;
+  v.t4 = t.p4;
+  v.n_materials = t.n_mat;
+  return v;
+}
 
 }  // namespace g4gpu::had

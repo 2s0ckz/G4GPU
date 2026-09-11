@@ -490,10 +490,16 @@ int main() {
            row[n_nodes - 1]);
 
     // A null table is zero cross section, not a dereference: it is the state every run is in
-    // until P8 lands, and step_neutral's streaming branch depends on it.
+    // until the neutron's final states land, and step_neutral's streaming branch depends on it.
+    //
+    // The second argument is `log(ekin)`. P8 made the socket a view of P2's PhysVec tables and
+    // the logarithm an argument rather than something the lookup recomputes, because Geant4
+    // takes one `fLogEnergy` per step and reads it from ComputeGeneralLambda and GetProbability
+    // alike. Nothing about this assertion changed - a null table still returns zero in both
+    // zones - only the call. See physics/hadronic/neutron_general_xs.cuh and docs/RISK.md V53.
     had::NeutronGeneralXs<double> empty{};
-    expect("null table xs", "neutron", empty.total(0, 1.0), 0.0);
-    expect("null table xs hi", "neutron", empty.total(0, 1000.0), 0.0);
+    expect("null table xs", "neutron", empty.total(0, 1.0, std::log(1.0)), 0.0);
+    expect("null table xs hi", "neutron", empty.total(0, 1000.0, std::log(1000.0)), 0.0);
   }
 
   std::printf("\n%d comparisons, %d failures", compared, fails);
