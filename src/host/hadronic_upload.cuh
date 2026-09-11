@@ -23,8 +23,17 @@
 // 3.7 MB and 184 numerical integrations of 24 energies each; building the scene's distinct Z is
 // a handful. The BGG tables are per-Z arrays with no Z-dependent cost, so they are built whole.
 //
-// A run with no charged hadron in it gets null pointers and pays nothing, which is the same
-// state a species with no elastic process is in - see `had::ElasticTables`.
+// BUILT UNCONDITIONALLY, like the hadron range table beside it, and the cost is measured rather
+// than guessed: 0.35 MB and 18 `G4ElasticData` for B1's nine distinct elements, each of which is
+// 24 energies by up to 100 bins of a 10-point midpoint rule - about 430,000 evaluations of
+// `he_hadr_nuc_differ_cr_sec` in total, under a second. `Upload` cannot know what species the
+// generator will produce until it has produced one, so a gamma run pays this the way it already
+// pays for the hadron range table. What a run with no charged hadron in it does NOT pay is any
+// per-step cost: `elastic_xs_per_volume` returns zero for a species whose channel is `kNone`.
+//
+// A caller that wants the tables absent can leave the pointers null - `had::ElasticTables`'s
+// default - and every channel that needs one then behaves exactly as a species with no elastic
+// process does.
 #pragma once
 
 #include <cstdio>

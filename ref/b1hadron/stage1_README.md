@@ -65,12 +65,89 @@ by a dose comparison until P9-P11 land; until then it is validated by its cross-
 the standard error and scales as 1/sqrt(N), so a 2,000-event run is +/-1.7% and can neither
 confirm nor exclude a 3% effect. docs/RISK.md V44 is the half day that cost.
 
-## The table, as measured
+## The table, as measured - P8b, with hadElastic and CoulombScat on both sides
+
+`ref\b1hadron\stage1_compare.ps1 -Events 500000 -SkipNoElastic`, on branch `phys/wiring2`,
+against `D:\g4gpu\ref\B1build` (Geant4 11.1.1, serial run manager). 500,000 events per run per
+side, 18 runs, doses in nGy. **Nothing is inactivated on the Geant4 side that this port has.**
+
+```
+species                     port           G4 stage 1      diff   sigma
+proton       3,003.8400 +/- 3.2354  3,008.1200 +/- 3.2443    -0.14%     0.9
+alpha       12,312.3000 +/- 12.9798 12,336.9000 +/- 13.0077  -0.20%     1.3
+muon_plus      598.7400 +/- 0.6345    600.3700 +/- 0.6341    -0.27%     1.8
+muon_minus     575.2420 +/- 0.6110    575.6470 +/- 0.6110    -0.07%     0.5
+pion_plus      606.4620 +/- 0.8888    609.0240 +/- 0.8874    -0.42%     2.0
+pion_minus     587.7400 +/- 0.6863    589.5030 +/- 0.6860    -0.30%     1.8
+kaon_plus    1,215.0200 +/- 1.4305  1,208.1700 +/- 1.3920     0.57%     3.4
+kaon_minus   1,115.7700 +/- 1.3779  1,108.7600 +/- 1.3248     0.63%     3.7
+neutron          0.0000 +/- 0.0000      0.0000 +/- 0.0000     0.00%     0.0
+```
+
+### Reading it
+
+**Seven of the nine species are inside two sigma, and the three negatives are the story.** mu-
+0.5, pi- 1.8, K- 3.7 - against 24.3, 31.7 and 58.3 in P8's table below. That is docs/RISK.md
+V44/V46 closed in the transport rather than in a table: P14's fix (the negative of each charge
+pair had its range table interpolated by a different rule) is on main and this is the first
+like-for-like that has it. The port's own charge pairs still agree with each other - pi+ 606.46
+against pi- 587.74, K+ 1215.02 against K- 1115.77 - and now Geant4's do too.
+
+**The proton went from 1.9 sigma against a Geant4 with elastic switched off to 0.9 sigma against
+one with it on.** Its `hadElastic` was worth -2.42% in P8's measurement and that gap is gone.
+
+**The two kaons are at 3.4 and 3.7 sigma, both with the port 0.6% HIGH, and that is a finding
+rather than a rounding.** Both charges by the same amount, so it is not V44. See docs/RISK.md
+V62 for the measurement that bounds it and the two candidates it does not separate.
+
+### The third column, for the four species where the answer turns on it
+
+`-SkipNoElastic` off, same 500,000 events, same build:
+
+```
+species                     port           G4 stage 1      diff   sigma        G4 no elastic      diff   sigma
+proton       3,003.8400 +/- 3.2354  3,008.1200 +/- 3.2443    -0.14%     0.9  3,092.3900 +/- 3.2300    -2.86%    19.4
+pion_plus      606.4620 +/- 0.8888    609.0240 +/- 0.8874    -0.42%     2.0    633.8790 +/- 0.6687    -4.33%    24.7
+kaon_plus    1,215.0200 +/- 1.4305  1,208.1700 +/- 1.3920     0.57%     3.4  1,201.9100 +/- 1.3475     1.09%     6.7
+kaon_minus   1,115.7700 +/- 1.3779  1,108.7600 +/- 1.3248     0.63%     3.7  1,097.3900 +/- 1.2327     1.67%     9.9
+```
+
+**This is what `hadElastic` being wired means, read off two Geant4 runs that differ by one
+`/process/inactivate` line.** Geant4's own elastic effect on the dose is -2.73% for the proton,
+-3.92% for pi+, +0.52% for K+ and +1.04% for K-, and the port is nearer the column WITH elastic
+in every one of the four - 0.9 against 19.4 sigma for the proton, 2.0 against 24.7 for pi+,
+3.4 against 6.7 for K+, 3.7 against 9.9 for K-. Including the kaons: whatever the residual 0.6%
+is, the port's kaon elastic is acting in the right direction and with roughly the right size.
+
+The sign flips between the pions and the kaons and that is the geometry, not a defect: elastic
+scattering moves a 200 MeV pion's dose OUT of B1's 12 cm scoring volume and a 400 MeV kaon's
+INTO it.
+
+**What `CoulombScat` was worth, measured by re-running the Geant4 side with it active.** The
+stage-1 column moved by at most one sigma from P8's numbers - proton 3011.34 to 3008.12, mu+
+600.428 to 600.370, mu- 576.241 to 575.647, pi+ 608.601 to 609.024, K+ 1209.10 to 1208.17,
+K- 1106.95 to 1108.76 - which is a Geant4 random stream reshuffle and not a physical effect.
+That is what the mean free path predicted: `tests/test_step_hadron.cu` measures
+`G4CoulombScattering`'s mfp in water at **158 m for a 200 MeV proton and 483 m for a 1 GeV
+muon**, against B1's 300 mm envelope, so the process cannot move a hadron's dose in this
+geometry however it is wired. The port's own numbers moved by about a sigma for the same reason
+(it now draws a Coulomb interaction length on every step of every singly-charged hadron), which
+is why P8's 632.8880 nGy for pi+ and 597.6490 for mu- are not reproduced here and should not be.
+
+**The neutron is still 0 against 0**, and docs/RISK.md V53 is why: `EnableNeutronGeneralProcess`
+makes its elastic, inelastic and capture one process that `/process/inactivate` can only take
+whole, so there is no stage-1 configuration for it at all. The zero is a prediction the port
+reproduces - streaming plus the 10 us time cut - and not evidence about a cross section.
+
+## P8's table - the same stage before hadElastic was wired
+
+Kept because the DIFFERENCE between the two is what the wiring did, and because its
+`G4 no elastic` column is what the port used to be compared against.
 
 `ref\b1hadron\stage1_compare.ps1 -Events 500000`, on branch `phys/wiring`, against
 `D:\g4gpu\ref\B1build` (Geant4 11.1.1, serial run manager). 500,000 events per run per side,
-27 runs, doses in nGy. The **like-for-like column is "G4 no elastic"**, because the port has
-decay and does not have `hadElastic`.
+27 runs, doses in nGy. The like-for-like column there was "G4 no elastic", because the port had
+decay and did not have `hadElastic`; both Geant4 columns had `CoulombScat` inactivated.
 
 ```
 species                     port        G4 no elastic      diff   sigma           G4 stage 1      diff   sigma
@@ -85,7 +162,14 @@ kaon_minus   1,207.1000 +/- 1.3822  1,099.0400 +/- 1.2340     9.83%    58.3  1,1
 neutron          0.0000 +/- 0.0000                    -         -       -      0.0000 +/- 0.0000     0.00%     0.0
 ```
 
-### Reading it
+### Reading it - as P8 read it, and two of its sentences are now history
+
+Two claims below have been superseded and are left standing rather than edited, because what
+they predicted is what happened. "The three negatives carry V44 and P14 has the fix" - the fix
+is on main and the negatives are at 0.5, 1.8 and 3.7 sigma in the table above. And "what
+hadElastic is worth" was measured here as the number the next package would be judged against:
+-2.42% for the proton and -4.08% for pi+. The port's proton is now 0.9 sigma from a Geant4 with
+elastic on, so that is the number that closed.
 
 **The five positive-or-neutral species agree: 0.5 to 1.9 sigma.** proton 1.9, alpha 0.5, mu+
 1.6, pi+ 1.7, K+ 1.9 - every one of them with `Decay` active on the Geant4 side, which is the

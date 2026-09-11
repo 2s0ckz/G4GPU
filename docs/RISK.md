@@ -5778,3 +5778,55 @@ one entry point instead of fourteen, and the same baseline measured through the 
 `transport_run.cu` is 3696 B and 68/36 B of spill. Comparing a reproducer number against a
 full-build number is how a measurement like this goes wrong, so both series are stated.
 
+
+---
+
+### V62: both kaons, 0.6% high, and the two things that measurement does not separate
+
+The stage-1 like-for-like with `hadElastic` and `CoulombScat` active on both sides
+(`ref/b1hadron/stage1_README.md`) puts seven of nine species inside two sigma and the two kaons
+outside it:
+
+    kaon_plus    1,215.0200 +/- 1.4305   G4  1,208.1700 +/- 1.3920    +0.57%   3.4 sigma
+    kaon_minus   1,115.7700 +/- 1.3779   G4  1,108.7600 +/- 1.3248    +0.63%   3.7 sigma
+
+**BOTH CHARGES BY THE SAME AMOUNT, which is what rules the obvious cause out.** V44/V46 - the
+range-table interpolation rule that split every charge pair - is one-sided by construction, and
+in this table it is closed: mu- is at 0.5 sigma, pi- at 1.8. A defect that moves K+ and K- by
++0.57% and +0.63% is charge-blind.
+
+**What the third column establishes, and it is not small.** Running the Geant4 side again with
+`hadElastic` inactivated gives 1,201.91 for K+ and 1,097.39 for K-, so Geant4's own elastic
+scattering RAISES a 400 MeV kaon's B1 dose by 0.52% and 1.04% - the opposite sign to the pion's
+-3.92%, because elastic scattering moves a pion's dose out of the 12 cm scoring volume and a
+kaon's into it. The port is 3.4 and 3.7 sigma from the column with elastic and 6.7 and 9.9 from
+the column without it. So the port's kaon elastic acts in the right direction and with roughly
+the right size; what is left is about a fifth of the effect.
+
+**The two candidates, neither excluded.**
+
+1. *The channel.* The kaons are the only species whose `had::elastic_channel` is
+   `G4CrossSectionElastic(G4ComponentGGHadronNucleusXsc)` plus a plain Gheisha `G4HadronElastic`
+   - `G4HadronicBuilder::BuildElastic`'s pair, reached through the "kaons" line of
+   `G4HadronElasticPhysics::ConstructProcess`. The proton's CHIPS and the pion's
+   `G4ElasticHadrNucleusHE` are different code, and both of those species are inside two sigma.
+   Against it: `tests/test_hadronic_xs.cu` compares the Glauber-Gribov component exactly and
+   `tests/test_elastic_models.cu` compares Gheisha's `SampleInvariantT` against the oracle, so
+   if this is the cause it is in the composition rather than in either piece.
+2. *The dE/dx table in air.* README open question 1 records `test_hadron_range` finding K- and
+   pbar off Geant4's `GetDEDX` by 11% and 15% in AIR between 1 and 3 MeV and nowhere else,
+   undiagnosed since it was measured. B1's world is air and its envelope is 12 cm of water in
+   30 cm of it. Against it: that finding is for the NEGATIVE of each pair only, and this is both
+   charges.
+
+Neither candidate explains a charge-blind 0.6% on its own, which is why this is written up
+rather than attributed. What would separate them is the measurement P14's `ref/chargeodd/`
+already has the shape for: a Geant4-linked program that asks `GetDEDX` for K+ and K- in B1's
+four materials over the whole range, and a stage-1 run with the kaon's elastic channel forced to
+the proton's CHIPS model, which is wrong physics and a clean bisection.
+
+The size is worth keeping in proportion. 0.6% is an eighth of what `hadElastic` was worth for
+the pion and a fortieth of what the missing inelastic final states are worth for a proton
+(docs/RESULT.md: 19%). It is recorded because it is the largest unexplained residual in the
+stage-1 table and because three of the nine species were at 24 to 58 sigma one commit ago.
+
