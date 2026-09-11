@@ -5798,6 +5798,34 @@ reason this entry exists: `store_sample_za_fn`'s `real_t temp[64]` (512 B, repla
 pass over the same terms in the same order, so the numbers did not move) and an
 `xs::ElementIsotopes[16]` that a `NistIsotopeView` answers instead (another 512 B).
 
+**P8c added two more instantiations and the frame is not what to watch.** He3 and GenericIon
+take `run_step_hadron` from eleven entry points to thirteen, and the cost of that is small and
+measured - `transport_run.cu` with `-Xptxas -v`, before and after on `phys/wiring3`:
+
+    kernel             inst.     registers   stack frame      spill st/ld     cmem[0]
+    run_step_hadron    11 -> 13  255 -> 255  4512 -> 4576 B   96/52 -> 100/52 1584 -> 1600
+    run_step_neutral   2         255 -> 255  3728 -> 3744 B   92/52 -> 96/52  1608 -> 1624
+    run_step_lepton    2         255 -> 255  3056 -> 3040 B   76/28 -> 80/28  1448 -> 1464
+    run_step_gamma     1         255 -> 255  2400 -> 2416 B   404/868->368/676 1448 -> 1464
+
++64 bytes against the 16384-byte limit, no register change, ptxas survived. The +16 bytes of
+cmem[0] on every kernel is the `ion_za` pointer on two `TrackBuffer`s passed by value, which is
+also the check on the claim that the field itself is free: `sizeof(TrackState<double>)` is 248
+before and after and only the argument list grew.
+
+**COMPILE TIME IS THE THING THIS ENTRY SHOULD HAVE PREDICTED AND DID NOT.** The frame grew 1.4%
+and the translation unit took about ninety minutes against the eight minutes recorded above -
+with three Geant4 cmake builds running beside it, so it is not a clean measurement, but it is
+the wrong direction by an order of magnitude and the numbers above give no warning of it. ptxas
+was alive throughout at 4 GB of working set. What that means for the next package: the
+reproducer this entry recommends - a ten-line translation unit instantiating ONE kernel - is now
+the only affordable way to iterate on `transport_run.cu`, and P8c's own iteration used the host
+test (`tests/test_ion_transport.cu`, one minute) for every loop and paid the ninety minutes
+once, at the end, for the measurement. The neutron general process is the next thing to be
+wired into a stepper and it drags the whole de-excitation chain into this file through
+`capture/capture_process.cuh`; whoever does it should put `__noinline__` on the capture cascade
+before measuring anything, for the reason this entry gives about the elastic branch.
+
 
 ---
 
