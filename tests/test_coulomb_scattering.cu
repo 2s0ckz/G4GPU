@@ -188,6 +188,18 @@ int main() {
                     kClaims[ci].act);
         ++fails;
       }
+      // `build_table`, which is the observable half of InitialiseProcess's
+      // `mass > GeV || GetParticleType() == "nucleus"` branch: that branch calls
+      // SetBuildTableFlag(false) AND swaps in G4IonCoulombScatteringModel. The header section
+      // on the four switches claims it is never taken in option0 because the heaviest species
+      // with this process is the proton at 938.272 MeV; a 1 here on every row is what says so,
+      // and the model-name check above is the other half of the same claim.
+      if (build != 1) {
+        std::printf("  FAIL: %s CoulombScat has build_table=%d, so InitialiseProcess took its "
+                    "mass > GeV branch and the model is not the electron one\n",
+                    kClaims[ci].name, build);
+        ++fails;
+      }
     }
     std::fclose(f);
     for (int i = 0; i < kNClaims; ++i) {

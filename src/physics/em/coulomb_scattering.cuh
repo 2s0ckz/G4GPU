@@ -77,6 +77,42 @@
 // this process.
 //
 // ---------------------------------------------------------------------------------------
+// THE FOUR SWITCHES IN InitialiseProcess AND Initialise, AND WHERE EACH ONE LANDS IN OPTION0
+//
+// All four are live code in 11.1.1 and all four are pinned in option0, so this port implements
+// one setting of each. Written down because a reader of the code below cannot tell a constant
+// that happens to be one from a constant that is one by construction.
+//
+//  * `mass > CLHEP::GeV || p->GetParticleType() == "nucleus"` (G4CoulombScattering.cc:121)
+//    picks G4IonCoulombScatteringModel over G4eCoulombScatteringModel and calls
+//    `SetBuildTableFlag(false)` - no lambda table, the cross section computed per step. NEVER
+//    TAKEN in option0: the only species that reach InitialiseProcess are the ten in the table
+//    above, and the heaviest is the proton at 938.272 MeV. The ions would take it, and they
+//    only get the process through ConstructIonEmPhysicsSS. So `build_table` is 1 in every row
+//    of `ref/oracle/coulomb_limits.csv`.
+//  * `isCombined`, the model's constructor argument (G4eCoulombScatteringModel.cc:72), defaults
+//    to true and does two things: `wokvi = new G4WentzelOKandVIxSection(isCombined)` (:88) and
+//    gating the cosThetaMin recompute in Initialise (:111). G4CoulombScattering constructs the
+//    model with no arguments, so it is TRUE, and `cosThetaMin` is therefore recomputed from
+//    PolarAngleLimit rather than left at its constructor value of 1.0. With combined false the
+//    interval would be empty and the process would never fire - which is why this is worth a
+//    line rather than a shrug.
+//  * `fixedCut` (G4eCoulombScatteringModel.cc:79, `fixedCut = -1.0`) overrides the production
+//    cut inside both `ComputeCrossSectionPerAtom` (:197) and `SampleSecondaries` (:239) through
+//    `G4double cut = (0.0 < fixedCut) ? fixedCut : cutEnergy`. `SetFixedCut` is DECLARED on
+//    G4eCoulombScatteringModel, G4hCoulombScatteringModel and G4WentzelVIModel and CALLED
+//    NOWHERE in the release, so `cutEnergy` always wins and `GetFixedCut` reads -1. Note what
+//    it is not: despite sitting next to the angular limits it is a cut in ENERGY, not in cos.
+//  * `SetSingleScatteringFactor` (G4WentzelVIModel.cc:85, `1.25`, with `invssFactor` 1/1.2)
+//    belongs to the MSC model's own step limit and its own multiple/single sub-mode split, and
+//    never reaches this process. The only override in the release is
+//    G4LowEWentzelVIModel.cc:60's `SetSingleScatteringFactor(0.5)`, which option0 does not use.
+//
+// So the coupling the msc/single-scattering pair is supposed to have - one angular limit shared
+// between them - is carried by `MscThetaLimit` alone, and in option0 that is pi and the limit
+// does not separate them at all. See the section above.
+//
+// ---------------------------------------------------------------------------------------
 // WHICH PRODUCTION CUT ARRIVES HERE, AND IT IS THE PROTON'S
 //
 // `G4eCoulombScatteringModel` uses its `cutEnergy` argument in exactly one place: through
