@@ -5251,6 +5251,10 @@ diagnostic that found it evaluates the derivative instead, and it is two columns
 
 ### V47: a comment asserting a term is zero, above the code that drops it
 
+**CLOSED.** The factor is in, and the check that had nothing to fail against now exists. The
+closing section at the end of this entry has the numbers, including what it moved in a B1 run;
+the record below is left as it was written.
+
 `em/wentzel_msc.cuh`'s `wv_sample_single` is `G4WentzelOKandVIxSection::SampleSingleScattering`
 without one factor. Geant4's analytic rejection function is
 
@@ -5300,6 +5304,112 @@ it checks is not sensitive to this.
 weaker claim than the code makes is protecting a gap, and a comment that explains why a term
 can be discarded is the one to re-read when the term turns out to matter. This one names the
 right variable, gives the right formula for it, and then asserts the wrong value.
+
+#### The fix
+
+One line of `wv_sample_single`, and it is G4WentzelOKandVIxSection.cc:372-373's own:
+
+```
+  grej = (1. - z1*factB + factB1*targetZ*sqrt(z1*factB)*(2. - z1))*fm*fm/(1.0 + z1*factD);
+```
+
+with `factD = sqrt(mom2)/wv_target_mass(Z)`, and the new `em::wv_target_mass` transcribing
+SetupTarget's `massT = (1 == Z) ? proton_mass_c2 : GetAtomicMassAmu(Z)*amu_c2` (:206-208). It is
+a function of Z rather than a field of `WentzelState`, because `em/coulomb_scattering.cuh`'s copy
+of this sampler takes the mass as an ARGUMENT for the reason two paragraphs up, and a struct
+field would be one place for the two callers' different targets to be confused. Two callers, two
+masses, each chosen where it is used. The comment is replaced by what the code does.
+
+#### The check that did not exist
+
+`tests/test_wentzel_msc.cu` block 4 against `ref/oracle/wentzel_msc_sample.csv`
+(`ref/dump/dump_wentzel_msc.cc`): 400,000 `SampleSingleScattering` draws a side, per cell, under
+a per-cell seed, over 240 cells - five species (e-, mu-, pi+, proton, alpha) x four Z (1, 8, 26,
+82) x up to seven energies including B1's 210 MeV x two step fractions. It is NOT
+`coulomb_sample.csv` at another seed: the two processes split the angular range, so the same
+Geant4 function gets DISJOINT intervals - `[cosTetMaxNuc, -1]` there, `[cosThetaMin,
+cosTetMaxNuc]` here - and here it also gets the ELECTRON production cut (`G4EmTableUtil::
+BuildMscProcess` passes a null secondary particle at :552, so `G4EmModelManager::Initialise`
+keeps its default cuts index of 1 at :463) and SetupTarget's own target mass rather than an
+isotope's. `cosThetaMin` is a property of the STEP, not of the material, so the grid takes it as
+`1 - f*(1 - cosTetMaxNuc)` with f in {0.05, 0.5} and dumps the value for the port to be handed.
+
+Everything the sampler is set up with that Geant4 will report is compared exactly and is
+bit-identical - the interval, `cosTetMaxElec`, the electron/nucleus split, the target mass - so
+the statistics are the angle and nothing else. `fMottFactor` has no accessor and therefore no
+column: a column would be the dumper and the port each writing `1 + 2e-4*Z*Z` and comparing the
+two, which is not an oracle (V37). It is exercised instead by the accepted fraction of the
+e-/Z=82 cells, where it is 2.345 and holds acceptance down to 3.1%.
+
+With the factor: worst **3.28 sigma** on the accepted fraction, **3.21** on `<1-cos>`, **2.01
+chi2/bin**, over 240 cells and three statistics each. Removing it again fails **52 of the 240**:
+
+| species | Z | E | f | P(accept) G4 / ours | sigma | sigma on `<1-cos>` | chi2/bin |
+|---|---|---|---|---|---|---|---|
+| alpha | 1 | 1 MeV | 0.5 | 0.7945 / 0.8882 | 103.7 | **117.7** | 90.4 |
+| pi+ | 1 | 30 MeV | 0.5 | 0.8038 / 0.8900 | 97.0 | 109.5 | 77.4 |
+| pi+ | 1 | 10 MeV | 0.5 | 0.8818 / 0.9516 | 96.7 | 110.0 | 46.0 |
+| alpha | 1 | 0.3 MeV | 0.5 | 0.8993 / 0.9627 | 94.2 | 108.3 | 39.2 |
+| proton | 1 | 3 MeV | 0.5 | 0.9012 / 0.9517 | 75.7 | 80.1 | 24.5 |
+| proton | 1 | 10 MeV | 0.5 | 0.8247 / 0.8847 | 70.6 | 75.7 | 37.8 |
+| proton | 1 | 210 MeV | 0.05 | 0.9700 / 0.9729 | 7.6 | 2.0 | 0.97 |
+
+51 of the 52 are at Z = 1, where SetupTarget's target mass is the PROTON's and factD is
+therefore largest, and NONE is an e- cell, whose rejection function is the Mott/Rutherford ratio
+with no factD in it. The failure pattern is the evidence about which term is missing, exactly as
+the paragraph above predicted it would be.
+
+#### What it moved in a B1 run, which is almost nothing, and why that is not a surprise
+
+Example B1, 2,000,000 events, `/gun/particle proton` at 210 MeV and `alpha` at 840 MeV, the same
+binary rebuilt either side of the one line.
+
+| beam | dose BEFORE | dose AFTER | statistical uncertainty | total track-steps before / after |
+|---|---|---|---|---|
+| proton 210 MeV | 61601.8 pGy / 10k | 61601.8 pGy / 10k | +/- 32.25 (5.2e-4) | 72402152 / 72402153 |
+| alpha 840 MeV | 247294 pGy / 10k | 247294 pGy / 10k | +/- 130.2 (5.3e-4) | 132313468 / 132313459 |
+
+Equal in every digit B1 prints - six significant figures on the dose and on `edep` (133.156 TeV
+and 534.541 TeV) - so the movement is **below 1e-6 relative against a 5.2e-4 uncertainty**. It is
+not zero and the runs are not the same run: the track-step totals differ, and the proton's rms
+moves in its last digit (32.2476 -> 32.2477). **That difference is the evidence that the branch
+is reached**, which a dose comparison alone could not distinguish from dead code - so it was
+measured directly as well: replaying stepper.cuh's WentzelVI block on the host with the port's
+own range table gives `t_path*xtsec`, the expected number of single scatters per step, as
+0.042 to 0.055 for a proton and an alpha at every energy from 1 to 840 MeV in water, A-150 and
+bone. About one step in twenty takes a single scatter, so a 2M-event proton run takes some three
+million of them.
+
+Three million calls and no measurable dose shift, because of where in the interval those calls
+land. The factor is `1/(1 + z1*factD)`, and the msc model's interval is
+`z1 in [1.25*t/lambda_eff, 1 - cosTetMaxNuc]` - the SMALL angles, with the large ones left to
+G4CoulombScattering. For a 210 MeV proton in water the step limit gives t = 31.5 mm against
+lambda_eff = 2.66e5 mm, so that interval is [1.5e-4, 0.0318], and z1 is drawn from it weighted
+as 1/(z1 + screenZ)^2, which puts the mean at 8.0e-4. With factD = 0.706 on hydrogen the mean
+correction is 6e-4 and the worst, at the top of the interval, is 2.2%. The dose cannot see that;
+the 52 failing cells can, because 400,000 draws a cell can.
+
+Which is the useful way round. The oracle grid's smallest f is 0.05 and B1's own steps sit at
+f = 0.005, so the test is deliberately more sensitive than the transport it protects rather than
+a copy of it, and the entry above - "what the WentzelVI multiple-scattering angle distribution is
+worth today is not measured" - is now answered in both directions: the distribution is right to
+a few sigma, and the term that was missing from it was worth less than a microgray in B1 and up
+to 118 sigma in the sampler.
+
+#### And the register budget, because this is device code
+
+`nvcc -Xptxas -v -cubin` on a one-line translation unit instantiating
+`run_step_hadron<double, kProton, StepTap<double>>`, either side of the change (V22's cheap
+evidence):
+
+| | registers | stack frame | spill stores / loads | cmem[2] |
+|---|---|---|---|---|
+| before | 255 | 3280 bytes | 56 / 20 bytes | 2496 bytes |
+| after | **255** | **3280 bytes** | **56 / 20 bytes** | 2504 bytes |
+
+Identical but for 8 bytes more constant memory, which is the two mass constants. The whole
+engine object grew 14,144 bytes over sixteen kernels. `sqrt(s.mom2)` is computed inside the
+non-Mott branch rather than beside `fm`, so the electron path does not pay for it.
 
 
 ### V48: the cut G4CoulombScattering hands its model is the proton's, and it gates a closed door

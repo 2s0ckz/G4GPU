@@ -426,7 +426,8 @@ __host__ __device__ inline int coulomb_select_element(const data::Material<real_
 /// `G4WentzelOKandVIxSection::SampleSingleScattering`, with the exponential nuclear form factor
 /// and with factD.
 ///
-/// This is NOT `wv_sample_single` in em/wentzel_msc.cuh, and the difference is one factor:
+/// This is NOT `wv_sample_single` in em/wentzel_msc.cuh, and what separates them is the
+/// TARGET MASS in one shared factor:
 ///
 ///     grej = (1. - z1*factB + factB1*targetZ*sqrt(z1*factB)*(2. - z1))*fm*fm/(1.0 + z1*factD)
 ///                                                                     ^^^^^^^^^^^^^^^^^^^^^
@@ -434,13 +435,15 @@ __host__ __device__ inline int coulomb_select_element(const data::Material<real_
 /// `factD = sqrt(mom2)/targetMass` (G4WentzelOKandVIxSection.hh, SetTargetMass), and
 /// `SetTargetMass` is called by SetupTarget for EVERY target (G4WentzelOKandVIxSection.cc:205),
 /// which G4WentzelVIModel::SampleScattering calls at line 615 immediately before
-/// SampleSingleScattering at line 618. So factD is not zero, in either caller.
-/// `wv_sample_single`'s comment says it is - "set only for particles with a magnetic-moment
-/// correction; it is zero for the particles here" - and drops the factor. For a 200 MeV proton
-/// on oxygen, sqrt(mom2) = 644.5 MeV and targetMass = 14903.9 MeV, so factD = 0.0433 and
-/// 1/(1 + z1*factD) runs from 1 at zero angle to 0.920 at 180 degrees: an 8% error in the
-/// rejection function at the large angles that are this process's whole subject. Recorded in
-/// docs/RISK.md V47 rather than fixed, because em/wentzel_msc.cuh is not this package's file.
+/// SampleSingleScattering at line 618. So factD is not zero in either caller - but the two
+/// callers build it from different masses, which is why this function takes the mass as an
+/// ARGUMENT and `wv_sample_single` derives it from Z through `em::wv_target_mass`. See @p
+/// target_mass below.
+///
+/// `wv_sample_single` dropped the factor entirely until docs/RISK.md V47 was closed, under a
+/// comment claiming factD was zero for these particles. For a 200 MeV proton on oxygen,
+/// sqrt(mom2) = 644.5 MeV and targetMass = 14903.9 MeV, so factD = 0.0433 and 1/(1 + z1*factD)
+/// runs from 1 at zero angle to 0.920 at 180 degrees.
 ///
 /// @param target_mass the mass factD is built from, MeV. SetupTarget uses
 ///        `GetAtomicMassAmu(Z)*amu_c2` for Z > 1 and the proton mass for Z == 1;

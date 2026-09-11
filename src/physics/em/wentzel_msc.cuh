@@ -10,7 +10,13 @@
 // single-scattering mode when the expected number of collisions falls below ten.
 //
 // The cross sections this drives are in wentzel_xs.cuh and are validated against
-// G4WentzelOKandVIxSection to 0.0003%.
+// G4WentzelOKandVIxSection to 0.0003%. The single-scattering SAMPLER below is validated as a
+// distribution against Geant4's own, in this model's configuration of it:
+// ref/dump/dump_wentzel_msc.cc draws 400,000 SampleSingleScattering angles per cell into
+// ref/oracle/wentzel_msc_sample.csv and tests/test_wentzel_msc.cu draws the same number from
+// wv_sample_single. That comparison is what docs/RISK.md V47's missing 1/(1 + z1*factD) factor
+// had nothing to fail against - the properties checked further down this file all passed
+// without it.
 //
 // CALL ORDER MATTERS. The sequence is wv_step_limit -> wv_geom_path -> (geometry decides the
 // actual geometric step) -> wv_true_path -> wv_sample_scattering. wv_true_path is what lowers
@@ -253,6 +259,33 @@ __host__ __device__ inline real_t wv_true_path(WentzelMscState<real_t>& st, real
   return st.t_path;
 }
 
+/// The target mass `factD` is built from, MeV.
+///
+/// Verbatim from G4WentzelOKandVIxSection::SetupTarget (G4WentzelOKandVIxSection.cc:206-208):
+///
+///     G4double massT = (1 == Z) ? CLHEP::proton_mass_c2 :
+///       fNistManager->GetAtomicMassAmu(Z)*CLHEP::amu_c2;
+///     SetTargetMass(massT);
+///
+/// The ELEMENT's mean atomic mass, not an isotope's: this is the one a multiple-scattering step
+/// samples with, because G4WentzelVIModel::SampleScattering calls SetupTarget
+/// (G4WentzelVIModel.cc:615) and then SampleSingleScattering (:618) with nothing in between. It
+/// is deliberately NOT what `em::coulomb_scattering.cuh` uses - G4eCoulombScatteringModel::
+/// SampleSecondaries overrides it with the sampled isotope's nuclear mass after the cross
+/// sections and before the sampler, so that file takes the mass as an argument and this one
+/// derives it from Z. Two callers, two masses, each named where it is chosen.
+///
+/// `Z`, not `min(Z, 99)`: SetupTarget clamps `targetZ` and then indexes the mass table with the
+/// unclamped argument. `data::atomic_mass` returns 0 above Z = 98, exactly as
+/// G4NistElementBuilder::GetAtomicMassAmu does, so both sides would divide by zero there; no
+/// material can reach this with such a Z, because `data::build_material` divides by the same
+/// number to get the atom density.
+template <typename real_t>
+__host__ __device__ inline real_t wv_target_mass(int z) {
+  return (1 == z) ? units::proton_mass_c2<real_t>()
+                  : data::atomic_mass<real_t>(z) * units::amu_c2<real_t>();
+}
+
 /// One single Coulomb scatter off a chosen element.
 ///
 /// Verbatim from G4WentzelOKandVIxSection::SampleSingleScattering, with the exponential
@@ -282,18 +315,23 @@ __host__ __device__ inline Vec3<real_t> wv_sample_single(const WentzelState<real
   // G4ScreeningMottCrossSection's Mott/Rutherford ratio; for everything else the analytic
   // Rutherford-plus-spin expression below. The ratio's beta is the projectile-nucleus
   // relative-system one, which depends on the target Z - so it is computed here, per element,
-  // as Geant4 recomputes it with SetupKinematic(tkin, targetZ) at this same point.
+  // as Geant4 recomputes it with SetupKinematic(tkin, targetZ) at this same point. factD does
+  // not appear in the Mott branch at all, which is why only the second one divides by it.
   //
-  // factD is sqrt(mom2)/value, set only for particles with a magnetic-moment correction; it is
-  // zero for the particles here, so the 1/(1 + z1*factD) factor in the analytic branch is 1.
+  // This line read `* fm * fm;` and carried a comment saying factD "is set only for particles
+  // with a magnetic-moment correction; it is zero for the particles here". It is not zero for
+  // any of them: SetTargetMass is called by SetupTarget for EVERY target
+  // (G4WentzelOKandVIxSection.cc:208) and SampleScattering calls SetupTarget immediately before
+  // this function. docs/RISK.md V47 has what the missing factor was worth.
   real_t grej;
   if (s.use_mott) {
     const real_t beta = data::mott_beta<real_t>(z, s.tkin, s.mass);
     grej = data::mott_ratio<real_t>(z, beta, sqrt(z1)) * fm * fm;
   } else {
+    const real_t fact_d = sqrt(s.mom2) / wv_target_mass<real_t>(z);
     grej = (real_t(1) - z1 * s.fact_b
             + wv_fact_b1<real_t>() * real_t(z) * sqrt(z1 * s.fact_b) * (real_t(2) - z1))
-           * fm * fm;
+           * fm * fm / (real_t(1) + z1 * fact_d);
   }
   if (s.mott_factor * rng.uniform() <= grej) {
     real_t cost = real_t(1) - z1;

@@ -541,8 +541,9 @@ int main() {
       // ten decades in 1 - cos will not agree bin for bin, and the alternative to a wide limit
       // here is a limit that fails at random. What makes this a check rather than a formality
       // is the anti-vacuity run in the commit message: dropping the 1/(1 + z1*factD) factor
-      // from the rejection function - which is exactly what em/wentzel_msc.cuh's copy of this
-      // sampler does - moves the proton's scattered fraction by 30 sigma.
+      // from the rejection function - which is what em/wentzel_msc.cuh's copy of this sampler
+      // did until docs/RISK.md V47 was closed - moves the proton's scattered fraction by 30
+      // sigma.
       const bool bad = (zsc > 5.0) || (chi2n > 12.0);
       if (bad || Z == 8 || Z == 1) {
         std::printf("  %-12s %4d %10.4g %6.4f/%6.4f %11.4g %11.3f%s\n", part, Z, e, p1, p2, m3,
