@@ -321,11 +321,20 @@ static void dump_ion_msc(const DumpContext& ctx) {
   // tlimit, so facrange (0.2 against the lepton's 0.04) and the `max(tlimit, tlimitmin)` floor
   // are pinned far tighter than either could be wrong by.
   //
-  // Safety zero, so the doverrb early return cannot fire and the branch is reached. The
-  // proposed step is the whole range, so `tlimit < tPathLength` and the limit always bites.
+  // THREE SAFETIES PER CELL, AND THE OTHER TWO ARE WHAT MEASURES doverrb. With safety zero the
+  // `distance < presafety` early return cannot fire and the fMinimal branch is always reached.
+  // The other two sit either side of the threshold itself, at 0.99 and 1.01 of
+  // `currentRange*doverrb`, and the test is strict (`if(distance < presafety)`): the 1.01 row
+  // must return the step unlimited and the 0.99 row must not. Without them doverrb would be
+  // compared as the dumper's transcription of one formula against the port's transcription of
+  // the same formula, which docs/RISK.md V37 says is not an oracle. With them it is pinned to
+  // 1% by whichever cells the limit actually bites in - and it bites in seven of 150, the ones
+  // where the transport mfp is under five times the range.
   FILE* g = std::fopen("ion_msc_limit.csv", "w");
   std::fprintf(g, "particle,Z,A,material,energy_MeV,range_mm,lambda0_mm,lambda0_over_range,"
-                  "facrange,n,n_limited,mean_t_mm,sd_t_mm,min_t_mm,max_t_mm\n");
+                  "doverrb,safety_over_distance,safety_mm,facrange,n,n_limited,mean_t_mm,"
+                  "sd_t_mm,min_t_mm,max_t_mm\n");
+  const double kSafetyFrac[3] = {0.0, 0.99, 1.01};
   int si = 0;
   for (const Sp& s : sp) {
     ++si;
@@ -339,42 +348,51 @@ static void dump_ion_msc(const DumpContext& ctx) {
       ++mi;
       const G4MaterialCutsCouple* c = couple_of(m);
       if (nullptr == c) { continue; }
+      const double zeff = m->GetIonisation()->GetZeffective();
+      const double doverrb = 1.15 - 9.76e-4 * zeff;
       for (int ie = 0; ie < kNE; ++ie) {
         const double e = kEperA[ie] * s.a * MeV;
         const double range = eloss->GetRange(e, c);
         const double lam0 = transport_mfp(model, m, s.def, e);
-        CLHEP::HepRandom::setTheSeed(770000UL + 10000UL * (unsigned long)si
-                                     + 100UL * (unsigned long)mi + (unsigned long)ie);
-        // Welford, not sum-of-squares. Most cells do not randomise at all - see the
-        // lambda0_over_range column - and there `s2/n - mean^2` cancels down to 1e-14 of a
-        // number of order 100, which prints as a spurious 1e-6 standard deviation. Welford
-        // gives an exact zero, so `n_limited == 0` and `sd == 0` say the same thing twice
-        // rather than one of them saying it wrongly.
-        double mean = 0, m2 = 0, lo = DBL_MAX, hi = -DBL_MAX;
-        long n_limited = 0;
-        const int n = 20000;  // the limit is one number; 20,000 pins it to 5e-3 of its sigma
-        for (int k = 0; k < n; ++k) {
-          Setup su = make_setup(s, m, c, e, 0.0);
-          proc->StartTracking(su.track);
-          G4double dummy = 0.0;
-          G4GPILSelection sel = NotCandidateForSelection;
-          double t_req = range;
-          const double gg =
-              proc->AlongStepGetPhysicalInteractionLength(*su.track, 0.0, t_req, dummy, &sel);
-          const double t = model->ComputeTrueStepLength(gg);
-          free_setup(su);
-          if (t != range) { ++n_limited; }
-          const double d = t - mean;
-          mean += d / (k + 1);
-          m2 += d * (t - mean);
-          if (t < lo) { lo = t; }
-          if (t > hi) { hi = t; }
+        for (int isf = 0; isf < 3; ++isf) {
+          const double safety = kSafetyFrac[isf] * range * doverrb;
+          CLHEP::HepRandom::setTheSeed(770000UL + 100000UL * (unsigned long)si
+                                       + 1000UL * (unsigned long)mi + 10UL * (unsigned long)ie
+                                       + (unsigned long)isf);
+          // Welford, not sum-of-squares. Most cells do not randomise at all - see the
+          // lambda0_over_range column - and there `s2/n - mean^2` cancels down to 1e-14 of a
+          // number of order 100, which prints as a spurious 1e-6 standard deviation. Welford
+          // gives an exact zero, so `n_limited == 0` and `sd == 0` say the same thing twice
+          // rather than one of them saying it wrongly.
+          double mean = 0, m2 = 0, lo = DBL_MAX, hi = -DBL_MAX;
+          long n_limited = 0;
+          // 20,000 where the moments are the measurement; 200 on the threshold rows, where
+          // what is being measured is which BRANCH ran and one draw would say it.
+          const int n = (isf == 0) ? 20000 : 200;
+          for (int k = 0; k < n; ++k) {
+            Setup su = make_setup(s, m, c, e, safety);
+            proc->StartTracking(su.track);
+            G4double dummy = 0.0;
+            G4GPILSelection sel = NotCandidateForSelection;
+            double t_req = range;
+            const double gg =
+                proc->AlongStepGetPhysicalInteractionLength(*su.track, 0.0, t_req, dummy, &sel);
+            const double t = model->ComputeTrueStepLength(gg);
+            free_setup(su);
+            if (t != range) { ++n_limited; }
+            const double d = t - mean;
+            mean += d / (k + 1);
+            m2 += d * (t - mean);
+            if (t < lo) { lo = t; }
+            if (t > hi) { hi = t; }
+          }
+          std::fprintf(g, "%s,%d,%d,%s,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%ld,"
+                          "%.17g,%.17g,%.17g,%.17g\n",
+                       s.name, s.z, s.a, m->GetName().c_str(), e / MeV, range / mm, lam0 / mm,
+                       (range > 0.0 ? lam0 / range : 0.0), doverrb, kSafetyFrac[isf],
+                       safety / mm, proc->RangeFactor(), n, n_limited, mean / mm,
+                       std::sqrt(m2 / n) / mm, lo / mm, hi / mm);
         }
-        std::fprintf(g, "%s,%d,%d,%s,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%ld,%.17g,%.17g,%.17g,"
-                        "%.17g\n",
-                     s.name, s.z, s.a, m->GetName().c_str(), e / MeV, range / mm, lam0 / mm,
-                     (range > 0.0 ? lam0 / range : 0.0), proc->RangeFactor(), n, n_limited,
-                     mean / mm, std::sqrt(m2 / n) / mm, lo / mm, hi / mm);
       }
     }
   }
@@ -392,10 +410,27 @@ static void dump_ion_msc(const DumpContext& ctx) {
   // of `MuHadLateralDisplacement = false` as a measurement rather than a claim: a port that
   // left the lepton's displacement branch switched on would move a track sideways AND consume
   // three extra uniforms per step, which shifts everything downstream of it.
+  // THE ENERGY THE SAMPLER USES IS A COLUMN, AND IT IS A TRANSCRIPTION RATHER THAN A READING.
+  // `SampleScattering` starts by replacing the pre-step energy with a post-step one, in three
+  // bands of tPathLength/currentRange (0.05 = dtrl, and 0.01), and G4UrbanMscModel exposes no
+  // accessor for the result. `scatter_energy_MeV` below is those three lines evaluated here
+  // with the same `GetEnergy`/`GetDEDX` the model calls, so the angular comparison is at the
+  // same energy on both sides rather than at two energies that differ by the port's own guess.
+  // It is NOT an independent oracle for those three lines - docs/RISK.md V37 - which is why the
+  // step fractions include 0.005: below 0.01 of the range the bands collapse and
+  // scatter_energy_MeV is the pre-step energy exactly, so those rows test the sampler with
+  // nothing transcribed at all, and the other two extend it to the branch where
+  // `currentKinEnergy != kinEnergy` and the tau re-derivation and the invbetacp sqrt turn on.
   FILE* h = std::fopen("ion_msc_sample.csv", "w");
-  std::fprintf(h, "particle,Z,A,material,energy_MeV,range_mm,lambda0_mm,t_mm,g_mm,tau,"
-                  "n,n_scattered,mean_cost,mean_cost2,mean_one_minus_cost,mean_disp_mm,"
-                  "hist_lo,hist_hi");
+  // `sd_one_minus_cost` IS A COLUMN AND mean_cost2 IS NOT ENOUGH. An ion's steps sit at
+  // tau ~ 1e-6, where <cos> is 1 - 1e-6 and <cos^2> is 1 - 2e-6: a test that reconstructs
+  // var(1 - cos) from those two loses every significant digit to cancellation and then reports
+  // a two-digit variance as if it were exact, which is how a perfectly good distribution
+  // comparison comes out at 145 sigma. Welford on (1 - cos) directly, so the standard error the
+  // port compares against is the real one.
+  std::fprintf(h, "particle,Z,A,material,energy_MeV,range_mm,lambda0_mm,t_frac,t_mm,g_mm,tau,"
+                  "scatter_energy_MeV,lambda_scat_mm,n,n_scattered,mean_cost,mean_cost2,"
+                  "mean_one_minus_cost,sd_one_minus_cost,mean_disp_mm,hist_lo,hist_hi");
   for (int b = 0; b < kBins; ++b) { std::fprintf(h, ",h%d", b); }
   std::fprintf(h, "\n");
   si = 0;
@@ -415,8 +450,9 @@ static void dump_ion_msc(const DumpContext& ctx) {
         const double e = kEperA[ie] * s.a * MeV;
         const double range = eloss->GetRange(e, c);
         const double lam0 = transport_mfp(model, m, s.def, e);
-        for (int it = 0; it < 2; ++it) {
-          const double t_in = (it == 0 ? 0.02 : 0.2) * range;
+        const double tfrac[3] = {0.005, 0.05, 0.3};
+        for (int it = 0; it < 3; ++it) {
+          const double t_in = tfrac[it] * range;
           // Safety above the doverrb distance for every Zeff (doverrb <= 1.15 - 9.76e-4*Zeff
           // is at most 1.15), so the early return fires and the step limit draws nothing: the
           // sampler's random numbers are the only ones this cell consumes.
@@ -429,11 +465,20 @@ static void dump_ion_msc(const DumpContext& ctx) {
               proc->AlongStepGetPhysicalInteractionLength(*su.track, 0.0, t_req, dummy, &sel);
           const double t_true = model->ComputeTrueStepLength(gg);
           su.step->SetStepLength(gg);
+          // G4UrbanMscModel::SampleScattering lines 786-792, with the model's own accessors.
+          double e_scat = e;
+          if (t_true > range * 0.05) {
+            e_scat = eloss->GetKineticEnergy(range - t_true, c);
+          } else if (t_true > range * 0.01) {
+            e_scat = e - t_true * eloss->GetDEDX(e, c);
+          }
+          const double lam_scat = transport_mfp(model, m, s.def, e_scat);
           CLHEP::HepRandom::setTheSeed(880000UL + 10000UL * (unsigned long)si
                                        + 1000UL * (unsigned long)mi + 10UL * (unsigned long)ie
                                        + (unsigned long)it);
           long hh[kBins] = {0};
           double a1 = 0, a2 = 0, a3 = 0, ad = 0;
+          double om = 0, om2 = 0;  // Welford on (1 - cos); see the header note
           long nsc = 0;
           const double lo = -12.0, hi = 0.31;  // log10(1 - cos), 1e-12 to 2
           for (int k = 0; k < kN; ++k) {
@@ -446,6 +491,9 @@ static void dump_ion_msc(const DumpContext& ctx) {
             a1 += cost;
             a2 += cost * cost;
             a3 += 1.0 - cost;
+            const double omd = (1.0 - cost) - om;
+            om += omd / (k + 1);
+            om2 += omd * ((1.0 - cost) - om);
             if (cost < 1.0) {
               ++nsc;
               const double x = std::log10(1.0 - cost);
@@ -455,11 +503,12 @@ static void dump_ion_msc(const DumpContext& ctx) {
               ++hh[b];
             }
           }
-          std::fprintf(h, "%s,%d,%d,%s,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%ld,"
-                          "%.9g,%.9g,%.9g,%.9g,%.17g,%.17g",
+          std::fprintf(h, "%s,%d,%d,%s,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                          "%d,%ld,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g",
                        s.name, s.z, s.a, m->GetName().c_str(), e / MeV, range / mm, lam0 / mm,
-                       t_true / mm, gg / mm, t_true / lam0, kN, nsc, a1 / kN, a2 / kN, a3 / kN,
-                       ad / kN, lo, hi);
+                       tfrac[it], t_true / mm, gg / mm, t_true / lam0, e_scat / MeV,
+                       lam_scat / mm, kN, nsc, a1 / kN, a2 / kN, om,
+                       std::sqrt(om2 / kN), ad / kN, lo, hi);
           for (int b = 0; b < kBins; ++b) { std::fprintf(h, ",%ld", hh[b]); }
           std::fprintf(h, "\n");
           free_setup(su);
