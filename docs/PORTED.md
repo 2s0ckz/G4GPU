@@ -179,7 +179,7 @@ physics lists.
 | G4HadXSHelper::FillPeaksStructure | **V** | checked in `tests/test_particlexs.cu`; P5 owns the port |
 | G4ComponentSAIDTotalXS | **-** | not reachable - see below |
 | G4ComponentAntiNuclNuclearXS | **-** | refused by name in `hadronic/xs/refusal.cuh` |
-| G4NeutronGeneralProcess | **P** | `hadronic/neutron_general_xs.cuh` and `step_neutral` in `physics/stepper.cuh`. The *shape* of the process, not its numbers: `EnableNeutronGeneralProcess` is 1 in 11.1.1, so a neutron has one discrete interaction length over elastic + inelastic + capture summed and picks the sub-process from cumulative partials afterwards, and `G4NeutronTrackingCut::ConstructProcess` returns early so the 10 us cut lives inside it. Ported: the grid `PreparePhysicsTable` builds (400 log bins 1 keV - 20 MeV, 70 more to 100 TeV, **linear** interpolation - the spline flag is `false`), the `G4PhysicsVector::LogVectorValue` lookup, the sub-process choice including the **order swap** either side of 20 MeV, and the time cut with its energy half correctly inert. Not ported: the table's contents (P2) and the final states (P8). The pointer is null, the cross section is zero, and a neutron streams to the world boundary or dies on the clock - which is what a Geant4 neutron does with `NeutronGeneralProc` inactivated. `Upload` refuses a table without final states. |
+| G4NeutronGeneralProcess | **P** | `hadronic/neutron_general_xs.cuh`, `hadronic/neutron_wiring.cuh` and `step_neutral` in `physics/stepper.cuh`. **WIRED END TO END SINCE P8d - see 2.1.8**, and `P` rather than `T` for exactly one reason: the inelastic sub-process is selectable and has no final state, so it is refused by name (`HadronicRefusal::kNeutronInelastic`) with the kinetic energy it costs. `EnableNeutronGeneralProcess` is 1 in 11.1.1, so a neutron has one discrete interaction length over elastic + inelastic + capture summed and picks the sub-process from cumulative partials afterwards, and `G4NeutronTrackingCut::ConstructProcess` returns early so the 10 us cut lives inside it. Ported: the grid `PreparePhysicsTable` builds (400 log bins 1 keV - 20 MeV, 70 more to 100 TeV, **linear** interpolation - the spline flag is `false`), the `G4PhysicsVector::LogVectorValue` lookup, the sub-process choice including the **order swap** either side of 20 MeV, the time cut with its energy half correctly inert, the tables on the device per material, and the elastic (P5) and capture (P7) final states. `Upload` still refuses a table that arrives without its final states; what it checks is now the two sub-process data sets and the level scheme rather than the table itself. |
 
 Nucleon-nucleus total, inelastic and elastic, Z = 2..92, 14 MeV - 1 TeV, protons and neutrons,
 agreeing with Geant4 to **2e-15 over 10,738 points** (`tests/test_nucleon_xs.cu`).
@@ -285,6 +285,10 @@ because QBBC gives that process exactly one data set, `G4ParticleInelasticXS`
 `ref/oracle/hadronic_params.csv` says `EnableNeutronGeneralProcess = 1`, so a neutron in QBBC
 has ONE discrete process. `G4NeutronGeneralProcess` builds a combined per-material table and
 the transport reads that, not the three data sets:
+
+*(P8d: the sentence below that attributes the flag to `G4HadronInelasticQBBC::ConstructProcess`
+is wrong - the CONSTRUCTOR sets it, and the difference is a whole stage-1 configuration. See
+2.1.8 and docs/RISK.md V60. The grid, the node counts and everything else in this section stand.)*
 
 | table | grid | contents |
 |--:|---|---|
@@ -482,6 +486,9 @@ than a model that is not written:
   left of this item is P2's five combined tables and the sub-process branch in `step_neutral`.
   The refusal in `Upload` still stands and is still the thing that keeps them from arriving
   separately.)*
+  *(P8d: CLOSED. `host/neutron_upload.cuh` puts the five combined tables and the two
+  per-process data sets on the device - 7.43 MB for a five-material scene - the level data is
+  uploaded unconditionally now, and `step_neutral` selects and applies. Section 2.1.8.)*
 
 #### 2.1.6 The isotope abundances, hadElastic and CoulombScat in the steppers (P8b)
 
@@ -504,7 +511,7 @@ what is left.
 | `G4AntiNuclElastic` + `G4ComponentAntiNuclNuclearXS` (the antiproton) | y | **-** | Refused by name. `had::elastic_channel(kAntiProton)` is `kAntiNucleusRefused` and the cross section is zero, so an antiproton draws no hadronic interaction length at all |
 | `G4NuclNuclDiffuseElastic` (`G4IonElasticPhysics`, GenericIon) | y | **-** | Reachable since P8c transports the ion, and refused by name rather than left unreachable: `had::elastic_channel(kGenericIon)` is `kIonDiffuseNotWired` and the cross section is zero, so an ion draws no hadronic interaction length. Both halves exist - `xs::ggnn_elastic_element` and `elastic/nucl_nucl_diffuse_elastic.cuh` - and what is missing is the channel, which needs the projectile to be `xs::generic_ion(Z, A)`. Bounded at ~1e-9 per recoil: a micrometre of range against a metre of mean free path. See section 2.1.7 |
 | `G4NuclearLevelData::UploadNuclearLevelData` - PhotonEvaporation5.7 on the device | y | **V** | `host/level_upload.cuh`. 3108 managers, 174,411 levels and 268,190 transitions, **9.52 MB**. Every manager's level count, level energies, lifetimes, spins and transitions are read through the cascade's own accessors on the host and on the device and compared **exactly**: 0 disagreements. The cascade on top of it - `G4NeutronRadCapture::ApplyYourself` through `G4PhotonEvaporation::BreakUpChain` - runs 448 captures over 14 targets and 4 energies on both sides: 1783 secondaries, worst **5.82e-11 MeV** absolute on an energy and **2.23e-11** on a direction component. `tests/test_capture_device.cu` |
-| the same, at initialisation, whether a neutron arrives or not | y | **P** | `TransportEngine::SetNuclearLevelData` is OFF by default, which Geant4's `G4ExcitationHandler::SetParameters` is not. The one consumer is the capture sub-process of `G4NeutronGeneralProcess`, which is not wired, and `read_all_level_data` opens 3110 files against a B1 run whose whole transport is 750 ms. It becomes unconditional the day the neutron is wired |
+| the same, at initialisation, whether a neutron arrives or not | y | **T** | `TransportEngine::SetNuclearLevelData` was OFF by default, which Geant4's `G4ExcitationHandler::SetParameters` is not, because the one consumer - the capture sub-process of `G4NeutronGeneralProcess` - was not wired and `read_all_level_data` opens 3110 files against a B1 run whose whole transport is 750 ms. *(P8d: ON by default now, which is what this row said would happen "the day the neutron is wired". The setter survives for a gamma- or electron-only run that cannot make a neutron, and `Upload` refuses the combination of a neutron cross section with no level scheme - measured, that is not a missing gamma but three times as many, docs/RISK.md V60.)* |
 
 **What was found on the way, and all three are in docs/RISK.md.**
 
@@ -713,7 +720,7 @@ kernel should measure it with V55's one-kernel reproducer before it adds one.
 | `G4IonPhysicsXS` | `G4ParticleInelasticXS`, `G4BinaryLightIonReaction` | **none** |
 | `G4IonElasticPhysics` | `G4ComponentGGNuclNuclXsc`, `G4NuclNuclDiffuseElastic` | **none** |
 | `G4StoppingPhysics` | `G4HadronStoppingProcess`, `G4HadronicAbsorptionBertini`, `G4HadronicAbsorptionFritiof`, `G4MuonMinusCapture`, `G4EmCaptureCascade` | **none** |
-| `G4NeutronTrackingCut` | `G4NeutronKiller` | **P** - and the class is not the answer. With `EnableNeutronGeneralProcess = 1` this constructor `return`s without creating a `G4NeutronKiller`; the cut is the two lines at the top of `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`. Ported in `step_neutral`, before geometry and before the cross section, and it **deposits nothing** - `theTotalResult->Initialize(track)` zeroes both energy deposits, so the neutron's kinetic energy is discarded rather than given to the volume. The engine books it (`RunStats::neutron_killed_energy`) because Geant4 does not conserve energy across this either and the only way anyone finds out is a printed number. |
+| `G4NeutronTrackingCut` | `G4NeutronKiller` | **T** - and the class is not the answer. With `EnableNeutronGeneralProcess = 1` this constructor `return`s without creating a `G4NeutronKiller`; the cut is the two lines at the top of `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`. Ported in `step_neutral`, before geometry and before the cross section, and it **deposits nothing** - `theTotalResult->Initialize(track)` zeroes both energy deposits, so the neutron's kinetic energy is discarded rather than given to the volume. The engine books it (`RunStats::neutron_killed_energy`) because Geant4 does not conserve energy across this either and the only way anyone finds out is a printed number. *(P8d: with the flag OFF - which is the stage-1 reference, and is reachable, docs/RISK.md V60 - `G4NeutronTrackingCut` does build a real `G4NeutronKiller`, and the run prints `TimeCut(ns)= 10000  KinEnergyCut(MeV)= 0`: the same two numbers. So the one line in `step_neutral` is right for both configurations and `P` became `T` without any code changing.)* |
 | `G4EmExtraPhysics` | gamma-nuclear (`G4GammaNuclearXS`, `G4LowEGammaNuclearModel`, LEND), electro- and muon-nuclear (`G4ElectroVDNuclearModel`, `G4MuonVDNuclearModel`), 18 neutrino classes, `G4SynchrotronRadiation`, `G4AnnihiToMuPair`, `G4GammaConversionToMuons`, `G4eeToHadrons`, `G4MuonToMuonPairProduction` | **none** |
 
 ### 2.3 The model tree, by size

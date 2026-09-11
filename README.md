@@ -14,9 +14,10 @@ hadronic and decay physics of Geant4's `QBBC` list is being ported in phases, to
 uses, the hadronic process framework and the elastic final states, decay, the complete
 de-excitation chain, and transport for eleven more species - is on main, validated class by
 class against the library, and not yet reached by a particle. Phase 2 has landed single Coulomb scattering, PreCompound and the closure of the negative-hadron
-question; neutron capture is on main, and decay, hadron elastic scattering and single Coulomb
-scattering are wired into the transport. The neutron general process is still open — its capture
-sub-process reads nuclear level data that is not on the device (P8b). The cascades and the string model (Phase 3) have not started. The [status
+question; decay, hadron elastic scattering, single Coulomb scattering and the **neutron general
+process** are wired into the transport, so a neutron interacts rather than streaming, and its
+elastic and capture final states act. Its inelastic sub-process is Phase 3's and is refused by
+name. The cascades and the string model (Phase 3) have not started. The [status
 tables](#physics) below say exactly what is there and what is not.
 
 ---
@@ -196,9 +197,10 @@ own coarseness, and the port reproduces Geant4's interpolated value exactly.
 #### Hadronic physics, decay and de-excitation - Phase 1 of the QBBC port
 
 Everything in this table is transcribed and checked against the library. Decay, hadron elastic
-scattering and single Coulomb scattering are reached by a particle; `nCapture` and the neutron
-general process are not. The B1 and Bragg-peak figures above are unchanged by all of it, which is
-the check that the foundations cost nothing.
+scattering, single Coulomb scattering, the neutron general process and `nCapture` are all reached
+by a particle now. The B1 and Bragg-peak figures above are unchanged by all of it for the charged
+species, which is the check that the foundations cost nothing; the NEUTRON's B1 dose is new and
+is in `ref/b1hadron/stage1_README.md`.
 
 | Geant4 | what | test | worst deviation |
 |---|---|---|---|
@@ -208,7 +210,7 @@ the check that the foundations cost nothing.
 | `G4ExcitationHandler` and its tree: `G4Evaporation` with the 68-channel GEM set, `G4FermiBreakUpVI`, `G4PhotonEvaporation`, `G4CompetitiveFission`, `G4UnstableFragmentBreakUp`; `G4NucleiProperties`, the pairing/shell corrections, `G4NuclearLevelData` | de-excitation of an excited fragment into fragments and gammas | `test_deex_*` (5 tests) | masses, corrections, probabilities exact; the whole PhotonEvaporation5.7 dataset (174,411 levels) bit for bit; `BreakItUp` within 4.1 σ over 2.5 M products |
 | `G4PreCompoundModel`, `G4PreCompoundEmission`, the six `G4PreCompound*` fragments, `G4PreCompoundTransitions`, `G4GeneratorPrecompoundInterface` | pre-equilibrium emission and the cascade-to-de-excitation hand-over | `test_precompound` | 374,345 exact comparisons, worst 1.2e-14; `DeExcite` within 3.8 σ over 2.35 M products |
 | `G4Decay`, `G4DecayTable`, `G4PhaseSpaceDecayChannel`, `G4MuonDecayChannel`, `G4KL3DecayChannel`, `G4DalitzDecayChannel`, `G4NeutronBetaDecayChannel` | decay for π±, π⁰, μ±, K± and the neutron | `test_decay` | every deterministic comparison exactly 0; spectra within 3.7 σ over 2,160 bins; **reached in transport** |
-| `G4NeutronRadCapture`, `G4NeutronCaptureProcess` | neutron radiative capture, hydrogen and compound branches | `test_capture` | deterministic 0; capture gammas and residuals within 3.5 σ |
+| `G4NeutronRadCapture`, `G4NeutronCaptureProcess` | neutron radiative capture, hydrogen and compound branches | `test_capture`, `test_neutron_general` | deterministic 0; capture gammas and residuals within 3.5 σ; **reached in transport**, 35,535 captures over four materials at 3.10 secondaries each and a longest cascade of 10 |
 | `G4ParticleDefinition` rows for 30 species; the neutral step; neutrino accounting | species and transport plumbing | `test_species`, `test_neutron` | 376 comparisons exact |
 
 Each package's report - what is `T`/`V`/`P`, what is refused by name, what it found in Geant4 -
@@ -270,7 +272,7 @@ closed - the same question has the mechanism.
 | γ, e⁻, e⁺ | **transported** |
 | proton, alpha | **transported** |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name |
-| neutron, π⁰ | **transported** by the neutral kernel: the neutron streams to the world boundary under the 10 µs tracking cut with no process acting yet; π⁰ decays at once |
+| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. The inelastic sub-process is selectable and refused by name with the energy it costs (P9–P11). The 10 µs tracking cut still comes first and still discards rather than deposits. π⁰ decays at once |
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic` |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
@@ -281,7 +283,7 @@ closed - the same question has the mechanism.
 
 | Geant4 | what | status |
 |---|---|---|
-| the wiring of the **neutron general process** — elastic, inelastic and capture as sub-processes of one `G4NeutronGeneralProcess` | a neutron that interacts rather than streaming to the world boundary | Phase 2, still open, and both of the device tables it was blocked on are now there: the isotope abundances (which is what `hadElastic` needed) and PhotonEvaporation5.7's 174,411 levels and 268,190 transitions, 9.52 MB, compared level by level against the host copy. What is left is P2's five combined cross-section tables uploaded per material and the sub-process branch in `step_neutral`. `TransportEngine::Upload` refuses a neutron cross-section table that arrives without its final states, so the state is enforced rather than merely current — and RISK V53 is why even then the neutron cannot be validated by a B1 dose until P9–P11 land |
+| the **inelastic** sub-process of `G4NeutronGeneralProcess` | a neutron that reacts rather than being killed | the process itself is wired (the row above); its inelastic sub-process is what is left, and it is Phase 3's `G4BinaryCascade`/Bertini/FTFP rather than anything about the neutron. It is selectable — `G4NeutronGeneralProcess::BuildPhysicsTable` sums elastic + inelastic + capture unconditionally, so leaving the term out would be a different cross section — so it is refused by name, `had::HadronicRefusal::kNeutronInelastic`, and the neutron is killed with its kinetic energy deposited locally, which is NOT what Geant4 does with it. Above 1 MeV that is a large share of the interactions: 18% in water at 10 MeV, 39% in air, 25% in bone, 51% in lead. Measured, in `tests/test_neutron_general.cu` |
 | `G4BinaryCascade`, `G4BinaryLightIonReaction`, `G4CascadeInterface` (Bertini), FTF + Lund fragmentation, `G4GeneratorPrecompoundInterface` | inelastic final states | Phase 3, not started; the largest part of the port |
 | `G4StoppingPhysics`, gamma-/electro-/muon-nuclear | capture at rest, `G4EmExtraPhysics` | Phase 3 (P12, P13) |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
@@ -311,18 +313,20 @@ Three things are measured, documented and unresolved rather than unknown:
    between 1 and 3 MeV and nowhere else, undiagnosed, left visible rather than absorbed into a
    tolerance.
 2. **The ion step limit** above.
-3. **Decay and elastic act; capture and the neutron do not yet.** The first like-for-like with a
-   hadronic-chain process wired — decay — put every positive hadron within two sigma of Geant4
-   with elastic inactivated on both sides (RISK V53; `ref/b1hadron/stage1_compare.ps1`). P8b
-   added the isotope abundances that `SampleZandA` needed and wired `hadElastic` for every
-   charged hadron Geant4 gives one to, and `CoulombScat` for e± above 100 MeV and the singly
-   charged hadrons — so the Geant4 side of stage 1 now inactivates nothing but the inelastic
-   processes, the at-rest captures, the four radiative processes and the lepto-nuclear ones.
-   What is still a transcription with an oracle rather than a dose is `nCapture` and with it the
-   whole neutron: the capture cascade reads P3's PhotonEvaporation5.7 level data and that is not
-   on the device, and RISK V53 shows that even with it there the neutron cannot be validated by
-   a B1 dose until P9–P11 land, because `EnableNeutronGeneralProcess` makes its elastic,
-   inelastic and capture one process that `/process/inactivate` can only take whole.
+3. **The neutron's inelastic sub-process, and what the port does with it instead.** The first
+   like-for-like with a hadronic-chain process wired — decay — put every positive hadron within
+   two sigma of Geant4 with elastic inactivated on both sides
+   (`ref/b1hadron/stage1_compare.ps1`). P8b added the isotope abundances that `SampleZandA`
+   needed and wired `hadElastic` for every charged hadron Geant4 gives one to, and `CoulombScat`
+   for e± above 100 MeV and the singly charged hadrons; P8d wired the neutron general process,
+   so the Geant4 side of stage 1 now inactivates nothing but the inelastic processes, the
+   at-rest captures, the four radiative processes and the lepto-nuclear ones. The neutron's own
+   row needed a second reference binary and a finding to get one — RISK V60: the flag that makes
+   its three processes one is set in a CONSTRUCTOR and has no UI command, so
+   `ref/b1neutron/b1neutron.cc` is Geant4's own example B1 with one line added. What is left is
+   the inelastic final state itself, which is Phase 3's: in the final configuration it is
+   selectable, refused by name, and the neutron is then killed with its energy deposited
+   locally, which is not what Geant4 does.
 
 ---
 

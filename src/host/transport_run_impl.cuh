@@ -1107,11 +1107,17 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // now asserts is that the three things `step_neutral` dereferences arrived together. Two of
     // them are cross sections the elastic and capture sub-processes draw a TARGET from
     // (`SampleZandA` on their own data stores, which the general process's table cannot
-    // answer), and the third is the level scheme the capture cascade walks. A table with no
-    // levels is the subtler of the two failures and the one worth refusing out loud: the
-    // capture would still run, and `G4PhotonEvaporation::BreakUpChain` with nothing to walk
-    // emits no gamma - so the neutron's binding energy would silently vanish instead of
-    // becoming a 2 to 9 MeV photon.
+    // answer), and the third is the level scheme the capture cascade walks.
+    //
+    // A TABLE WITH NO LEVELS IS THE SUBTLER FAILURE AND IT IS NOT THE OBVIOUS ONE. This comment
+    // said the capture "would emit no gamma, so the neutron's binding energy would silently
+    // vanish". Measured - `tests/test_neutron_general.cu` section 4, 2000 thermal captures in
+    // lead with the table and with a null view - it is the opposite: the cascade takes the
+    // CONTINUUM arm of `generate_gamma` instead of walking a discrete scheme and emits
+    // **26,485 secondaries carrying 14,609.9 MeV against 9,021 carrying 13,694.7 MeV**, three
+    // times the multiplicity and 6.7% more energy. So the failure mode is a plausible capture
+    // with a wrong spectrum rather than a missing one, which is exactly the kind of thing that
+    // is found in a dose comparison months later. docs/RISK.md V60.
     if (d_neutron_xs_ != nullptr
         && (neutron_tables_.sub.elastic == nullptr || neutron_tables_.sub.capture == nullptr)) {
       std::printf(
@@ -1127,8 +1133,10 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     if (d_neutron_xs_ != nullptr && level_tables_.view.n_managers == 0) {
       std::printf(
           "\nFATAL: the neutron's cross sections are on the device and the nuclear level\n"
-          "  scheme is not, so a capture would kill the neutron and emit no gamma - its\n"
-          "  binding energy, 2 to 9 MeV per capture, would vanish rather than be deposited.\n"
+          "  scheme is not. A capture would still run - and emit the WRONG cascade rather than\n"
+          "  none: measured in lead at thermal energy, 2000 captures give 26,485 secondaries\n"
+          "  carrying 14,609.9 MeV with a null table against 9,021 carrying 13,694.7 MeV with\n"
+          "  the real one, because G4PhotonEvaporation falls back to its continuum arm.\n"
           "  Either let SetNuclearLevelData stay on (the default since P8d) or resolve\n"
           "  G4LEVELGAMMADATA; see host/level_upload.cuh.\n");
       std::exit(2);

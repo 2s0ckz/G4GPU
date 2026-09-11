@@ -1,31 +1,50 @@
-# Stage 1: example B1 with a neutron beam, everything P9-P13 owes inactivated,
-# and Decay and hadElastic LEFT ACTIVE.
+# Stage 1: example B1 with a neutron beam, everything P9-P13 owes inactivated, and Decay,
+# hadElastic and nCapture LEFT ACTIVE.
 #
-# THE ONE ROW THAT IS NOT A STAGE-1 CONFIGURATION, and it cannot be made one. Elastic,
-# inelastic and capture are sub-processes of `NeutronGeneralProc`, whose
-# EnableNeutronGeneralProcess flag `G4HadronInelasticQBBC::ConstructProcess` sets
-# unconditionally with no messenger anywhere in 11.1.1 - so /process/inactivate takes all
-# three or none. This macro takes all three, which is stage ZERO for a neutron: both sides
-# deposit exactly nothing in the scoring volume, and that zero is a prediction rather than
-# an absence. `Decay` is left active because a free neutron's 880 s lifetime makes it inert
-# at any energy that crosses a phantom, and inactivating an inert process would make the
-# macro differ from Geant4's default for no reason. See stage1_README.md and
-# docs/RISK.md V53.
+# **RUN THIS THROUGH ref\b1neutron\run.bat AND NOT THROUGH ref\run\runb1.bat.** It is the one
+# macro in this directory that needs a different binary, and the reason is the finding P8d
+# wrote up: `EnableNeutronGeneralProcess` has no UI command anywhere in 11.1.1
+# (`G4HadronicParametersMessenger` builds three, and it is not one of them), so the flag can
+# only be turned off from C++ - one line, in `G4State_PreInit`, after `new QBBC` and before
+# `/run/initialize`. `ref/b1neutron/b1neutron.cc` is Geant4's own example B1 with that line and
+# nothing else; every other source file in it comes from `$G4SRC/examples/basic/B1`, so this is
+# the same B1 every other row of stage1_README.md was measured with.
 #
-# Every name below is a row of ref/oracle/species_processes.csv for neutron - the dump of
-# the constructed QBBC's own process manager. /process/inactivate ignores a name the
-# species does not have, silently, so a macro written from the source rather than from
-# the object can look like it switched something off. docs/RISK.md V43.
+# WHAT THIS MACRO USED TO BE, and why it changed. It used to read
+#
+#     /process/inactivate NeutronGeneralProc
+#
+# and the note over it said "THE ONE ROW THAT IS NOT A STAGE-1 CONFIGURATION, and it cannot be
+# made one" - because with the flag set, elastic, inelastic and capture are sub-processes of one
+# object and `/process/inactivate` takes all three or none. That was true of what could be done
+# from a macro and it was not true of what could be done at all. With the flag off, the neutron's
+# process manager holds six entries, `neutronInelastic` is one of them, and inactivating it by
+# name leaves exactly the processes this port has. docs/RISK.md V53 and V60.
+#
+# THE SIX ENTRIES, and this macro prints them rather than asserting them (docs/RISK.md V43: ask
+# the object). `G4HadProcesses::BuildNeutronElastic` and `BuildNeutronInelasticAndCapture` take
+# their `else` branches and register `hadElastic`, `neutronInelastic` and `nCapture` separately,
+# and `G4NeutronTrackingCut::ConstructProcess` no longer finds a general process - so it builds
+# a real `G4NeutronKiller` with the same 10 us and 0 MeV the general process carries internally.
+#
+#     Transportation, Decay, hadElastic, neutronInelastic, nCapture, nKiller
+#
+# `Decay` is left active because a free neutron's 880 s lifetime makes it inert at any energy
+# that crosses a phantom, and inactivating an inert process would make the macro differ from
+# Geant4's default for no reason.
 
 /run/initialize
 /control/verbose 0
 /run/verbose 1
 
-/process/inactivate NeutronGeneralProc
+# The one thing this port does not have for a neutron: the inelastic final state (P9-P11).
+# It is a process on the manager now, so this command reaches it; with the general process on
+# it answers `illegal process (or type) name`.
+/process/inactivate neutronInelastic
 
-# The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's
-# lesson: ask the object. This prints Active/InActive for every process on the
-# particle's manager, after the inactivations above.
+# The stage, recorded by what RAN and not by what was intended. This prints Active/InActive for
+# every process on the neutron's manager, after the inactivation above - so the six entries in
+# the header are a claim the output checks.
 /particle/select neutron
 /particle/process/dump
 

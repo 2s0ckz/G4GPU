@@ -136,7 +136,17 @@ function Invoke-Run([string]$exe, [string]$mac, [string]$cwd) {
 # only symptom upstream is a null output array and "Cannot index into a null array" from inside
 # the dose parser. A second copy of the variable list here would be a second thing to keep in
 # step with the install; one launcher is the point.
-function Invoke-G4([string]$mac) {
+#
+# EXCEPT FOR THE NEUTRON, WHICH NEEDS A DIFFERENT BINARY (P8d). Its stage-1 configuration is
+# `EnableNeutronGeneralProcess` false, which has no UI command anywhere in 11.1.1 - so it cannot
+# be a line in a macro and has to be a line in a main. `ref\b1neutron` is Geant4's own example
+# B1 compiled from the Geant4 source tree with that one line added and the visualisation manager
+# removed; `ref\b1neutron\run.bat` is its launcher and exports the same eleven variables.
+# docs/RISK.md V60 and V53.
+function Invoke-G4([string]$mac, [string]$species) {
+  if ($species -eq "neutron") {
+    return & cmd /c "`"$root\ref\b1neutron\run.bat`" `"$mac`"" 2>&1 | ForEach-Object { "$_" }
+  }
   return & cmd /c "`"$root\ref\run\runb1.bat`" `"$mac`"" 2>&1 | ForEach-Object { "$_" }
 }
 
@@ -156,12 +166,20 @@ foreach ($s in $want) {
 
   $g4 = $null
   $g4ne = $null
+  # The neutron's reference is its own binary and it is built in THIS worktree, so its existence
+  # is a different test from $refExe's. See Invoke-G4.
+  $needExe = if ($s -eq "neutron") {
+    Join-Path $root "ref\b1neutronbuild\Release\b1neutron.exe"
+  } else { $refExe }
   if (-not $SkipGeant4) {
-    if (-not (Test-Path -LiteralPath $refExe)) {
-      Write-Output "  no $refExe - Geant4 columns skipped"
+    if (-not (Test-Path -LiteralPath $needExe)) {
+      Write-Output "  no $needExe - Geant4 columns skipped"
+      if ($s -eq "neutron") {
+        Write-Output "       Build it with ref\b1neutron\build.bat IN THIS WORKTREE."
+      }
     } else {
       $g4Mac = New-Macro (Join-Path $here "stage1_${s}.mac") $Events
-      $g4Out = Invoke-G4 $g4Mac
+      $g4Out = Invoke-G4 $g4Mac $s
       $g4 = Get-Dose $g4Out
       if ($null -eq $g4) {
         Write-Output "  Geant4 stage-1 run produced no dose line; last lines:"
@@ -172,7 +190,7 @@ foreach ($s in $want) {
       $neSrc = Join-Path $here "stage1_${s}_noelastic.mac"
       if ((-not $SkipNoElastic) -and (Test-Path -LiteralPath $neSrc)) {
         $neMac = New-Macro $neSrc $Events
-        $neOut = Invoke-G4 $neMac
+        $neOut = Invoke-G4 $neMac $s
         $g4ne = Get-Dose $neOut
         if ($null -eq $g4ne) {
           Write-Output "  Geant4 no-elastic run produced no dose line; last lines:"

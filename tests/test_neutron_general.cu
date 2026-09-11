@@ -958,6 +958,84 @@ int main() {
                 captures, secondaries,
                 (captures > 0) ? double(secondaries) / double(captures) : 0.0, overall_max,
                 had::kNeutronCaptureSecondaryCap);
+
+    // AND WHAT A NULL LEVEL SCHEME DOES, which is the claim `Upload`'s new refusal rests on.
+    //
+    // The refusal says a capture with no levels to walk "would kill the neutron and emit no
+    // gamma - its binding energy, 2 to 9 MeV per capture, would vanish". That is a statement
+    // about `G4PhotonEvaporation::BreakUpChain` with an empty table and it is measured here
+    // rather than asserted: the same tracks, with `level_data` replaced by a null view. If the
+    // two columns agreed, the refusal would be protecting nothing and the 9.52 MB upload would
+    // be free to skip.
+    //
+    // IN LEAD, AND WATER WAS THE WRONG CHOICE FOR A REASON WORTH KEEPING. Run in water at
+    // thermal energy the two columns are IDENTICAL - 2000 captures, exactly 2 secondaries each,
+    // 4448.7461 MeV emitted either way - because a thermal neutron in water captures on
+    // HYDROGEN, and `G4NeutronRadCapture::ApplyYourself`'s `A <= 1` branch is a closed-form
+    // two-body decay (n + p -> d + gamma) that never opens the level scheme. So the one capture
+    // a water phantom mostly makes is the one that does not read the table this test is about.
+    // Lead is A = 204..208, which is the `A >= 5` compound branch through `BreakUpChain`.
+    {
+      had::HadronicWiring<real_t> nolevels = w;
+      nolevels.level_data = data::LevelTable{};
+      std::vector<TrackState<real_t>> tracks(kN);
+      for (int k = 0; k < kN; ++k) {
+        TrackState<real_t>& p = tracks[static_cast<std::size_t>(k)];
+        p = TrackState<real_t>{};
+        p.species = ParticleType::kNeutron;
+        p.pos = Vec3<real_t>{0, 0, 0};
+        p.dir = Vec3<real_t>{0, 0, 1};
+        p.ekin = real_t(2.53e-8);
+        p.volume = 0;
+        p.weight = real_t(1);
+        p.rng_key = 0xC0FFEEu + 1009u * static_cast<unsigned int>(k);
+        p.step = 0u;
+      }
+      cudaMemcpy(d_in, tracks.data(), sizeof(TrackState<real_t>) * kN, cudaMemcpyHostToDevice);
+      long long with_n = 0, with_sec = 0, without_n = 0, without_sec = 0;
+      double with_e = 0, without_e = 0;
+      for (int pass = 0; pass < 2; ++pass) {
+        cudaMemset(d_out, 0, sizeof(Outcome) * kN);
+        RunNeutral<<<(kN + 63) / 64, 64>>>(dscene[3], d_in, kN, nown.d_general,
+                                           (pass == 0) ? w : nolevels, d_out);
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+          fail("the null-level-scheme launch failed");
+          break;
+        }
+        cudaMemcpy(host_out.data(), d_out, sizeof(Outcome) * kN, cudaMemcpyDeviceToHost);
+        for (int k = 0; k < kN; ++k) {
+          if (host_out[k].process != static_cast<int>(ProcessId::fNeutronCapture)) { continue; }
+          double se = 0;
+          for (int j = 0; j < host_out[k].n_sec; ++j) { se += double(host_out[k].sec_ekin[j]); }
+          if (pass == 0) {
+            ++with_n;
+            with_sec += host_out[k].n_sec;
+            with_e += se;
+          } else {
+            ++without_n;
+            without_sec += host_out[k].n_sec;
+            without_e += se;
+          }
+        }
+      }
+      std::printf("  thermal captures in lead, with the level scheme:     %lld captures, "
+                  "%lld secondaries, %.4f MeV emitted\n", with_n, with_sec, with_e);
+      std::printf("                                 with a null table:    %lld captures, "
+                  "%lld secondaries, %.4f MeV emitted\n", without_n, without_sec, without_e);
+      // NOT "FEWER", AND THAT IS THE FINDING. A null level scheme does not emit nothing: the
+      // cascade takes the continuum arm of `generate_gamma` instead of walking a discrete level
+      // scheme, and in lead at thermal energy it emits 26,485 secondaries and 14,609.9 MeV where
+      // the real table gives 9,021 and 13,694.7 - nearly three times the multiplicity and 6.7%
+      // more energy. So the failure mode a missing G4LEVELGAMMADATA produces is a plausible
+      // capture with a wrong spectrum, which is worse than a zero and is why `Upload` refuses
+      // the combination rather than warning about it. docs/RISK.md V60.
+      if (with_n == 0 || without_n == 0) {
+        fail("no thermal captures in lead - the comparison has nothing in it");
+      } else if (without_sec == with_sec && without_e == with_e) {
+        fail("a null level scheme produced the identical cascade - Upload's refusal is "
+             "protecting nothing");
+      }
+    }
     if (captures < 1000) {
       fail("fewer than 1000 captures in 40,000 tracks - the measurement has no tail to see");
     }

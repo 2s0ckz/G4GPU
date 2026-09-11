@@ -1,0 +1,39 @@
+# Stage 1 with the neutron's elastic scattering inactivated as well - the diagnostic column,
+# and the first time it has been possible to produce one for a neutron.
+#
+# **RUN THIS THROUGH ref\b1neutron\run.bat**, like `stage1_neutron.mac` beside it and for the
+# same reason: `EnableNeutronGeneralProcess` has no UI command, so the configuration in which
+# `hadElastic` is a process of the neutron's own - and therefore something
+# `/process/inactivate` can name - only exists in that binary. docs/RISK.md V60.
+#
+# WHAT THE DIFFERENCE BETWEEN THE TWO COLUMNS IS. With the general process ON, elastic,
+# inelastic and capture are sub-processes of one object and `/process/inactivate hadElastic`
+# names nothing a neutron has, so the "what is this process worth" measurement every other
+# species in this directory has was unavailable for the neutron. With it off, this column
+# leaves the neutron with `Transportation`, `Decay`, `nCapture` and `nKiller` - so the
+# difference from `stage1_neutron.mac` is what a 100 MeV neutron's elastic scattering is worth
+# to B1's scoring volume, which for a neutron is most of what a dose is: the recoil protons and
+# oxygen nuclei an elastic scatter makes are what deposits, and the neutron itself deposits
+# nothing.
+#
+# `nCapture` is left active so that the column differs from its partner by ONE process. A
+# thermal neutron in water captures on hydrogen and the 2.22 MeV gamma is the deposit; at
+# 100 MeV that channel is reached only after the neutron has been slowed by the elastic
+# scattering this macro switches off, so the number is expected to be small rather than zero.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate neutronInelastic
+/process/inactivate hadElastic
+
+# The stage, recorded by what RAN. docs/RISK.md V43.
+/particle/select neutron
+/particle/process/dump
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

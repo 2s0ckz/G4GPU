@@ -112,7 +112,17 @@ struct CountingEmitter {
   Vec3<real_t> pos{};
   int volume = 0;
   int event = 0;
-  __device__ int push(ParticleType, const Vec3<real_t>&, real_t, int) {
+  __device__ int push(ParticleType, const Vec3<real_t>&, real_t, int, unsigned short = 0) {
+    atomicAdd(pushes, 1);
+    ++child_count;
+    return -1;
+  }
+  /// P8d, and the comment above predicted it word for word: "a test emitter that lacked them
+  /// would only fail to compile once a stepper started using them". `step_neutral` pushes a
+  /// NUCLEUS now - the recoil of an elastic scatter and the residual of a capture - and this
+  /// file would not build without the entry point. It is still counted and not stored, because
+  /// what these five tracks check is that NOTHING is emitted: their cross section is zero.
+  __device__ int push_nucleus(int, int, const Vec3<real_t>&, real_t, int) {
     atomicAdd(pushes, 1);
     ++child_count;
     return -1;

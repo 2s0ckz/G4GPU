@@ -6042,3 +6042,107 @@ number that is right for a different experiment. `ref/dump/build.bat` beside the
 `%~dp0`-relative and says why in its header - "several packages are developed in worktrees at
 once and each has its own `ref/dump/dump_<package>.cc` to build" - so the reasoning existed one
 directory away from the files that needed it.
+
+---
+
+### V60: the flag is set in a constructor, and a missing level scheme does not emit nothing
+
+Two findings from wiring `G4NeutronGeneralProcess` into the neutral stepper (P8d), and they are
+opposite shapes: the first is a configuration everyone believed did not exist, and the second is
+a failure mode that looks like physics instead of like an absence.
+
+#### `EnableNeutronGeneralProcess` is settable, and V53's own mechanism was one function out
+
+V53 is titled "a neutron that cannot be validated by a dose" and its central sentence is that
+`EnableNeutronGeneralProcess` "is set unconditionally by `G4HadronInelasticQBBC::
+ConstructProcess` with no messenger anywhere in 11.1.1". docs/PORTED.md 2.1.2 and
+`ref/b1hadron/stage1_README.md` repeat it. **The second half is true and the first half names the
+wrong function.**
+
+```
+G4HadronInelasticQBBC::G4HadronInelasticQBBC(G4int ver)          // the CONSTRUCTOR
+  : G4VHadronPhysics("hInelasticQBBC")
+{
+  SetPhysicsType(bHadronInelastic);
+  auto param = G4HadronicParameters::Instance();
+  param->SetEnableBCParticles(true);
+  param->SetEnableNeutronGeneralProcess(true);                   // <- here, not ConstructProcess
+  param->SetVerboseLevel(ver);
+}
+```
+
+`ConstructProcess` only READS it (`G4HadProcesses::BuildNeutronElastic` and
+`BuildNeutronInelasticAndCapture` each open with `G4bool useNeutronGeneral =
+param->EnableNeutronGeneralProcess()`), and the two run at different times: the constructor when
+`new QBBC` registers its physics constructors, `ConstructProcess` at `/run/initialize`. In
+between, the state is `G4State_PreInit`, and the setter's guard is
+
+    G4bool G4HadronicParameters::IsLocked() const {
+      return ( ! G4Threading::IsMasterThread() ||
+               G4StateManager::GetStateManager()->GetCurrentState() != G4State_PreInit );
+    }
+
+so one line of C++ between those two points turns the general process off. The "no messenger"
+half is confirmed rather than assumed: `G4HadronicParametersMessenger` builds exactly three
+commands - `/process/had/verbose`, `/process/had/maxEnergy`, `/process/had/enableCRCoalescence` -
+so there is no `/process/had/enableNeutronGeneralProcess` and no macro can do it.
+
+**What that is worth is the neutron's whole stage-1 row.** With the flag off, the process manager
+holds six entries where it held three, and the run prints them (`ref/b1neutron/run.bat` on
+`ref/b1hadron/stage1_neutron.mac`):
+
+```
+[0] Transportation      Active
+[1] Decay               Active
+[2] hadElastic          Active     G4NeutronElasticXS:   0 eV ---> 100 TeV
+[3] neutronInelastic    InActive   G4NeutronInelasticXS: 0 eV ---> 100 TeV
+[4] nCapture            Active     G4NeutronCaptureXS:   0 eV ---> 100 TeV
+[5] nKiller             General    TimeCut(ns)= 10000  KinEnergyCut(MeV)= 0
+```
+
+`/process/inactivate neutronInelastic` reaches entry 3 - the command V53 and docs/PORTED.md 2.1.7
+both record as answering `illegal process (or type) name`, which it does whenever the flag is on.
+And `G4NeutronTrackingCut::ConstructProcess` no longer returns early, so the 10 us cut arrives as
+a real `G4NeutronKiller` carrying the same two numbers the general process carries internally.
+
+So "the neutron cannot be validated by a B1 dose comparison until P9-P11 land" is now false, and
+the sentence it rested on was a reading of the source rather than a question put to the object -
+which is docs/RISK.md V43's lesson, arriving a fourth time in the file V43 is in. The stage-1
+neutron row is a number now.
+
+**And it is a different competition, not the general table minus a term.** P8c's V53 addendum said
+"left out of the total" was the wrong description and did not say what the right one is. It is
+this: in that configuration the neutron has two independent discrete processes, each evaluating
+its OWN `G4CrossSectionDataStore` at the track's energy and drawing its own interaction length,
+where the general process has one interaction length off a 401-node interpolation of the summed
+cross section at ITS node energies. `step_neutral` runs both, switched by `had::HadronicStage`,
+and `tests/test_neutron_general.cu` predicts the two by two different formulas.
+
+#### A capture with no level scheme emits three times as much, not nothing
+
+`TransportEngine::Upload` refuses a neutron cross-section table that arrives without P3's
+PhotonEvaporation5.7 level data, and the reason written over the refusal was that
+"`G4PhotonEvaporation::BreakUpChain` with nothing to walk emits no gamma - so the neutron's
+binding energy would silently vanish". That was a guess and it is wrong by a factor of three in
+the other direction. Measured, 2000 thermal captures in lead, the same tracks and the same seeds
+with the table and with a null view (`tests/test_neutron_general.cu` section 4):
+
+```
+with the level scheme    2000 captures,  9,021 secondaries, 13,694.7198 MeV emitted
+with a null table        2000 captures, 26,485 secondaries, 14,609.9069 MeV emitted
+```
+
+Nearly three times the multiplicity and 6.7% more energy, because the cascade takes the CONTINUUM
+arm of `generate_gamma` instead of walking a discrete level scheme. A missing dataset that
+produced zero would announce itself in any energy balance; one that produces a plausible capture
+with a wrong spectrum is what gets found in a dose comparison six weeks later. The refusal stays
+and its message carries the two numbers.
+
+**And the obvious material was the wrong one to measure it in.** The first version of that
+comparison ran in water at thermal energy and the two columns were IDENTICAL to the last digit -
+2000 captures, exactly 2 secondaries each, 4448.7461 MeV either way. A thermal neutron in water
+captures on HYDROGEN, and `G4NeutronRadCapture::ApplyYourself`'s `A <= 1` branch is a closed-form
+two-body decay (n + p -> d + gamma) that never opens the level scheme at all. So the one capture a
+water phantom mostly makes is the one that does not read the 9.52 MB this port uploads for it -
+which is worth knowing for the opposite reason as well: a B1 neutron dose is not a test of the
+level data.
