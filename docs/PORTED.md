@@ -506,15 +506,29 @@ what is left.
 | `G4NuclearLevelData::UploadNuclearLevelData` - PhotonEvaporation5.7 on the device | y | **V** | `host/level_upload.cuh`. 3108 managers, 174,411 levels and 268,190 transitions, **9.52 MB**. Every manager's level count, level energies, lifetimes, spins and transitions are read through the cascade's own accessors on the host and on the device and compared **exactly**: 0 disagreements. The cascade on top of it - `G4NeutronRadCapture::ApplyYourself` through `G4PhotonEvaporation::BreakUpChain` - runs 448 captures over 14 targets and 4 energies on both sides: 1783 secondaries, worst **5.82e-11 MeV** absolute on an energy and **2.23e-11** on a direction component. `tests/test_capture_device.cu` |
 | the same, at initialisation, whether a neutron arrives or not | y | **P** | `TransportEngine::SetNuclearLevelData` is OFF by default, which Geant4's `G4ExcitationHandler::SetParameters` is not. The one consumer is the capture sub-process of `G4NeutronGeneralProcess`, which is not wired, and `read_all_level_data` opens 3110 files against a B1 run whose whole transport is 750 ms. It becomes unconditional the day the neutron is wired |
 
-**What was found on the way, and both of them are in docs/RISK.md.**
+**What was found on the way, and all three are in docs/RISK.md.**
 
 - **V54**: `G4NistManager::FindOrBuildElement(105)` aborts the process. The NIST table carries
   107 elements and gives every trans-uranic a fabricated 100% abundance on one isotope, so
   `BuildElement` really does build a `G4Element` for it - and `G4Element::AddIsotope` then indexes
   `G4AtomicShells`' `[105]` tables. 104 is the highest Z at which a material can exist in 11.1.1.
 - **V55**: inlining the elastic package into `run_step_hadron` killed ptxas with an access
-  violation. `had::elastic_apply` and `had::elastic_xs_per_volume` are `__noinline__`, which is
-  also the right answer for the hot path: the elastic branch fires 16 times in 900 steps.
+  violation. Four functions are `__noinline__` now, which is also the right answer for the hot
+  path: the elastic branch fires 16 times in 900 steps and `CoulombScat`'s mean free path is
+  158 m. The entry carries both the one-kernel reproducer series and the engine's own.
+- **V56**: both kaons are 0.6% high in the stage-1 table, 3.4 and 3.7 sigma, and by the same
+  amount for both charges - which is what rules out V44. Two candidates, neither excluded.
+
+**The register and stack cost**, `transport_run.cu` with `-Xptxas -v`, against the same file on
+main. No change in register count and +816 bytes on the hadron kernel's frame against the
+16384-byte limit `Upload` sets:
+
+| kernel | registers | stack frame | spill st/ld |
+|---|---|---|---|
+| `run_step_hadron` | 255 -> 255 | 3696 -> **4512** B | 68/36 -> 96/52 |
+| `run_step_neutral` | 255 -> 255 | 3072 -> **3728** B | 80/36 -> 92/52 |
+| `run_step_lepton` | 255 -> 255 | 2992 -> **3056** B | 56/20 -> 76/28 |
+| `run_step_gamma` | 255 -> 255 | 3024 -> **2400** B | 44/20 -> 404/868 |
 
 **The numbers.** `ref/oracle/isotopes.csv` 308 isotopes over 104 elements, worst **0** twice.
 `ref/oracle/isotope_zanda.csv` 36 blocks, 135 element and 378 isotope frequencies from 200,000

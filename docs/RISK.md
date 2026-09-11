@@ -5778,6 +5778,26 @@ one entry point instead of fourteen, and the same baseline measured through the 
 `transport_run.cu` is 3696 B and 68/36 B of spill. Comparing a reproducer number against a
 full-build number is how a measurement like this goes wrong, so both series are stated.
 
+What the engine actually ends at, `transport_run.cu` with `-Xptxas -v`, against the same file
+on main:
+
+    kernel             registers   stack frame        spill st/ld      cmem[0]
+    run_step_hadron    255 -> 255  3696 -> 4512 B     68/36 -> 96/52   1472 -> 1584
+    run_step_neutral   255 -> 255  3072 -> 3728 B     80/36 -> 92/52   1496 -> 1608
+    run_step_lepton    255 -> 255  2992 -> 3056 B     56/20 -> 76/28   1448 -> 1448
+    run_step_gamma     255 -> 255  3024 -> 2400 B     44/20 -> 404/868 1448 -> 1448
+
+No change in register count, +816 bytes on the hadron kernel's frame against the 16384-byte
+limit `Upload` sets, and the last 48 of those are the `data::LevelTable` added to
+`HadronicWiring` - four pointers and three counts, passed by value, which is also the cmem[0]
+growth. Two things worth noting in that table rather than skipping past. The GAMMA kernel's
+frame went DOWN 624 bytes and its spill UP by 360/848 while it gained no physics at all, which
+is ptxas reallocating and not a cost anyone chose - the only thing that reached it is the
+emitter's new `parent_velocity`. And two stack allocations were removed on the way, for the same
+reason this entry exists: `store_sample_za_fn`'s `real_t temp[64]` (512 B, replaced by a second
+pass over the same terms in the same order, so the numbers did not move) and an
+`xs::ElementIsotopes[16]` that a `NistIsotopeView` answers instead (another 512 B).
+
 
 ---
 
