@@ -24,9 +24,11 @@ if "%EV%"=="" set EV=20000
 set EN=%2
 if "%EN%"=="" set EN=100
 set OUT=%3
-if "%OUT%"=="" set OUT=D:\g4gpu\out\g4_depth.csv
+if "%OUT%"=="" set OUT=%~dp0..\..\out\g4_depth.csv
 set CUT=%4
 set SLAB=%5
 if "%SLAB%"=="" set SLAB=0.5
 if "%CUT%"=="" set CUT=0.7
-D:\g4gpu\ref\protonbuild\Release\g4proton.exe %EV% %EN% "%OUT%" %CUT% %SLAB%
+rem Relative to this file, not D:\g4gpu - see the note in build.bat beside it. A worktree runs
+rem the binary ITS build.bat built, from ITS proton_depth.cc.
+"%~dp0..\protonbuild\Release\g4proton.exe" %EV% %EN% "%OUT%" %CUT% %SLAB%

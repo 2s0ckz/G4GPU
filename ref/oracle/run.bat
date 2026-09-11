@@ -31,5 +31,17 @@ rem against a freshly built port is the kind of disagreement that gets blamed on
 rem
 rem 100,000 events so the reference itself is not the statistical limit: the pipeline runs the
 rem port at 6,000 against it and the reference contributes about a sixth of the noise.
-call D:\g4gpu\ref\proton\build.bat || exit /b 1
-call D:\g4gpu\ref\proton\run.bat 100000 100 D:\g4gpu\ref\oracle\proton_depth.csv 0.7 0.5 || exit /b 1
+rem
+rem WHAT THE REFERENCE IS, since P8c: QBBC with ONLY the processes this port lacks inactivated -
+rem every `*Inelastic`, `hBrems`/`hPairProd`, the gamma-/electro-/muon-nuclear processes,
+rem `ionElastic`, `NeutronGeneralProc` and the three at-rest captures. `hadElastic`,
+rem `CoulombScat`, `msc`, `hIoni`, `ionIoni` and `Decay` are ACTIVE on both sides. The list is
+rem in ref/proton/proton_depth.cc and the run prints `/particle/process/dump` for the proton and
+rem for GenericIon, so the configuration is recorded by what ran. It was G4EmStandardPhysics and
+rem nothing else until P8c, which is a reference with no elastic scattering in it - and that is
+rem what made build_all.bat's plateau check fail by 1.32% once P8b wired hadElastic.
+rem
+rem RELATIVE, not D:\g4gpu: these two lines were the last place a worktree regenerated MAIN's
+rem oracle from MAIN's source. See the note in ref/proton/build.bat and docs/RISK.md V45.
+call "%~dp0..\proton\build.bat" || exit /b 1
+call "%~dp0..\proton\run.bat" 100000 100 "%~dp0proton_depth.csv" 0.7 0.5 || exit /b 1

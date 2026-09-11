@@ -18,17 +18,29 @@
 //   fluctuations             -> the width of the distal falloff, and *only* that. It is the
 //                               one metric here that no other part of the physics touches.
 //
-// Physics list: G4EmStandardPhysics and nothing else. NOT QBBC. A proton in QBBC undergoes
-// inelastic nuclear reactions - about 1% per centimetre of water - which remove primaries from
-// the beam and redistribute their energy. This port has no hadronic physics at all, so
-// comparing against QBBC would measure that absence rather than the stepper. The EM-only list
-// is the physics this port actually implements, and it is a legitimate Geant4 configuration
-// rather than a contrivance: it is what G4EmStandardPhysics alone gives you.
+// **Physics list: QBBC on both sides, with exactly what the port lacks inactivated on the
+// Geant4 side.** It was `G4EmStandardPhysics` and nothing else, and the note here said "this
+// port has no hadronic physics at all, so comparing against QBBC would measure that absence
+// rather than the stepper". That stopped being true when P8 wired `G4Decay` and P8b wired
+// `hadElastic` and `CoulombScat`: the port now has a hadronic process acting on the proton, and
+// a reference taken without one is a different experiment. `build_all.bat`'s gate failed on
+// exactly that - the plateau 1.32% high, which is what elastic scattering is worth here.
 //
-// **Known omissions, stated up front.** No hadronic interactions - see the physics-list note
-// above, which is why the reference is run without them either. And the port's Bragg peak sits
-// about 0.23 mm proximal of Geant4's, a 0.3% range difference that docs/RISK.md V5 records in
-// detail, including the seven things it has been measured *not* to be.
+// So the rule docs/HADRONIC_PLAN.md section 4 states for every comparison applies to this one
+// too: **inactivate, on the Geant4 side, ONLY what the port still lacks.** The list is in
+// `inactivate()` below, each line with the package that closes it, and the run PRINTS
+// `/particle/process/dump` for the proton so the configuration is recorded by what ran rather
+// than by what was intended (docs/RISK.md V43: `/process/inactivate` ignores a name the species
+// does not have, silently).
+//
+// What is left ACTIVE on both sides: `msc`, `hIoni`, `ionIoni`, `hadElastic`, `CoulombScat`,
+// `Decay`, and the whole of `G4EmStandardPhysics` for the electrons and gammas.
+//
+// **Known omissions, stated up front.** The inelastic reactions (P9-P11) and the ion's own
+// `ionElastic` (`had::ElasticChannel::kIonDiffuseNotWired`) are off on both sides. And the
+// port's Bragg peak sits about 0.23 mm proximal of Geant4's, a 0.3% range difference that
+// docs/RISK.md V5 records in detail, including the seven things it has been measured *not*
+// to be.
 //
 // Read the four metrics separately, which is what tools/compare_depth.ps1 does. A stopping
 // power 1% high and a range table 1% long cancel in the plateau and add in R80, so a single
@@ -42,7 +54,6 @@
 #include <vector>
 
 #include "G4Box.hh"
-#include "G4EmStandardPhysics.hh"
 #include "G4LogicalVolume.hh"
 #include "G4NistManager.hh"
 #include "G4PVPlacement.hh"
@@ -59,6 +70,8 @@
 #include "G4MultiFunctionalDetector.hh"
 #include "G4PSEnergyDeposit.hh"
 #include "G4SDManager.hh"
+#include "G4UImanager.hh"
+#include "QBBC.hh"
 #include "Randomize.hh"
 
 // ---------------------------------------------------------------- the phantom, in one place
@@ -66,7 +79,27 @@
 // Both builds read these, so the two geometries cannot drift apart.
 namespace cfg {
 constexpr int kMaxBins = 400;          ///< storage bound; the run picks how many it uses
-constexpr double kHalfXY = 50.0;       ///< mm, half-width of a slab transverse to the beam
+/// mm, half-width of a slab transverse to the beam.
+///
+/// 150 AND NOT 50, AND THAT IS WHAT KEEPS THE CONSERVATION CHECK EXACT once `hadElastic` is in
+/// the reference. `tools/compare_depth.ps1`'s first metric is energy in against energy
+/// deposited, with a 1e-6 limit and the comment "it should be exact on both sides - the phantom
+/// is deeper than the range". Deeper is not wider: an elastic scatter off oxygen leaves a
+/// 100 MeV proton with nearly all of its energy at any angle, so one scattered near 90 degrees
+/// runs its whole 77 mm range sideways and left a 50 mm half-width phantom carrying it. At
+/// 100,000 events that was 112 MeV of 10,000,000 - 1.1e-5, eleven times the limit - and it is
+/// energy Geant4 genuinely transported out of the box rather than anything wrong with either
+/// side.
+///
+/// So the phantom is widened to hold it rather than the limit widened to excuse it (the
+/// package's own rule for the plateau, applied here). 150 mm exceeds a 100 MeV proton's range,
+/// so a proton scattered at any angle stops inside; it stays inside the 200 mm world. Measured:
+/// the deposited total goes from 99.9989% of the beam energy to 100.0000%.
+///
+/// What it changes about the curve is the same 1.1e-5, and in the direction of a standard
+/// integral depth dose: the energy that used to leave is now binned at the depth it was
+/// scattered from.
+constexpr double kHalfXY = 150.0;
 constexpr double kWorldHalf = 200.0;   ///< mm
 
 // Slab thickness and count are runtime, not compile-time, and that is worth the small
@@ -202,8 +235,12 @@ int main(int argc, char** argv) {
 
   auto* rm = G4RunManagerFactory::CreateRunManager(G4RunManagerType::Serial);
 
-  auto* phys = new G4VModularPhysicsList();
-  phys->RegisterPhysics(new G4EmStandardPhysics(0));
+  // QBBC on both sides. On the port's side that is its own QBBC shim, whose hadronic component
+  // is whatever it has wired - `HadronicStage::kStage1`, decay, hadElastic and CoulombScat all
+  // on, which is the engine's default and the configuration every stage-1 number is measured
+  // in. On Geant4's side it is the real one, and the block after Initialize() is what makes the
+  // two comparable.
+  auto* phys = new QBBC();
   phys->SetDefaultCutValue(range_cut * mm);
   rm->SetUserInitialization(phys);
   rm->SetUserInitialization(new Phantom());
@@ -216,6 +253,79 @@ int main(int argc, char** argv) {
 #endif
 
   rm->Initialize();
+
+#ifndef G4GPU_PORT
+  // ---------------------------------------------------------------- the like-for-like list
+  //
+  // ONLY WHAT THE PORT LACKS, and every line names the package that closes it. This is
+  // docs/HADRONIC_PLAN.md section 4's rule applied to this comparison: "Nothing is ever
+  // compared against a Geant4 that is running physics the port does not have."
+  //
+  // `/process/inactivate <name>` takes no particle argument here, so it applies to every
+  // species that has the process - which is what is wanted, because a proton's elastic recoils
+  // are deuterons, tritons, He3s, alphas and heavier nuclei and each of those carries its own
+  // inelastic process.
+  //
+  // IT ALSO SILENTLY IGNORES A NAME NOTHING HAS (docs/RISK.md V43), which is why the dump
+  // below is printed rather than trusted: three of these names are here for species this run
+  // cannot make, so that the list is the same in a run that can.
+  {
+    G4UImanager* ui = G4UImanager::GetUIpointer();
+    const char* off[] = {
+        // The radiative processes of a charged hadron. em/muon_radiative.cuh has both models'
+        // dE/dx exactly and neither model's SampleSecondaries (docs/PORTED.md 1.3).
+        "hBrems", "hPairProd", "muBrems", "muPairProd",
+        // Every inelastic final state that has a name of its own: P9 (binary cascade),
+        // P10 (Bertini), P11 (FTFP).
+        "protonInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic",
+        "ionInelastic",
+        // The neutron's three sub-processes are one process and /process/inactivate can only
+        // take it whole (docs/RISK.md V53). P8c leaves step_neutral's cross section at zero, so
+        // the whole process comes off. `neutronInelastic` is deliberately NOT in this list: the
+        // UI answers `illegal process (or type) name` for it, because it is inside the general
+        // process and is on no manager. No neutron is made in this configuration anyway -
+        // nothing but an inelastic reaction produces one - so this line costs the comparison
+        // nothing and keeps its statement true.
+        "NeutronGeneralProc",
+        // The ion's own elastic process. G4IonElasticPhysics gives GenericIon "ionElastic"
+        // (G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic); both halves are ported and the
+        // channel is not wired - had::ElasticChannel::kIonDiffuseNotWired.
+        "ionElastic",
+        // Electro-, positron- and muon-nuclear: P13. These three the UI accepts.
+        //
+        // `photonNuclear` IS NOT HERE AND CANNOT BE, which is V53's mechanism a second time and
+        // was found by the UI rejecting it. `G4EmStandardPhysics::ConstructProcess` calls
+        // `SetGeneralProcessActive(true)`, so `G4EmExtraPhysics::ConstructGammaElectroNuclear`
+        // takes its `gproc != nullptr` branch and does `gproc->AddHadProcess(gnuc)` instead of
+        // `ph->RegisterProcess(gnuc, gamma)` - the gamma's photo-nuclear is a sub-process of
+        // `G4GammaGeneralProcess`, exactly as the neutron's inelastic is of
+        // `G4NeutronGeneralProcess`, and the only name that reaches it is `GammaGeneralProc`,
+        // which would take Compton, the photoelectric effect, Rayleigh and conversion off with
+        // it. Those this port HAS, so switching them off would break the rule this list exists
+        // for. It is inert here and the arithmetic is why: nothing in this configuration makes
+        // a photon above about 0.5 MeV (protonInelastic and hBrems are off, so the only
+        // photons are the bremsstrahlung of a delta ray whose own energy is capped by the
+        // proton's maximum transfer), and `G4GammaNuclearXS` is a giant-resonance cross
+        // section that starts near 10 MeV.
+        "electronNuclear", "positronNuclear", "muonNuclear",
+        // The at-rest captures: P12. Unreachable here (nothing negative is made) and listed so
+        // that this list is the stage-1 one.
+        "hBertiniCaptureAtRest", "hFritiofCaptureAtRest", "muMinusCaptureAtRest",
+    };
+    for (const char* p : off) {
+      ui->ApplyCommand(G4String("/process/inactivate ") + p);
+    }
+    // The stage, recorded by what RAN. Printed for the proton and for GenericIon, which is the
+    // species every elastic recoil heavier than an alpha is and the one P8c added transport
+    // for; `hadElastic`, `CoulombScat`, `msc`, `hIoni`, `ionIoni` and `Decay` must read Active
+    // in it and every name above InActive.
+    ui->ApplyCommand("/particle/select proton");
+    ui->ApplyCommand("/particle/process/dump");
+    ui->ApplyCommand("/particle/select GenericIon");
+    ui->ApplyCommand("/particle/process/dump");
+  }
+#endif
+
   G4Random::setTheSeed(12345);
   for (int i = 0; i < cfg::bins(); ++i) { g_edep[i] = 0; }
   rm->BeamOn(n_events);

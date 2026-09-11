@@ -218,3 +218,54 @@ The three inactivations that make stage 1 what it is appear as `InActive` in it:
 `hBertiniCaptureAtRest` on pi- and K-, `muMinusCaptureAtRest` on mu-, every `*Inelastic`, and
 `NeutronGeneralProc` on the neutron. `Decay` and `hadElastic` are `Active` wherever the species
 has them.
+
+## The three macro sets in this directory, and what each one compares
+
+Added by P8c, because there are now three and the difference between them is a stage rather
+than a detail. `/process/inactivate` on the Geant4 side is the only thing that differs; the
+port's half of each pair carries no inactivation at all, for the reason every `*_port.mac`
+states (this port's `G4UImanager` rejects an unknown command rather than ignoring it, so the
+two sides cannot be the same file).
+
+| set | Geant4 side inactivates | what the comparison isolates |
+|---|---|---|
+| `<species>_emonly.mac` (P1, stage 0) | everything hadronic AND `Decay`, AND `hadElastic` AND `CoulombScat` | ELECTROMAGNETIC transport alone: dE/dx, delta rays, multiple scattering, the range table. It is the column every number in docs/RESULT.md was measured against before P8, and it is **still the right comparison for a question about the EM half** - which is why these macros are kept and not updated. They are stage 0 and they are not a like-for-like with the port as it stands: the port HAS `Decay`, `hadElastic` and `CoulombScat`, so it deposits differently from this column by construction. |
+| `stage1_<species>.mac` | every `*Inelastic`, `muonNuclear`, the three at-rest captures, `hBrems`/`hPairProd`/`muBrems`/`muPairProd` — and NOTHING else | **the like-for-like.** Nothing is inactivated that this port has. `Decay`, `hadElastic` and `CoulombScat` are ACTIVE on both sides. This is the column a disagreement is a defect in. |
+| `stage1_<species>_noelastic.mac` | the same, plus `hadElastic` | what `hadElastic` is WORTH for that species and that geometry, read as the difference between this column and the one above. Since P8b that is the size of what the port gained rather than of what it was missing, and `-SkipNoElastic` drops it. |
+
+`neutron_nogeneral.mac` is a fourth and is not a set: it is one inactivation
+(`NeutronGeneralProc`) with a prediction attached, and `stage1_neutron.mac` is the same
+configuration because no other one exists for a neutron. See the section above and
+docs/RISK.md V53.
+
+**Nothing here is in `build_all.bat`, and that is deliberate**: a 500,000-event run per species
+per side is minutes of Geant4 for each of eighteen runs, against a pipeline that has to stay
+short enough to run on every commit. The table in this file is the record, and the branch and
+the event count it was measured at are printed with it.
+
+## What P8c changed, and what it did NOT re-measure
+
+P8c transports the elastic recoil nucleus, which every row of the stage-1 table has been
+missing: the energy of every recoil heavier than an alpha was going to
+`EmitterBooks::refused_energy` instead of into the geometry. For the proton at 210 MeV in B1
+that was 929 GenericIon secondaries carrying 515 MeV per 6000 protons in the depth-dose gate -
+0.086% of the beam - so the stage-1 doses above are low by an amount of that order for every
+species whose elastic scattering makes a heavy recoil.
+
+**The table above is therefore stale and was not re-run.** It is left standing rather than
+deleted, with this paragraph over it, because a superseded measurement with its branch and its
+event count attached is evidence and an empty section is not - the same convention the P8 table
+below is kept under. What has to be re-run, and at 500,000 events per run per side:
+
+* `proton` and `alpha`, whose recoils now deposit. The port's numbers should RISE.
+* `neutron`, which is `0.0000 +/- 0.0000` against `0.0000 +/- 0.0000` and stays there until the
+  neutron general process is wired (P8c did not do it; docs/RISK.md V53 for why the zero is a
+  prediction rather than an absence).
+* `He3` is a new row: it has a kernel now and never had one before.
+* `mu+`, `mu-`, `pi+`, `pi-`, `K+`, `K-` need no re-run for the recoil - a muon has no
+  `hadElastic` at all and the pion and kaon recoils are the same nuclei - but their kernel DID
+  change: `step_hadron` now reads the range table through `G4VEnergyLossProcess`'s base-particle
+  scaling (docs/RISK.md V57) and `G4ionIonisation`'s `linLossLimit` of 0.02 is honoured for the
+  ions. The first is the identity for all six of them and for the proton; the second moves an
+  ALPHA's steps and nothing else. So the six charge-pair rows should be unmoved and the alpha's
+  should move twice - once for its recoils and once for its step function.

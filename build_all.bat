@@ -700,6 +700,22 @@ rem have to be kept in step. The Geant4 half is run once and checked in as
 rem ref/oracle/proton_depth.csv, exactly like every other oracle file; this runs the port's
 rem half short and compares per proton.
 rem
+rem WHAT THE REFERENCE IS, and it changed in P8c. It was `G4EmStandardPhysics` and nothing
+rem else, which is a Geant4 with no hadronic process at all - and the port has had `G4Decay`
+rem since P8 and `hadElastic` and `CoulombScat` since P8b, so this gate was comparing two
+rem different experiments and failed by the 1.32% that elastic scattering is worth to a
+rem 100 MeV proton's plateau in water. It is QBBC on both sides now with ONLY what the port
+rem lacks inactivated on the Geant4 side - every `*Inelastic`, `hBrems`/`hPairProd`,
+rem `ionElastic`, `NeutronGeneralProc`, the electro-/muon-nuclear processes and the three
+rem at-rest captures - and the reference run prints `/particle/process/dump` for the proton
+rem and for GenericIon so the configuration is recorded by what ran rather than by what was
+rem intended. docs/RISK.md V58, docs/PORTED.md 2.1.7.
+rem
+rem The phantom is also 150 mm wide rather than 50, because the conservation check's premise
+rem ("the phantom is deeper than the range") is about depth and an elastic scatter sends a
+rem proton sideways with nearly all of its energy: 1.1e-5 of the beam left a 50 mm box, on
+rem the GEANT4 side, against a 1e-6 limit. Widened rather than excused - V58 has the number.
+rem
 rem 6000 events, which is a few seconds and puts the statistical error on R80 near 0.02 mm -
 rem an order of magnitude under the limit, so a failure here means physics and not luck.
 call "%~dp0build_proton.bat" || exit /b 1
