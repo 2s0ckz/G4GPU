@@ -419,7 +419,7 @@ __host__ __device__ inline CoulombAtomXs<real_t> coulomb_xs_per_atom(
 ///        builds this table with `(*theCuts)[i]`, and theCuts is the PROTON vector - see the
 ///        file header. This took `m.cut_electron` until it was measured: the electron cut is
 ///        four times the proton cut in water and never reaches the model.
-/// `__noinline__` since P8b, and see docs/RISK.md V61: inlined, this function's Wentzel setup
+/// `__noinline__` since P8b, and see docs/RISK.md V55: inlined, this function's Wentzel setup
 /// and per-element loop go into the body of `step_lepton` and of `run_step_hadron`'s fourteen
 /// species, and the translation unit that holds all of them killed ptxas with an access
 /// violation once `hadElastic` was inlined beside it. One call per step against a function that

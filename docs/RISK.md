@@ -5683,7 +5683,7 @@ reads.
 
 ---
 
-### V60: the NIST element table has 107 elements and 104 of them can exist
+### V54: the NIST element table has 107 elements and 104 of them can exist
 
 `G4NistElementBuilder` carries 107 elements - `maxNumElements` is 108 and `AddElement` is called
 for Z = 1..107. `G4NistManager::FindOrBuildElement(105)` aborts the process.
@@ -5726,7 +5726,7 @@ the element it is building can have electron shells.
 
 ---
 
-### V61: the compiler died before the physics could be wrong
+### V55: the compiler died before the physics could be wrong
 
 Wiring `hadElastic` into `step_hadron` killed ptxas.
 
@@ -5801,7 +5801,7 @@ pass over the same terms in the same order, so the numbers did not move) and an
 
 ---
 
-### V62: both kaons, 0.6% high, and the two things that measurement does not separate
+### V56: both kaons, 0.6% high, and the two things that measurement does not separate
 
 The stage-1 like-for-like with `hadElastic` and `CoulombScat` active on both sides
 (`ref/b1hadron/stage1_README.md`) puts seven of nine species inside two sigma and the two kaons

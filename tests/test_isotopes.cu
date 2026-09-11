@@ -204,7 +204,7 @@ int check_table(const std::string& dir) {
   }
   // 104, not 107. G4AtomicShells' tables are `[105]` and G4Element::AddIsotope indexes them,
   // so FindOrBuildElement(105) aborts the process - which is how this number was found. See
-  // the header of data/isotope_abundance.hh and docs/RISK.md V60.
+  // the header of data/isotope_abundance.hh and docs/RISK.md V54.
   if (n_elements != data::kNistBuildableMaxZ) {
     fail("compared %d elements, expected %d", n_elements, data::kNistBuildableMaxZ);
   }

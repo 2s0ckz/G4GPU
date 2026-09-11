@@ -7,16 +7,18 @@
 # element - so the script goes looking for `stage1_pion_plus kaon_minus_port.mac` and fails on
 # a path, not on the argument.
 #
-# THREE RUNS PER SPECIES, and the third is what makes the table readable.
+# THREE RUNS PER SPECIES, and since P8b the SECOND is the like-for-like.
 #
 #   port                stage1_<s>_port.mac      through examples\B1\exampleB1.exe
-#   Geant4 stage 1      stage1_<s>.mac           Decay AND hadElastic active
-#   Geant4 no elastic   stage1_<s>_noelastic.mac Decay active, hadElastic inactivated
+#   Geant4 stage 1      stage1_<s>.mac           Decay, hadElastic AND CoulombScat active
+#   Geant4 no elastic   stage1_<s>_noelastic.mac the same with hadElastic inactivated
 #
-# The port has decay and does not yet have hadElastic, so the LIKE-FOR-LIKE column is the third
-# one and the second is where it is going. Their difference is what hadElastic is worth for that
-# species in that geometry - measured, not asserted - and it is the number the next package is
-# judged against. Printing only one of them would have left that as a sentence.
+# The port has `hadElastic` and `CoulombScat` now, so the LIKE-FOR-LIKE column is "G4 stage 1"
+# and it is printed first. The third is kept and is not redundant: the difference between the
+# two is what hadElastic is worth for that species in that geometry, which used to be the size
+# of the gap and is now the size of what the port gained. `-SkipNoElastic` drops it, which is
+# half the Geant4 time, for a run whose question is whether the port agrees rather than how big
+# the effect it gained was.
 #
 # See stage1_README.md for what stage 1 inactivates and why the neutron has no third column.
 #

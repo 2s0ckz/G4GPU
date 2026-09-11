@@ -59,11 +59,16 @@ by a dose comparison until P9-P11 land; until then it is validated by its cross-
 
 ## How to run
 
-    ref\b1hadron\stage1_compare.ps1 -Events 500000
+    ref\b1hadron\stage1_compare.ps1 -Events 500000 -SkipNoElastic     the like-for-like
+    ref\b1hadron\stage1_compare.ps1 -Events 500000                    plus the diagnostic column
 
 500,000 events per run per side, and the count is part of the measurement: B1's printed rms is
 the standard error and scales as 1/sqrt(N), so a 2,000-event run is +/-1.7% and can neither
 confirm nor exclude a 3% effect. docs/RISK.md V44 is the half day that cost.
+
+`-SkipNoElastic` drops the third run per species - half the Geant4 time - and is the right
+default for asking whether the port agrees. Leave it off when the question is how big the effect
+`hadElastic` has for a species, which is what the two Geant4 columns differ by.
 
 ## The table, as measured - P8b, with hadElastic and CoulombScat on both sides
 
@@ -98,7 +103,7 @@ one with it on.** Its `hadElastic` was worth -2.42% in P8's measurement and that
 
 **The two kaons are at 3.4 and 3.7 sigma, both with the port 0.6% HIGH, and that is a finding
 rather than a rounding.** Both charges by the same amount, so it is not V44. See docs/RISK.md
-V62 for the measurement that bounds it and the two candidates it does not separate.
+V56 for the measurement that bounds it and the two candidates it does not separate.
 
 ### The third column, for the four species where the answer turns on it
 
