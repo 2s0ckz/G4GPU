@@ -5263,3 +5263,78 @@ it checks is not sensitive to this.
 weaker claim than the code makes is protecting a gap, and a comment that explains why a term
 can be discarded is the one to re-read when the term turns out to matter. This one names the
 right variable, gives the right formula for it, and then asserts the wrong value.
+
+
+### V48: the cut G4CoulombScattering hands its model is the proton's, and it gates a closed door
+
+Two facts, and the second is why the first is written down rather than fixed in a hurry.
+
+#### It is the proton cut, in four source lines
+
+`G4eCoulombScatteringModel` uses its `cutEnergy` argument in exactly one place:
+`G4WentzelOKandVIxSection::SetupTarget(iz, cut)` passes it to
+`ComputeMaxElectronScattering(cut)`, where it bounds the energy transfer to an atomic ELECTRON
+and so sets `cosTetMaxElec`. It is a delta-ray production threshold by construction. What
+arrives in it is the PROTON production cut:
+
+1. `G4CoulombScattering`'s constructor calls `SetSecondaryParticle(G4Proton::Proton())`
+   (G4CoulombScattering.cc:68), because the recoil it can emit is an ion.
+2. `G4EmModelManager::Initialise` turns the secondary into a cuts INDEX - gamma 0, e- 1, e+ 2,
+   `else { idx = 3; }` (G4EmModelManager.cc:463-468) - and takes
+   `theCuts = theCoupleTable->GetEnergyCutsVector(idx)` (:471).
+3. Every later use of a cut reads that vector: the lambda table through `FillLambdaVector`'s
+   `G4double cut = (*theCuts)[i]` (:634), and the final state through
+   `G4VEmProcess::PostStepDoIt`'s `SampleSecondaries(..., (*theCuts)[currentCoupleIndex])`
+   (G4VEmProcess.cc:527).
+4. `G4eCoulombScatteringModel::Initialise` stores the same vector as `pCuts`
+   (G4eCoulombScatteringModel.cc:117), which is what the recoil threshold reads. So the two
+   cuts in this model are one number arriving by two routes.
+
+The electron production cut therefore never reaches this model in QBBC, not for any species,
+the e- projectile included. In G4_WATER the two differ by a factor of four: 0.07 MeV against
+0.2776 MeV. The proton cut needs no table to reproduce - `G4RToEConvForProton::Convert` is
+`(rangeCut/mm) * 100 keV`, linear and with no material argument, which is why the oracle's
+`pcut_MeV` column is 0.07 in all seven materials while `ecut_MeV` spans 0.00099 to 0.61.
+
+#### And it changes nothing, because the channel it gates is shut
+
+`ComputeElectronCrossSection` (G4WentzelOKandVIxSection.hh:222-230) is
+
+```
+  G4double cost1 = std::max(cosTMin, cosTetMaxElec);
+  G4double cost2 = std::max(cosTMax, cosTetMaxElec);
+  return (cost1 <= cost2) ? 0.0 : kinFactor*fMottFactor*(cost1 - cost2)/...
+```
+
+and this process integrates from `cosTMin = cosTetMaxNuc` out to `cosTMax = -1`, so the channel
+is open only when `cosTetMaxElec < cosTetMaxNuc`. For a heavy projectile those two are
+`1 - cut*m_e/mom2` and `1 - 0.5*q2Max*<A^-2/3>/mom2`, so the condition is
+
+    cut * m_e  >  0.5 * q2Max * <A^-2/3>
+
+with `q2Max` = 19469 MeV^2 and `<A^-2/3>` = 0.1686 in water: 0.0358 MeV^2 against 1641, a factor
+of 46,000 - and `mom2` cancels, so no energy changes the answer. Measured rather than argued:
+over the 20,182 active rows of `ref/oracle/coulomb_xs.csv`, at BOTH cuts, `xs_electron` is zero
+in every one, the smallest `cosTetMaxElec - cosTetMaxNuc` is +3.2e-7, and `elec_ratio` is zero
+in all 240 sampler cells. It would take a ~3.2 GeV production cut in water to open it.
+
+#### What that costs, and what it buys
+
+* The CALL-SITE CONTRACT is still the proton cut, and `em::coulomb_secondary_cut(range_cut_mm)`
+  is the one line that produces it. `coulomb_xs_per_volume` and `coulomb_select_element` take
+  the cut as an argument for this reason; they read `Material::cut_electron` in the first
+  version of this package and nothing measured it, because nothing could - the two give the
+  same cross section. A wiring error here is invisible in option0 and becomes visible the
+  moment anyone sets `MscThetaLimit` to something other than pi, which moves `cosTMin` off
+  `cosTetMaxNuc` and can open the channel.
+* `em::wentzel_electron_xs` and `coulomb_sample_single`'s electron branch are transcribed and
+  are NOT exercised through this process by any cell in the oracle. Their correctness rests on
+  `G4WentzelVIModel`, the other caller, which has a different `cosThetaMin`.
+  `tests/test_coulomb_scattering.cu` prints the channel's state and the margin on every run
+  rather than leaving this to be rediscovered.
+
+**The rule it earns.** A quantity can be plumbed wrongly and measured correctly at the same
+time, if what it feeds is multiplied by zero. The test that would have caught the wrong cut is
+not a comparison of the cross section - that one passes either way - but a comparison of
+`cosTetMaxElec`, the intermediate. Compare the intermediate whose value the argument actually
+reaches, not only the answer the argument is supposed to change.

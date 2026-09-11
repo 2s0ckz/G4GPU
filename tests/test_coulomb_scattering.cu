@@ -1,6 +1,6 @@
 // src/physics/em/coulomb_scattering.cuh against the real G4CoulombScattering.
 //
-// Three blocks, against the three CSVs ref/dump/dump_coulomb.cc writes, and they are three
+// Four blocks, against the four CSVs ref/dump/dump_coulomb.cc writes, and they are four
 // different kinds of check.
 //
 //   1. WHO GETS IT.  coulomb_limits.csv is read off the CONSTRUCTED QBBC - one row per model
@@ -18,6 +18,18 @@
 //   3. THE ANGLE SAMPLER, statistically. 20,000 SampleSingleScattering draws per cell under a
 //      fixed seed, with (Z, A) and the target mass FIXED so the isotope draw this port refuses
 //      is out of the comparison. Moments and a log-spaced histogram of 1 - cos(theta).
+//   4. THE RECOIL, exactly. One row per real SampleSecondaries call, carrying the angle Geant4
+//      drew and the target it drew, so the recoil energy, the primary's final energy, the
+//      local deposit, the threshold branch and the recoil ion's direction are compared point by
+//      point rather than through the statistics of a second random stream. This is the block
+//      the `coulomb_recoil` / `coulomb_sample_secondaries` split exists for.
+//
+// The cut in blocks 2 to 4 is the PROTON production cut, not the electron one, because
+// G4CoulombScattering's secondary particle is the proton and so `theCuts` is cuts index 3 - see
+// coulomb_scattering.cuh's header. Block 2 compares the cross section at BOTH cuts and finds
+// them equal to the last bit, which is the finding rather than a formality: the only quantity
+// the cut moves is `cosTetMaxElec`, and the electron channel that gates is closed over this
+// process's whole interval. Block 2 prints how close it comes to opening.
 //
 // WHY n_scattered IS A COLUMN AND NOT A DETAIL. `SampleSingleScattering` returns (0,0,1) - no
 // deflection at all - whenever its rejection loop fails, and for a 200 MeV proton on oxygen it
@@ -221,17 +233,22 @@ int main() {
     char line[1024];
     std::fgets(line, sizeof line, f);
     Worst xs[kNClaims], interval[kNClaims], pmin[kNClaims], mmin[kNClaims];
+    Worst xsp[kNClaims], elec[kNClaims];
     long zeros_both = 0, zeros_us_only = 0, zeros_g4_only = 0;
+    long n_active = 0, n_g4_elec = 0, n_our_elec = 0;
+    double min_elec_gap = 1e300;
     while (std::fgets(line, sizeof line, f) != nullptr) {
       char mat[64], part[64];
       int Z, A;
       double e, ecut, pcut, x, xn, xe, ctmin, ctmax, ctnuc, ctelec, inva23, tmass, pm, mm;
+      double xp, xep, ctelecp;
       const int n = std::sscanf(line,
                                 "%63[^,],%63[^,],%d,%d,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,"
-                                "%lf,%lf,%lf,%lf,%lf",
+                                "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
                                 mat, part, &Z, &A, &e, &ecut, &pcut, &x, &xn, &xe, &ctmin,
-                                &ctmax, &ctnuc, &ctelec, &inva23, &tmass, &pm, &mm);
-      if (n != 18) { continue; }
+                                &ctmax, &ctnuc, &ctelec, &inva23, &tmass, &pm, &mm, &xp, &xep,
+                                &ctelecp);
+      if (n != 21) { continue; }
       const int mi = material_of(mat);
       const int ci = claim_of(part);
       if (mi < 0 || ci < 0 || kClaims[ci].low < 0) { continue; }
@@ -239,6 +256,46 @@ int main() {
       const em::CoulombAtomXs<real_t> a =
           em::coulomb_xs_per_atom(pd, kClaims[ci].type, e, real_t(inva23), Z, real_t(ecut),
                                   real_t(kCosThetaMin), real_t(kCosThetaMax));
+      // THE SAME FUNCTION AT THE OTHER CUT. The cut the TRANSPORT passes is the proton's, not
+      // the electron's (coulomb_scattering.cuh's header has the four source lines), and it
+      // reaches the cross section through exactly one quantity: ComputeMaxElectronScattering's
+      // cosTetMaxElec, and through that the electron cross section. Both cuts are compared, and
+      // what the pair MEASURES is that the cross sections are identical while cosTetMaxElec is
+      // not - the electron channel is closed over this process's whole angular interval, so
+      // the cut is a plumbing fact with no numerical consequence in option0. The counters below
+      // are what would notice if that stopped being true.
+      const em::CoulombAtomXs<real_t> ap =
+          em::coulomb_xs_per_atom(pd, kClaims[ci].type, e, real_t(inva23), Z, real_t(pcut),
+                                  real_t(kCosThetaMin), real_t(kCosThetaMax));
+      if (xp > 0 && ap.total > 0) {
+        note(xsp[ci], std::fabs(double(ap.total) - xp) / xp,
+             "%s Z=%d at %.6g MeV, pcut %.4g (%.10g vs %.10g mm^2)", mat, Z, e, pcut,
+             double(ap.total), xp);
+        // How closed the electron channel is, and on both sides. `xe`/`xep` are Geant4's own
+        // electron cross sections and the two `electron` fields are the port's; if either ever
+        // became nonzero the two cut columns would stop being equal and this says so first.
+        ++n_active;
+        if (xe > 0 || xep > 0) { ++n_g4_elec; }
+        if (a.electron > 0 || ap.electron > 0) { ++n_our_elec; }
+        const double gap = ctelec - ctnuc;
+        if (gap < min_elec_gap) { min_elec_gap = gap; }
+      }
+      // cosTetMaxElec itself, at both cuts, which is the one number the cut moves. Held to an
+      // absolute tolerance in cos: it approaches 1 from below and a relative comparison there
+      // measures nothing.
+      {
+        const em::WentzelState<real_t> se =
+            em::wentzel_setup(pd, kClaims[ci].type, e, real_t(inva23), Z, real_t(ecut),
+                              real_t(kCosThetaMin));
+        const em::WentzelState<real_t> sp =
+            em::wentzel_setup(pd, kClaims[ci].type, e, real_t(inva23), Z, real_t(pcut),
+                              real_t(kCosThetaMin));
+        const double de = std::max(std::fabs(double(se.cos_tet_max_elec) - ctelec),
+                                   std::fabs(double(sp.cos_tet_max_elec) - ctelecp));
+        note(elec[ci], de, "%s Z=%d at %.6g MeV (ecut %.17g vs %.17g, pcut %.17g vs %.17g)",
+             mat, Z, e, double(se.cos_tet_max_elec), ctelec, double(sp.cos_tet_max_elec),
+             ctelecp);
+      }
       // Both zero is the process being off below its threshold, and it must be off at the
       // same energies on both sides - a port that never returns zero would pass a relative
       // comparison on every nonzero point and be wrong about where the process exists.
@@ -288,12 +345,26 @@ int main() {
     }
     std::fclose(f);
     std::printf("\n== cross section per atom vs ComputeCrossSectionPerAtom ==\n");
-    std::printf("  %-12s %12s %12s %12s %12s %7s\n", "", "xs", "interval", "proc Emin",
-                "model Emin", "n");
+    std::printf("  %-12s %12s %12s %12s %12s %12s %12s %7s\n", "", "xs(ecut)", "xs(pcut)",
+                "cosTetElec", "interval", "proc Emin", "model Emin", "n");
     for (int i = 0; i < kNClaims; ++i) {
       if (kClaims[i].low < 0 || xs[i].n == 0) { continue; }
-      std::printf("  %-12s %11.3e %11.3e %11.3e %11.3e %7d\n", kClaims[i].name, xs[i].dev,
-                  interval[i].dev, pmin[i].dev, mmin[i].dev, xs[i].n);
+      std::printf("  %-12s %11.3e %11.3e %11.3e %11.3e %11.3e %11.3e %7d\n", kClaims[i].name,
+                  xs[i].dev, xsp[i].dev, elec[i].dev, interval[i].dev, pmin[i].dev,
+                  mmin[i].dev, xs[i].n);
+      if (xsp[i].dev > 1e-12) {
+        std::printf("    FAIL: %s xs at the proton cut, %s\n", kClaims[i].name, xsp[i].where);
+        ++fails;
+      }
+      if (elec[i].dev > 1e-14) {
+        std::printf("    FAIL: %s cosTetMaxElec, %s\n", kClaims[i].name, elec[i].where);
+        ++fails;
+      }
+      if (xsp[i].n == 0) {
+        std::printf("    FAIL: %s never compared at the proton cut, so the cut argument was "
+                    "not tested\n", kClaims[i].name);
+        ++fails;
+      }
       // 1e-12 relative: the cross section is four multiplies and two divides on numbers the
       // port and Geant4 both compute in double from the same constants, and the measured
       // worst case is below 1e-14. Not 1e-15, because kin_factor carries `coeff` built from
@@ -323,6 +394,18 @@ int main() {
     }
     std::printf("  zeros: %ld agreed, %ld ours only, %ld Geant4 only\n", zeros_both,
                 zeros_us_only, zeros_g4_only);
+    // The electron channel, measured rather than asserted away. It is closed over this
+    // process's interval at every active point, which is why the two cut columns agree; the gap
+    // is how close cosTetMaxElec ever comes to cosTetMaxNuc, and it would have to go NEGATIVE
+    // for the channel to open. So `wentzel_electron_xs` and the sampler's electron branch are
+    // transcribed and not exercised THROUGH THIS PROCESS - the msc model is where they are.
+    std::printf("  electron channel: %ld active rows, Geant4 nonzero in %ld, ours in %ld, "
+                "smallest (cosTetMaxElec - cosTetMaxNuc) %+.3g\n", n_active, n_g4_elec,
+                n_our_elec, min_elec_gap);
+    if (n_g4_elec != n_our_elec) {
+      std::printf("  FAIL: the two sides disagree about whether the electron channel is open\n");
+      ++fails;
+    }
     if (zeros_both == 0) {
       std::printf("  FAIL: no row had a zero cross section on either side, so the threshold "
                   "the process turns on at was never tested\n");
@@ -343,22 +426,23 @@ int main() {
     std::printf("  %-12s %4s %10s %12s %12s %12s\n", "particle", "Z", "E(MeV)", "P(scatter)",
                 "<1-cos>", "chi2/bin");
     int cells = 0;
+    bool cut_reported = false;
     while (std::fgets(line, sizeof line, f) != nullptr) {
       char mat[64], part[64];
       int Z, A, N;
       long nsc;
-      double e, m1, m2, m3, mt, tmax, ratio, ctmin, ctmax, tmass;
+      double e, m1, m2, m3, mt, tmax, ratio, ctmin, ctmax, tmass, cut;
       long h[20];
       char* p = line;
       // Fixed-width sscanf up to the histogram, then the twenty bins by hand.
       const int n = std::sscanf(p,
                                 "%63[^,],%63[^,],%d,%d,%lf,%d,%ld,%lf,%lf,%lf,%lf,%lf,%lf,"
-                                "%lf,%lf,%lf",
+                                "%lf,%lf,%lf,%lf",
                                 mat, part, &Z, &A, &e, &N, &nsc, &m1, &m2, &m3, &mt, &tmax,
-                                &ratio, &ctmin, &ctmax, &tmass);
-      if (n != 16) { continue; }
+                                &ratio, &ctmin, &ctmax, &tmass, &cut);
+      if (n != 17) { continue; }
       int commas = 0;
-      while (*p != '\0' && commas < 16) {
+      while (*p != '\0' && commas < 17) {
         if (*p == ',') { ++commas; }
         ++p;
       }
@@ -379,13 +463,27 @@ int main() {
       // own generator - so this is a distribution comparison and nothing else. Its seed is
       // derived from the cell so that a cell reproduces on its own.
       const ParticleDef<real_t> pd = particle_def<real_t>(kClaims[ci].type);
+      // `cut` off the row, not `mats[mi].cut_electron`: the cut the process hands this model is
+      // the PROTON production cut and it is the only thing that moves the electron/nucleus
+      // split this sampler draws from. Reading it out of the oracle rather than recomputing it
+      // keeps the two sides on the same number by construction; that the port can PRODUCE it
+      // is checked separately, against `coulomb_secondary_cut`, below.
       const em::CoulombAtomXs<real_t> a =
           em::coulomb_xs_per_atom(pd, kClaims[ci].type, real_t(e), mats[mi].inv_a23, Z,
-                                  mats[mi].cut_electron, real_t(kCosThetaMin),
-                                  real_t(kCosThetaMax));
+                                  real_t(cut), real_t(kCosThetaMin), real_t(kCosThetaMax));
       const em::WentzelState<real_t> st =
-          em::wentzel_setup(pd, kClaims[ci].type, real_t(e), mats[mi].inv_a23, Z,
-                            mats[mi].cut_electron, real_t(kCosThetaMin));
+          em::wentzel_setup(pd, kClaims[ci].type, real_t(e), mats[mi].inv_a23, Z, real_t(cut),
+                            real_t(kCosThetaMin));
+      // QBBC's range cut is 0.7 mm and G4RToEConvForProton::Convert is linear in it with no
+      // material argument, so one line reproduces every proton cut in the oracle. Reported
+      // once, not 240 times.
+      if (std::fabs(double(em::coulomb_secondary_cut<real_t>(real_t(0.7))) - cut) > 1e-15
+          && !cut_reported) {
+        std::printf("  FAIL: coulomb_secondary_cut(0.7 mm) = %.17g, oracle cut = %.17g\n",
+                    double(em::coulomb_secondary_cut<real_t>(real_t(0.7))), cut);
+        cut_reported = true;
+        ++fails;
+      }
       // Philox, keyed by the cell, so a cell reproduces on its own the way the oracle side
       // does with CLHEP::HepRandom::setTheSeed.
       Philox<real_t> rng(0x5cabu + unsigned(ci) * 977u, unsigned(Z) * 31u,
@@ -439,8 +537,13 @@ int main() {
                     chi2n, bad ? "   <-- FAIL" : "");
       }
       if (bad) {
+        // mean_trec and max_trec are Geant4's own recoil energies for this cell, printed as
+        // context and not asserted here: they are a function of the angles above, so their
+        // agreement would be a consequence of it. The recoil is asserted EXACTLY in block 4,
+        // against Geant4's per-call rows, which is where an arithmetic error in it belongs.
         std::printf("    nsc %ld vs %ld (%.1f sigma), <1-cos> %.6g vs %.6g, chi2/bin %.2f "
-                    "over %d bins\n", nsc, onsc, zsc, m3, o3 / N, chi2n, nb);
+                    "over %d bins; G4 <trec> %.4g MeV, max %.4g MeV\n", nsc, onsc, zsc, m3,
+                    o3 / N, chi2n, nb, mt, tmax);
         ++fails;
       }
     }
@@ -449,6 +552,284 @@ int main() {
     if (cells == 0) {
       std::printf("  FAIL: no sampler cells compared\n");
       ++fails;
+    }
+  }
+
+  // ---------------------------------------------------------------- 4. the recoil, exactly
+  //
+  // One row per SampleSecondaries call, so this is not a distribution comparison: the row
+  // carries the cos(theta) Geant4 drew and the (Z, A) it drew, and everything after those two
+  // is arithmetic that must agree to machine precision. `coulomb_recoil` exists as a separate
+  // function for exactly this - to be drivable by an angle rather than by an RNG.
+  //
+  // WHICH ROWS TEST WHICH THING, because the two passes are not interchangeable:
+  //
+  //  * A row where Geant4 EMITTED AN ION carries (Z, A), so the target mass comes from the
+  //    port's own data/nuclei_mass_ame12.hh and every output is checked: trec, finalT, edep
+  //    (which must be zero), the branch, and the ion's direction from momentum balance.
+  //  * A row where it did NOT has no (Z, A) - below threshold the recoil becomes a deposit and
+  //    the target is not observable from outside the model. Such a row cannot test trec: the
+  //    only way to a target mass is to invert Geant4's own trec, and then recomputing trec
+  //    from it would compare a number with itself. So those rows test the BRANCH, `edep = trec`
+  //    and `finalT = T - trec`, which is the half the ion rows do not reach, and the inverted
+  //    mass is used for nothing else.
+  //
+  // AND WHY THE ORACLE HAS THREE PASSES. With QBBC's real cuts the `edep = trec` arm is
+  // UNREACHABLE: this process samples only angles beyond cosTetMaxNuc, so its smallest momentum
+  // transfer is set by q2Max and <A^-2/3> rather than by the energy, and the smallest recoil it
+  // can produce in these four materials is 0.285 MeV (calcium in bone) against a 0.07 MeV
+  // proton cut - measured and printed below, not assumed. So `zerocut` (pCuts zeroed, every
+  // draw emits its ion) carries the trec comparison and `highcut` (pCuts at 1e6 MeV, every draw
+  // deposits) carries the other arm. The `pcut` pass is QBBC's own behaviour and is what says
+  // which of the two the transport will actually see.
+  {
+    FILE* f = std::fopen((dir + "/coulomb_recoil.csv").c_str(), "r");
+    if (f == nullptr) {
+      std::printf("cannot read %s/coulomb_recoil.csv\n", dir.c_str());
+      return 1;
+    }
+    char line[1024];
+    std::fgets(line, sizeof line, f);
+    Worst trec_w[kNClaims], ft_w[kNClaims], dep_w[kNClaims], dir_w[kNClaims], mass_w[kNClaims];
+    long n_ion = 0, n_dep = 0, n_dep_nonzero = 0, n_branch_bad = 0, n_g4_bad = 0, n_clamp = 0;
+    long n_composed = 0, n_compose_bad = 0, n_pcut_deflected = 0, n_clamp_tested = 0;
+    double min_trec_pcut = 1e300, tcut_pcut = 0;
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+      char mat[64], part[64], pass[16];
+      int nsec, ionz, iona, call;
+      double e, cut, tcut, mom2, cost, dx, dy, dz, ft, trec, edep, nonion, idx, idy, idz;
+      const int n = std::sscanf(line,
+                                "%63[^,],%63[^,],%15[^,],%lf,%d,%lf,%lf,%lf,%lf,%lf,%lf,%lf,"
+                                "%lf,%lf,%lf,%lf,%d,%d,%d,%lf,%lf,%lf",
+                                mat, part, pass, &e, &call, &cut, &tcut, &mom2, &cost, &dx,
+                                &dy, &dz, &ft, &trec, &edep, &nonion, &nsec, &ionz, &iona,
+                                &idx, &idy, &idz);
+      if (n != 22) { continue; }
+      const int ci = claim_of(part);
+      const int mi = material_of(mat);
+      if (ci < 0 || mi < 0 || kClaims[ci].low < 0) { continue; }
+      const ParticleDef<real_t> pd = particle_def<real_t>(kClaims[ci].type);
+
+      // Geant4's own row, checked for internal consistency first. If the reference's finalT is
+      // not T - trec then this block is comparing against something it has mis-read, and that
+      // has to fail loudly rather than be absorbed into a tolerance.
+      if (std::fabs(ft + trec - e) > 1e-9 * e) { ++n_g4_bad; }
+      if (nsec == 0 && trec > tcut && trec > 0) { ++n_g4_bad; }
+      if (nsec > 0 && !(trec > tcut)) { ++n_g4_bad; }
+      if (trec >= e) { ++n_clamp; }
+
+      real_t tmass = 0;
+      const bool have_target = (ionz > 0 && iona > 0);
+      if (have_target) {
+        tmass = data::nuclear_mass<real_t>(iona, ionz);
+        // The mass Geant4 used, recovered from its own recoil expression - a diagnostic, so
+        // that a trec failure says whether the mass table or the formula moved. Asserting on
+        // it would be asserting on the formula, which is what trec already does.
+        const double omc = 1.0 - cost;
+        if (trec > 0 && omc > 0) {
+          const double g4m = mom2 * omc / trec - (pd.mass + e) * omc;
+          note(mass_w[ci], std::fabs(double(tmass) - g4m) / g4m, "Z=%d A=%d (%.10g vs %.10g)",
+               ionz, iona, double(tmass), g4m);
+        }
+      } else {
+        const double omc = 1.0 - cost;
+        tmass = (trec > 0 && omc > 0)
+                    ? real_t(mom2 * omc / trec - (pd.mass + e) * omc)
+                    : real_t(1);   // cost == 1: trec is zero for any target
+      }
+
+      const em::CoulombFinalState<real_t> r =
+          em::coulomb_recoil<real_t>(pd.mass, real_t(e), real_t(mom2), tmass, real_t(cost),
+                                     real_t(tcut));
+      if (r.emit_ion != (nsec > 0)) {
+        ++n_branch_bad;
+        if (n_branch_bad < 5) {
+          std::printf("    FAIL branch: %s %s %s %.4g MeV call %d: G4 n_sec=%d, ours "
+                      "emit_ion=%d (trec %.10g vs %.10g, tcut %.10g)\n", mat, part, pass, e,
+                      call, nsec, int(r.emit_ion), double(r.trec), trec, tcut);
+        }
+      }
+      note(ft_w[ci], (e > 0) ? std::fabs(double(r.final_t) - ft) / e : 0.0,
+           "%s %s %s %.4g MeV call %d (%.12g vs %.12g MeV)", mat, part, pass, e, call,
+           double(r.final_t), ft);
+      note(dep_w[ci], (e > 0) ? std::fabs(double(r.edep) - edep) / e : 0.0,
+           "%s %s %s %.4g MeV call %d (%.12g vs %.12g MeV)", mat, part, pass, e, call,
+           double(r.edep), edep);
+      if (have_target) {
+        ++n_ion;
+        if (trec > 0) {
+          note(trec_w[ci], std::fabs(double(r.trec) - trec) / trec,
+               "%s %s %s %.4g MeV call %d, Z=%d A=%d (%.12g vs %.12g MeV)", mat, part, pass, e,
+               call, ionz, iona, double(r.trec), trec);
+        }
+        // The full `coulomb_sample_secondaries` on the same inputs, once per ion row. It draws
+        // its own angle, so nothing here can be compared against the row - what is checked is
+        // the COMPOSITION, which no other block reaches: that the ion identity is the caller's
+        // (iz, ia) and not something invented, that the three energies still balance after the
+        // parts are put together, and that the deposit goes to whichever of the two places the
+        // branch chose. The parts themselves are what the row-by-row comparison above tests.
+        {
+          Philox<real_t> srng(0x51e3u + unsigned(ci) * 131u, unsigned(ionz) * 17u,
+                              unsigned(call));
+          const em::CoulombFinalState<real_t> fs = em::coulomb_sample_secondaries<real_t>(
+              pd, kClaims[ci].type, real_t(e), mats[mi].inv_a23, ionz, iona, tmass,
+              real_t(cut), real_t(kCosThetaMin), real_t(kCosThetaMax),
+              Vec3<real_t>{0, 0, 1}, srng);
+          ++n_composed;
+          const bool ident = !fs.emit_ion || (fs.ion_z == ionz && fs.ion_a == iona);
+          const double bal = std::fabs(double(fs.final_t + fs.trec) - e);
+          const double dep = fs.emit_ion ? double(fs.edep)
+                                         : std::fabs(double(fs.edep - fs.trec));
+          const double unitv = std::fabs(double(mag(fs.ion_dir)) - 1.0);
+          if (!ident || bal > 1e-12 * e || dep > 1e-12 * e || unitv > 1e-12) {
+            if (n_compose_bad < 5) {
+              std::printf("    FAIL composition: %s %s %.4g MeV: ion (%d,%d) vs (%d,%d), "
+                          "balance %.3g, deposit %.3g, |ion_dir|-1 %.3g\n", part, mat, e,
+                          fs.ion_z, fs.ion_a, ionz, iona, bal, dep, unitv);
+            }
+            ++n_compose_bad;
+          }
+        }
+        // The recoil direction, from the primary's own before/after momenta. Compared as the
+        // angle between the two unit vectors, so all three components count once.
+        const Vec3<real_t> ours =
+            em::coulomb_recoil_direction<real_t>(Vec3<real_t>{0, 0, 1},
+                                                 Vec3<real_t>{real_t(dx), real_t(dy),
+                                                              real_t(dz)},
+                                                 real_t(mom2), pd.mass, real_t(ft));
+        const double d = std::fabs(double(ours.x) - idx) + std::fabs(double(ours.y) - idy)
+                         + std::fabs(double(ours.z) - idz);
+        note(dir_w[ci], d, "%s %s %s %.4g MeV call %d ((%.9g,%.9g,%.9g) vs (%.9g,%.9g,%.9g))",
+             mat, part, pass, e, call, double(ours.x), double(ours.y), double(ours.z), idx,
+             idy, idz);
+      } else {
+        ++n_dep;
+        if (trec > 0) { ++n_dep_nonzero; }
+        // The non-ionizing route, which only the deposit arm uses: Geant4 proposes the recoil
+        // as non-ionizing AND as local, so both columns must equal trec. The port carries one
+        // `edep` and a comment saying which; if the two Geant4 columns ever disagreed, that
+        // comment would be wrong and this is where it shows.
+        if (std::fabs(nonion - trec) > 1e-12 * (trec + 1e-30)
+            || std::fabs(edep - trec) > 1e-12 * (trec + 1e-30)) {
+          ++n_g4_bad;
+        }
+      }
+      // `trec = std::min(trec, kinEnergy)`, on the rows where GEANT4 took it. Those rows are
+      // deposit rows, so the target mass this block inverts out of Geant4's own trec is the
+      // mass that reproduces trec = T exactly - which would pass whether the port clamps or
+      // not. The target can be identified without the inversion, though: only the LIGHTEST
+      // element in the material can clamp, because trec exceeds T only when the target mass is
+      // below the projectile's (omc*mass > targetMass at omc <= 2), and in these materials that
+      // is hydrogen and nothing else. So the port is re-run on the lightest element's own mass
+      // out of its own table, and it has to overshoot and then clamp: if its unclamped trec did
+      // not exceed T, Geant4's clamp could not have fired either and the row is being
+      // misattributed.
+      if (trec >= e && !have_target) {
+        int zl = 300;
+        for (int k = 0; k < mats[mi].n_elements; ++k) {
+          const int zz = int(mats[mi].z[k] + 0.5);
+          if (zz < zl) { zl = zz; }
+        }
+        const int al = int(data::atomic_mass<real_t>(zl) + 0.5);
+        const real_t lm = data::nuclear_mass<real_t>(al, zl);
+        const double omc = 1.0 - cost;
+        const double raw = mom2 * omc / (double(lm) + (pd.mass + e) * omc);
+        const em::CoulombFinalState<real_t> rc = em::coulomb_recoil<real_t>(
+            pd.mass, real_t(e), real_t(mom2), lm, real_t(cost), real_t(tcut));
+        if (!(raw > e) || std::fabs(double(rc.trec) - e) > 1e-12 * e
+            || double(rc.final_t) != 0.0 || std::fabs(double(rc.edep) - e) > 1e-12 * e) {
+          std::printf("    FAIL clamp: %s %s %s %.4g MeV cost %.6g on Z=%d: unclamped %.6g, "
+                      "clamped %.10g, finalT %.3g, edep %.10g\n", mat, part, pass, e, cost, zl,
+                      raw, double(rc.trec), double(rc.final_t), double(rc.edep));
+          ++fails;
+        }
+        ++n_clamp_tested;
+      }
+      // QBBC's own arm, measured: the smallest recoil this process can produce against the cut
+      // it is compared with. This is the number behind "the local-deposit arm is unreachable".
+      if (std::strcmp(pass, "pcut") == 0 && trec > 0) {
+        ++n_pcut_deflected;
+        if (trec < min_trec_pcut) { min_trec_pcut = trec; }
+        tcut_pcut = tcut;
+      }
+    }
+    std::fclose(f);
+    std::printf("\n== SampleSecondaries, one row per call ==\n");
+    std::printf("  %-12s %12s %12s %12s %12s %12s %7s\n", "particle", "trec", "finalT", "edep",
+                "ion dir", "mass table", "n");
+    for (int i = 0; i < kNClaims; ++i) {
+      if (kClaims[i].low < 0 || ft_w[i].n == 0) { continue; }
+      std::printf("  %-12s %11.3e %11.3e %11.3e %11.3e %11.3e %7d\n", kClaims[i].name,
+                  trec_w[i].dev, ft_w[i].dev, dep_w[i].dev, dir_w[i].dev, mass_w[i].dev,
+                  ft_w[i].n);
+      // 1e-9 on trec, and the limit is the nuclear mass and not the arithmetic: the recoil
+      // divides by `targetMass + (mass + T)*(1 - cost)`, and targetMass comes from this port's
+      // data/nuclei_mass_ame12.hh against Geant4's G4NucleiProperties - the same 1e-9 the
+      // model's MinPrimaryEnergy is held to in block 2, for the same reason. finalT, edep and
+      // the direction are pure arithmetic on the row and are held to 1e-12.
+      if (trec_w[i].dev > 1e-9) {
+        std::printf("    FAIL: %s trec, %s\n", kClaims[i].name, trec_w[i].where);
+        ++fails;
+      }
+      if (ft_w[i].dev > 1e-12) {
+        std::printf("    FAIL: %s finalT, %s\n", kClaims[i].name, ft_w[i].where);
+        ++fails;
+      }
+      if (dep_w[i].dev > 1e-12) {
+        std::printf("    FAIL: %s edep, %s\n", kClaims[i].name, dep_w[i].where);
+        ++fails;
+      }
+      if (dir_w[i].dev > 1e-9) {
+        std::printf("    FAIL: %s recoil direction, %s\n", kClaims[i].name, dir_w[i].where);
+        ++fails;
+      }
+    }
+    std::printf("  %ld rows emitted an ion, %ld deposited locally (%ld of them a nonzero "
+                "recoil), %ld branch disagreements, %ld reference inconsistencies, %ld "
+                "trec clamped to T\n", n_ion, n_dep, n_dep_nonzero, n_branch_bad, n_g4_bad,
+                n_clamp);
+    std::printf("  %ld coulomb_sample_secondaries compositions, %ld bad\n", n_composed,
+                n_compose_bad);
+    fails += int(n_branch_bad > 0) + int(n_g4_bad > 0) + int(n_compose_bad > 0);
+    if (n_composed == 0) {
+      std::printf("  FAIL: coulomb_sample_secondaries was never called\n");
+      ++fails;
+    }
+    // Both branches have to have run, or the `if(trec > tcut)` this block is about was never
+    // decided: with only ion rows the local-deposit arm is dead code, and with only deposit
+    // rows nothing tested the trec formula at all.
+    if (n_ion == 0 || n_dep_nonzero == 0) {
+      std::printf("  FAIL: the recoil threshold branch was not exercised both ways (%ld ion, "
+                  "%ld nonzero deposit)\n", n_ion, n_dep_nonzero);
+      ++fails;
+    }
+    // The finding, as a number rather than as a claim in a comment: with QBBC's real cuts every
+    // deflected draw is above threshold, because the smallest recoil this process can produce
+    // is several times the proton cut. If a future release, a heavier material or a larger
+    // range cut ever brought the two together, this line is where it would show.
+    if (n_pcut_deflected > 0) {
+      std::printf("  QBBC cuts: %ld deflected draws, smallest recoil %.4g MeV against a %.4g "
+                  "MeV threshold (ratio %.1f),\n             so the local-deposit arm is "
+                  "unreachable in option0 and the highcut pass is what measures it\n",
+                  n_pcut_deflected, min_trec_pcut, tcut_pcut, min_trec_pcut / tcut_pcut);
+    } else {
+      std::printf("  FAIL: the pcut pass produced no deflected draw at all\n");
+      ++fails;
+    }
+    // Geant4's own "the check likely not needed" does fire, and only for an ANTIPROTON: the
+    // clamp needs a target lighter than the projectile, and the proton is kept from
+    // backscattering off hydrogen by SampleSecondaries' own `1 == iz && particle == theProton`
+    // exception, which forces its cosThetaMax to 0. The pbar is not in that test, so it reaches
+    // 180 degrees off a target of its own mass and takes the whole of its kinetic energy.
+    std::printf("  min(trec, T) clamp: fired in Geant4 on %ld rows, %ld of them checked "
+                "against the port\n", n_clamp, n_clamp_tested);
+    if (n_clamp > 0 && n_clamp_tested == 0) {
+      std::printf("  FAIL: the clamp fired in the reference and no row tested it\n");
+      ++fails;
+    }
+    if (n_clamp == 0) {
+      std::printf("  note: no row reached trec >= T, so the min(trec, kinEnergy) clamp is "
+                  "transcribed but not exercised by this oracle\n");
     }
   }
 

@@ -77,6 +77,69 @@
 // this process.
 //
 // ---------------------------------------------------------------------------------------
+// WHICH PRODUCTION CUT ARRIVES HERE, AND IT IS THE PROTON'S
+//
+// `G4eCoulombScatteringModel` uses its `cutEnergy` argument in exactly one place: through
+// `G4WentzelOKandVIxSection::SetupTarget(iz, cut)` into `ComputeMaxElectronScattering(cut)`,
+// where it bounds the energy transfer to an atomic ELECTRON and so sets `cosTetMaxElec` and the
+// electron cross section (G4WentzelOKandVIxSection.cc, ComputeMaxElectronScattering). It is a
+// delta-ray production threshold by construction. The value the transport hands it is the
+// PROTON production cut:
+//
+//   * G4CoulombScattering's constructor calls `SetSecondaryParticle(G4Proton::Proton())`
+//     (G4CoulombScattering.cc:68) - because the recoil it can emit is an ion.
+//   * `G4EmModelManager::Initialise` turns that into a cuts INDEX: gamma 0, e- 1, e+ 2, and
+//     `else { idx = 3; }` for anything else (G4EmModelManager.cc:463-468), then
+//     `theCuts = theCoupleTable->GetEnergyCutsVector(idx)` (:471).
+//   * Every later use of a cut in the process reads that vector: the lambda table through
+//     `G4EmModelManager::FillLambdaVector`'s `G4double cut = (*theCuts)[i]` (:634), and
+//     `G4VEmProcess::PostStepDoIt`'s `SampleSecondaries(..., (*theCuts)[currentCoupleIndex])`
+//     (G4VEmProcess.cc:527).
+//   * `G4eCoulombScatteringModel::Initialise` also stores that same vector as `pCuts`
+//     (G4eCoulombScatteringModel.cc:117), which is what `SampleSecondaries` reads for the
+//     recoil threshold. So the two cuts in this model are one number arriving twice.
+//
+// The electron production cut NEVER reaches this model in QBBC, not even for an e-
+// projectile - in G4_WATER the two differ by a factor of four, 0.07 MeV against 0.2776 MeV.
+//
+// AND IT MAKES NO DIFFERENCE TO THIS PROCESS, WHICH IS THE PART WORTH KNOWING. The cut gates
+// exactly one channel and that channel is shut. `ComputeElectronCrossSection`
+// (G4WentzelOKandVIxSection.hh:222-230) opens with
+//
+//     G4double cost1 = std::max(cosTMin, cosTetMaxElec);
+//     G4double cost2 = std::max(cosTMax, cosTetMaxElec);
+//     return (cost1 <= cost2) ? 0.0 : ...
+//
+// and this process integrates from cosTMin = cosTetMaxNuc out to cosTMax = -1, so the channel
+// is open only when `cosTetMaxElec < cosTetMaxNuc`. For a heavy projectile those are
+// 1 - cut*m_e/mom2 and 1 - 0.5*q2Max*<A^-2/3>/mom2, so the condition is
+//
+//     cut * m_e  >  0.5 * q2Max * <A^-2/3>
+//
+// with q2Max = 19469 MeV^2 and <A^-2/3> = 0.1686 in water: 0.0358 MeV^2 against 1641, a factor
+// of 46,000, and the mom2 cancels so no energy changes it. Measured over all 20,182 active
+// rows of `ref/oracle/coulomb_xs.csv` at BOTH cuts: `xs_electron` is 0 in every one, the
+// smallest gap `cosTetMaxElec - cosTetMaxNuc` is +1.9e-7, and `elec_ratio` is 0 in all 240
+// sampler cells. It would take a ~3.2 GeV production cut in water to open it.
+//
+// So two things follow. The port must pass the PROTON cut to be right about the plumbing, and
+// it costs nothing to be wrong about it in option0 - which is why this is written down rather
+// than left to be rediscovered by whoever changes `MscThetaLimit` and moves cosTMin. And
+// `wentzel_electron_xs` and `coulomb_sample_single`'s electron branch, both transcribed, are
+// NOT exercised through this process by any oracle cell here. The msc model is a different
+// caller with a different cosThetaMin and is where they earn their place.
+//
+// The cut itself needs no table. `G4RToEConvForProton::Convert` is
+//
+//     // Simple formula - range = Ekin/(100*keV)*(1*mm);
+//     return (rangeCut/(1.0*CLHEP::mm)) * (100.0*CLHEP::keV);
+//
+// (processes/cuts/src/G4RToEConvForProton.cc) - linear in the range cut and independent of the
+// material, which is why the oracle's `pcut_MeV` column is 0.07 in all seven materials while
+// its `ecut_MeV` spans 0.00099 to 0.61. `coulomb_secondary_cut` below is that one line, and it
+// is why this file needs no proton-cut field on `data::Material`.
+//
+// ---------------------------------------------------------------------------------------
 // WHAT IS REFUSED, BY NAME
 //
 //  * ISOTOPE SELECTION. G4eCoulombScatteringModel::SampleSecondaries calls
@@ -182,6 +245,22 @@ __host__ __device__ inline real_t coulomb_model_min_primary_energy(real_t proton
   return fmax(cut, real_t(0.5) * (cut + sqrt(real_t(2) * cut * target_mass)));
 }
 
+/// `G4RToEConvForProton::Convert(rangeCut, material)`, MeV - the cut this process is driven by.
+///
+///     // Simple formula - range = Ekin/(100*keV)*(1*mm);
+///     return (rangeCut/(1.0*CLHEP::mm)) * (100.0*CLHEP::keV);
+///
+/// Linear in the range cut and independent of the material, so 0.07 MeV for QBBC's 0.7 mm in
+/// every one of the oracle's seven materials. See the file header: this is the value that
+/// reaches `cutEnergy` and `pCuts` alike, because G4CoulombScattering's secondary is the
+/// proton. Passing an electron cut instead moves `cosTetMaxElec` - by up to 0.66 in cos, which
+/// `tests/test_coulomb_scattering.cu` compares at both cuts - but not the cross section, which
+/// is the header's point: the electron channel it gates is closed at every energy.
+template <typename real_t> __host__ __device__ inline real_t coulomb_secondary_cut(
+    real_t range_cut_mm) {
+  return range_cut_mm * real_t(0.1);   // 100 keV per mm, in MeV/mm
+}
+
 /// What `G4eCoulombScatteringModel::ComputeCrossSectionPerAtom` returns, plus the electron
 /// fraction its sampler needs.
 template <typename real_t>
@@ -211,7 +290,13 @@ struct CoulombAtomXs {
 /// @param cos_theta_min  the model's `cosThetaMin`, -1 in option0 (MscThetaLimit == pi)
 /// @param cos_theta_max  the model's `cosThetaMax`, -1 always: it is set in the constructor
 ///                       and never reassigned anywhere in G4eCoulombScatteringModel
-/// @param cut            the electron production threshold, for ComputeMaxElectronScattering
+/// @param cut            the threshold ComputeMaxElectronScattering bounds the energy transfer
+///                       to an atomic electron with. It is a delta-ray threshold by
+///                       construction and the PROTON production cut by plumbing - see the file
+///                       header - so `coulomb_secondary_cut(range_cut_mm)`, not
+///                       `Material::cut_electron`. It is an argument and not read off the
+///                       material because the material carries no proton cut and does not need
+///                       one: the value is a per-run constant.
 template <typename real_t>
 __host__ __device__ inline CoulombAtomXs<real_t> coulomb_xs_per_atom(
     const ParticleDef<real_t>& pd, ParticleType type, real_t tkin, real_t inv_a23, int z,
@@ -250,19 +335,23 @@ __host__ __device__ inline CoulombAtomXs<real_t> coulomb_xs_per_atom(
 
 /// Cross section per unit volume, 1/mm - `G4VEmProcess::CrossSectionPerVolume` summed over the
 /// material's elements, which is what the process's lambda table holds.
+///
+/// @param cut `coulomb_secondary_cut(range_cut_mm)`. `G4EmModelManager::FillLambdaVector`
+///        builds this table with `(*theCuts)[i]`, and theCuts is the PROTON vector - see the
+///        file header. This took `m.cut_electron` until it was measured: the electron cut is
+///        four times the proton cut in water and never reaches the model.
 template <typename real_t>
 __host__ __device__ inline real_t coulomb_xs_per_volume(const data::Material<real_t>& m,
                                                         ParticleType type, real_t tkin,
-                                                        real_t cos_theta_min,
+                                                        real_t cut, real_t cos_theta_min,
                                                         real_t cos_theta_max) {
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
   if (pd.mass <= real_t(0) || tkin <= real_t(0)) { return real_t(0); }
   real_t xs = real_t(0);
   for (int i = 0; i < m.n_elements; ++i) {
     const int z = static_cast<int>(m.z[i] + real_t(0.5));
-    const CoulombAtomXs<real_t> a = coulomb_xs_per_atom(pd, type, tkin, m.inv_a23, z,
-                                                        m.cut_electron, cos_theta_min,
-                                                        cos_theta_max);
+    const CoulombAtomXs<real_t> a = coulomb_xs_per_atom(pd, type, tkin, m.inv_a23, z, cut,
+                                                        cos_theta_min, cos_theta_max);
     xs += m.n_atoms[i] * a.total;
   }
   return xs;
@@ -273,19 +362,20 @@ __host__ __device__ inline real_t coulomb_xs_per_volume(const data::Material<rea
 /// `G4VEmModel::SelectTargetAtom` reads G4EmElementSelector's tabulated cumulative
 /// distribution; this evaluates the same partial cross sections at the energy. See the
 /// refusal list in the file header. Returns the element INDEX in the material.
+///
+/// @param cut `coulomb_secondary_cut(range_cut_mm)`, as in `coulomb_xs_per_volume`.
 template <typename real_t, typename Rng>
 __host__ __device__ inline int coulomb_select_element(const data::Material<real_t>& m,
                                                       ParticleType type, real_t tkin,
-                                                      real_t cos_theta_min,
+                                                      real_t cut, real_t cos_theta_min,
                                                       real_t cos_theta_max, Rng& rng) {
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
   real_t part[data::kMaxElements];
   real_t sum = real_t(0);
   for (int i = 0; i < m.n_elements; ++i) {
     const int z = static_cast<int>(m.z[i] + real_t(0.5));
-    const CoulombAtomXs<real_t> a = coulomb_xs_per_atom(pd, type, tkin, m.inv_a23, z,
-                                                        m.cut_electron, cos_theta_min,
-                                                        cos_theta_max);
+    const CoulombAtomXs<real_t> a = coulomb_xs_per_atom(pd, type, tkin, m.inv_a23, z, cut,
+                                                        cos_theta_min, cos_theta_max);
     sum += m.n_atoms[i] * a.total;
     part[i] = sum;
   }
@@ -385,7 +475,91 @@ struct CoulombFinalState {
   bool emit_ion = false;   ///< true when the recoil is emitted as an ion instead
   int ion_z = 0;
   int ion_a = 0;
+  /// The recoil ion's direction, in the same frame as the direction passed in. Only meaningful
+  /// when `emit_ion`; `coulomb_recoil` leaves it (0,0,1) because it works in the scattering
+  /// frame and does not know the incoming direction.
+  Vec3<real_t> ion_dir{real_t(0), real_t(0), real_t(1)};
 };
+
+/// `G4eCoulombScatteringModel::SampleSecondaries`' recoil and energy balance, given the angle.
+///
+///     G4double mom2 = wokvi->GetMomentumSquare();
+///     G4double trec = mom2*(1.0 - cost)/(targetMass + (mass + kinEnergy)*(1.0 - cost));
+///     trec = std::min(trec, kinEnergy);                       // "the check likely not needed"
+///     G4double finalT = kinEnergy - trec;
+///     G4double edep = 0.0;
+///     G4double tcut = recoilThreshold;                        // 0.0, and never set in QBBC
+///     if(pCuts) { tcut = std::max(tcut,(*pCuts)[currentMaterialIndex]); }
+///     if(trec > tcut) { ... emit theIonTable->GetIon(iz, ia, 0) with kinetic energy trec ... }
+///     else { edep = trec; fParticleChange->ProposeNonIonizingEnergyDeposit(edep); }
+///     if(finalT < 0.0) { edep += finalT; finalT = 0.0; }
+///     edep = std::max(edep, 0.0);
+///
+/// (G4eCoulombScatteringModel.cc:277-314). The comment above it says "recoil sampling assuming
+/// a small recoil and first order correction to primary 4-momentum", and that is what the
+/// expression is: the primary keeps the sampled DIRECTION and loses `trec`, with no exact
+/// two-body solve, so the primary's momentum after the step is not the two-body value.
+///
+/// Split out from `coulomb_sample_secondaries` so it can be driven with an angle rather than an
+/// RNG: `tests/test_coulomb_scattering.cu` feeds it the cos(theta) of each of Geant4's own
+/// `SampleSecondaries` calls out of `ref/oracle/coulomb_recoil.csv` and compares trec, finalT,
+/// edep and the branch exactly. Sampling the angle here instead would leave the arithmetic
+/// checkable only through the statistics of a different random stream.
+///
+/// Note where the deposit goes: below threshold it is proposed as NON-IONIZING as well as
+/// local, so a scorer that separates the two sees the recoil there.
+///
+/// @param mom2 `wokvi->GetMomentumSquare()`, MeV^2 - `WentzelState::mom2`
+/// @param tcut `max(recoilThreshold, (*pCuts)[i])`, i.e. `coulomb_secondary_cut(range_cut_mm)`
+///        in QBBC, where recoilThreshold is 0 and pCuts is the proton vector
+template <typename real_t>
+__host__ __device__ inline CoulombFinalState<real_t> coulomb_recoil(real_t mass, real_t tkin,
+                                                                    real_t mom2,
+                                                                    real_t target_mass,
+                                                                    real_t cos_theta,
+                                                                    real_t tcut) {
+  CoulombFinalState<real_t> r;
+  r.cos_theta = cos_theta;
+  const real_t one_minus_cost = real_t(1) - cos_theta;
+  real_t trec = mom2 * one_minus_cost / (target_mass + (mass + tkin) * one_minus_cost);
+  trec = fmin(trec, tkin);
+  real_t final_t = tkin - trec;
+  real_t edep = real_t(0);
+  if (trec > tcut) {
+    r.emit_ion = true;
+  } else {
+    edep = trec;
+  }
+  // "this threshold may be applied only because for low-energy e+e- msc model is applied"
+  if (final_t < real_t(0)) {
+    edep += final_t;
+    final_t = real_t(0);
+  }
+  r.trec = trec;
+  r.edep = fmax(edep, real_t(0));
+  r.final_t = final_t;
+  return r;
+}
+
+/// The recoil ion's direction, from momentum balance (G4eCoulombScatteringModel.cc:296-297):
+///
+///     G4ThreeVector dir = (direction*sqrt(mom2) -
+///                          newDirection*sqrt(finalT*(2*mass + finalT))).unit();
+///
+/// The primary's momentum before minus its momentum after, with the after magnitude rebuilt
+/// from `finalT` - the energy the recoil took - and not from the sampled angle. `mass` is the
+/// PROJECTILE's on both sides; the ion's own mass never enters, which is the same first-order
+/// approximation `coulomb_recoil` carries. When the rejection failed and `cos_theta` is 1 the
+/// two momenta are parallel and the difference is along the primary, so this returns the
+/// incoming direction - but that case never emits an ion, because trec is then zero.
+template <typename real_t>
+__host__ __device__ inline Vec3<real_t> coulomb_recoil_direction(const Vec3<real_t>& in_dir,
+                                                                 const Vec3<real_t>& new_dir,
+                                                                 real_t mom2, real_t mass,
+                                                                 real_t final_t) {
+  const real_t p_out = sqrt(final_t * (real_t(2) * mass + final_t));
+  return normalize(in_dir * sqrt(mom2) - new_dir * p_out);
+}
 
 /// The refusal `coulomb_sample_secondaries` cannot make for its caller.
 ///
@@ -400,73 +574,50 @@ __host__ __device__ inline const char* coulomb_refuse_isotope_selection() {
          "isotope explicitly.";
 }
 
-/// `G4eCoulombScatteringModel::SampleSecondaries`, verbatim from the direction sampling to the
-/// energy balance.
+/// `G4eCoulombScatteringModel::SampleSecondaries`, from the angle to the energy balance.
 ///
-/// The recoil, which is the part that is not just an angle:
+/// The order is Geant4's and it matters: the cross sections are computed with SetupTarget's
+/// mean atomic mass, then `SetTargetMass(GetNuclearMass(ia, iz))` overrides it, and only then
+/// is the angle sampled. So `factD` in the rejection function and `targetMass` in the recoil
+/// belong to the sampled ISOTOPE while `cosTetMaxNuc` and the two cross sections belong to the
+/// ELEMENT. Selecting the isotope is refused (see the file header), so both (iz, ia) and the
+/// nuclear mass come from the caller.
 ///
-///     G4double trec = mom2*(1.0 - cost)/(targetMass + (mass + kinEnergy)*(1.0 - cost));
-///     trec = std::min(trec, kinEnergy);
-///     G4double finalT = kinEnergy - trec;
-///     G4double tcut = recoilThreshold;                       // 0.0 in QBBC
-///     if(pCuts) { tcut = std::max(tcut, (*pCuts)[currentMaterialIndex]); }
-///     if(trec > tcut) { ... emit G4IonTable::GetIon(iz, ia, 0) ... }
-///     else { edep = trec; ProposeNonIonizingEnergyDeposit(edep); }
-///     if(finalT < 0.0) { edep += finalT; finalT = 0.0; }
-///     edep = std::max(edep, 0.0);
-///
-/// The comment above it in the source says "recoil sampling assuming a small recoil and first
-/// order correction to primary 4-momentum", and that is exactly what the expression is: the
-/// primary keeps the sampled direction and loses `trec`, with no exact two-body solve. Note
-/// that `edep` is proposed as NON-IONIZING when the recoil is below threshold, so a scorer
-/// that separates the two will see it there.
-///
-/// @param proton_cut `(*pCuts)[currentMaterialIndex]` - the PROTON production threshold, MeV
-/// @param target_mass `G4NucleiProperties::GetNuclearMass(ia, iz)`, MeV; the caller supplies it
-///        together with (iz, ia), because selecting the isotope is refused above
+/// @param cut `coulomb_secondary_cut(range_cut_mm)`. One value, used twice: as `cutEnergy` in
+///        SetupTarget and as `(*pCuts)[i]` in the recoil threshold. In 11.1.1 those are
+///        literally the same vector - see the file header - so a caller that had two numbers
+///        here would be modelling something the release cannot do.
+/// @param target_mass `G4NucleiProperties::GetNuclearMass(ia, iz)`, MeV
+/// @param in_dir the primary's direction before the scatter, for the recoil ion's direction and
+///        for `rotateUz`. `cos_theta` and `phi` in the result stay in the scattering frame.
 template <typename real_t, typename Rng>
 __host__ __device__ inline CoulombFinalState<real_t> coulomb_sample_secondaries(
     const ParticleDef<real_t>& pd, ParticleType type, real_t tkin, real_t inv_a23, int iz,
-    int ia, real_t target_mass, real_t electron_cut, real_t proton_cut, real_t cos_theta_min,
-    real_t cos_theta_max, Rng& rng) {
+    int ia, real_t target_mass, real_t cut, real_t cos_theta_min, real_t cos_theta_max,
+    const Vec3<real_t>& in_dir, Rng& rng) {
   CoulombFinalState<real_t> r;
   r.final_t = tkin;
+  r.ion_dir = in_dir;
 
-  const CoulombAtomXs<real_t> a = coulomb_xs_per_atom(pd, type, tkin, inv_a23, iz,
-                                                      electron_cut, cos_theta_min,
-                                                      cos_theta_max);
+  const CoulombAtomXs<real_t> a =
+      coulomb_xs_per_atom(pd, type, tkin, inv_a23, iz, cut, cos_theta_min, cos_theta_max);
   if (!(a.total > real_t(0))) { return r; }
 
   const WentzelState<real_t> s =
-      wentzel_setup(pd, type, tkin, inv_a23, iz, electron_cut, cos_theta_min);
+      wentzel_setup(pd, type, tkin, inv_a23, iz, cut, cos_theta_min);
   const Vec3<real_t> dir = coulomb_sample_single(s, iz, target_mass, a.cos_t_min, a.cos_t_max,
                                                  a.elec_ratio, rng);
-  const real_t cost = dir.z;
-  r.cos_theta = cost;
+
+  r = coulomb_recoil(pd.mass, tkin, s.mom2, target_mass, dir.z, fmax(real_t(0), cut));
   r.phi = atan2(dir.y, dir.x);
-
-  real_t trec = s.mom2 * (real_t(1) - cost)
-                / (target_mass + (pd.mass + tkin) * (real_t(1) - cost));
-  trec = fmin(trec, tkin);
-  real_t final_t = tkin - trec;
-  real_t edep = real_t(0);
-
-  const real_t tcut = fmax(real_t(0), proton_cut);   // recoilThreshold = 0 in QBBC
-  if (trec > tcut) {
-    r.emit_ion = true;
+  if (r.emit_ion) {
     r.ion_z = iz;
     r.ion_a = ia;
-  } else {
-    edep = trec;
   }
-  // "this threshold may be applied only because for low-energy e+e- msc model is applied"
-  if (final_t < real_t(0)) {
-    edep += final_t;
-    final_t = real_t(0);
-  }
-  r.trec = trec;
-  r.edep = fmax(edep, real_t(0));
-  r.final_t = final_t;
+  // rotateUz, so the ion's direction is in the caller's frame - which is the frame Geant4
+  // computes it in, after `newDirection.rotateUz(direction)`.
+  r.ion_dir = coulomb_recoil_direction(in_dir, rotate_uz(dir, in_dir), s.mom2, pd.mass,
+                                       r.final_t);
   return r;
 }
 
