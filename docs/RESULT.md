@@ -47,6 +47,13 @@ that precision nothing below a 3% systematic is resolvable, and hours were then 
 bisecting a multiple-scattering model that was correct. The reference is now 2,000,000 events
 from `ref/run/runb1.bat`, and both sides print their own uncertainty. See docs/RISK.md S1.
 
+**Update, 2026-09-11.** The same 2,000,000-event run on main gives 425.847 +/- 0.870 pGy against
+the same reference, 1.25 sigma, and has since before the hadronic port began - build_all.bat
+prints it as its gate on every run. The run quoted above is older than that shift; the README's
+"Where it stands" table carries the current figure and the spread over four more seeds (+1.44,
+-0.26, +0.37, +0.32 sigma), which is what a single-sample comparison between two Monte Carlos can
+mean.
+
 ## Geometry against Geant4's own G4VSolid
 
 All 18 primitives and the three boolean operations, over 120,000 pseudo-random
@@ -186,7 +193,7 @@ every other oracle file; the pipeline runs the port's half at 6,000 and compares
 | build | every driver, test, the viewer, the GUI and example B1 compile |
 | 32 tests | physics against `ref/oracle/*.csv`; geometry against `G4VSolid`; voxel and mesh traversal against their own invariants; CLHEP's constants against CLHEP; a user-built material's derived quantities against Geant4's |
 | 2M-event dose | the reference driver still reproduces 427.6 pGy |
-| example B1 | the Geant4-API path agrees with Geant4 to 0.09 sigma |
+| example B1 | the Geant4-API path agrees with Geant4 to 1.25 sigma (2026-09-11; 0.09 sigma when this table was written) |
 | B1's vis macros | `init_vis.mac` and `tsg_offscreen.mac` run clean and write seven pictures |
 | mesh transport | the same geometry as an analytic solid and as a triangle mesh, to 0.00 sigma |
 | every physics switch | turning any one of seven processes off changes the step count or the dose |
