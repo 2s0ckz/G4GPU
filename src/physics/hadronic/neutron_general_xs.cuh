@@ -29,6 +29,12 @@
 // zero, and a neutron streams to the world boundary or dies on the time cut - which is exactly
 // what a Geant4 neutron does with `NeutronGeneralProc` inactivated.
 //
+// *(P8d: FILLED. `host/neutron_upload.cuh` builds the five tables per material with
+// `xs::ngp_build_table` and uploads them - 7.43 MB with the two per-process data sets for a
+// five-material scene - and `physics/hadronic/neutron_wiring.cuh` has the sub-process branch
+// `step_neutral` calls. A null pointer is still a legal state and still means what the paragraph
+// above says: it is what a run whose `G4PARTICLEXSDATA` could not be resolved is in.)*
+//
 // WHOSE FILE THIS IS. `src/physics/hadronic/` belongs to packages P2 (`xs/`) and P5
 // (`process.cuh`, `elastic/`); this one file is P1's, and it is here rather than under
 // `src/core/` because what it describes is a hadronic process's table and not a property of a
@@ -170,7 +176,9 @@ enum class NeutronSubProcess : int { kElastic = 0, kInelastic = 1, kCapture = 2 
 /// energies the ones the table was BUILT on rather than a formula that agrees with them to a few
 /// ulps. See the P8 note at the top of this file for what that formula cost.
 ///
-/// A null view is the state the engine is in today, and `total()` then returns zero.
+/// A null view means no table, and `total()` then returns zero. It was the state every run was
+/// in until P8d; it is now the state a run whose `G4PARTICLEXSDATA` could not be resolved is in,
+/// and `host/upload_neutron_tables` says so when it happens.
 ///
 /// THE CONTRACT, which is what this file is for:
 ///
@@ -187,9 +195,13 @@ enum class NeutronSubProcess : int { kElastic = 0, kInelastic = 1, kCapture = 2 
 ///   * `n_materials` must match the scene's material count. A lookup with `material` outside
 ///     it is a caller error, not a clamped answer.
 ///
-/// What is NOT here, and must arrive with it: the final states. A table with no sampler is a
-/// neutron that decides to interact and then cannot, so `TransportEngine::Upload` refuses that
-/// combination rather than letting the device discover it - see the note in step_neutral.
+/// What is NOT here, and must arrive with it: the final states, and the two per-process cross
+/// sections they draw a TARGET from. A table with no sampler is a neutron that decides to
+/// interact and then cannot, so `TransportEngine::Upload` refuses that combination rather than
+/// letting the device discover it. Since P8d the combination it refuses is a non-null table
+/// arriving without `had::NeutronSubTables`' two data sets or without P3's level scheme - the
+/// second because a capture with no levels is not a missing gamma but three times as many
+/// (docs/RISK.md V60).
 template <typename real_t>
 struct NeutronGeneralXs {
   const xs::PhysVec<real_t>* t0 = nullptr;  ///< low grid, elastic + inelastic + capture

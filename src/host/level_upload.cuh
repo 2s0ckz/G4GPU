@@ -5,23 +5,26 @@
 // a data structure but a `cudaMalloc`. This file is that, plus the memory report the other
 // tables print at upload.
 //
-// WHO READS IT, AND THAT IS WHY IT IS OFF BY DEFAULT TODAY
+// WHO READS IT, AND WHY IT IS ON BY DEFAULT SINCE P8d
 //
 // The one consumer in this port's transport is the capture cascade:
 // `G4NeutronRadCapture::ApplyYourself` hands its compound nucleus to
 // `G4PhotonEvaporation::BreakUpChain`, which walks a nuclide's level scheme
 // (`deexcitation/photon_evaporation.cuh`). That is a sub-process of
-// `G4NeutronGeneralProcess`, which is NOT wired - see `physics/hadronic/neutron_general_xs.cuh`
-// and `TransportEngine::Upload`'s refusal - so uploading the table in every run would cost
-// every run something nothing reads.
-//
-// And the cost is not negligible: `read_all_level_data` opens **3110 files** over the AMIN/AMAX
-// window, one per nuclide, and a B1 run's whole transport is 750 ms. So
-// `TransportEngine::SetNuclearLevelData(true)` turns it on and the default is off, with the
-// measured numbers printed when it does. When the neutron general process lands this becomes
-// unconditional, which is what Geant4 does: `G4ExcitationHandler::SetParameters` calls
+// `G4NeutronGeneralProcess`, and this paragraph used to end "which is NOT wired, so uploading
+// the table in every run would cost every run something nothing reads". It is wired
+// (`physics/hadronic/neutron_wiring.cuh`), so the default flipped - which is what the paragraph
+// promised for the day it happened and is also what Geant4 does:
+// `G4ExcitationHandler::SetParameters` calls
 // `G4NuclearLevelData::UploadNuclearLevelData(Zmax+1)` at initialisation whether a neutron ever
 // arrives or not.
+//
+// The cost is real and is why the setter survives: `read_all_level_data` opens **3110 files**
+// over the AMIN/AMAX window, one per nuclide, and a B1 run's whole transport is 750 ms. So
+// `TransportEngine::SetNuclearLevelData(false)` is the right thing for a gamma- or
+// electron-only run that cannot make a neutron - and `Upload` refuses the other combination,
+// a neutron cross section with no level scheme, because that is not a missing gamma but three
+// times as many (docs/RISK.md V60).
 //
 // `tests/test_capture_device.cu` uses this uploader directly, so the path is exercised
 // regardless of what the engine's default is.

@@ -69,17 +69,19 @@
 //   both sub-processes, capacity 32               13120 B
 //   both sub-processes, capacity 16                7472 B       296/516, 255 registers
 //
-// The capacity is `kNeutronCaptureSecondaryCap` below and the whole of the difference between
-// the second and third rows; the ELASTIC branch costs the frame almost nothing, because
-// `HadFinalState<real_t, 1>` is 56 bytes. So the `__noinline__` on the elastic side is not what
+// The 5,648 bytes between the last two rows are `kNeutronCaptureSecondaryCap` and nothing else;
+// the ELASTIC branch costs the frame almost nothing, because its `HadFinalState<real_t, 1>` is
+// 56 bytes (see `neutron_elastic_apply`). So the `__noinline__` on the elastic side is not what
 // saves the frame - it is what stops G4ChipsElasticModel's tables being a second copy of what
 // `step_hadron` already inlines - and the one on the capture side is both.
 //
 // And it is the right answer for the hot path for the same reason it was there: the capture
 // cascade walks a nuclide's level scheme and the elastic branch carries G4ChipsElasticModel's
-// 52-parameter tables, and neither runs on a step that does not interact. A 100 MeV neutron's
-// total mean free path in water is about 44 mm against steps of tens of mm, so the branch runs on
-// a minority of steps and the cascade on a small minority of those.
+// 52-parameter tables, and neither runs on a step that does not interact. The mean free paths
+// make that a quantity rather than a hope - measured in `tests/test_neutron_general.cu`, a
+// 10 MeV neutron's total mean free path in AIR is about 62 m (at a half-width of 1 km, 3,249 of
+// 200,000 tracks left the box), and the capture sub-process is 6e-5 of the interactions there.
+// So the cascade runs on about one step in sixteen thousand that interact at all.
 #pragma once
 
 #include <cmath>
