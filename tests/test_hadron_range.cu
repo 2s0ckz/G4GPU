@@ -121,6 +121,16 @@ struct Species {
   /// undiagnosed charge-odd air anomaly the note above describes, showing up in a second
   /// quantity. Raising the shared limit to 5e-3 would have hidden the proton's 0.066% behind
   /// the antiproton's 0.39%; a measured column per species keeps both visible.
+  ///
+  /// **For the four negative hadrons this stopped being a tolerance.** docs/RISK.md V46: the
+  /// range table of the negative of every charge pair is interpolated LINEARLY in Geant4 and
+  /// its inverse is splined, so Geant4's own R and R^-1 do not round-trip either - and that
+  /// non-round-trip is the whole of the 4-9% charge-odd dose split V44 recorded. Reproducing
+  /// it took mu- from 0.106% to 1.141%, pi- 0.107% to 1.146%, kaon- 0.226% to 1.535% and
+  /// pbar 0.391% to 1.408%; the four positives did not move by one bit. So those four rows now
+  /// bound a quantity the reference agrees with rather than a residual, and the check that the
+  /// composition is right - `E - R^-1(R(E) - L)` against Geant4's own two lookups - is
+  /// tests/test_chargeodd.cu, where the same four species agree to 0.16-0.36%.
   double inv;
 };
 
@@ -214,13 +224,13 @@ const Species kSpecies[] = {
     // anomaly above; the low bands are it too, diluted.
     {"anti_proton", ParticleType::kAntiProton,
      {0.080, 0.030, 0.020, 0.250, 0.030},
-     {0.030, 0.020, 0.020, 0.150, 0.030}, 0.005},
+     {0.030, 0.020, 0.020, 0.150, 0.030}, 0.016},
     {"pi-", ParticleType::kPionMinus,
      {0.030, 0.020, 0.030, 0.030, 0.020},
-     {0.020, 0.020, 0.020, 0.020, 0.020}, 0.001},
+     {0.020, 0.020, 0.020, 0.020, 0.020}, 0.013},
     {"kaon-", ParticleType::kKaonMinus,
      {0.080, 0.020, 0.200, 0.100, 0.030},
-     {0.030, 0.010, 0.100, 0.090, 0.030}, 0.003},
+     {0.030, 0.010, 0.100, 0.090, 0.030}, 0.017},
     // Muons: a flat 200 keV boundary rather than the mass-scaled 225 keV, and
     // G4MuBetheBlochModel above it. mu+ agrees exactly below 100 keV; the 0.1-2 MeV band
     // straddles the boundary and mu- carries the charge-odd air anomaly on top.
@@ -240,7 +250,7 @@ const Species kSpecies[] = {
      {0.002, 0.002, 0.005, 0.002, 0.002}, 0.001},
     {"mu-", ParticleType::kMuonMinus,
      {0.025, 0.025, 0.025, 0.025, 0.010},
-     {0.010, 0.010, 0.016, 0.015, 0.010}, 0.001},
+     {0.010, 0.010, 0.016, 0.015, 0.010}, 0.013},
     // The base particle every non-alpha ion scales from. Charge 1, mass 938.2723 - and not
     // units::proton_mass_c2, which is 938.272013. Exact below 100 keV.
     {"GenericIon", ParticleType::kGenericIon,

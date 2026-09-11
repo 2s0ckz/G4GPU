@@ -14,6 +14,7 @@
 // ref/oracle/hadron_tables.csv are G4EmCalculator::GetDEDX and ::GetRange for the same
 // particle, material and energy. See tests/test_hadron_range.cu.
 #pragma once
+#include <algorithm>
 #include <cmath>
 
 #include "core/particle.cuh"
@@ -269,6 +270,61 @@ __host__ __device__ inline ParticleType hadron_species_particle(HadronSpecies s)
   }
 }
 
+/// Does this species' dE/dx table - and therefore its range table - carry a spline?
+///
+/// It is not a physics question and it is not about charge. It is which member of its charge
+/// pair `G4EmBuilder` registers second, and it costs the negative hadrons 4-9% of their
+/// transported dose. docs/RISK.md V44 and V46; the chain, all Geant4 11.1.1:
+///
+///  1. `G4EmBuilder::ConstructLightHadrons` (G4EmBuilder.cc:175-204) creates ONE
+///     `G4hBremsstrahlung` and ONE `G4hPairProduction` and registers each to BOTH members of
+///     the pair - constructed after part1's `G4hIonisation` and before part2's.
+///     G4EmBuilder.cc:248-269 does the same for mu+- with `G4MuBremsstrahlung` /
+///     `G4MuPairProduction`. So part1 is p, pi+, K+, mu+ and part2 is pbar, pi-, K-, mu-.
+///  2. `G4MuBremsstrahlung.cc:82` and `G4MuPairProduction.cc:88` call `SetSpline(false)` in
+///     their constructors, and rightly: a radiative restricted dE/dx is identically zero below
+///     threshold, and a cubic spline through that rings. `G4hBremsstrahlung` and
+///     `G4hPairProduction` derive from them (G4hBremsstrahlung.cc:51, G4hPairProduction.cc:51)
+///     and inherit it.
+///  3. `G4LossTableManager::BuildTables` (G4LossTableManager.cc:800-838) walks `loss_vector` in
+///     CONSTRUCTION order and picks the shared radiative processes up through its "possible
+///     case of process sharing between particle/anti-particle" pointer scan. part1 gets
+///     `t_list = [hIoni, hBrems, hPairProd]`; part2 gets `[hBrems, hPairProd, hIoni]`.
+///  4. `G4LossTableBuilder::BuildDEDXTable` (G4LossTableBuilder.cc:161-166) builds the summed
+///     dE/dx vector as `new G4PhysicsLogVector(*pv0)` with `pv0 = (*(list[0]))[i]` - a COPY of
+///     `t_list[0]`'s vector, carrying its `useSpline`. part2's sum inherits hBrems's false.
+///  5. `BuildRangeTable` (:224-226) copies that vector again for the range table, so the range
+///     loses the spline too, and its `if(splineFlag) v->FillSecondDerivatives()` is a no-op
+///     because `G4PhysicsVector::FillSecondDerivatives` opens with `if(!useSpline) return;`.
+///     `BuildInverseRangeTable` (:275) builds a *fresh* `G4PhysicsFreeVector(npoints,
+///     splineFlag)` instead, so the INVERSE range table stays splined for both charges.
+///
+/// Measured off the vectors themselves in `ref/oracle/chargeodd_vectors.csv`, every material,
+/// 85 nodes and a 100 eV lower edge on all of them: dedx_spline and range_spline are 1 for
+/// mu+, pi+, K+, p and 0 for mu-, pi-, K-, pbar; invrange_spline is 1 for all eight.
+///
+/// alpha, He3, deuteron, triton and GenericIon are splined because they get no radiative
+/// process at all - `G4EmBuilder::ConstructIonEmPhysics` (G4EmBuilder.cc:119-145) registers
+/// only msc and an ionisation process - so `n_dedx` is 1, `BuildTables`' `if (1 < n_dedx)`
+/// is false, and no summed vector is ever made.
+///
+/// This port has no radiative dE/dx in `hadron_total_dedx` (docs/PORTED.md 1.3, worth 5e-5 of
+/// the restricted total for a 1.6 GeV muon in water and less below), so it never had the term
+/// that switches the interpolation. It has to reproduce the interpolation anyway: the
+/// interpolation rule is what the transport reads, and it is worth 4-9% where the value it
+/// omits is worth 5e-5.
+__host__ __device__ inline bool hadron_table_uses_spline(HadronSpecies s) {
+  switch (s) {
+    // part2 of a G4EmBuilder charge pair, sharing a radiative process constructed before its
+    // own ionisation process.
+    case HadronSpecies::kAntiProton:
+    case HadronSpecies::kPionMinus:
+    case HadronSpecies::kKaonMinus:
+    case HadronSpecies::kMuonMinus: return false;
+    default: return true;
+  }
+}
+
 /// The table a species reads: its own where it has one, its base particle's otherwise.
 template <typename real_t>
 __host__ __device__ inline HadronSpecies hadron_species_of(ParticleType t) {
@@ -514,13 +570,29 @@ __host__ inline void build_hadron_range_table(const data::Material<real_t>* mats
                     kHadronRangeEMin, s, m);
         std::exit(2);
       }
-      data::fill_second_derivatives(x.data(), y.data(), kHadronRangeBins, d2.data());
+      // Splined for part1 of each charge pair and NOT for part2, which is Geant4's behaviour
+      // and not a choice - see hadron_table_uses_spline above. Zeroing the second derivatives
+      // is exact rather than approximate: spline_value's correction term is
+      // `b*(b-1)*((2-b)*d2[i] + (1+b)*d2[i+1])*dl*dl/6`, so all-zero d2 leaves `y1 + b*dy`,
+      // which is character for character what G4PhysicsVector::LinearInterpolation returns
+      // when useSpline is false.
+      const bool use_spline = hadron_table_uses_spline(static_cast<HadronSpecies>(s));
+      if (use_spline) {
+        data::fill_second_derivatives(x.data(), y.data(), kHadronRangeBins, d2.data());
+      } else {
+        std::fill(d2.begin(), d2.end(), 0.0);
+      }
       for (int b = 0; b < kHadronRangeBins; ++b) {
         t.dedx[s][m][b] = static_cast<real_t>(y[b]);
         t.dedx_d2[s][m][b] = static_cast<real_t>(d2[b]);
       }
 
-      // ---- range, by integrating that spline.
+      // ---- range, by integrating that table as it will be read.
+      //
+      // `d2` is zero for an unsplined species, so this one call is Geant4's integral of the
+      // spline for part1 and of the chord for part2. G4LossTableBuilder::BuildRangeTable
+      // integrates `pv->Value(energy, idx)`, which is whichever interpolation the vector
+      // carries, so the values differ between the two charges as well as the interpolation.
       constexpr int kSub = 100;  // G4LossTableBuilder's n
       const double del = 1.0 / kSub;
       std::vector<double> r(kHadronRangeBins);
@@ -543,9 +615,16 @@ __host__ inline void build_hadron_range_table(const data::Material<real_t>* mats
         e1 = e2;
       }
 
-      std::vector<double> rd2(kHadronRangeBins);
-      data::fill_second_derivatives(x.data(), r.data(), kHadronRangeBins, rd2.data());
-      // The inverse table: the same points, range as abscissa, energy as ordinate.
+      std::vector<double> rd2(kHadronRangeBins, 0.0);
+      if (use_spline) {
+        data::fill_second_derivatives(x.data(), r.data(), kHadronRangeBins, rd2.data());
+      }
+      // The inverse table: the same points, range as abscissa, energy as ordinate, and ALWAYS
+      // splined. G4LossTableBuilder::BuildInverseRangeTable makes a fresh
+      // G4PhysicsFreeVector(npoints, splineFlag) rather than copying the range vector, so the
+      // one asymmetry the negatives have is a linearly interpolated R against a splined R^-1.
+      // That is the pair AlongStepDoIt's long branch composes, and it is why the two are built
+      // with different rules here.
       std::vector<double> id2(kHadronRangeBins);
       data::fill_second_derivatives(r.data(), x.data(), kHadronRangeBins, id2.data());
 
