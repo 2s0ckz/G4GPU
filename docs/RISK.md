@@ -5251,10 +5251,6 @@ diagnostic that found it evaluates the derivative instead, and it is two columns
 
 ### V47: a comment asserting a term is zero, above the code that drops it
 
-**CLOSED.** The factor is in, and the check that had nothing to fail against now exists. The
-closing section at the end of this entry has the numbers, including what it moved in a B1 run;
-the record below is left as it was written.
-
 `em/wentzel_msc.cuh`'s `wv_sample_single` is `G4WentzelOKandVIxSection::SampleSingleScattering`
 without one factor. Geant4's analytic rejection function is
 
@@ -5304,112 +5300,6 @@ it checks is not sensitive to this.
 weaker claim than the code makes is protecting a gap, and a comment that explains why a term
 can be discarded is the one to re-read when the term turns out to matter. This one names the
 right variable, gives the right formula for it, and then asserts the wrong value.
-
-#### The fix
-
-One line of `wv_sample_single`, and it is G4WentzelOKandVIxSection.cc:372-373's own:
-
-```
-  grej = (1. - z1*factB + factB1*targetZ*sqrt(z1*factB)*(2. - z1))*fm*fm/(1.0 + z1*factD);
-```
-
-with `factD = sqrt(mom2)/wv_target_mass(Z)`, and the new `em::wv_target_mass` transcribing
-SetupTarget's `massT = (1 == Z) ? proton_mass_c2 : GetAtomicMassAmu(Z)*amu_c2` (:206-208). It is
-a function of Z rather than a field of `WentzelState`, because `em/coulomb_scattering.cuh`'s copy
-of this sampler takes the mass as an ARGUMENT for the reason two paragraphs up, and a struct
-field would be one place for the two callers' different targets to be confused. Two callers, two
-masses, each chosen where it is used. The comment is replaced by what the code does.
-
-#### The check that did not exist
-
-`tests/test_wentzel_msc.cu` block 4 against `ref/oracle/wentzel_msc_sample.csv`
-(`ref/dump/dump_wentzel_msc.cc`): 400,000 `SampleSingleScattering` draws a side, per cell, under
-a per-cell seed, over 240 cells - five species (e-, mu-, pi+, proton, alpha) x four Z (1, 8, 26,
-82) x up to seven energies including B1's 210 MeV x two step fractions. It is NOT
-`coulomb_sample.csv` at another seed: the two processes split the angular range, so the same
-Geant4 function gets DISJOINT intervals - `[cosTetMaxNuc, -1]` there, `[cosThetaMin,
-cosTetMaxNuc]` here - and here it also gets the ELECTRON production cut (`G4EmTableUtil::
-BuildMscProcess` passes a null secondary particle at :552, so `G4EmModelManager::Initialise`
-keeps its default cuts index of 1 at :463) and SetupTarget's own target mass rather than an
-isotope's. `cosThetaMin` is a property of the STEP, not of the material, so the grid takes it as
-`1 - f*(1 - cosTetMaxNuc)` with f in {0.05, 0.5} and dumps the value for the port to be handed.
-
-Everything the sampler is set up with that Geant4 will report is compared exactly and is
-bit-identical - the interval, `cosTetMaxElec`, the electron/nucleus split, the target mass - so
-the statistics are the angle and nothing else. `fMottFactor` has no accessor and therefore no
-column: a column would be the dumper and the port each writing `1 + 2e-4*Z*Z` and comparing the
-two, which is not an oracle (V37). It is exercised instead by the accepted fraction of the
-e-/Z=82 cells, where it is 2.345 and holds acceptance down to 3.1%.
-
-With the factor: worst **3.28 sigma** on the accepted fraction, **3.21** on `<1-cos>`, **2.01
-chi2/bin**, over 240 cells and three statistics each. Removing it again fails **52 of the 240**:
-
-| species | Z | E | f | P(accept) G4 / ours | sigma | sigma on `<1-cos>` | chi2/bin |
-|---|---|---|---|---|---|---|---|
-| alpha | 1 | 1 MeV | 0.5 | 0.7945 / 0.8882 | 103.7 | **117.7** | 90.4 |
-| pi+ | 1 | 30 MeV | 0.5 | 0.8038 / 0.8900 | 97.0 | 109.5 | 77.4 |
-| pi+ | 1 | 10 MeV | 0.5 | 0.8818 / 0.9516 | 96.7 | 110.0 | 46.0 |
-| alpha | 1 | 0.3 MeV | 0.5 | 0.8993 / 0.9627 | 94.2 | 108.3 | 39.2 |
-| proton | 1 | 3 MeV | 0.5 | 0.9012 / 0.9517 | 75.7 | 80.1 | 24.5 |
-| proton | 1 | 10 MeV | 0.5 | 0.8247 / 0.8847 | 70.6 | 75.7 | 37.8 |
-| proton | 1 | 210 MeV | 0.05 | 0.9700 / 0.9729 | 7.6 | 2.0 | 0.97 |
-
-51 of the 52 are at Z = 1, where SetupTarget's target mass is the PROTON's and factD is
-therefore largest, and NONE is an e- cell, whose rejection function is the Mott/Rutherford ratio
-with no factD in it. The failure pattern is the evidence about which term is missing, exactly as
-the paragraph above predicted it would be.
-
-#### What it moved in a B1 run, which is almost nothing, and why that is not a surprise
-
-Example B1, 2,000,000 events, `/gun/particle proton` at 210 MeV and `alpha` at 840 MeV, the same
-binary rebuilt either side of the one line.
-
-| beam | dose BEFORE | dose AFTER | statistical uncertainty | total track-steps before / after |
-|---|---|---|---|---|
-| proton 210 MeV | 61601.8 pGy / 10k | 61601.8 pGy / 10k | +/- 32.25 (5.2e-4) | 72402152 / 72402153 |
-| alpha 840 MeV | 247294 pGy / 10k | 247294 pGy / 10k | +/- 130.2 (5.3e-4) | 132313468 / 132313459 |
-
-Equal in every digit B1 prints - six significant figures on the dose and on `edep` (133.156 TeV
-and 534.541 TeV) - so the movement is **below 1e-6 relative against a 5.2e-4 uncertainty**. It is
-not zero and the runs are not the same run: the track-step totals differ, and the proton's rms
-moves in its last digit (32.2476 -> 32.2477). **That difference is the evidence that the branch
-is reached**, which a dose comparison alone could not distinguish from dead code - so it was
-measured directly as well: replaying stepper.cuh's WentzelVI block on the host with the port's
-own range table gives `t_path*xtsec`, the expected number of single scatters per step, as
-0.042 to 0.055 for a proton and an alpha at every energy from 1 to 840 MeV in water, A-150 and
-bone. About one step in twenty takes a single scatter, so a 2M-event proton run takes some three
-million of them.
-
-Three million calls and no measurable dose shift, because of where in the interval those calls
-land. The factor is `1/(1 + z1*factD)`, and the msc model's interval is
-`z1 in [1.25*t/lambda_eff, 1 - cosTetMaxNuc]` - the SMALL angles, with the large ones left to
-G4CoulombScattering. For a 210 MeV proton in water the step limit gives t = 31.5 mm against
-lambda_eff = 2.66e5 mm, so that interval is [1.5e-4, 0.0318], and z1 is drawn from it weighted
-as 1/(z1 + screenZ)^2, which puts the mean at 8.0e-4. With factD = 0.706 on hydrogen the mean
-correction is 6e-4 and the worst, at the top of the interval, is 2.2%. The dose cannot see that;
-the 52 failing cells can, because 400,000 draws a cell can.
-
-Which is the useful way round. The oracle grid's smallest f is 0.05 and B1's own steps sit at
-f = 0.005, so the test is deliberately more sensitive than the transport it protects rather than
-a copy of it, and the entry above - "what the WentzelVI multiple-scattering angle distribution is
-worth today is not measured" - is now answered in both directions: the distribution is right to
-a few sigma, and the term that was missing from it was worth less than a microgray in B1 and up
-to 118 sigma in the sampler.
-
-#### And the register budget, because this is device code
-
-`nvcc -Xptxas -v -cubin` on a one-line translation unit instantiating
-`run_step_hadron<double, kProton, StepTap<double>>`, either side of the change (V22's cheap
-evidence):
-
-| | registers | stack frame | spill stores / loads | cmem[2] |
-|---|---|---|---|---|
-| before | 255 | 3280 bytes | 56 / 20 bytes | 2496 bytes |
-| after | **255** | **3280 bytes** | **56 / 20 bytes** | 2504 bytes |
-
-Identical but for 8 bytes more constant memory, which is the two mass constants. The whole
-engine object grew 14,144 bytes over sixteen kernels. `sqrt(s.mom2)` is computed inside the
-non-Mott branch rather than beside `fm`, so the electron path does not pay for it.
 
 
 ### V48: the cut G4CoulombScattering hands its model is the proton's, and it gates a closed door
@@ -5485,3 +5375,243 @@ time, if what it feeds is multiplied by zero. The test that would have caught th
 not a comparison of the cross section - that one passes either way - but a comparison of
 `cosTetMaxElec`, the intermediate. Compare the intermediate whose value the argument actually
 reaches, not only the answer the argument is supposed to change.
+
+### V49: a flag that switches off the stage it selects
+
+`G4DeexPrecoParameters::fUseGNASH` chooses `G4GNASHTransitions` over `G4PreCompoundTransitions`
+(`G4PreCompoundModel.cc:122`). Setting it does not change which transition rates
+pre-equilibrium uses. It stops pre-equilibrium happening at all.
+
+`G4GNASHTransitions::CalculateProbability` computes one number and returns it. It never assigns
+`TransitionProb1`, `TransitionProb2` or `TransitionProb3` - the three protected members
+`G4VPreCompoundTransitions`' constructor initialises to 0.0 - and no other code writes them.
+`G4PreCompoundModel::DeExcite` reads all three back on the next three lines
+(`G4PreCompoundModel.cc:263-265`) and its first equilibrium test is
+
+    if(!go_ahead || P1 <= P2+P3 || Z < minZ || A < minA || U <= fLowLimitExc*A || ...) {
+      PerformEquilibriumEmission(aFragment, Result);
+      return Result;
+    }
+
+which for (0, 0, 0) is `0 <= 0`, true. So every fragment leaves the loop on its first iteration,
+no ejectile is ever emitted pre-equilibrium, and every product comes from
+`G4ExcitationHandler`. The comment three lines above the read is Geant4's own warning about
+exactly this failure mode - "WARNING: CalculateProbability MUST be called prior to Get!! (0
+values would be returned otherwise)" - and `G4GNASHTransitions` satisfies the letter of it while
+returning zeros anyway.
+
+Measured, not argued. `ref/oracle/preco_transitions.csv` calls the three getters after a GNASH
+`CalculateProbability` on all 5,120 grid points and every one reads exactly 0, where
+`G4PreCompoundTransitions` on the same grid gives P1 > 0 on every row. `tests/test_precompound.cu`
+asserts the zeros on the ORACLE side, so a Geant4 release that fixes the class fails the test
+loudly instead of quietly bringing a dead branch to life.
+
+Reproduced rather than corrected, because it is what the installed Geant4 computes. The port
+sets `PrecoRefusal::gnash` so a caller that selects GNASH is told, rather than receiving pure
+equilibrium emission that looks like a working answer.
+
+#### The same shape twice more in the same package
+
+`useSICB` is `G4VPreCompoundFragment`'s own dead flag: initialised to `true`, plumbed down by
+`G4PreCompoundEmission::UseSICB` and `G4PreCompoundFragmentVector::UseSICB`, described as
+defaulting to false by five separate comments in the package - and read nowhere in 11.1.1. The
+superimposed Coulomb barrier it used to gate is now the unconditional
+`elim = theCoulombBarrier*0.5` line in `G4VPreCompoundFragment::Initialize`, so the lower limit
+of every charged channel's emission integral is HALF the barrier whichever value the flag holds.
+`DeltaR` in `G4GeneratorPrecompoundInterface` is the third: set to 0.0 in the constructor, with
+the space cut in `MakeCoalescence` that would read it commented out.
+
+None of the three is a port bug and none of them can be tested, because none of them changes an
+answer. What they cost is the reader's time. What makes them findable is asking who READS a
+member, not who writes it - the same question docs/RISK.md V42's initialisation-order defect
+needed.
+
+---
+
+### V50: the hand-over every cascade uses has an arm that cannot be called
+
+`G4GeneratorPrecompoundInterface::Propagate` is where every cascade and string model in QBBC
+turns its residual into the fragment `G4PreCompoundModel::DeExcite` receives. It has two arms,
+chosen by a loop the source labels "Check that we use QGS model"
+(`G4GeneratorPrecompoundInterface.cc:248-256`): `QGSM` is set if ANY hit nucleon satisfies
+`Get4Momentum().mag() < GetDefinition()->GetPDGMass()`. The QGS arm then builds the exciton
+four-momentum from
+
+    GetPrimaryProjectile()->Get4Momentum() + G4LorentzVector(0.,0.,0.,InitialTargetMass)
+
+at line 301. `GetPrimaryProjectile()` is `G4VIntraNuclearTransportModel`'s accessor for
+`thePrimaryProjectile`, which that class's constructor sets to `nullptr` and only
+`SetPrimaryProjectile` ever writes. There is no null check anywhere on the path.
+
+**The predicate is not a rare condition; it is the default.**
+`G4Fancy3DNucleus::ChooseFermiMomenta` gives every nucleon
+`energy = GetPDGMass() - BindingEnergy()/A` on top of a sampled Fermi three-momentum
+(`G4Fancy3DNucleus.cc:511-517`), so `mag() = sqrt(E^2 - p^2)` is below the PDG mass for ALL of
+them. Any nucleus straight out of `Init()` therefore selects the QGS arm on its first hit
+nucleon. `G4FTFModel` does not crash because it re-sets each hit nucleon to the on-shell
+`sqrt(mt^2 + pz^2)` form before handing over; a model that does not, and any oracle or test that
+wounds a nucleus by hand, does.
+
+Found by writing `ref/dump/dump_precompound.cc`: the first `Propagate` call killed `g4dump.exe`
+with no output at all. The dump now sets a primary projectile for every case, and three of its
+four cases put the hit nucleons back on shell so that the FTF arm is exercised as well.
+
+#### Why the branch verdict is a dumped column and not an inference
+
+Putting a nucleon back on shell through `e = sqrt(p^2 + m^2)` does not guarantee
+`Get4Momentum().mag() >= m` afterwards - the round trip through two square roots can land a
+half-ulp low, and one of the four dumped cases does exactly that. So the dump carries `on_shell`
+(what it intended) and `qgsm` (what Propagate's own loop concluded) as separate columns, and the
+port's predicate is compared against the second. An `on_shell`-implies-`!qgsm` test would have
+been wrong on a quarter of the grid.
+
+For P9, P10 and P11: `preco::propagate_residual` takes the primary's four-momentum as a
+parameter and sets `GeneratorRefusal::missing_primary` when the QGS arm is reached without one,
+so the port reports a refusal where Geant4 dereferences null.
+
+---
+
+### V51: a neutron projectile is given a charged particle exciton
+
+`G4PreCompoundModel::ApplyYourself` builds the initial state for a nucleon on a nucleus:
+
+    G4int Zp = 0;
+    G4int Ap = 1;
+    if(primary == proton) { Zp = 1; }
+    ...
+    G4Fragment anInitialState(A + Ap, Z + Zp, p);
+    anInitialState.SetNumberOfExcitedParticle(2, 1);
+    anInitialState.SetNumberOfHoles(1,0);
+
+`Zp` distinguishes the two projectiles, so the compound nucleus has the right charge. The
+SECOND argument of `SetNumberOfExcitedParticle` is the number of CHARGED particle excitons, and
+it is `1` for both of them.
+
+What reads that number is `GetRj(nParticles, nCharged)`, the combinatorial factor every
+channel's emission probability is multiplied by. At the initial `(P, Pc) = (2, 1)` the six come
+out as
+
+    neutron    (P-Pc)/P                                        = 1/2
+    proton     Pc/P                                            = 1/2
+    deuteron   2 Pc (P-Pc) / (P(P-1))                          = 1
+    triton     0, guarded by  (P - Pc) >= 2
+    He3        0, guarded by  Pc >= 2
+    alpha      0, guarded by  Pc >= 2 and (P - Pc) >= 2
+
+and **not one of the six depends on which nucleon came in**, because `Pc` does not. So the first
+emission of any nucleon-induced reaction can only be a neutron, a proton or a deuteron, at
+relative weights 1/2, 1/2 and 1, whether the projectile was a proton or a neutron. That is
+exact, not statistical: `Pc` is a constant in the expression.
+
+#### What it is worth, measured
+
+`ref/oracle/preco_apply.csv` runs `ApplyYourself` 20,000 times per case on four matched
+(neutron, proton) pairs. The pre-equilibrium ejectile counts, and the proton-to-neutron ratio
+of them:
+
+| target, 100 MeV | projectile | n | p | d | p/n |
+|---|---|---|---|---|---|
+| Al27 | p | 8,649 | 10,573 | 7,308 | 1.222 |
+| Al27 | n | 10,688 | 8,693 | 8,035 | 0.813 |
+| Fe56 | p | 12,761 | 13,727 | 5,231 | 1.076 |
+| Fe56 | n | 14,346 | 12,002 | 5,413 | 0.837 |
+| Au197 | p | 21,527 | 11,920 | 1,942 | 0.554 |
+| Au197 | n | 22,456 | 11,838 | 1,956 | 0.527 |
+
+The two projectiles do NOT give the same yields - the p/n ratio is 1.50x apart on Al27, 1.29x on
+Fe56 and 1.05x on Au197 - and that difference is *entirely* the compound nucleus's extra proton,
+because the exciton bookkeeping contributes none. Its shrinking with mass number is the
+signature: one unit of Z matters less to a heavier compound's binding energies and Coulomb
+barrier, whereas an exciton-charge effect would not care about A at all.
+
+So what the unconditional `1` costs is measured by removing it. With `SetNumberOfExcitedParticle(2, 0)`
+for a neutron projectile - the "physical" count if the projectile itself is the only exciton
+whose charge is known - `GetRj` for the proton channel becomes 0/2 and n + Fe56 emits 26,252
+pre-equilibrium neutrons instead of 14,346, an 83% increase, and no pre-equilibrium protons at
+all. `tests/test_precompound.cu` fails that at 87 sigma, so the number is not a formality.
+
+If the two particle excitons are instead taken to be the projectile and one struck nucleon drawn
+at random from the target, the expected number of charged ones is `Zp + Z/A`: 1.40 for a proton
+on Au197 and 0.40 for a neutron. Geant4's fixed 1 is therefore low for a proton and high for a
+neutron, and the port does not invent a better number - `apply_yourself_initial_fragment`
+reproduces the unconditional 1 and says in its header that it is unconditional, because
+"improve the physics" and "port Geant4" are different jobs and only one of them can be validated
+against this oracle.
+
+Why it matters here rather than in general: neutron-induced reactions are most of the secondary
+production in a shielding calculation, and the pre-equilibrium protons are the part of that
+spectrum with enough energy to leave the shield. The port reproduces Geant4, so a comparison
+against Geant4 will not show this; a comparison against data might.
+
+---
+
+### V52: an assertion that never reaches the code it is named after
+
+Three of the twenty perturbations in P6's first anti-vacuity campaign were not caught, and all
+three failed for the same reason: the test computed the expected value AND the actual value
+itself, and never called the function under test.
+
+    // tests/test_precompound.cu, as first written
+    const int neq = static_cast<int>(std::lrint(std::sqrt(ldfact * e * ld)));
+    cmp_int(b_neq, neq, iv(f, 7), w + " n_eq");
+
+`b_neq` is a bucket named `EquilibriumExcitonNumber` with 640 points and a worst relative error
+of exactly zero, and it stays at exactly zero when the equilibrium exciton number inside
+`precompound_model.cuh` is changed from `G4lrint` to truncation. So did the bucket named
+`EntryGate`, with the entry gate's `&&` changed to `||`, and again with the loop's `U <= low*A`
+changed to `U < low*A`. Three green buckets, 1,920 points, and no coverage of the three lines
+they are named after.
+
+The fix is structural and it is not "call the function from the test as well": it is that the
+port must have a function to call. The three decisions were expressions inline in
+`preco::deexcite`, so there was nothing a test could address. They are now
+`preco_equilibrium_exciton_number`, `preco_entry_gate` and `preco_loop_gate`, `deexcite` calls
+them, and the same three perturbations fail.
+
+#### What is general
+
+The shape to look for is a test line that mentions neither the module's namespace nor any of its
+functions. Every genuine comparison in this package reads
+`preco::something(...)` against a CSV column; these three read arithmetic against a CSV column,
+and the arithmetic was a copy of the source line the CSV was dumped from. A copy agrees with
+itself.
+
+It is worth saying why the statistical half did not catch them either, because the natural
+assumption is that a 300,000-event campaign covers what an exact grid misses. It cannot, here:
+
+  * the entry gate's `(Z < minZ && A < minA)` and the loop's `(Z < minZ || A < minA)` disagree
+    only about fragments with `Z < 3, A >= 5` or `Z >= 3, A < 5`. Such a fragment passes the
+    entry gate, fails the loop's OR on the same iteration, and reaches the same handler having
+    consumed exactly ONE extra uniform deviate. The product distribution is identical; only the
+    random stream moves. No campaign, at any statistics, can see it.
+  * `U <= fLowLimitExc*A` against `U < fLowLimitExc*A` differ on a set of measure zero, and the
+    excitation energy reaching that comparison has been through a `sqrt` round trip in
+    `G4Fragment`'s constructor, so no decimal input lands on it.
+
+Both are now pinned by construction rather than by sampling: `preco_equilibrium.csv` dumps both
+gates' verdicts for nuclides on each side of the (Z, A) disagreement (He6 and Li4 among them)
+and at U set to `fPrecoLowEnergy*A` and `fPrecoHighEnergy*A` exactly, plus the adjacent
+representable double either side. Both sides read the same 17-digit double out of the file, so
+`<` and `<=` return different verdicts and the comparison sees the difference.
+
+Four further perturbations across the two campaigns were not caught and are NOT holes, which is
+the distinction this entry exists to draw. An uncaught perturbation is a question, not a verdict;
+what settles it is whether the two forms can differ on any reachable input.
+
+  * `G4PreCompoundFragmentVector::ChooseFragment`'s `x <= probabilities[i]` against `x <` is
+    measure-zero on a continuous deviate. The port has Geant4's form and there is no input at
+    which the two differ.
+  * `G4PreCompoundTransitions::PerformTransition`'s final `if (Npart < Ncharged)` clamp reads the
+    PRE-transition locals. Round one changed it to read the post-transition counts and nothing
+    moved, which could have meant either "dead" or "untested". Round two made the branch write a
+    sentinel value, so that taking it at all would be visible, and nothing moved again. That
+    settles it: the branch is never taken. **The lesson is that "dead" needs its own
+    perturbation, one that fires if the line runs at all, and not merely a different value.**
+  * `deex::level_density`'s `has_levels` dispatch input inverted. `fLD` is 1 in the install, so
+    the function returns `A * fLevelDensity` and never reads the flag - the branch is
+    unreachable under 11.1.1's defaults, which is P3's finding, re-measured here. The sensitive
+    input perturbation for the same 640-point bucket is `A + 1` instead of `A`, and that one
+    fails.
+
+The third of those is the one to copy: when an input perturbation passes, the next question is
+whether the input is read at all, and the answer is usually two lines up in the function.

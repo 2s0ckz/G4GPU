@@ -42,7 +42,11 @@
 //   * `GetPrimaryProjectile()` in the QGS branch of Propagate needs the primary's four
 //     momentum, which the interface reads off G4HadronicInteraction. It is a PARAMETER here
 //     rather than a refusal, because a caller that has it can pass it; a caller that leaves
-//     it zero and hits the QGS branch is refused.
+//     it zero and hits the QGS branch is refused. In Geant4 that pointer is null until a
+//     cascade calls SetPrimaryProjectile and nothing checks it, so the arm crashes with no
+//     message - and a nucleus straight out of G4Fancy3DNucleus::Init always selects it.
+//     docs/RISK.md V50, which is why this is the one place the port reports rather than
+//     reproduces.
 #ifndef G4GPU_PRECO_GENERATOR_INTERFACE_CUH
 #define G4GPU_PRECO_GENERATOR_INTERFACE_CUH
 

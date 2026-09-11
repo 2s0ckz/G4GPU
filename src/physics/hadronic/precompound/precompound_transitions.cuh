@@ -34,7 +34,7 @@
 // `P1 <= P2+P3` - which is `0 <= 0`, true - so **fUseGNASH = true sends every fragment to
 // equilibrium emission on the first iteration and no pre-equilibrium emission ever happens.**
 // That is transcribed rather than corrected, and the oracle dumps the three getters after a
-// GNASH CalculateProbability call so the fact is measured and not argued. See docs/RISK.md.
+// GNASH CalculateProbability call so the fact is measured and not argued. See docs/RISK.md V49.
 #ifndef G4GPU_PRECO_TRANSITIONS_CUH
 #define G4GPU_PRECO_TRANSITIONS_CUH
 
@@ -345,11 +345,16 @@ __host__ __device__ inline TransitionResult perform_transition(const TransitionP
   } else if (delta_n > 0) {
     const int A = frag.a - npart;
     const int Z = frag.z - ncharged;
-    // G4lrint - round half to even, which is what std::lrint does under the default rounding
-    // mode. The exact half is measure-zero on a uniform deviate, so the choice of tie rule is
-    // not observable here; std::lrint is used because it is what G4lrint is.
-    const long rounded = std::lrint(A * rng.uniform());
-    if ((Z == A) || (Z > 0 && rounded <= static_cast<long>(Z))) {
+    // The `||` and the `&&` SHORT-CIRCUIT, and that is observable: when Z == A the deviate is
+    // never drawn, and nor is it when Z <= 0. Hoisting `lrint(A*rng.uniform())` out of the
+    // condition gives the same charge decision and consumes one extra random number, which
+    // desynchronises every draw after it - preco_transitions.csv's `draws_perform` column
+    // caught exactly that, at He4 with (P, Pc, H) = (3, 1, 2) where A = Z = 1.
+    //
+    // G4lrint is round half to even, which is what std::lrint does under the default rounding
+    // mode. The exact half is measure-zero on a uniform deviate, so the tie rule is not
+    // observable; std::lrint is used because it is what G4lrint is.
+    if ((Z == A) || (Z > 0 && std::lrint(A * rng.uniform()) <= static_cast<long>(Z))) {
       r.ex.charged = ncharged + delta_n;
     }
   }

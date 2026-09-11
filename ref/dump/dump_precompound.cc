@@ -1,7 +1,7 @@
 // The pre-equilibrium module's oracle: what Geant4 11.1.1 answers for every piece of
 // G4PreCompoundModel, so the port can be diffed against it rather than against a reading.
 //
-// Eight files:
+// Nine files:
 //
 //   preco_params.csv        the thirteen G4DeexPrecoParameters values this package is
 //                           dispatched by, read from the install. NOT the three
@@ -26,7 +26,10 @@
 //                           reachable. The GNASH rows are the point of the file: they show
 //                           P1 = P2 = P3 = 0.
 //   preco_equilibrium.csv   the equilibrium predicate's inputs on the same grid: the level
-//                           density, G4lrint(sqrt(12/pi^2 U g)) and the entry gate's verdict.
+//                           density, G4lrint(sqrt(12/pi^2 U g)) and both gates' verdicts;
+//                           preco_gates.csv adds the four nuclides and the four excitation
+//                           energies at which the two gates' four differing tokens are
+//                           decidable at all.
 //   preco_emission.csv      G4PreCompoundEmission::PerformEmission under the cycle: which
 //                           channel was chosen, the ejectile's four-momentum, and the
 //                           residual's (Z, A, E*, P, Pc, H). Exact, and it checks
@@ -35,6 +38,12 @@
 //   preco_deexcite.csv      G4PreCompoundModel::DeExcite, N = 20,000 under a fixed seed on
 //                           fifteen fragments, tagged pre-equilibrium against equilibrium by
 //                           G4ReactionProduct::GetCreatorModelID.
+//   preco_apply.csv         G4PreCompoundModel::ApplyYourself, N = 20,000 on nine
+//                           (projectile, target, energy) cases - four matched neutron/proton
+//                           pairs and one below the entry gate. The initial fragment
+//                           ApplyYourself builds is never handed back, so this is the only way
+//                           to check it: through its consequences, with Geant4 supplying the
+//                           target mass and the projectile four-momentum.
 //   preco_propagate.csv     G4GeneratorPrecompoundInterface::Propagate on a real
 //                           G4Fancy3DNucleus with a hand-built track list, under the cycle -
 //                           plus the nucleon list itself, so the port replays the same
@@ -75,12 +84,15 @@
 #include "G4Fragment.hh"
 #include "G4GNASHTransitions.hh"
 #include "G4GeneratorPrecompoundInterface.hh"
+#include "G4HadFinalState.hh"
 #include "G4HadProjectile.hh"
+#include "G4HadSecondary.hh"
 #include "G4He3.hh"
 #include "G4KineticTrack.hh"
 #include "G4KineticTrackVector.hh"
 #include "G4Neutron.hh"
 #include "G4Nucleon.hh"
+#include "G4Nucleus.hh"
 #include "G4NuclearLevelData.hh"
 #include "G4NucleiProperties.hh"
 #include "G4ParticleTable.hh"
@@ -408,7 +420,7 @@ void dump_equilibrium() {
   const double ldfact = 12.0 / CLHEP::pi2;
 
   FILE* f = std::fopen("preco_equilibrium.csv", "w");
-  std::fprintf(f, "Z,A,Eexc_MeV,P,Pc,H,level_density,eq_exciton_number,entry_gate,loop_za_gate\n");
+  std::fprintf(f, "Z,A,Eexc_MeV,P,Pc,H,level_density,eq_exciton_number,entry_gate,loop_gate\n");
   for (const Nuclide& nu : kNuclides) {
     for (const double e : kExc) {
       for (const ExcitonConfig& ex : kExcitons) {
@@ -418,11 +430,74 @@ void dump_equilibrium() {
         // The entry gate, as G4PreCompoundModel::DeExcite writes it: note the AND.
         const int entry = ((nu.z < minz && nu.a < mina) || U < low * nu.a ||
                            U > nu.a * high) ? 1 : 0;
-        // The loop's (Z, A) clause alone, which is an OR.
-        const int loopza = (nu.z < minz || nu.a < mina) ? 1 : 0;
+        // The (Z, A) and excitation clauses of the loop's test, which are an OR and an
+        // inclusive `<=`. preco_gates.csv is where the two forms are separated at the boundary.
+        const int loop = (nu.z < minz || nu.a < mina || U <= low * nu.a ||
+                          U > nu.a * high) ? 1 : 0;
         std::fprintf(f, "%d,%d,%.17g,%d,%d,%d,%.17g,%d,%d,%d\n", nu.z, nu.a, e, ex.p, ex.pc,
-                     ex.h, ld * MeV, neq, entry, loopza);
+                     ex.h, ld * MeV, neq, entry, loop);
       }
+    }
+  }
+  std::fclose(f);
+}
+
+/// preco_gates.csv - both gates as predicates, at the excitation energies where the four tokens
+/// that differ between them are decidable.
+///
+/// The entry gate and the loop gate are not the same test: AND against OR in the (Z, A) clause,
+/// and `<` against `<=` on the low limit. **Neither difference is observable in a product
+/// distribution**, which is why this file exists rather than another campaign:
+///
+///   * a fragment the (Z, A) clause disagrees about - `Z < minZ, A >= minA` or the reverse -
+///     passes the entry gate, fails the loop's OR on the very same iteration, and reaches the
+///     same G4ExcitationHandler having consumed exactly ONE extra uniform. Same products, same
+///     distribution; only the random stream moves.
+///   * `U <= fLowLimitExc*A` against `U <` differ on a set of measure zero, and U has been
+///     through a sqrt round trip in G4Fragment's constructor, so no decimal excitation energy
+///     lands on it.
+///
+/// So the tokens are pinned by construction instead. `U` is written here at exactly
+/// `fPrecoLowEnergy*A` and `fPrecoHighEnergy*A` and at the adjacent representable doubles either
+/// side, and `%.17g` round-trips a double, so the port evaluates its comparison on the same bits
+/// this file evaluated its own on and `<` and `<=` give different answers. The nuclide list adds
+/// H3, He6, Li4 and Be7 to the main grid's - the four that sit on the two sides of the (Z, A)
+/// disagreement, which the main grid has none of, every one of its entries having either both
+/// of Z and A small (He4) or neither.
+///
+/// The gates are pure arithmetic on (Z, A, U) and touch no mass table, so an unbound nuclide
+/// like Li4 is a legitimate row here.
+void dump_gates() {
+  G4NuclearLevelData* nd = G4NuclearLevelData::GetInstance();
+  const G4DeexPrecoParameters* p = nd->GetParameters();
+  const double low = p->GetPrecoLowEnergy();
+  const double high = p->GetPrecoHighEnergy();
+  const int minz = p->GetMinZForPreco();
+  const int mina = p->GetMinAForPreco();
+
+  const Nuclide gate_nuc[] = {
+    {1, 3, "H3"},   {2, 4, "He4"},  {2, 6, "He6"},   {3, 4, "Li4"},    {3, 6, "Li6"},
+    {4, 7, "Be7"},  {6, 12, "C12"}, {26, 56, "Fe56"}, {82, 208, "Pb208"},
+  };
+
+  FILE* f = std::fopen("preco_gates.csv", "w");
+  std::fprintf(f, "Z,A,U_MeV,entry_gate,loop_gate\n");
+  for (const Nuclide& nu : gate_nuc) {
+    const double lo = low * nu.a;
+    const double hi = nu.a * high;
+    const double us[] = {
+      0.0, std::nextafter(lo, 0.0), lo, std::nextafter(lo, 1.0e300),
+      0.5 * (lo + hi), std::nextafter(hi, 0.0), hi, std::nextafter(hi, 1.0e300),
+    };
+    for (const double U : us) {
+      // Both written exactly as their sources write them: G4PreCompoundModel.cc's entry test
+      // (the AND, the strict `<`) and the (Z, A)/excitation clauses of its loop test (the OR,
+      // the inclusive `<=`).
+      const int entry = ((nu.z < minz && nu.a < mina) || U < low * nu.a ||
+                         U > nu.a * high) ? 1 : 0;
+      const int loop = (nu.z < minz || nu.a < mina || U <= low * nu.a ||
+                        U > nu.a * high) ? 1 : 0;
+      std::fprintf(f, "%d,%d,%.17g,%d,%d\n", nu.z, nu.a, U / MeV, entry, loop);
     }
   }
   std::fclose(f);
@@ -495,9 +570,22 @@ struct Campaign {
 /// preco_deexcite.csv - the whole model, statistically.
 ///
 /// Fifteen fragments with chosen exciton configurations, 20,000 calls each under one seed.
-/// Products are keyed by (PDG, is_preco) where is_preco is `creatorModelID == PRECO`, so the
-/// pre-equilibrium stage and P3's cascade are separated in the file - see the header note on
-/// the one case where that tag over-counts by one.
+///
+/// Products are keyed by (PDG, is_preco), and `is_preco` is the LEADING RUN of products whose
+/// creator model id is PRECO **and** whose PDG is one of the six pre-equilibrium ejectiles.
+/// The raw creator id alone is not enough, and the failure is not hypothetical: Al27 at
+/// E* = 30 MeV produced 2,347 Mg25 residuals carrying the PRECO id, because
+/// G4PreCompoundEmission::PerformEmission stamps PRECO on the RESIDUAL fragment as well as on
+/// the ejectile, and G4ExcitationHandler then released that residual untouched (Mg25 is a
+/// natural isotope at zero excitation) and copied the fragment's id onto the product. So the
+/// id says "this product's fragment was last touched by PRECO", not "this product was emitted
+/// pre-equilibrium".
+///
+/// The leading-run rule is exact, because G4PreCompoundModel::DeExcite pushes each ejectile as
+/// it is emitted and PerformEquilibriumEmission then INSERTS the handler's whole output at the
+/// end - so the pre-equilibrium products are precisely the first `n` entries. It is also the
+/// rule the port applies to its own list, and the boundary itself is checked independently by
+/// preco_deexcite_mult.csv, which histograms `n` per event.
 void dump_deexcite() {
   G4PreCompoundModel model;
   model.InitialiseModel();
@@ -521,6 +609,22 @@ void dump_deexcite() {
   FILE* f = std::fopen("preco_deexcite.csv", "w");
   std::fprintf(f, "Z,A,Eexc_MeV,pz_MeV,P,Pc,H,N,pdg,is_preco,count,mean_ekin_MeV,"
                   "mean_ekin2_MeV2\n");
+  // preco_deexcite_species.csv carries the SAME tally folded onto (Z, A, is_preco), which is
+  // the key the port can be compared on at all - the last digit of an ion's PDG code is an
+  // isomer index G4IonTable assigns per run, so the port emits pdg = 0 for a heavy product.
+  //
+  // It exists for one column. `count`, `sum_ekin` and `sum_ekin2` are additive, so a test can
+  // fold the file above itself and 877 of the rows in this campaign do merge that way. The
+  // second moment of the per-event MULTIPLICITY is not additive: E[(k_a+k_b)^2] carries a cross
+  // term, so folding E[k^2] over isomers understates the variance of the sum and makes the
+  // comparison stricter than the data supports. It is therefore accumulated here on the folded
+  // key. `count` is repeated so the test can assert its own folding against this one.
+  //
+  // The variance matters because the port's alone will not do: the port emits exactly one proton
+  // in every 20 MeV p + C12 event, so its measured variance is zero, and Geant4 emits one in
+  // 19,996 of 20,000 - a 2.0 sigma difference that a port-side-only variance reports as 1e9.
+  FILE* s = std::fopen("preco_deexcite_species.csv", "w");
+  std::fprintf(s, "Z,A,Eexc_MeV,pz_MeV,P,Pc,H,N,spZ,spA,is_preco,count,mean_mult2\n");
   FILE* g = std::fopen("preco_deexcite_residual.csv", "w");
   std::fprintf(g, "Z,A,Eexc_MeV,pz_MeV,P,Pc,H,N,resZ,resA,count\n");
   FILE* h = std::fopen("preco_deexcite_mult.csv", "w");
@@ -530,6 +634,9 @@ void dump_deexcite() {
     CLHEP::HepRandom::setTheSeed(20260913 + c.Z * 1000 + c.A * 7 + int(c.eexc));
     std::map<int, long long> count;              // key = pdg*2 + is_preco
     std::map<int, double> sum_e, sum_e2;
+    std::map<int, long long> sp_count;            // key = ((Z+500)*1000 + A)*2 + is_preco
+    std::map<int, double> sp_sum_k2;
+    std::map<int, int> per_event;                 // the same key -> multiplicity this event
     std::map<int, long long> residual;           // key = 1000*Z + A of the heaviest product
     std::map<int, long long> mult;               // n_preco_ejectiles -> events
     for (int n = 0; n < kN; ++n) {
@@ -543,30 +650,46 @@ void dump_deexcite() {
       int heaviestA = -1, hz = 0, ha = 0;
       int n_preco_ej = 0;
       bool still_leading = true;
+      per_event.clear();
       for (G4ReactionProduct* rp : *out) {
         const int pdg = rp->GetDefinition()->GetPDGEncoding();
-        const int is_preco = (rp->GetCreatorModelID() == preco_id) ? 1 : 0;
         const double ekin = rp->GetKineticEnergy() / MeV;
+        // The leading run of PRECO-tagged products that are one of the six ejectiles - see
+        // this function's header for why the raw id is not the tag.
+        const bool is_ejectile = (pdg == 2112 || pdg == 2212 || pdg == 1000010020 ||
+                                  pdg == 1000010030 || pdg == 1000020030 ||
+                                  pdg == 1000020040);
+        int is_preco = 0;
+        if (still_leading && rp->GetCreatorModelID() == preco_id && is_ejectile) {
+          is_preco = 1;
+          ++n_preco_ej;
+        } else {
+          still_leading = false;
+        }
         const int key = pdg * 2 + is_preco;
         ++count[key];
         sum_e[key] += ekin;
         sum_e2[key] += ekin * ekin;
-        // The leading run of PRECO-tagged products that are one of the six ejectiles.
-        const bool is_ejectile = (pdg == 2112 || pdg == 2212 || pdg == 1000010020 ||
-                                  pdg == 1000010030 || pdg == 1000020030 ||
-                                  pdg == 1000020040);
-        if (still_leading && is_preco == 1 && is_ejectile) { ++n_preco_ej; }
-        else { still_leading = false; }
         int z = 0, a = 0;
         if (pdg > 1000000000) {
           a = (pdg / 10) % 1000;
           z = (pdg / 10000) % 1000;
         } else if (pdg == 2112) { a = 1; z = 0; }
         else if (pdg == 2212) { a = 1; z = 1; }
+        // The species key, which is (Z, A) except that a conversion electron is given Z = -1 so
+        // that it is not merged with the gammas. `z`/`a` above are left alone because the
+        // residual histogram below is keyed on them and must not move.
+        const int spz = (pdg == 11) ? -1 : z;
+        const int spkey = ((spz + 500) * 1000 + a) * 2 + is_preco;
+        ++sp_count[spkey];
+        ++per_event[spkey];
         if (a > heaviestA) { heaviestA = a; hz = z; ha = a; }
         delete rp;
       }
       delete out;
+      for (const auto& kv : per_event) {
+        sp_sum_k2[kv.first] += double(kv.second) * kv.second;
+      }
       ++residual[1000 * hz + ha];
       ++mult[n_preco_ej];
     }
@@ -575,6 +698,12 @@ void dump_deexcite() {
       std::fprintf(f, "%d,%d,%.17g,%.17g,%d,%d,%d,%d,%d,%d,%lld,%.17g,%.17g\n", c.Z, c.A,
                    c.eexc, c.pz, c.p, c.pc, c.h, kN, kv.first / 2, kv.first % 2, m,
                    sum_e[kv.first] / double(m), sum_e2[kv.first] / double(m));
+    }
+    for (const auto& kv : sp_count) {
+      const int za = kv.first / 2;
+      std::fprintf(s, "%d,%d,%.17g,%.17g,%d,%d,%d,%d,%d,%d,%d,%lld,%.17g\n", c.Z, c.A, c.eexc,
+                   c.pz, c.p, c.pc, c.h, kN, za / 1000 - 500, za % 1000, kv.first % 2,
+                   kv.second, sp_sum_k2[kv.first] / double(kN));
     }
     for (const auto& kv : residual) {
       std::fprintf(g, "%d,%d,%.17g,%.17g,%d,%d,%d,%d,%d,%d,%lld\n", c.Z, c.A, c.eexc, c.pz,
@@ -586,7 +715,145 @@ void dump_deexcite() {
     }
   }
   std::fclose(f);
+  std::fclose(s);
   std::fclose(g);
+  std::fclose(h);
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// preco_apply.csv - G4PreCompoundModel::ApplyYourself, the model as a hadronic interaction.
+///
+/// **Why this is statistical and not exact.** The initial fragment ApplyYourself builds -
+/// `G4Fragment(A + Ap, Z + Zp, p)` with `p = thePrimary.Get4Momentum() + (0,0,0,M(A,Z))`,
+/// `SetNumberOfExcitedParticle(2, 1)` and `SetNumberOfHoles(1, 0)` - is a local and is never
+/// handed back; DeExcite is called on it and only the final state comes out. Rebuilding that
+/// fragment here and dumping its fields would compare the port against a second copy of the
+/// same two lines, and the two things most worth checking - WHICH mass Geant4 adds
+/// (`G4NucleiProperties::GetNuclearMass(A, Z)`, the target's, not the compound's) and WHICH
+/// four-momentum it adds it to - would then be assumed on both sides instead of measured. So
+/// the whole final state is dumped instead: a wrong target mass moves E* and therefore every
+/// spectrum, a wrong (A + Ap, Z + Zp) moves the residual, and a wrong (2, 1, 1) exciton
+/// configuration moves the pre-equilibrium multiplicity.
+///
+/// The nine cases are four matched (neutron, proton) pairs plus one that fails the entry gate.
+/// `U` for a nucleon on a target is the projectile's kinetic energy plus its separation energy
+/// from the compound, and the gate needs `fPrecoLowEnergy*(A+1) <= U <= fPrecoHighEnergy*(A+1)`;
+/// the last case, a 1 MeV proton on Pb208, gives U ~ 5 MeV against a low limit of 20.9 MeV, so
+/// ApplyYourself skips pre-equilibrium entirely and the row is a check that the port skips it
+/// too.
+///
+/// `is_preco` is the same leading-run rule dump_deexcite uses, and it is exact for the same
+/// reason: ApplyYourself copies `*result` in order, so the pre-equilibrium ejectiles are the
+/// first entries of the secondary list.
+void dump_applyyourself() {
+  G4PreCompoundModel model;
+  model.InitialiseModel();
+  const G4int preco_id = G4PhysicsModelCatalog::GetModelID("model_PRECO");
+
+  // Four MATCHED pairs, a neutron and a proton at the same energy on the same target, because
+  // the one thing ApplyYourself does that a reading would not predict is to give the neutron
+  // projectile a CHARGED particle exciton - `SetNumberOfExcitedParticle(2, 1)` is unconditional
+  // - and the only way to see what that costs is to have both projectiles on one target.
+  // docs/RISK.md V51.
+  struct ACase { int pdg; int z, a; double ekin; };
+  const ACase cs[] = {
+    {2212, 6, 12, 20.0},    {2112, 6, 12, 20.0},
+    {2212, 13, 27, 100.0},  {2112, 13, 27, 100.0},
+    {2212, 26, 56, 100.0},  {2112, 26, 56, 100.0},
+    {2212, 79, 197, 100.0}, {2112, 79, 197, 100.0},
+    // Below the entry gate: U ~ 5 MeV against fPrecoLowEnergy*209 = 20.9 MeV, so ApplyYourself
+    // skips pre-equilibrium entirely and every event must land in the zero bin.
+    {2212, 82, 208, 1.0},
+  };
+  const int kN = 20000;
+
+  FILE* f = std::fopen("preco_apply.csv", "w");
+  std::fprintf(f, "proj_pdg,Z,A,ekin_MeV,N,pdg,is_preco,count,mean_ekin_MeV,"
+                  "mean_ekin2_MeV2\n");
+  // Folded onto (Z, A, is_preco), for the per-event multiplicity's second moment. Same reason
+  // as preco_deexcite_species.csv - see its header.
+  FILE* s = std::fopen("preco_apply_species.csv", "w");
+  std::fprintf(s, "proj_pdg,Z,A,ekin_MeV,N,spZ,spA,is_preco,count,mean_mult2\n");
+  FILE* h = std::fopen("preco_apply_mult.csv", "w");
+  std::fprintf(h, "proj_pdg,Z,A,ekin_MeV,N,n_preco_ejectiles,count\n");
+
+  for (const ACase& c : cs) {
+    const G4ParticleDefinition* part =
+        (c.pdg == 2212) ? static_cast<const G4ParticleDefinition*>(G4Proton::Proton())
+                        : static_cast<const G4ParticleDefinition*>(G4Neutron::Neutron());
+    CLHEP::HepRandom::setTheSeed(20260914 + c.pdg + c.z * 1000 + int(c.ekin));
+    std::map<int, long long> count;
+    std::map<int, double> sum_e, sum_e2;
+    std::map<int, long long> sp_count;
+    std::map<int, double> sp_sum_k2;
+    std::map<int, int> per_event;
+    std::map<int, long long> mult;
+    for (int n = 0; n < kN; ++n) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.a, c.z);
+      G4HadFinalState* r = model.ApplyYourself(proj, nucleus);
+      if (r == nullptr) { continue; }
+      int n_preco_ej = 0;
+      bool still_leading = true;
+      per_event.clear();
+      const std::size_t ns = r->GetNumberOfSecondaries();
+      for (std::size_t i = 0; i < ns; ++i) {
+        const G4HadSecondary* s = r->GetSecondary(i);
+        const int pdg = s->GetParticle()->GetDefinition()->GetPDGEncoding();
+        const double ekin = s->GetParticle()->GetKineticEnergy() / MeV;
+        const bool is_ejectile = (pdg == 2112 || pdg == 2212 || pdg == 1000010020 ||
+                                  pdg == 1000010030 || pdg == 1000020030 ||
+                                  pdg == 1000020040);
+        int is_preco = 0;
+        if (still_leading && s->GetCreatorModelID() == preco_id && is_ejectile) {
+          is_preco = 1;
+          ++n_preco_ej;
+        } else {
+          still_leading = false;
+        }
+        const int key = pdg * 2 + is_preco;
+        ++count[key];
+        sum_e[key] += ekin;
+        sum_e2[key] += ekin * ekin;
+        int z = 0, a = 0;
+        if (pdg > 1000000000) {
+          a = (pdg / 10) % 1000;
+          z = (pdg / 10000) % 1000;
+        } else if (pdg == 2112) { a = 1; z = 0; }
+        else if (pdg == 2212) { a = 1; z = 1; }
+        else if (pdg == 11) { z = -1; }
+        const int spkey = ((z + 500) * 1000 + a) * 2 + is_preco;
+        ++sp_count[spkey];
+        ++per_event[spkey];
+      }
+      for (const auto& kv : per_event) {
+        sp_sum_k2[kv.first] += double(kv.second) * kv.second;
+      }
+      ++mult[n_preco_ej];
+      // theResult is a member of G4HadronicInteraction and is Clear()ed at the top of the next
+      // ApplyYourself, which deletes the G4HadSecondary objects. Nothing to free here, and
+      // freeing it would double-delete on the next call.
+    }
+    for (const auto& kv : count) {
+      std::fprintf(f, "%d,%d,%d,%.17g,%d,%d,%d,%lld,%.17g,%.17g\n", c.pdg, c.z, c.a,
+                   c.ekin, kN, kv.first / 2, kv.first % 2, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second));
+    }
+    for (const auto& kv : sp_count) {
+      const int za = kv.first / 2;
+      std::fprintf(s, "%d,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g\n", c.pdg, c.z, c.a, c.ekin, kN,
+                   za / 1000 - 500, za % 1000, kv.first % 2, kv.second,
+                   sp_sum_k2[kv.first] / double(kN));
+    }
+    for (const auto& kv : mult) {
+      std::fprintf(h, "%d,%d,%d,%.17g,%d,%d,%lld\n", c.pdg, c.z, c.a, c.ekin, kN, kv.first,
+                   kv.second);
+    }
+  }
+  std::fclose(f);
+  std::fclose(s);
   std::fclose(h);
 }
 
@@ -634,8 +901,8 @@ void dump_propagate() {
   FILE* fn = std::fopen("preco_propagate_nucleons.csv", "w");
   std::fprintf(fn, "case,Z,A,radius_fm,idx,charge,hit,px,py,pz,e,pdgmass,binding\n");
   FILE* f = std::fopen("preco_propagate.csv", "w");
-  std::fprintf(f, "case,on_shell,phase,prim_pz,prim_e,n_escaped,escaped_ids,sum_px,sum_py,"
-                  "sum_pz,sum_e,n_deex,deex_px,deex_py,deex_pz,deex_e,draws\n");
+  std::fprintf(f, "case,on_shell,qgsm,phase,prim_pz,prim_e,n_escaped,escaped_ids,sum_px,"
+                  "sum_py,sum_pz,sum_e,n_deex,deex_px,deex_py,deex_pz,deex_e,draws\n");
 
   struct PCase { int z, a, nhit; int on_shell; };
   const PCase cases[] = {{6, 12, 2, 1}, {13, 27, 3, 1}, {26, 56, 4, 1}, {26, 56, 4, 0}};
@@ -683,6 +950,24 @@ void dump_propagate() {
       ++idx;
       nuc = nucleus.GetNextNucleon();
     }
+    // Propagate's "Check that we use QGS model" loop, verbatim and on the same object, so that
+    // the branch it selects is a dumped number and not an inference from `on_shell`. It is not
+    // a second implementation of anything: the whole test is one accessor against another.
+    //
+    // It matters that this is measured rather than assumed. Setting a nucleon's energy to
+    // `sqrt(p^2 + m^2)` does NOT guarantee `Get4Momentum().mag() >= m` afterwards - the round
+    // trip through a square root can land a half-ulp low - so the predicate is ulp-sensitive
+    // and the `on_shell` intent above does not decide the branch by itself.
+    G4bool qgsm = false;
+    nuc = nucleus.StartLoop() ? nucleus.GetNextNucleon() : nullptr;
+    while (nuc != nullptr) {
+      if (nuc->AreYouHit() &&
+          nuc->Get4Momentum().mag() < nuc->GetDefinition()->GetPDGMass()) {
+        qgsm = true;
+      }
+      nuc = nucleus.GetNextNucleon();
+    }
+
     idx = 0;
     nuc = nucleus.StartLoop() ? nucleus.GetNextNucleon() : nullptr;
     while (nuc != nullptr) {
@@ -754,11 +1039,12 @@ void dump_propagate() {
       }
       const G4LorentzVector pp = primary.Get4Momentum();
       std::fprintf(f,
-                   "%d,%d,%d,%.17g,%.17g,%d,%s,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%.17g,"
+                   "%d,%d,%d,%d,%.17g,%.17g,%d,%s,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%.17g,"
                    "%.17g,%.17g,%d\n",
-                   case_index, pc.on_shell, phase, pp.z() / MeV, pp.e() / MeV, n_escaped,
-                   ids.c_str(), esc.x() / MeV, esc.y() / MeV, esc.z() / MeV, esc.e() / MeV,
-                   n_deex, dx.x() / MeV, dx.y() / MeV, dx.z() / MeV, dx.e() / MeV, draws);
+                   case_index, pc.on_shell, qgsm ? 1 : 0, phase, pp.z() / MeV, pp.e() / MeV,
+                   n_escaped, ids.c_str(), esc.x() / MeV, esc.y() / MeV, esc.z() / MeV,
+                   esc.e() / MeV, n_deex, dx.x() / MeV, dx.y() / MeV, dx.z() / MeV,
+                   dx.e() / MeV, draws);
       std::fflush(f);
       // `iface` owns `preco` through SetDeExcitation and deletes nothing; the model is
       // registered in G4HadronicInteractionRegistry and outlives this scope, which is what the
@@ -782,8 +1068,10 @@ void dump_precompound(const DumpContext&) {
   dump_sample();
   dump_transitions();
   dump_equilibrium();
+  dump_gates();
   dump_emission();
   dump_deexcite();
+  dump_applyyourself();
   dump_propagate();
 }
 
@@ -791,7 +1079,10 @@ void dump_precompound(const DumpContext&) {
 
 G4GPU_REGISTER_DUMP("precompound",
                     "preco_params.csv preco_modelids.csv preco_channels.csv preco_sample.csv "
-                    "preco_transitions.csv preco_equilibrium.csv preco_emission.csv "
-                    "preco_deexcite.csv preco_deexcite_residual.csv preco_deexcite_mult.csv "
+                    "preco_transitions.csv preco_equilibrium.csv preco_gates.csv "
+                    "preco_emission.csv "
+                    "preco_deexcite.csv preco_deexcite_species.csv preco_deexcite_residual.csv "
+                    "preco_deexcite_mult.csv "
+                    "preco_apply.csv preco_apply_species.csv preco_apply_mult.csv "
                     "preco_propagate.csv preco_propagate_nucleons.csv",
                     dump_precompound);

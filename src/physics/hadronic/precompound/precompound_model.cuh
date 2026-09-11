@@ -104,6 +104,56 @@ __host__ __device__ inline deex::DeexProduct to_deex_product(const PrecoProduct&
   return d;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The three decisions DeExcite makes about (Z, A, U), as named functions
+// ---------------------------------------------------------------------------------------------
+//
+// These were expressions inline in `deexcite` below, and an expression has no address a test can
+// aim at: the test compared its OWN copy of each formula against the oracle column, agreed with
+// itself to the last bit over 1,920 points, and went on agreeing when the port's copy of all
+// three was changed underneath it. docs/RISK.md V52 has the measurement. They are functions now
+// so that `tests/test_precompound.cu` compares the port and not a transcription of the port, and
+// `deexcite` is their only other caller.
+
+/// The entry gate at the top of G4PreCompoundModel::DeExcite, as a predicate on (Z, A, U): true
+/// when pre-equilibrium is SKIPPED and the fragment goes straight to the handler. The `!isActive`
+/// and `GetNumberOfLambdas() > 0` clauses stay with the caller, being functions of neither.
+///
+/// Note the AND in the (Z, A) clause and the STRICT `<` on the low limit. The loop's version of
+/// both is different - see `preco_loop_gate` and this file's header.
+__host__ __device__ inline bool preco_entry_gate(int Z, int A, double U) {
+  const deex::DeexParameters& par = deex::deex_params();
+  return (Z < par.min_z_for_preco && A < par.min_a_for_preco) ||
+         U < par.preco_low_energy * A || U > A * par.preco_high_energy;
+}
+
+/// The (Z, A) and excitation clauses of the six-way equilibrium test inside DeExcite's loop:
+/// true when the loop hands the fragment to the equilibrium handler. The other three clauses -
+/// `!go_ahead`, `P1 <= P2+P3` and `GetNumberOfExcitons() <= 0` - stay in the loop, being
+/// functions of the transition probabilities and the exciton configuration rather than of
+/// (Z, A, U). None of the six has a side effect, so factoring four of them out cannot change
+/// what the short circuit evaluates.
+///
+/// OR where the entry gate has AND, and `<=` where the entry gate has `<`.
+__host__ __device__ inline bool preco_loop_gate(int Z, int A, double U) {
+  const deex::DeexParameters& par = deex::deex_params();
+  return Z < par.min_z_for_preco || A < par.min_a_for_preco ||
+         U <= par.preco_low_energy * A || U > A * par.preco_high_energy;
+}
+
+/// n_eq = G4lrint(sqrt((12/pi^2) U g(Z, A, U))), the critical exciton number DeExcite computes
+/// at the top of each outer iteration and compares `GetNumberOfExcitons()` against.
+///
+/// `has_levels` is P3's level-density dispatch input, `data::find_manager(lt, Z, A) >= 0`; it is
+/// a parameter rather than a lookup here so the function needs no level table and the test can
+/// drive both branches. It can return ZERO - see the file header.
+__host__ __device__ inline int preco_equilibrium_exciton_number(int Z, int A, double U,
+                                                                 bool has_levels) {
+  const double ldfact = 12.0 / deex::pi2();
+  return static_cast<int>(
+      std::lrint(std::sqrt(ldfact * U * deex::level_density(Z, A, U, has_levels))));
+}
+
 /// G4PreCompoundModel::PerformEquilibriumEmission - `GetExcitationHandler()->BreakItUp()` and
 /// splice the result onto the end.
 ///
@@ -157,10 +207,6 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
     return st;
   }
 
-  const double low = par.preco_low_energy;
-  const double high = par.preco_high_energy;
-  const int min_z = par.min_z_for_preco;
-  const int min_a = par.min_a_for_preco;
   const bool is_active = !par.preco_dummy;
 
   double U = frag.excitation;
@@ -169,9 +215,8 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
 
   if (frag.lambdas > 0) { st.ref.hyper_fragment = true; }
 
-  // The entry gate. Note the AND in the (Z, A) clause and the strict `<` on the low limit -
-  // the loop's version of both is different, and the file header says how.
-  if (!is_active || (Z < min_z && A < min_a) || U < low * A || U > A * high || frag.lambdas > 0) {
+  // The entry gate; `preco_entry_gate` is where the AND and the strict `<` are written out.
+  if (!is_active || preco_entry_gate(Z, A, U) || frag.lambdas > 0) {
     st.skipped_precompound = true;
     st.reached_equilibrium_without_emitting = true;
     perform_equilibrium_emission(frag, lt, pool, ws, st, rng);
@@ -179,7 +224,6 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
   }
 
   int count = 0;
-  const double ldfact = 12.0 / deex::pi2();
   const int countmax = 1000;
 
   for (;;) {
@@ -187,8 +231,7 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
     Z = frag.z;
     A = frag.a;
     const bool has_levels = (data::find_manager(lt, Z, A) >= 0);
-    const int eq_exciton_number = static_cast<int>(
-        std::lrint(std::sqrt(ldfact * U * deex::level_density(Z, A, U, has_levels))));
+    const int eq_exciton_number = preco_equilibrium_exciton_number(Z, A, U, has_levels);
 
     bool is_transition = false;
     do {
@@ -209,8 +252,8 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
       // The six-way equilibrium test. `P1 <= P2+P3` is the physical criterion - Quesada's
       // comment says it PREVAILS over the critical-exciton-number approximation - and it is
       // also what makes fUseGNASH a dead branch, because GNASH leaves all three at zero.
-      if (!go_ahead || tp.p1 <= tp.p2 + tp.p3 || Z < min_z || A < min_a || U <= low * A ||
-          U > A * high || ex.total() <= 0) {
+      if (!go_ahead || tp.p1 <= tp.p2 + tp.p3 || preco_loop_gate(Z, A, U) ||
+          ex.total() <= 0) {
         if (st.n_emissions == 0) { st.reached_equilibrium_without_emitting = true; }
         st.n_iterations = count;
         perform_equilibrium_emission(frag, lt, pool, ws, st, rng);
@@ -278,7 +321,7 @@ __host__ __device__ inline PrecoStatus deexcite(deex::Fragment frag, Excitons ex
 /// are the projectile neutron and a knocked-out nucleon. That is not a reading of the source
 /// this port is free to improve: GetRj for the proton channel is Pc/P = 1/2 for both
 /// projectiles, so a neutron-induced reaction emits protons at the same relative rate as a
-/// proton-induced one at the first step. Recorded in docs/RISK.md.
+/// proton-induced one at the first step. Recorded in docs/RISK.md V51, with the measurement.
 ///
 /// `Zp` is 1 for a proton and 0 for a neutron; `Ap` is 1 for both. Any other projectile is a
 /// FatalException in Geant4 ("G4PreCompoundModel is used for <name>") and is refused here.

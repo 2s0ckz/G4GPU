@@ -347,6 +347,40 @@ during transport yet - the entry point exists, its caller does not.
 Tests: `test_deex_nuclear.cu`, `test_deex_levels.cu`, `test_deex_probs.cu`,
 `test_deex_models.cu` (all exact) and `test_deex_breakup.cu` (statistical).
 
+#### 2.1.4 pre_equilibrium/exciton_model - the exciton stage and the cascade hand-over (P6)
+
+`G4PreCompoundModel::DeExcite` and everything under it, plus `G4GeneratorPrecompoundInterface`,
+the class every cascade and string model in QBBC hands its residual to. The entry point is
+`preco::deexcite(fragment, excitons, ...)`, and it writes **one** product list: the
+pre-equilibrium ejectiles first, then P3's whole equilibrium cascade, with
+`PrecoStatus::n_preco_products` marking the boundary - so a caller sees a single list and does
+not have to know where the stages met. `V` and not `T` throughout because the callers do not
+exist yet: P9 (binary cascade), P10 (Bertini) and P11 (FTFP) are what reach this, and the plain
+data types they fill in - `CascadeTrack`, `HitNucleon`, `WoundedNucleus` - are defined here
+because this is the file that reads them.
+
+**Why the exact half is exact.** Geant4 lets a random engine be installed, so
+`ref/dump/dump_precompound.cc` drives every sampler in the package under an eight-value uniform
+cycle. `SampleKineticEnergy`, `ChooseFragment`, `PerformTransition` and `PerformEmission` become
+deterministic functions of (inputs, phase), and each row compares kinetic energies,
+four-momenta and exciton counts **and the number of deviates the call consumed** - the part a
+transcription can get wrong while still producing a plausible answer.
+
+| Geant4 class | | Where |
+|---|:--:|---|
+| **G4PreCompoundModel** (`DeExcite`, `PerformEquilibriumEmission`, `ApplyYourself`) | **V** | `precompound/precompound_model.cuh`, entry point `preco::deexcite()`. 640 equilibrium exciton numbers, 1,424 gate verdicts including the four tokens the entry gate and the loop gate differ in; 15 campaigns x 20,000 events, 2.35M products, worst 3.8 sigma. `ApplyYourself` has no exact oracle and cannot have one - the initial fragment is a local - so it is checked through its consequences over 6 cases x 20,000 events, worst 2.7 sigma. The 1000-iteration guard is a JustWarning in Geant4, so it is REPORTED and the products are still produced |
+| G4VPreCompoundFragment (+ `.icc`), G4PreCompoundFragment, G4PreCompoundNucleon, G4PreCompoundIon, G4PreCompoundNeutron / Proton / Deuteron / Triton / He3 / Alpha | **V** | `precompound_fragment.cuh`; 19,200 emission-probability integrals over all five `OPTxs`, 33,280 `Initialize` outputs, 8,456 sampled kinetic energies with their draw counts - all at worst 0. `SetOPTxs` is public and unlocked, which is what makes `GetAlpha`, `GetBeta` and all five inverse cross sections measured rather than transcribed-and-hoped |
+| G4PreCompoundEmission (`rho`, `AngularDistribution`, `PerformEmission`), G4PreCompoundFragmentVector, G4PreCompoundEmissionFactory, G4VPreCompoundEmissionFactory | **V** | `precompound_emission.cuh`; 5,120 channel choices, ejectile four-momenta and residual states, worst 1.2e-14. The factory's order is n, p, d, **alpha, t, He3** - not the evaporation module's - and `ChooseFragment` walks it, so it is observable and is checked |
+| G4VPreCompoundTransitions, G4PreCompoundTransitions | **V** | `precompound_transitions.cuh`; all four (`fUseCEM`, `fNeverGoBack`) combinations, 102,400 rates and 76,800 post-transition exciton configurations with both draw counts, worst 0 |
+| G4GNASHTransitions | **V** | same file - and it is a **dead branch**. It never assigns `TransitionProb1/2/3`, the model reads all three back as the 0.0 the base constructor left, and its first equilibrium test is then `0 <= 0`: setting `fUseGNASH` switches pre-equilibrium emission off entirely. Measured on 5,120 oracle rows, transcribed as written, and reported by name rather than silently producing pure equilibrium emission. docs/RISK.md V49 |
+| G4GeneratorPrecompoundInterface (`Propagate`, `PropagateNuclNucl`, `MakeCoalescence`) | **P** | `generator_interface.cuh`; four wounded nuclei x 8 phases, exact on which tracks escaped, on their summed four-momentum and on the FTF/QGS branch verdict. **Refused by name:** `G4DecayKineticTracks`, the anti-nucleus and hypernucleus arms of `PropagateNuclNucl`, and `Propagate`'s silent drop of a residual with Z > A, which is reported instead. Its QGS arm dereferences a null `GetPrimaryProjectile()` for any bare wounded nucleus - docs/RISK.md V50 |
+| G4HETCEmissionFactory and the ten `G4HETC*` classes | **-** | refused by name in `precompound_emission.cuh`. `fUseHETC` is false and `G4DeexPrecoParameters`' setters return early outside `G4State_PreInit`, so no run reaches them and there is no oracle a transcription could be checked against - P3's Weisskopf-width case |
+| G4LowEIonFragmentation | **-** | not a gap: named in five places in the whole 11.1.1 tree - its own two files, its package's CMake, the History file and `G4PhysicsModelCatalog`'s name list - and constructed nowhere, so QBBC cannot reach it |
+| `useSICB` (G4VPreCompoundFragment, G4PreCompoundEmission::UseSICB, G4PreCompoundFragmentVector::UseSICB) and `DeltaR` (G4GeneratorPrecompoundInterface) | **-** | nothing to port: both are written, plumbed and never read. The barrier `useSICB` gated is now the unconditional `elim = theCoulombBarrier*0.5` in `Initialize`, so every charged channel's integral starts at HALF the barrier whatever the flag says. docs/RISK.md V49 |
+
+Tests: `test_precompound.cu` - 374,345 exact comparisons at worst 1.2e-14, plus 21 statistical
+campaigns of 20,000 events.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

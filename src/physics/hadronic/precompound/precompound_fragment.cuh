@@ -58,7 +58,7 @@
 // `G4PreCompoundFragmentVector::UseSICB` plumb it down to every channel - and nothing in
 // 11.1.1 ever reads it. The superimposed barrier it used to gate is now the unconditional
 // `elim = theCoulombBarrier*0.5` line in Initialize below. It is not ported, because there is
-// nothing to port; see docs/RISK.md.
+// nothing to port; see docs/RISK.md V49.
 #ifndef G4GPU_PRECO_FRAGMENT_CUH
 #define G4GPU_PRECO_FRAGMENT_CUH
 
