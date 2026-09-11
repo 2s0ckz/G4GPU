@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a mu- beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a mu- beam, everything P9-P13 owes inactivated,
 # and Decay and hadElastic LEFT ACTIVE.
 #
 # One line more than mu+: `muMinusCaptureAtRest`. With it inactivated a stopped mu- has
@@ -22,7 +22,6 @@
 
 /process/inactivate muBrems
 /process/inactivate muPairProd
-/process/inactivate CoulombScat
 /process/inactivate muonNuclear
 /process/inactivate muMinusCaptureAtRest
 

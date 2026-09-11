@@ -33,6 +33,15 @@ struct ProcessFlags {
   bool bremsstrahlung = true;
   bool annihilation = true;
   bool multiple_scattering = true;
+  /// `CoulombScat` - G4CoulombScattering, the single-scattering half of the pair whose
+  /// continuous half is WentzelVI multiple scattering. On e+- above
+  /// G4EmParameters::MscEnergyLimit() (100 MeV) and on every singly-charged hadron from 100 eV;
+  /// the ions do not have it at all in option0. See physics/em/coulomb_scattering.cuh for which
+  /// species and why, and physics/stepper.cuh for the two call sites.
+  ///
+  /// It is a study switch like the others, and it is also the flag `ref/b1hadron/stage1_*.mac`
+  /// no longer has to inactivate on the Geant4 side.
+  bool coulomb_scattering = true;
 };
 
 /// A null table means the corresponding process is switched off.

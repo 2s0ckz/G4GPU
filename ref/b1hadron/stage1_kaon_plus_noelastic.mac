@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a kaon+ beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a kaon+ beam, everything P9-P13 owes inactivated,
 # and Decay LEFT ACTIVE.
 #
 # The kaon is the shortest-lived of the three positives - 12.380 ns proper, against the
@@ -23,7 +23,6 @@
 
 /process/inactivate hBrems
 /process/inactivate hPairProd
-/process/inactivate CoulombScat
 /process/inactivate kaon+Inelastic
 /process/inactivate hadElastic
 

@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a pi+ beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a pi+ beam, everything P9-P13 owes inactivated,
 # and Decay LEFT ACTIVE.
 #
 # 200 MeV pi+ range in G4_WATER is 782.2 mm against B1's 300 mm envelope, so it crosses.
@@ -24,7 +24,6 @@
 
 /process/inactivate hBrems
 /process/inactivate hPairProd
-/process/inactivate CoulombScat
 /process/inactivate pi+Inelastic
 /process/inactivate hadElastic
 

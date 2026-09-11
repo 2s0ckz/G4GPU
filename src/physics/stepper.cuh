@@ -16,6 +16,7 @@
 #include "physics/em/hadron_delta.cuh"
 #include "physics/em/hadron_range.cuh"
 #include "physics/em/nuclear_stopping.cuh"
+#include "physics/em/coulomb_scattering.cuh"
 #include "physics/em/wentzel_msc.cuh"
 #include "physics/em/gamma_processes.cuh"
 #include "physics/em/klein_nishina.cuh"
@@ -29,6 +30,80 @@
 #include "render/trajectory.cuh"
 
 namespace g4gpu {
+
+/// `G4CoulombScattering::PostStepDoIt`, applied to a track. The wiring half of P14's model.
+///
+/// Called from `step_lepton` and `step_hadron` on the POST-step state, which is what
+/// `G4VEmProcess::PostStepDoIt` reads: `G4Step::UpdateTrack` has already run, so
+/// `track.GetKineticEnergy()` is the energy after the continuous loss. Written once for both
+/// because the sequence is the same and the ORDER inside it is Geant4's.
+///
+/// THE INTEGRAL-CROSS-SECTION REJECTION IS HERE AND IT IS NOT OPTIONAL.
+///
+/// `G4CoulombScattering::InitialiseProcess` calls `SetCrossSectionType(fEmIncreasing)` when
+/// MscThetaLimit is pi (G4CoulombScattering.cc:102), which it is in option0. So
+/// `G4VEmProcess::PostStepDoIt` runs
+///
+///     const G4double lx = std::max(GetCurrentLambda(finalT, logFinalT), 0.0);
+///     if(preStepLambda*G4UniformRand() >= lx) { return &fParticleChange; }
+///
+/// - the mean free path was drawn with the cross section at the START of the step and the
+/// interaction is then thrown away with probability `1 - lx/preStepLambda`, which makes the
+/// effective rate the cross section at the step's END. Without it a charged hadron that lost a
+/// lot of energy over a long step would scatter at the wrong rate, and the rate would be wrong
+/// in the direction of too many scatters. `hadronic/process.cuh::integral_xs_rejects` is the
+/// same mechanism for the hadronic processes.
+///
+/// The one thing this does NOT reproduce is Geant4's CACHING of `preStepLambda`:
+/// `ComputeIntegralLambda`'s fEmIncreasing branch keeps a lambda computed at up to 1/0.8 of the
+/// current energy until the energy has fallen by 20%, so Geant4's `preStepLambda` can be larger
+/// than the true pre-step value and its rejection correspondingly harder. Both give the same
+/// net rate `lx`; what differs is the number of uniforms consumed, and this port re-draws every
+/// interaction length every step anyway (see `had::decay_in_flight_length`'s header for why
+/// that is the same distribution and not an approximation).
+///
+/// @param xs_at_step_start the cross section the step's interaction length was drawn with,
+///        1/mm - `preStepLambda`.
+template <typename real_t, typename Rng, typename Emitter>
+__host__ __device__ __noinline__ void coulomb_apply(const Scene<real_t>& s, TrackState<real_t>& p,
+                                     ParticleType type, int mat, real_t xs_at_step_start,
+                                     Rng& rng, Emitter& em, real_t& edep,
+                                     StepReport<real_t>& rep) {
+  const data::Material<real_t>& mm = s.materials[mat];
+  // One value, used as `cutEnergy` in SetupTarget and as the recoil threshold: in 11.1.1 they
+  // are literally the same cuts vector, the PROTON's, because the process declares
+  // SetSecondaryParticle(G4Proton::Proton()). See em/coulomb_scattering.cuh's file header.
+  const real_t cut = em::coulomb_secondary_cut(s.range_cut);
+
+  const real_t xs_now =
+      em::coulomb_xs_per_volume(mm, type, p.ekin, cut, real_t(-1), real_t(-1));
+  // Geant4's own test, including its direction at equality.
+  if (xs_at_step_start * rng.uniform() >= xs_now) { return; }
+
+  const auto r = em::coulomb_fire(mm, type, p.ekin, p.dir, cut, rng);
+  if (!r.fired) { return; }
+
+  p.dir = r.dir;
+  p.ekin = r.final_t;
+  // ProposeLocalEnergyDeposit AND ProposeNonIonizingEnergyDeposit, with the same value: a
+  // sub-threshold nuclear recoil is entirely non-ionizing, so a scorer that separates the two
+  // sees it there. G4Step::GetNonIonizingEnergyDeposit is part of edep, not additional to it.
+  if (r.edep > real_t(0)) {
+    if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += r.edep; }
+    rep.non_ionizing += r.edep;
+  }
+  if (r.emit_ion) {
+    em.pos = p.pos;
+    em.volume = p.volume;
+    em.event = p.event;
+    // Hydrogen recoils as a proton and is transported; everything heavier maps to
+    // `kGenericIon`, which has no kernel, so `BufferEmitter::push` counts it by name with its
+    // kinetic energy. That is a hole in the answer with a number attached rather than a silent
+    // drop - see EmitterBooks::refused_energy, which P8 added for exactly this shape of
+    // secondary.
+    em.push(particle_type_of_nucleus(r.ion_z, r.ion_a), r.ion_dir, r.ion_ekin, p.event);
+  }
+}
 
 /// Advances one photon by a single step.
 /// @param edep energy deposited in the scoring volume by this step, MeV
@@ -218,6 +293,32 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
             ? em::annihilation_xs(s.materials[mat], p.ekin) : real_t(0);
     const real_t d_annih = (annih_xs > real_t(0)) ? -log(rng.uniform()) / annih_xs
                                                   : geom::kInfinity<real_t>();
+    // ---- G4CoulombScattering, a fifth discrete competitor, and ONLY above 100 MeV.
+    //
+    // THE ENERGY GATE IS THE PROCESS AND NOT A SHORTCUT. `G4EmStandardPhysics` fetches
+    // `G4EmParameters::MscEnergyLimit()` once and hands it to the e+- single-scattering model
+    // as SetMinKinEnergy, SetLowEnergyLimit AND SetActivationLowEnergyLimit
+    // (em/coulomb_scattering.cuh's table), so an electron below 100 MeV has the process on its
+    // manager and inactive. Above it, Urban msc stops and WentzelVI plus single scattering take
+    // over - the split is in ENERGY, because in option0 MscThetaLimit is pi and the two cover
+    // the same angular range.
+    //
+    // AND THE DRAW IS CONDITIONAL, for the reason `step_hadron`'s decay draw is: below 100 MeV
+    // no uniform is consumed, so every existing electron and positron result is unmoved. That
+    // is not a small claim for this repository - B1 is a 6 MeV gamma beam whose secondaries
+    // never reach 100 MeV, so its dose cannot move at all, and the proton and alpha depth-dose
+    // curves are checked to a fraction of a sigma. The port's MSC below 100 MeV is still Urban,
+    // which is what Geant4 runs there.
+    const real_t coul_xs =
+        (s.processes.coulomb_scattering && p.ekin >= em::kMscEnergyLimit<real_t>())
+            ? em::coulomb_xs_per_volume(s.materials[mat],
+                                        is_positron ? ParticleType::kPositron
+                                                    : ParticleType::kElectron,
+                                        p.ekin, em::coulomb_secondary_cut(s.range_cut),
+                                        real_t(-1), real_t(-1))
+            : real_t(0);
+    const real_t d_coul = (coul_xs > real_t(0)) ? -log(rng.uniform()) / coul_xs
+                                                : geom::kInfinity<real_t>();
 
     // Continuous-loss step limit, verbatim from
     // G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with the G4EmParameters
@@ -244,7 +345,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc_eff), fmin(fmin(d_delta, d_brem), d_annih));
-    t_step = fmin(t_step, range);
+    t_step = fmin(fmin(t_step, d_coul), range);
 
     // lambda at the energy left after the whole true step, for the general geometric branch.
     real_t lambda1 = real_t(-1);
@@ -274,6 +375,14 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const bool emits_brem =
         !hits_boundary && !annihilates && (d_brem <= t_step) && (d_brem <= d_delta);
     const bool emits_delta = !hits_boundary && !annihilates && !emits_brem && (d_delta <= t_step);
+    // Coulomb scattering is LAST in the tie order, which is the order `G4EmStandardPhysics`
+    // registers the processes in: msc, eIoni, eBrem, (annihilation for e+), then
+    // `G4CoulombScattering`. `G4SteppingManager::DefinePhysicalStepLength` keeps the smallest
+    // with a strict `<`, so a tie goes to whichever process the manager holds first. A tie
+    // between two continuous distributions has probability zero; what the order must not do is
+    // fire two processes on one step.
+    const bool coulomb_scatters = !hits_boundary && !annihilates && !emits_brem && !emits_delta
+                                  && (d_coul <= t_step);
 
     // The same competition, read back out as G4StepPoint::GetProcessDefinedStep would report
     // it. When nothing discrete won, the step was defined along its length by whichever limit
@@ -291,6 +400,9 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     } else if (emits_delta) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fIonisation;
+    } else if (coulomb_scatters) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fCoulombScattering;
     } else {
       rep.status = StepStatus::fAlongStepDoItProc;
       rep.process = (t_msc_eff < max_step && t_msc_eff < range) ? ProcessId::fMultipleScattering
@@ -471,6 +583,18 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       }
     }
 
+    // ---- G4CoulombScattering::PostStepDoIt, on the POST-step state.
+    //
+    // After the continuous loss and after the multiple scattering, because that is the order
+    // Geant4 runs them in: every AlongStepDoIt, `G4Step::UpdateTrack`, then the one PostStepDoIt
+    // that won. So `p.ekin` here is `track.GetKineticEnergy()`, which is the energy
+    // `G4VEmProcess::PostStepDoIt` reads and passes to SampleSecondaries.
+    if (coulomb_scatters && p.ekin > real_t(0)) {
+      const ParticleType lt =
+          is_positron ? ParticleType::kPositron : ParticleType::kElectron;
+      coulomb_apply(s, p, lt, mat, coul_xs, rng, em, edep, rep);
+    }
+
     if (p.ekin >= em::kElectronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld) {
       return true;
     }
@@ -564,34 +688,41 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     as long as it has been stepped. docs/PORTED.md 1.3 and docs/RISK.md V38 carry the numbers
 ///     and the reason no energy refusal was added.
 ///
-///   * **The one nuclear interaction here is DECAY.** This used to read "there are no nuclear
-///     interactions"; P8 added `G4Decay`, as a discrete process competing with the delta ray
-///     and geometry, and as an at-rest process on the dying branch. Everything else QBBC gives
-///     a charged hadron is still absent, and each absence has a package and a counter:
+///   * **THE NUCLEAR INTERACTIONS ARE DECAY AND ELASTIC SCATTERING**, and single Coulomb
+///     scattering beside them. This used to read "there are no nuclear interactions"; P8 added
+///     `G4Decay` and P8b added `hadElastic` and `CoulombScat`. Four discrete competitors now:
+///     the delta ray, the decay, `CoulombScat` and `hadElastic`, in the order the process
+///     manager holds them.
 ///
-///       - `hadElastic`. P5's models are transcribed and bit-exact against the oracle and P2's
-///         cross sections are device-callable, so what is missing is neither the physics nor
-///         the framework - it is the TARGET DRAW. `xs::store_sample_za` needs an
-///         `ElementIsotopes` per element (mass numbers and relative abundances) and no table
-///         in this port holds abundances: `data/natural_isotopes.hh` is deliberately the SET
-///         and not the weights, `data/isotope_list.hh` is amin/amax/aeff, and
-///         `data::Material` has no isotope field to upload one into. An elastic recoil is
-///         (Z, A)-resolved - `G4ChipsElasticModel` reads both and the CHIPS tables are
-///         per-isotope - so there is no version of this that draws an element and stops.
-///         Named here rather than approximated by aeff[Z], which would be a plausible number
-///         from a different physics. Its size, per species, is the difference between the two
-///         Geant4 columns of `ref/b1hadron/stage1_compare.ps1`.
+///     `hadElastic` was P8's one named blocker and it was the TARGET DRAW rather than the
+///     physics: `xs::store_sample_za` needs an `ElementIsotopes` per element and no table held
+///     abundances. `data/isotope_abundance.hh` is G4NistElementBuilder's, compared isotope by
+///     isotope against a QBBC-initialised G4NistManager, so the recoil is (Z, A)-resolved as
+///     `G4ChipsElasticModel`'s per-isotope tables require rather than approximated by aeff[Z].
+///     Which (cross section, model) pair per species is `had::elastic_channel`.
+///
+///     What QBBC still gives a charged hadron and this function does not do, each with a
+///     package and a counter:
+///
 ///       - the inelastic final state (P9-P11), the large hole: docs/RESULT.md puts it at 19%
-///         of a 210 MeV proton's dose and 33% of an 840 MeV alpha's.
+///         of a 210 MeV proton's dose and 33% of an 840 MeV alpha's. Absent from the cross
+///         section rather than present and refused, so `kChargedHadronInelastic` is
+///         structurally zero.
 ///       - the at-rest capture of a stopped negative hadron (P12), refused by name and
 ///         counted with the rest mass it costs - see `had::HadronicRefusal`, and note that in
 ///         stage 1 it is Geant4 that has it switched off and both sides decay instead.
+///       - the ANTIPROTON's elastic scattering, for the opposite reason to everything else
+///         here: `G4AntiNuclElastic` was not started in P5 and `G4ComponentAntiNuclNuclearXS`
+///         is refused by P2, so `elastic_channel` answers `kAntiNucleusRefused` and a pbar
+///         draws no hadronic interaction length while every other charged hadron does.
+///       - `hBrems` and `hPairProd`, above - the models' dE/dx is exact and neither has a
+///         `SampleSecondaries`.
 ///
-///     Only the third is reachable from this function today, because the first two are absent
-///     from the cross section rather than present and refused: a charged hadron here draws no
-///     hadronic interaction length at all.
+///     An elastic recoil heavier than an alpha maps to `kGenericIon`, which has no kernel, so
+///     it is counted by name with its kinetic energy rather than transported. For a 200 MeV
+///     proton in water that is the oxygen recoils above the 70 keV threshold.
 template <typename real_t, typename Rng, typename Emitter>
-__device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
+__host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
                                    ParticleType type, const had::HadronicWiring<real_t>& had,
                                    Rng& rng, Emitter& em, real_t& edep,
                                    StepReport<real_t>& rep,
@@ -640,6 +771,65 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
         (had.decay && had::decays_in_flight(type))
             ? had::decay_in_flight_length<real_t>(type, pd.mass, p.ekin, rng)
             : geom::kInfinity<real_t>();
+
+    // ---- G4CoulombScattering in flight, a third discrete competitor.
+    //
+    // WHICH SPECIES, AND THE THRESHOLD THAT IS NOT AN ENERGY LIMIT.
+    //
+    // `has_coulomb_scattering` is the table in em/coulomb_scattering.cuh's header: mu+-, pi+-,
+    // K+- and p/pbar get `G4CoulombScattering` from `G4EmBuilder::ConstructLightHadrons`
+    // alongside their WentzelVI msc, and the ions - alpha, He3, deuteron, triton, GenericIon -
+    // do not get it at all, because the only constructor that gives them one is
+    // `ConstructIonEmPhysicsSS` and option0 never calls it. So a stepped alpha draws no uniform
+    // here and its B1 dose is unmoved, which is checked to about a per cent.
+    //
+    // The lower edge is `coulomb_table_min_energy`: the process's own 100 eV floor raised by
+    // `MinPrimaryEnergy(part, mat)`, which is `sqrt(q2Max*<A^-2/3>/2 + m^2) - m` and therefore
+    // MATERIAL-dependent. In water that is 1.75 MeV for a proton and 0.283 MeV for a muon; in
+    // lead 0.295 and 0.0477. It is the energy `SetStartFromNullFlag` puts the table's first
+    // non-zero node at, so below it the cross section is a tabulated zero rather than a small
+    // number - and a port that used a single constant instead would give a 200 MeV proton this
+    // process over its whole track in lead and over only part of it in water, or the reverse.
+    //
+    // CONDITIONAL, like the decay draw above and for the same reason: a species or an energy
+    // that has no process must consume no uniform, or every existing number for it moves.
+    const bool has_coul = s.processes.coulomb_scattering && em::has_coulomb_scattering(type)
+                          && p.ekin >= em::coulomb_table_min_energy<real_t>(type, pd.mass,
+                                                                           mm.inv_a23);
+    const real_t coul_xs =
+        has_coul ? em::coulomb_xs_per_volume(mm, type, p.ekin,
+                                             em::coulomb_secondary_cut(s.range_cut),
+                                             real_t(-1), real_t(-1))
+                 : real_t(0);
+    const real_t d_coul = (coul_xs > real_t(0)) ? -log(rng.uniform()) / coul_xs
+                                                : geom::kInfinity<real_t>();
+
+    // ---- hadElastic, a fourth discrete competitor - and the first HADRONIC interaction this
+    // stepper has ever drawn.
+    //
+    // `elastic_xs_per_volume` is `G4CrossSectionDataStore::ComputeCrossSection` for whichever
+    // (cross section, model) pair `G4HadronElasticPhysics::ConstructProcess` gives this species
+    // - see `hadronic/elastic_wiring.cuh` for the table and for the three rows of it that are
+    // easy to guess wrong. It returns zero for a species with no such process (the leptons) and
+    // for the antiproton, whose data set P2 refuses and whose high-energy model P5 did not
+    // write; the antiproton's refusal is booked on the dying branch below rather than here,
+    // because a cross section of zero is not an interaction that could not be applied.
+    //
+    // THE PARTIAL SUMS ARE KEPT, and that is the point of `MaterialXs` being a struct: the
+    // target element is drawn from the CUMULATIVE array this call leaves behind, at this energy
+    // and in this material, and `G4HadronicProcess::PostStepDoIt` relies on the same pairing.
+    // A draw against a stale array picks an element by another energy's cross sections and
+    // nothing complains.
+    //
+    // Conditional on the flag and on the species, so a proton run with elastic switched off and
+    // every alpha, deuteron, triton and muon consume exactly the uniforms they consumed before.
+    hadronic::xs::MaterialXs<real_t> el_mxs{};
+    const real_t el_xs =
+        had.hadron_elastic
+            ? had::elastic_xs_per_volume<real_t>(had.elastic, mm, type, p.ekin, el_mxs)
+            : real_t(0);
+    const real_t d_elastic = (el_xs > real_t(0)) ? -log(rng.uniform()) / el_xs
+                                                 : geom::kInfinity<real_t>();
 
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
@@ -694,7 +884,7 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
 
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc), fmin(d_delta, d_decay));
-    t_step = fmin(t_step, range);
+    t_step = fmin(fmin(t_step, fmin(d_coul, d_elastic)), range);
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
     // are inputs to the true/geometric conversion, so both are computed from the uninterrupted
@@ -747,6 +937,18 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     // two continuous distributions has probability zero; what it must not do is fire both.
     const bool decays = !hits_boundary && (d_decay <= t_step) && (d_decay < d_delta);
     const bool emits_delta = !hits_boundary && !decays && (d_delta <= t_step);
+    // Coulomb scattering last, as in step_lepton: `G4EmBuilder::ConstructLightHadrons`
+    // registers msc, hIoni, hBrems, hPairProd and then G4CoulombScattering, and G4DecayPhysics
+    // runs before G4EmStandardPhysics in QBBC's constructor list - so Decay is ahead of every EM
+    // process on the manager and CoulombScat is behind all of them. See the note on ties above.
+    const bool coulomb_scatters =
+        !hits_boundary && !decays && !emits_delta && (d_coul <= t_step);
+    // And hadElastic after both, because `G4HadronElasticPhysicsXS` is registered after
+    // `G4EmStandardPhysics` and `G4DecayPhysics` in QBBC's constructor list - so it is last on
+    // the process manager and loses every tie. `ref/oracle/species_processes.csv` has the order
+    // the constructed QBBC actually holds.
+    const bool scatters_elastic = !hits_boundary && !decays && !emits_delta
+                                  && !coulomb_scatters && (d_elastic <= t_step);
 
     // Read back out as G4StepPoint::GetProcessDefinedStep would report it. See the same block
     // in step_lepton.
@@ -759,6 +961,12 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
     } else if (emits_delta) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fIonisation;
+    } else if (coulomb_scatters) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fCoulombScattering;
+    } else if (scatters_elastic) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fHadronElastic;
     } else {
       rep.status = StepStatus::fAlongStepDoItProc;
       rep.process = ProcessId::fIonisation;
@@ -885,6 +1093,59 @@ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p
         em.push(ParticleType::kElectron, d.delta_dir, d.delta_ekin, p.event);
         p.ekin = d.primary_ekin;
         p.dir = d.primary_dir;
+      }
+    }
+
+    // ---- G4CoulombScattering::PostStepDoIt, on the POST-step state. See coulomb_apply.
+    if (coulomb_scatters && p.ekin > real_t(0)) {
+      coulomb_apply(s, p, type, mat, coul_xs, rng, em, edep, rep);
+    }
+
+    // ---- G4HadronElasticProcess::PostStepDoIt, on the POST-step state.
+    //
+    // After the continuous loss and the scattering, for the reason the decay branch gives: the
+    // order is every AlongStepDoIt, then the one PostStepDoIt that won, so the elastic scatter
+    // sees the energy and direction the step left the hadron with. The cross section it is
+    // rejected against is the one the interaction length was drawn with - `el_xs`, at the
+    // PRE-step energy - and `elastic_apply` recomputes it at this energy for the integral
+    // approach, which for a pion or a proton is a real rejection (`fHadTwoPeaks`).
+    if (scatters_elastic && p.ekin > real_t(0)) {
+      const auto er = had::elastic_apply<real_t>(had.elastic, mm, type, p.ekin, p.dir,
+                                                 s.range_cut, el_xs, el_mxs, rng);
+      if (er.interacted) {
+        p.dir = er.dir;
+        p.ekin = er.energy;
+        // Both deposits, with the same value: `G4HadronElasticProcess::PostStepDoIt` proposes
+        // the sub-threshold recoil as LOCAL and as NON-IONIZING (note 5 of
+        // elastic/elastic_process.cuh), which is what makes elastic scattering contribute to
+        // NIEL and not to dose in a scorer that separates them.
+        if (er.edep > real_t(0)) {
+          if (s.geometry.volumes[p.volume].score_index >= 0) { edep += er.edep; }
+          rep.non_ionizing += er.edep;
+        }
+        if (er.emit_recoil) {
+          em.pos = p.pos;
+          em.volume = p.volume;
+          em.event = p.event;
+          // Hydrogen recoils as a proton and is transported; anything heavier than an alpha
+          // maps to `kGenericIon`, which has no kernel, so `BufferEmitter::push` counts it by
+          // name with its kinetic energy. A 200 MeV proton in water above the 70 keV recoil
+          // threshold therefore loses its oxygen recoils to that ledger, which is a hole with
+          // a number attached rather than a silent drop - EmitterBooks::refused_energy exists
+          // for exactly this secondary.
+          em.push(particle_type_of_nucleus(er.recoil_z, er.recoil_a), er.recoil_dir,
+                  er.recoil_ekin, p.event);
+        }
+        if (er.dropped_secondaries > 0) {
+          had::book_refusal<real_t>(had.books, had::HadronicRefusal::kElasticDropped,
+                                    er.recoil_ekin);
+        }
+      }
+      if (!er.primary_survives) {
+        // `efinal == 0` with no at-rest process: G4HadronElasticProcess proposes fStopAndKill.
+        // Fall through to the dying branch, which deposits what is left and asks the at-rest
+        // question - the same path a track that ran out of range takes.
+        p.ekin = real_t(0);
       }
     }
 

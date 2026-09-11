@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a kaon- beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a kaon- beam, everything P9-P13 owes inactivated,
 # and Decay and hadElastic LEFT ACTIVE.
 #
 # See kaon_plus and muon_minus. This is also the row with the largest stage-0 disagreement
@@ -16,7 +16,6 @@
 
 /process/inactivate hBrems
 /process/inactivate hPairProd
-/process/inactivate CoulombScat
 /process/inactivate kaon-Inelastic
 /process/inactivate hBertiniCaptureAtRest
 

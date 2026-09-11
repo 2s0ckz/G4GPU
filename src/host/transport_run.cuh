@@ -18,6 +18,7 @@
 #include <vector>
 #include "core/step_hook.cuh"
 #include "g4/G4Flatten.hh"
+#include "host/hadronic_upload.cuh"
 #include "host/pe_upload.cuh"
 #include "physics/source.cuh"
 #include "physics/stepper.cuh"
@@ -442,6 +443,10 @@ class TransportEngine {
   /// Built only when the scene can actually see a hadron - it is 256 bins x 2 species x
   /// every material, and a photon run has no use for it. Null in Scene when not built.
   em::HadronRangeTable<real_t>* d_hrt_ = nullptr;
+  /// `hadElastic`'s device tables and the allocations behind them. See
+  /// host/hadronic_upload.cuh; the view inside it is copied into every kernel launch as part
+  /// of `had::HadronicWiring`.
+  ElasticTableOwner<real_t> elastic_tables_{};
   std::vector<data::Material<real_t>> h_mats_;
   std::vector<double> h_voxel_score_;
   geom::Geometry<real_t> geom_{};

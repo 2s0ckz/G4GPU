@@ -854,6 +854,12 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                                           static_cast<int>(zs.size()));
     auto* d_msc = upload_msc<real_t>(h_mats_.data(), n_materials_);
 
+    // hadElastic's device tables, beside the hadron range table and for the same reason: a run
+    // that will carry a charged hadron needs them before the first primary is seeded. The
+    // element list is the scene's, so the per-(pion, Z) G4ElasticData is built for the elements
+    // the detector is actually made of rather than for all 92. See host/hadronic_upload.cuh.
+    elastic_tables_ = upload_elastic_tables<real_t>(zs);
+
     // The hadron range table. Built here rather than on demand because a run that will carry
     // a proton needs it before the first primary is seeded, and the engine cannot know what
     // species the generator will produce until it has produced one. Two megabytes in double
@@ -1480,6 +1486,11 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         had_wiring.decay = had_decay_;
         had_wiring.hadron_elastic = had_elastic_;
         had_wiring.neutron_capture = had_capture_;
+        // Five device pointers, copied by value into the launch like the rest of the struct.
+        // Null in a run whose scene can see no hadron - Upload only builds them when it builds
+        // the hadron range table - and `elastic_xs_per_volume` then returns zero, which is the
+        // same "no process" state a lepton is in.
+        had_wiring.elastic = elastic_tables_.view;
         had_wiring.books.count = d_had_refused_n_;
         had_wiring.books.energy = d_had_refused_e_;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
@@ -1859,6 +1870,7 @@ void TransportEngine<real_t, StepHook>::Free() {
     d_killed_n_ = nullptr;
     cudaFree(d_neutron_xs_);
     d_neutron_xs_ = nullptr;
+    free_elastic_tables<real_t>(elastic_tables_);
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);

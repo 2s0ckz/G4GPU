@@ -198,11 +198,30 @@
 //    defaults to fExponentialNF and nothing in QBBC changes it, so `fGaussianNF` and
 //    `fFlatNF` (G4WentzelOKandVIxSection.cc:355-365) are absent, as they already are in
 //    em/wentzel_xs.cuh's file header.
+//
+// ---------------------------------------------------------------------------------------
+// P8b: THE ISOTOPE REFUSAL IS CLOSED, AND THE CALL SITE IS NOW IN THIS FILE
+//
+// `coulomb_refuse_isotope_selection` was the first item on the list above: reproducing
+// `G4VEmModel::SelectIsotopeNumber` needs per-element natural abundances and no table in the
+// port had them. `data/isotope_abundance.hh` is G4NistElementBuilder's table now, compared
+// isotope by isotope against a QBBC-initialised G4NistManager (`ref/oracle/isotopes.csv`), and
+// `data::nist_sample_isotope_n` is `G4EmUtility::SampleRandomIsotope` as written - including
+// that a single-isotope element consumes NO uniform. So the recoil's target mass is the sampled
+// isotope's `G4NucleiProperties::GetNuclearMass(ia, iz)`, which is what Geant4 hands the
+// sampler, rather than the element's mean atomic mass.
+//
+// `coulomb_fire` at the bottom is the whole of one PostStepDoIt: element, isotope, nuclear mass,
+// angle, recoil. It lives here rather than in `stepper.cuh` because `step_lepton` and
+// `step_hadron` both make the same call in the same order, and the order is Geant4's - the cross
+// sections belong to the ELEMENT and factD and the recoil to the sampled ISOTOPE, which is a
+// sequence that must not be written twice.
 #pragma once
 #include <cmath>
 
 #include "core/particle.cuh"
 #include "core/units.cuh"
+#include "data/isotope_abundance.hh"
 #include "data/materials.cuh"
 #include "data/mott.hh"
 #include "data/nuclei_mass_ame12.hh"
@@ -210,6 +229,30 @@
 #include "physics/em/wentzel_xs.cuh"
 
 namespace g4gpu::em {
+
+/// `G4EmParameters::MscEnergyLimit()`, MeV - 100 MeV, set in G4EmParameters::Initialise
+/// (`energyLimit = 100.0*CLHEP::MeV`, G4EmParameters.cc:155).
+///
+/// It does two jobs for e+- and only for e+-: it is the Urban/WentzelVI msc split AND the lower
+/// edge of `G4CoulombScattering`'s table, because G4EmStandardPhysics.cc fetches it once at
+/// line 134 and hands it to `SetMinKinEnergy`, `SetLowEnergyLimit` and
+/// `SetActivationLowEnergyLimit` alike. The light hadrons get none of those calls, so for them
+/// the process starts at 100 eV and the only threshold is the material-dependent
+/// `coulomb_process_min_primary_energy`.
+template <typename real_t> __host__ __device__ constexpr real_t kMscEnergyLimit() {
+  return real_t(100);
+}
+
+/// `G4VEmProcess`'s own floor for a light hadron, MeV - 100 eV.
+///
+/// `G4VEmProcess`'s constructor sets `minKinEnergy(0.1*CLHEP::keV)` and nothing in
+/// G4EmBuilder::ConstructLightHadrons overrides it, so this is where a muon's, pion's, kaon's
+/// or proton's `CoulombScat` table begins. Below it there is no process at all, which is a
+/// different statement from `coulomb_process_min_primary_energy` - that is the energy the table
+/// is zero below, in a particular material.
+template <typename real_t> __host__ __device__ constexpr real_t kCoulombHadronMinEnergy() {
+  return real_t(1e-4);
+}
 
 /// `G4CoulombScattering::q2Max`, MeV^2.
 ///
@@ -376,11 +419,16 @@ __host__ __device__ inline CoulombAtomXs<real_t> coulomb_xs_per_atom(
 ///        builds this table with `(*theCuts)[i]`, and theCuts is the PROTON vector - see the
 ///        file header. This took `m.cut_electron` until it was measured: the electron cut is
 ///        four times the proton cut in water and never reaches the model.
+/// `__noinline__` since P8b, and see docs/RISK.md V61: inlined, this function's Wentzel setup
+/// and per-element loop go into the body of `step_lepton` and of `run_step_hadron`'s fourteen
+/// species, and the translation unit that holds all of them killed ptxas with an access
+/// violation once `hadElastic` was inlined beside it. One call per step against a function that
+/// loops over the material's elements is not a cost worth measuring.
 template <typename real_t>
-__host__ __device__ inline real_t coulomb_xs_per_volume(const data::Material<real_t>& m,
-                                                        ParticleType type, real_t tkin,
-                                                        real_t cut, real_t cos_theta_min,
-                                                        real_t cos_theta_max) {
+__host__ __device__ __noinline__ real_t coulomb_xs_per_volume(const data::Material<real_t>& m,
+                                                              ParticleType type, real_t tkin,
+                                                              real_t cut, real_t cos_theta_min,
+                                                              real_t cos_theta_max) {
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
   if (pd.mass <= real_t(0) || tkin <= real_t(0)) { return real_t(0); }
   real_t xs = real_t(0);
@@ -602,11 +650,15 @@ __host__ __device__ inline Vec3<real_t> coulomb_recoil_direction(const Vec3<real
 
 /// The refusal `coulomb_sample_secondaries` cannot make for its caller.
 ///
-/// Reproducing `SelectIsotopeNumber` needs per-element natural abundances, which this port has
-/// no table of - see the file header. A caller that has only the element must say so rather
-/// than substitute the mean A: `G4NucleiProperties::GetNuclearMass(lrint(<A>), Z)` is not the
-/// abundance-weighted mean of the isotope masses, and using it would be an approximation
-/// wearing a transcription's clothes.
+/// KEPT, AND NO LONGER REACHED FROM THIS PORT'S TRANSPORT. P8b added
+/// `data/isotope_abundance.hh`, so `coulomb_fire` below does the draw and passes the isotope.
+/// What this still says is true of any caller that does NOT have an isotope composition - a
+/// material built from explicit isotopes, or an element outside G4NistElementBuilder's
+/// Z = 1..107 - and the statement it makes is the one that matters:
+/// `G4NucleiProperties::GetNuclearMass(lrint(<A>), Z)` is not the abundance-weighted mean of the
+/// isotope masses, so substituting it would be an approximation wearing a transcription's
+/// clothes. `tests/test_coulomb_scattering.cu` asserts the text; `coulomb_fire` returns
+/// `fired = false` where it would apply.
 __host__ __device__ inline const char* coulomb_refuse_isotope_selection() {
   return "G4eCoulombScatteringModel::SampleSecondaries: SelectIsotopeNumber needs per-element "
          "natural abundances; data/natural_isotopes.hh carries the nuclide set only. Pass the "
@@ -658,6 +710,151 @@ __host__ __device__ inline CoulombFinalState<real_t> coulomb_sample_secondaries(
   r.ion_dir = coulomb_recoil_direction(in_dir, rotate_uz(dir, in_dir), s.mom2, pd.mass,
                                        r.final_t);
   return r;
+}
+
+// =============================================================================================
+// The call site: one G4CoulombScattering::PostStepDoIt, written once for both steppers (P8b)
+// =============================================================================================
+
+/// Whether this species has `CoulombScat` on its process manager in QBBC at all.
+///
+/// The table at the top of this file, as a predicate. It is exactly `uses_wentzel_msc` for the
+/// hadrons - `G4EmBuilder::ConstructLightHadrons` registers a WentzelVI msc and a
+/// G4CoulombScattering in the same two lines for mu+-, pi+-, K+- and p/pbar - plus e+-, which
+/// get it from G4EmStandardPhysics directly. It is FALSE for alpha, He3, deuteron, triton and
+/// GenericIon: they reach the process only through `G4EmBuilder::ConstructIonEmPhysicsSS`,
+/// which option0 never calls, so an ion in QBBC has no single Coulomb scattering.
+///
+/// Not derived from `uses_wentzel_msc` even though the two agree on the hadrons: that predicate
+/// records which species this port SUBSTITUTES WentzelVI for (the ions included, as a measured
+/// substitution), and this one records which species Geant4 gives a process to. Tying them
+/// together would make generalising urban_msc.cuh silently add a process.
+__host__ __device__ inline bool has_coulomb_scattering(ParticleType t) {
+  switch (t) {
+    case ParticleType::kElectron:
+    case ParticleType::kPositron:
+    case ParticleType::kMuonMinus:
+    case ParticleType::kMuonPlus:
+    case ParticleType::kPionPlus:
+    case ParticleType::kPionMinus:
+    case ParticleType::kKaonPlus:
+    case ParticleType::kKaonMinus:
+    case ParticleType::kProton:
+    case ParticleType::kAntiProton:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// The lower edge of this species' `CoulombScat` table, MeV, in this material.
+///
+/// TWO DIFFERENT NUMBERS FOR TWO GROUPS OF SPECIES, AND NEITHER IS THE OTHER'S DEFAULT.
+///
+/// For e+- it is `G4EmParameters::MscEnergyLimit()` - 100 MeV - because G4EmStandardPhysics
+/// calls `SetMinKinEnergy`, `SetLowEnergyLimit` and `SetActivationLowEnergyLimit` with it. The
+/// material-dependent threshold is computed too and never wins: it tops out at 98.15 MeV in
+/// hydrogen, so the e+- table always starts at exactly 100 MeV.
+///
+/// For mu/pi/K/p it is the process's own 100 eV floor raised by
+/// `coulomb_process_min_primary_energy`, which is where `SetStartFromNullFlag` puts the table's
+/// first non-zero node. In water (<A^-2/3> = 0.1686) that is 1.75 MeV for a proton and 0.283 MeV
+/// for a muon; in lead (0.02845) 0.295 MeV and 0.0477 MeV. So the threshold is not a detail:
+/// it is the difference between a 200 MeV proton having this process over its whole track and
+/// having it only above a couple of MeV.
+template <typename real_t>
+__host__ __device__ inline real_t coulomb_table_min_energy(ParticleType t, real_t mass,
+                                                            real_t inv_a23) {
+  if (t == ParticleType::kElectron || t == ParticleType::kPositron) {
+    return kMscEnergyLimit<real_t>();
+  }
+  return fmax(kCoulombHadronMinEnergy<real_t>(),
+              coulomb_process_min_primary_energy<real_t>(mass, inv_a23));
+}
+
+/// What the transport needs back from one `CoulombScat` PostStepDoIt.
+template <typename real_t>
+struct CoulombStepResult {
+  bool fired = false;              ///< false when the element draw found no cross section
+  Vec3<real_t> dir{real_t(0), real_t(0), real_t(1)};  ///< the primary's new direction, lab frame
+  real_t final_t = 0;             ///< the primary's kinetic energy after the scatter
+  real_t edep = 0;                ///< local AND non-ionizing, MeV - the sub-threshold recoil
+  bool emit_ion = false;
+  int ion_z = 0, ion_a = 0;
+  real_t ion_ekin = 0;
+  Vec3<real_t> ion_dir{real_t(0), real_t(0), real_t(1)};
+};
+
+/// One whole `G4CoulombScattering::PostStepDoIt`: element, isotope, nuclear mass, angle, recoil.
+///
+/// THE ORDER OF THE THREE RANDOM NUMBERS IS PART OF THE TRANSCRIPTION. `G4VEmProcess::
+/// PostStepDoIt` calls `SelectTargetAtom` (one uniform, and none for a single-element material)
+/// and then `SampleSecondaries`, which calls `SelectIsotopeNumber` (one uniform, and NONE for a
+/// single-isotope element) before `SampleSingleScattering` (one for the angle, one for phi, one
+/// for the rejection, and one more first if the electron channel is open). A port that drew them
+/// in another order, or drew one Geant4 skips, would be sampling the same distributions off a
+/// different stream - which is fine on its own and wrong the moment a second process shares the
+/// stream.
+///
+/// @param cut `coulomb_secondary_cut(range_cut_mm)` - the PROTON production threshold, used both
+///        as `cutEnergy` and as the recoil threshold. See the file header.
+/// @return `fired = false` when there is no cross section in this material at this energy, which
+///         is not an error: it is how the process switches itself off below the material's
+///         threshold. The caller must then leave the track alone.
+/// `__noinline__`, for the reason `coulomb_xs_per_volume` gives and one more: this is a branch
+/// that almost never runs. `CoulombScat`'s mean free path in water is 158 m for a 200 MeV
+/// proton and 483 m for a 1 GeV muon (`tests/test_step_hadron.cu` prints them), against B1's
+/// 300 mm envelope - so inlining the sampler, the form factor, the Mott ratio and the recoil
+/// into every step of every species buys nothing and cost the build.
+template <typename real_t, typename Rng>
+__host__ __device__ __noinline__ CoulombStepResult<real_t> coulomb_fire(
+    const data::Material<real_t>& m, ParticleType type, real_t tkin, const Vec3<real_t>& in_dir,
+    real_t cut, Rng& rng) {
+  CoulombStepResult<real_t> out;
+  out.dir = in_dir;
+  out.final_t = tkin;
+  const ParticleDef<real_t> pd = particle_def<real_t>(type);
+
+  // cosThetaMin = cosThetaMax = -1: MscThetaLimit is pi in option0 and the model's cosThetaMax
+  // is never reassigned. See the file header - the whole angular range, both here and in the
+  // msc model, and no handover between them.
+  constexpr real_t kCosMin = real_t(-1);
+  constexpr real_t kCosMax = real_t(-1);
+
+  const int ie = coulomb_select_element(m, type, tkin, cut, kCosMin, kCosMax, rng);
+  if (ie < 0) { return out; }
+  const int iz = static_cast<int>(m.z[ie] + real_t(0.5));
+
+  // SelectIsotopeNumber, then GetNuclearMass(ia, iz) - the mass factD and the recoil use, and
+  // NOT the element's mean atomic mass that the cross sections above were computed with.
+  const int ia = data::nist_sample_isotope_n(iz, static_cast<double>(rng.uniform()));
+  if (ia <= 0) { return out; }   // no NIST element at this Z; coulomb_refuse_isotope_selection
+  const real_t target_mass = data::nuclear_mass<real_t>(ia, iz);
+  if (!(target_mass > real_t(0))) { return out; }
+
+  const CoulombFinalState<real_t> fs = coulomb_sample_secondaries(
+      pd, type, tkin, m.inv_a23, iz, ia, target_mass, cut, kCosMin, kCosMax, in_dir, rng);
+
+  out.fired = true;
+  out.final_t = fs.final_t;
+  out.edep = fs.edep;
+  // The sampled angle is about the incoming direction, so rotateUz puts it in the lab frame -
+  // which is what G4ParticleChangeForGamma::ProposeMomentumDirection receives after
+  // `newDirection.rotateUz(direction)`.
+  {
+    const real_t sint = sqrt(fmax(real_t(0), (real_t(1) - fs.cos_theta)
+                                                 * (real_t(1) + fs.cos_theta)));
+    const Vec3<real_t> local{sint * cos(fs.phi), sint * sin(fs.phi), fs.cos_theta};
+    out.dir = rotate_uz(local, in_dir);
+  }
+  if (fs.emit_ion) {
+    out.emit_ion = true;
+    out.ion_z = fs.ion_z;
+    out.ion_a = fs.ion_a;
+    out.ion_ekin = fs.trec;
+    out.ion_dir = fs.ion_dir;
+  }
+  return out;
 }
 
 }  // namespace g4gpu::em

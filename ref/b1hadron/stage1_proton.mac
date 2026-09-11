@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a proton beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a proton beam, everything P9-P13 owes inactivated,
 # and Decay and hadElastic LEFT ACTIVE.
 #
 # B1's own hadronic beam. 210 MeV is the energy docs/RESULT.md's headline comparison uses:
@@ -18,7 +18,6 @@
 
 /process/inactivate hBrems
 /process/inactivate hPairProd
-/process/inactivate CoulombScat
 /process/inactivate protonInelastic
 
 # The stage, recorded by what RAN and not by what was intended. docs/RISK.md V43's

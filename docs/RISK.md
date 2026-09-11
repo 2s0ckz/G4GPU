@@ -5723,3 +5723,58 @@ natural because Geant4 does. Reproduced, not corrected. The second is the shape:
 not in the class that has the limit, it is in the class three levels up that never asks whether
 the element it is building can have electron shells.
 
+
+---
+
+### V61: the compiler died before the physics could be wrong
+
+Wiring `hadElastic` into `step_hadron` killed ptxas.
+
+    ptxas warning : Stack size for entry function 'run_step_neutral<...>' cannot be
+                    statically determined
+    Internal error
+    nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+
+Nothing about the message says what to do, and two things about it are misleading. The warning
+immediately above names `run_step_neutral`, which is not the kernel that grew - it is a
+pre-existing warning that every stepper emits because the boolean-solid distance routine
+recurses. And "Internal error" arrives with no file, line or symbol, so the only thing
+distinguishing it from a hung machine is the exit code.
+
+**What it was.** `run_step_hadron` is instantiated fourteen times in `transport_run.cu`, once per
+charged species, and each instantiation inlines the whole of whatever the elastic branch calls.
+That branch is G4ChipsElasticModel's 52-parameter tables, G4ElasticHadrNucleusHE's sampler,
+Gheisha's `SampleInvariantT`, G4BGGNucleonElasticXS, G4BGGPionElasticXS,
+G4UPiNuclearCrossSection, Barashenkov, G4HadronNucleonXsc and both Glauber-Gribov components.
+One kernel's worth of that compiles; fourteen do not.
+
+**How it was isolated, and this is the part worth keeping.** The failing compile is
+`transport_run.cu`, which takes eight minutes - so bisecting `__noinline__` placements against it
+would have been an afternoon. A ten-line translation unit that explicitly instantiates ONE
+kernel,
+
+    template __global__ void
+    run_step_hadron<double, ParticleType::kProton, StepTap<double>>(...);
+
+compiles in under two minutes and reports the same per-kernel register and stack numbers. It
+also answered the first question immediately: the single kernel compiled fine, which said the
+failure was the TRANSLATION UNIT's size and not any one kernel's, and therefore that the fix was
+to stop inlining rather than to simplify the physics.
+
+**The fix is also the right answer for the hot path**, which is why it is not a workaround.
+`had::elastic_apply` and `had::elastic_xs_per_volume` are `__noinline__`. The elastic branch
+fires 16 times in 900 steps (`tests/test_step_hadron.cu`), because the elastic mean free path in
+water is 466 mm for a 200 MeV pion and 2013 mm for a 200 MeV proton against steps of tens of mm -
+so what was being inlined into every step of every charged hadron is a branch that almost never
+runs. Measured with the one-kernel reproducer, on the proton kernel:
+
+    baseline (no elastic)                    2464 B stack,  652/1728 B spill, 255 registers
+    elastic inlined                          2912 B stack, 1052/1292 B spill, 255 registers
+    elastic_apply __noinline__               3376 B stack,  916/1592 B spill, 255 registers
+    both __noinline__                        3440 B stack,  916/1512 B spill, 255 registers
+
+Those numbers are the REPRODUCER's, not the engine's: ptxas allocates differently when it sees
+one entry point instead of fourteen, and the same baseline measured through the full
+`transport_run.cu` is 3696 B and 68/36 B of spill. Comparing a reproducer number against a
+full-build number is how a measurement like this goes wrong, so both series are stated.
+

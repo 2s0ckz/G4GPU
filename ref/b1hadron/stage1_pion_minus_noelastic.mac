@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a pi- beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a pi- beam, everything P9-P13 owes inactivated,
 # and Decay LEFT ACTIVE.
 #
 # One line more than pi+: `hBertiniCaptureAtRest`. See muon_minus for what that switch
@@ -23,7 +23,6 @@
 
 /process/inactivate hBrems
 /process/inactivate hPairProd
-/process/inactivate CoulombScat
 /process/inactivate pi-Inelastic
 /process/inactivate hBertiniCaptureAtRest
 /process/inactivate hadElastic

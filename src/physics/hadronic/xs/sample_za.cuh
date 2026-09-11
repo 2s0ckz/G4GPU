@@ -312,6 +312,49 @@ __host__ __device__ inline TargetZA store_sample_za_fn(const XsFn& xs,
 }
 
 
+/// `store_sample_za_fn` with the two uniforms drawn where Geant4 draws them - which is the
+/// number of them as well as the order (P8b).
+///
+/// THE TWO-ARGUMENT FORM CANNOT EXPRESS "NO DRAW", AND SampleZandA HAS TWO OF THOSE.
+///
+///     if (mat->GetNumberOfElements() > 1) { ... G4UniformRand() ... }      // the element
+///     std::size_t nIso = anElement->GetNumberOfIsotopes();
+///     iso = anElement->GetIsotope(0);
+///     if (1 < nIso) { ... }                                               // the isotope
+///
+/// A single-element material consumes NO element uniform and a single-isotope element consumes
+/// NO isotope uniform, and the second test is on the element that was just chosen - so a caller
+/// of the two-argument form has to know the chosen element's isotope count before it picks the
+/// element. Which is to say it cannot, and every existing caller is a test feeding fixed
+/// uniforms. In transport the draw count IS the random stream: aluminium and sodium are
+/// single-isotope elements, so a port that always drew would put every subsequent sample in a
+/// water-plus-aluminium detector on a different number from Geant4's.
+///
+/// The element index is decided from the partial sums first, exactly as the two-argument form
+/// does, and only then is the isotope uniform drawn - so this consumes 0, 1 or 2 uniforms and
+/// Geant4 consumes the same count on the same material and element.
+template <typename real_t, typename XsFn, typename IsoArray, typename Rng>
+__host__ __device__ inline TargetZA store_sample_za_rng(const XsFn& xs,
+                                                        const data::Material<real_t>& mat,
+                                                        const IsoArray& isos,
+                                                        const MaterialXs<real_t>& mxs,
+                                                        Rng& rng) {
+  const real_t q_elm = (mat.n_elements > 1) ? rng.uniform() : real_t(0);
+  int index = 0;
+  if (mat.n_elements > 1) {
+    const real_t cross = mxs.total * q_elm;
+    for (int i = 0; i < mat.n_elements; ++i) {
+      if (cross <= mxs.cumulative[i]) {
+        index = i;
+        break;
+      }
+    }
+  }
+  const ElementIsotopes<real_t> iso = isos[index];
+  const real_t q_iso = (iso.n > 1) ? rng.uniform() : real_t(0);
+  return store_sample_za_fn<real_t>(xs, mat, isos, mxs, q_elm, q_iso);
+}
+
 /// True when the data set samples an isotope by abundance alone - the per-class fallback test
 /// listed in the file header.
 template <typename real_t>

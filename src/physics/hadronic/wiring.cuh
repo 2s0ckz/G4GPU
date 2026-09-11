@@ -30,6 +30,7 @@
 #include "core/particle.cuh"
 #include "core/units.cuh"
 #include "physics/decay/decay.cuh"
+#include "physics/hadronic/elastic_wiring.cuh"
 
 namespace g4gpu::had {
 
@@ -112,6 +113,16 @@ enum class HadronicRefusal : int {
   /// An antinucleus's elastic scattering: `G4ComponentAntiNuclNuclearXS` (refused by name in
   /// P2's `xs/refusal.cuh`) and `G4AntiNuclElastic` (not started in P5). The antiproton
   /// therefore has NO hadronic process at all in this transport.
+  ///
+  /// STRUCTURALLY ZERO, and it stays that way now that every other charged hadron has an
+  /// elastic process. `had::elastic_channel(kAntiProton)` is `kAntiNucleusRefused` and
+  /// `elastic_xs_per_volume` returns zero for it, so an antiproton draws no hadronic
+  /// interaction length at all - the gap is in the CROSS SECTION and not in a final state that
+  /// could not be applied, and this ledger counts interactions the answer is missing rather
+  /// than steps that had no chance of one. Booking it per step would count chances. The size of
+  /// the gap is not measurable from this port; it is the difference between Geant4's own two
+  /// pbar columns, which `ref/b1hadron/` does not run because P1 transports no pbar primary in
+  /// the stage-1 set.
   kAntiNucleusElastic,
   /// A decay whose channel P4 refused - `DecayStatus` other than kOK or kStable. The parent is
   /// killed with its energy deposited, which is what Geant4's DECAY101 path does, and the
@@ -119,6 +130,16 @@ enum class HadronicRefusal : int {
   kDecayChannel,
   /// A capture cascade that produced more secondaries than the final state can hold.
   kCaptureOverflow,
+  /// An elastic final state with a secondary beyond the first.
+  ///
+  /// A TRIPWIRE, NOT AN EXPECTED COUNT. `G4HadronElasticProcess::PostStepDoIt` looks at
+  /// `GetSecondary(0)` and drops the rest with `result->Clear()` (note 4 of
+  /// `elastic/elastic_process.cuh`), and no elastic model in QBBC emits more than one - which
+  /// is why `step_hadron` gives the final state a capacity of ONE, 56 bytes of kernel stack
+  /// against the package default's 450. If this counter ever moves, a model started emitting
+  /// something this transport is throwing away, and it says so instead of the stack quietly
+  /// being too small.
+  kElasticDropped,
   kNumHadronicRefusals,
 };
 
@@ -142,6 +163,9 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "a decay channel P4 refused (see DecayStatus)";
     case HadronicRefusal::kCaptureOverflow:
       return "a capture cascade longer than the final state can hold";
+    case HadronicRefusal::kElasticDropped:
+      return "an elastic final state with more than one secondary - G4HadronElasticProcess "
+             "keeps only GetSecondary(0)";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";
@@ -166,12 +190,20 @@ struct HadronicRefusalBooks {
 /// Books one refusal. `energy` is what the answer is missing because of it: for a stopping
 /// process the total energy the particle would have released, for an absent final state the
 /// projectile's kinetic energy.
+/// `__host__ __device__` since P8b, so that `step_hadron` can be run on the host and compared
+/// against the device bit for bit (`tests/test_step_hadron.cu`). A host caller is
+/// single-threaded, so the host arm is a plain increment and not a serialised atomic.
 template <typename real_t>
-__device__ inline void book_refusal(const HadronicRefusalBooks& books, HadronicRefusal r,
-                                    real_t energy) {
+__host__ __device__ inline void book_refusal(const HadronicRefusalBooks& books,
+                                             HadronicRefusal r, real_t energy) {
   const int i = static_cast<int>(r);
+#ifdef __CUDA_ARCH__
   if (books.count != nullptr) { atomicAdd(&books.count[i], 1); }
   if (books.energy != nullptr) { atomicAdd(&books.energy[i], static_cast<double>(energy)); }
+#else
+  if (books.count != nullptr) { books.count[i] += 1; }
+  if (books.energy != nullptr) { books.energy[i] += static_cast<double>(energy); }
+#endif
 }
 
 // =============================================================================================
@@ -198,13 +230,18 @@ struct HadronicWiring {
   /// `hadElastic`: the elastic sub-process of the neutron general process, and - when a charged
   /// hadron gets one - `hadElastic` on its own process manager.
   ///
-  /// READ IN ONE PLACE, `step_neutral`'s cross-section gate, and inert there too because the
-  /// table it would gate is null. It is here rather than added later because the flag is the
-  /// `/process/inactivate` equivalent and its meaning does not depend on whether the process
-  /// exists yet; what it must not do is imply that it does. `step_hadron` does not read it, and
-  /// that is the honest state: see the `hadElastic` bullet in that function's header for what
-  /// the kernel is missing (the isotope abundances `SampleZandA` needs) and what it costs.
+  /// READ IN TWO PLACES NOW: `step_neutral`'s cross-section gate, and `step_hadron`'s elastic
+  /// interaction length. P8b closed the gap P8 named here - the isotope abundances
+  /// `SampleZandA` draws a target from are in `data/isotope_abundance.hh` - so a charged hadron
+  /// in this transport has a real hadronic process. Which (cross section, model) pair per
+  /// species is `had::elastic_channel`, transcribed from
+  /// `G4HadronElasticPhysics::ConstructProcess` in `elastic_wiring.cuh`.
   bool hadron_elastic = true;
+  /// The device tables `hadElastic` reads: the two BGG per-Z tables and
+  /// G4ElasticHadrNucleusHE's per-(pion, Z) G4ElasticData. Null in a run with no charged
+  /// hadron, which costs nothing and behaves exactly as a species with no elastic process
+  /// does. `host/hadronic_upload.cuh` fills them.
+  ElasticTables<real_t> elastic{};
   /// `nCapture` - the capture sub-process of the neutron general process. Same state as
   /// `hadron_elastic`: read by the gate, inert because the table is null. P7's model is
   /// written and tested (`tests/test_capture.cu`); what is not written is the upload of P3's
@@ -358,7 +395,7 @@ __host__ __device__ inline bool decays_in_flight(ParticleType t) {
 ///
 /// @return the number of products that became tracks or bookings; the rest are refused.
 template <typename real_t, typename Emitter>
-__device__ inline int emit_decay_products(const decay::DecayProducts<real_t>& products,
+__host__ __device__ inline int emit_decay_products(const decay::DecayProducts<real_t>& products,
                                           Emitter& emitter,
                                           const HadronicRefusalBooks& books) {
   int emitted = 0;

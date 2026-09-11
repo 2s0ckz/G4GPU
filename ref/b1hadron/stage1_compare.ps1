@@ -37,7 +37,12 @@
 param(
   [int]$Events = 500000,
   [string]$Species = "",
-  [switch]$SkipGeant4
+  [switch]$SkipGeant4,
+  # Skips the `_noelastic` run, which is HALF the Geant4 time and is the DIAGNOSTIC column
+  # rather than the like-for-like one now that the port has hadElastic. Use it when the
+  # question is whether the port agrees, not how big the effect it just gained was; a table
+  # printed with it on says "-" in that column rather than leaving a stale number standing.
+  [switch]$SkipNoElastic
 )
 
 $ErrorActionPreference = "Stop"
@@ -163,7 +168,7 @@ foreach ($s in $want) {
       # The process dump, kept so the stage a number was measured at is recorded by what RAN.
       $dumps[$s] = ($g4Out | Select-String -Pattern 'Active|InActive' | ForEach-Object { $_.Line })
       $neSrc = Join-Path $here "stage1_${s}_noelastic.mac"
-      if (Test-Path -LiteralPath $neSrc) {
+      if ((-not $SkipNoElastic) -and (Test-Path -LiteralPath $neSrc)) {
         $neMac = New-Macro $neSrc $Events
         $neOut = Invoke-G4 $neMac
         $g4ne = Get-Dose $neOut
@@ -182,12 +187,17 @@ function Fmt($v) { if ($null -eq $v) { "-" } else { "{0:N4}" -f ($v * 1e9) } }
 Write-Output ""
 Write-Output "STAGE 1, example B1, $Events events per run per side, doses in nGy"
 Write-Output ""
+Write-Output "THE LIKE-FOR-LIKE COLUMN IS 'G4 stage 1' - the FIRST Geant4 column - because the"
+Write-Output "port has hadElastic and CoulombScat since P8b. 'G4 no elastic' is the same run"
+Write-Output "with hadElastic inactivated, and its difference from the first is what hadElastic"
+Write-Output "is worth for that species in this geometry. See stage1_README.md."
+Write-Output ""
 Write-Output ("{0,-11} {1,20} {2,20} {3,9} {4,7} {5,20} {6,9} {7,7}" -f `
-  "species", "port", "G4 no elastic", "diff", "sigma", "G4 stage 1", "diff", "sigma")
+  "species", "port", "G4 stage 1", "diff", "sigma", "G4 no elastic", "diff", "sigma")
 foreach ($r in $rows) {
   $p = $r.Port
   $line = "{0,-11} {1,11} +/- {2,-6}" -f $r.Name, (Fmt $p.Dose), (Fmt $p.Rms)
-  foreach ($col in @($r.G4NoEl, $r.G4)) {
+  foreach ($col in @($r.G4, $r.G4NoEl)) {
     if ($null -eq $col) {
       $line += " {0,20} {1,9} {2,7}" -f "-", "-", "-"
     } else {

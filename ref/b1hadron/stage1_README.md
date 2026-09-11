@@ -15,8 +15,12 @@ Geant4 QBBC, example B1, with
   `muMinusCaptureAtRest` (P12),
 * `hBrems`, `hPairProd`, `muBrems`, `muPairProd` inactivated (no `SampleSecondaries` for either
   radiative model - docs/PORTED.md 1.3),
-* `CoulombScat` inactivated (P14),
-* and **`Decay` and `hadElastic` LEFT ACTIVE**, because those are what P8 adds.
+* and **`Decay`, `hadElastic` and `CoulombScat` LEFT ACTIVE**.
+
+`CoulombScat` was inactivated here until P8b wired it (docs/PORTED.md 2.1.6). Nothing is
+inactivated on the Geant4 side any more except processes this port does not have, which is what
+the plan's staged method asks for (docs/HADRONIC_PLAN.md section 4) and what makes the first
+column below the like-for-like one.
 
 The port runs in `HadronicStage::kStage1`, whose one effect is that a stopped pi-, K- or mu-
 DECAYS: on the Geant4 side its at-rest capture has just been switched off and `G4Decay` is the
@@ -28,12 +32,13 @@ does, and the port refuses the capture by name - see `physics/hadronic/wiring.cu
 `stage1_<species>.mac` is the configuration above. `stage1_<species>_noelastic.mac` is the same
 with `hadElastic` inactivated as well.
 
-The second is the like-for-like for a port that has **decay and not elastic**, which is what
-this branch delivers; the first is the like-for-like for one that has both. Running both gives
-two numbers whose DIFFERENCE is what `hadElastic` is worth for that species and that geometry -
-which is the size of the remaining gap, measured rather than asserted, and the number the next
-package is judged against. A single macro would have left "the port is low, and hadElastic is
-probably why" as a sentence instead of a measurement.
+**Since P8b the FIRST one is the like-for-like**, because the port has `hadElastic` now. The
+second is kept, and it is not redundant: the difference between the two columns is what
+`hadElastic` is worth for that species and that geometry, and that number is now the size of
+what the port GAINED rather than of what it was missing. It is the same measurement read in the
+other direction, and keeping it is what lets "the port followed Geant4's move" be checked
+against how big the move was. P8's table below has both columns for the state before the wiring;
+P8b's has both for the state after it.
 
 ## The neutron is a special case and it is not this port's fault
 

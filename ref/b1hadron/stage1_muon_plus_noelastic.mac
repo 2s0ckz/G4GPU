@@ -1,4 +1,4 @@
-# Stage 1: example B1 with a mu+ beam, everything P9-P14 owes inactivated,
+# Stage 1: example B1 with a mu+ beam, everything P9-P13 owes inactivated,
 # and Decay LEFT ACTIVE.
 #
 # A muon has NO hadElastic and no inelastic: `muonNuclear` (subtype 121) is the only
@@ -27,7 +27,6 @@
 
 /process/inactivate muBrems
 /process/inactivate muPairProd
-/process/inactivate CoulombScat
 /process/inactivate muonNuclear
 /process/inactivate hadElastic
 

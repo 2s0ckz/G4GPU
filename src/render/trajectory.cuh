@@ -44,13 +44,29 @@ struct TrajectoryBuffer {
   int* dropped;
   int max_event;  ///< capture only events with id < this; 0 disables capture entirely
 
+  /// `__host__ __device__`, and the host arm is not decoration.
+  ///
+  /// The steppers call this, and P8b made `step_hadron` host-callable so that a test can run
+  /// the SAME function on both sides and compare the two bit for bit - which is how every
+  /// other piece of physics in this port is checked, and which `step_hadron` had no way to be
+  /// (`tests/test_step_hadron.cu`). The only thing in this function that was device-only was
+  /// the two atomics, and a host caller is single-threaded by construction, so the host arm is
+  /// a plain increment rather than a serialisation of a parallel algorithm.
   template <typename real_t>
-  __device__ void add(const Vec3<real_t>& a, const Vec3<real_t>& b, ParticleType type,
-                      int event, unsigned int track_id) {
+  __host__ __device__ void add(const Vec3<real_t>& a, const Vec3<real_t>& b, ParticleType type,
+                               int event, unsigned int track_id) {
     if (max_event <= 0 || event >= max_event) { return; }
+#ifdef __CUDA_ARCH__
     const int slot = atomicAdd(count, 1);
+#else
+    const int slot = (*count)++;
+#endif
     if (slot >= capacity) {
+#ifdef __CUDA_ARCH__
       atomicAdd(dropped, 1);
+#else
+      ++(*dropped);
+#endif
       return;
     }
     x0[slot] = static_cast<float>(a.x);
