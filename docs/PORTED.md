@@ -636,6 +636,74 @@ is energy Geant4 genuinely transported out of the box, so the phantom was widene
 rather than the limit widened to excuse it - the same rule this package applied to the plateau.
 At 150 mm the deposited total is 100.0000% of the beam energy on both sides.
 
+**The numbers.** `tests/test_ion_transport.cu`, six sections:
+
+* the scaling is EXACTLY the identity for the ten species that own a table and is not for the
+  three that do not - `range_for/lookup` is 0.5722 for the deuteron, 0.4139 for the triton and
+  **0.1032** for He3, whose `chargeSqRatio` is the dynamic 4.0007 at 50 MeV in water;
+* a stopping track's total true path length against `range_for`: proton +0.152%, alpha +0.055%,
+  deuteron +0.020%, triton -0.011%, and the energy balance closes to 0 in every case;
+* `sizeof(TrackState<double>)` 248 with `ion_za` at offset 4 and `pos` at offset 8, and 308
+  natural isotopes round-tripping through the 16-bit field;
+* `ion_particle_def` against `ref/oracle/ion_definitions.csv` for eleven nuclides, mass bit for
+  bit - and that file is also where the spin refusal is bounded: 2J is 0 for C12, O16, O18,
+  Mg24, S32, Ca40, Fe56 and Pb208 and non-zero for Li7 (1.5), N14 (1) and P31 (0.5);
+* a nucleus stepped to a stop in water - an O16 of 0.55 MeV has a range of **1.35 um**, dies on
+  its first step and deposits everything where the scatter happened, which is where Geant4 puts
+  it too;
+* against `ref/oracle/ion_tables.csv` - 2684 rows, eleven nuclides in B1's four materials, 61
+  energies each - **`q2_eff` worst 2.30e-15**, dE/dx worst 3.67e-2 (Ca40 in air at 121 MeV,
+  which is GenericIon's own table in that band), range worst 1.97e-2.
+
+`tests/test_step_hadron.cu` on the device against the host, unchanged at 900 steps and a worst
+relative deviation of **3.197e-13**, now also comparing each secondary's NUCLIDE exactly: 16
+elastic scatters produced 13 recoil tracks, **7 of them GenericIon**, drawn as (Z, A) = (8, 16)
+and (1, 1) - oxygen recoils in water, which is exactly the population the gate was losing.
+
+**THE GATE, before and after.** `proton_depth.exe 6000 100 out/port_depth.csv 0.7 0.5` against
+the regenerated `ref/oracle/proton_depth.csv` (100,000 events), through
+`tools/compare_depth.ps1` with its limits untouched:
+
+| metric | before (P8b, `build_all.bat`) | after | limit |
+|---|---|---|---|
+| total, Geant4 | exact, but see the note above | **100.0000%** | 1e-6 |
+| total, port | 99.9141% **FAIL** | **100.0000%** | 1e-6 |
+| plateau, port/G4 per proton | 1.01322 (+1.322%) **FAIL** | **1.00158** (+0.158%) | 1.000% |
+| R80 | G4 77.798, port 77.743, diff -0.054 mm | G4 **77.730**, port **77.742**, diff **+0.012** mm | 0.5 mm |
+| 80-20 falloff width | G4 1.126, port 1.166, diff +0.040 mm | G4 **1.152**, port **1.166**, diff **+0.014** mm | 0.15 mm |
+
+Both failures closed, and by different halves. The TOTAL is item 1: 929 GenericIon secondaries
+carrying 515.136 MeV of 600,000 became tracks, and the banner
+`*** 929 SECONDARIES OF SPECIES THIS PORT CANNOT TRANSPORT ***` is gone. The PLATEAU is item 2:
+the reference's own plateau per proton rose by about 1.2% when `hadElastic` was switched on in
+it, because a deflected proton takes a longer path through each slab and its recoils deposit
+where they were made - and the same effect shortened Geant4's R80 by 0.068 mm, which is why R80
+and the falloff width both improved as well without anything in the port changing them.
+
+**The register and stack cost**, `transport_run.cu` with `-Xptxas -v`, measured on this branch
+before and after. `run_step_hadron` goes from 11 instantiations to 13 - He3 and GenericIon - and
+docs/RISK.md V55 is the entry about what happened the last time that translation unit grew:
+
+| kernel | instantiations | registers | stack frame | spill st/ld | cmem[0] |
+|---|---|---|---|---|---|
+| `run_step_hadron` | 11 -> **13** | 255 -> 255 | 4512 -> **4576** B | 96/52 -> 100/52 | 1584 -> 1600 |
+| `run_step_neutral` | 2 | 255 -> 255 | 3728 -> **3744** B | 92/52 -> 96/52 | 1608 -> 1624 |
+| `run_step_lepton` | 2 | 255 -> 255 | 3056 -> **3040** B | 76/28 -> 80/28 | 1448 -> 1464 |
+| `run_step_gamma` | 1 | 255 -> 255 | 2400 -> **2416** B | 404/868 -> 368/676 | 1448 -> 1464 |
+
++64 bytes on the hadron kernel's frame against the 16384-byte limit `Upload` sets, no change in
+register count, and ptxas survived. The **+16 bytes of cmem[0] on every kernel is the `ion_za`
+pointer** - two `TrackBuffer`s passed by value, eight bytes each - which is a check on the claim
+that the field itself is free: the STRUCT did not grow (`sizeof(TrackState<double>)` is 248
+before and after), and the only thing that did is the argument list. One of the thirteen hadron
+entries spills 184/140 rather than 100/52; that is the instantiation carrying the ion branch.
+
+Compile time is the thing to watch rather than the frame. The translation unit took about
+ninety minutes on this machine for the thirteen-plus-four entry points, against the eight
+minutes V55 records for eleven - with three Geant4 cmake builds running beside it, so it is not
+a clean measurement, but the direction is the one V55 warns about and the next package to add a
+kernel should measure it with V55's one-kernel reproducer before it adds one.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

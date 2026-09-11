@@ -488,6 +488,12 @@ int main() {
   std::printf("  %-8s %6s %8s %8s %8s %8s %8s %10s\n", "species", "n", "elastic", "coulomb",
               "decay", "delta", "recoils", "worst rel");
   long long total_elastic = 0, total_coulomb = 0, total_decay = 0, total_recoil = 0;
+  // The distinct nuclides the target draw produced, so the line at the end of this block
+  // names the nuclei that are tracks rather than only counting them.
+  long long total_ion = 0;
+  constexpr int kMaxZaSeen = 32;
+  int za_list[kMaxZaSeen] = {};
+  int za_seen = 0;
   double worst_overall = 0.0;
   int n_compared = 0;
 
@@ -541,7 +547,7 @@ int main() {
     // A budget on the FAIL lines: 900 steps that all disagree would otherwise print 900 of
     // them and bury the summary. The COUNT is still exact - `g_fails` counts every one.
     int printed = 0;
-    int n_el = 0, n_coul = 0, n_dec = 0, n_delta = 0, n_rec = 0;
+    int n_el = 0, n_coul = 0, n_dec = 0, n_delta = 0, n_rec = 0, n_ion = 0;
     for (int i = 0; i < kPer; ++i) {
       Outcome h{};
       one_step<int>(hscene, tracks[i], b.type, hhad, &h);
@@ -622,6 +628,40 @@ int main() {
           const ParticleType st = static_cast<ParticleType>(h.sec_type[j]);
           if (st == ParticleType::kElectron) { continue; }  // a delta cannot be here, but say so
           ++n_rec;
+          // WHICH NUCLIDE, AND WHETHER IT IS A TRACK. P8c's whole first deliverable is that a
+          // recoil heavier than an alpha is transported rather than counted, and the two are
+          // told apart by exactly one thing: `species_disposition`. A recoil that came back as
+          // `kGenericIon` with `sec_za == 0` would be a nucleus with no nuclide - `step_hadron`
+          // refuses one by name - so the encoding is checked here, at the only place in this
+          // tree where a real recoil is produced by a real cross section.
+          if (st == ParticleType::kGenericIon) {
+            ++n_ion;
+            if (h.sec_za[j] == 0) {
+              std::printf("  FAIL: %s track %d: a GenericIon recoil with no nuclide\n", b.name,
+                          i);
+              ++g_fails;
+            }
+            if (species_disposition(st) != SpeciesDisposition::kStepped) {
+              std::printf("  FAIL: kGenericIon is not stepped, so the recoil is refused\n");
+              ++g_fails;
+            }
+          }
+          if (h.sec_za[j] != 0) {
+            const int rz = ion_z_of(static_cast<unsigned short>(h.sec_za[j]));
+            const int ra = ion_a_of(static_cast<unsigned short>(h.sec_za[j]));
+            if (particle_type_of_nucleus(rz, ra) != st) {
+              std::printf("  FAIL: %s track %d: nuclide (%d, %d) is not species %d\n", b.name,
+                          i, rz, ra, h.sec_type[j]);
+              ++g_fails;
+            }
+            if (za_seen < kMaxZaSeen) {
+              bool have = false;
+              for (int k = 0; k < za_seen; ++k) {
+                if (za_list[k] == h.sec_za[j]) { have = true; break; }
+              }
+              if (!have) { za_list[za_seen++] = h.sec_za[j]; }
+            }
+          }
         }
       }
     }
@@ -630,6 +670,7 @@ int main() {
     total_coulomb += n_coul;
     total_decay += n_dec;
     total_recoil += n_rec;
+    total_ion += n_ion;
     std::printf("  %-8s %6d %8d %8d %8d %8d %8d %10.3e\n", b.name, kPer, n_el, n_coul, n_dec,
                 n_delta, n_rec, worst);
     cudaFree(d_in);
@@ -676,6 +717,23 @@ int main() {
   // calling it directly on both sides rather than by waiting for it to win a step.
   std::printf("\n  hadElastic fired %lld times, CoulombScat %lld, Decay %lld; %lld recoils "
               "became tracks\n", total_elastic, total_coulomb, total_decay, total_recoil);
+  // WHICH NUCLEI, because "13 recoils became tracks" was true before P8c as well - the emitter
+  // recorded the push and `BufferEmitter` then refused the ones with no kernel. The line that
+  // distinguishes the two states is this one: a GenericIon recoil is a nuclide with a kernel
+  // now, and a zero here would mean the target draw is only ever making light nuclei and the
+  // whole first deliverable is untested by this file.
+  std::printf("  of which %lld were GenericIon - the species that had no kernel before P8c."
+              " Distinct nuclides drawn: ", total_ion);
+  for (int k = 0; k < za_seen; ++k) {
+    std::printf("%s(%d,%d)", (k > 0) ? " " : "",
+                ion_z_of(static_cast<unsigned short>(za_list[k])),
+                ion_a_of(static_cast<unsigned short>(za_list[k])));
+  }
+  std::printf("%s\n", (za_seen == 0) ? "none" : "");
+  if (total_ion == 0) {
+    fail("no elastic recoil in 900 steps was heavier than an alpha, so nothing here exercises "
+         "the ion path this file's section 4 is about");
+  }
   if (total_elastic == 0) {
     fail("hadElastic never fired in 900 steps - the process is wired and inert");
   }
