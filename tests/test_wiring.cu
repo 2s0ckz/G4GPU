@@ -320,10 +320,18 @@ int main() {
       check(particle_type_of_pdg(code + 2) == nn.t,
             std::string("isomer digit ignored for ") + buf);
     }
-    // A heavy recoil is a REFUSED species, not a transported one, and that is what makes the
-    // energy ledger in EmitterBooks necessary. Asserted rather than commented.
-    check(species_disposition(ParticleType::kGenericIon) == SpeciesDisposition::kRefused,
-          "a heavy recoil maps to a refused species");
+    // A heavy recoil is a TRANSPORTED species as of P8c, and this assertion is the one it
+    // inverted. It used to read `== kRefused`, with "that is what makes the energy ledger in
+    // EmitterBooks necessary" over it - and the ledger showed 929 GenericIons carrying
+    // 515.136 MeV out of `build_all.bat`'s 6000-proton depth-dose gate, which is what the
+    // package was written for. It is kept rather than deleted because the DIRECTION is the
+    // claim: `species_disposition` is the one function that decides whether a recoil becomes a
+    // track or a counter, and it is the only thing standing between `push_nucleus` and a
+    // number in a report.
+    check(species_disposition(ParticleType::kGenericIon) == SpeciesDisposition::kStepped,
+          "a heavy recoil maps to a transported species");
+    check(species_disposition(ParticleType::kHe3) == SpeciesDisposition::kStepped,
+          "He3 maps to a transported species");
     std::printf("3. the nuclear encoding: %d nuclides, both directions, isomer digit ignored\n",
                 int(sizeof(nucs) / sizeof(nucs[0])));
   }
