@@ -15,6 +15,17 @@
 # Same answer at twenty-five times the statistics, and it is now one row of six: every positive
 # hadron measured agrees inside 0.35% and every negative one is 3.8% to 9.5% high. The negative
 # half is pion_minus_port.mac and the reason is in docs/RISK.md, not in the pion.
+#
+# RE-RUN AFTER THE V46 FIX, same 500,000 events: 632.349 +/- 0.668 nGy, BIT-IDENTICAL. That is
+# the point of re-running a positive. The fix changes the interpolation of the dE/dx and range
+# tables for the SECOND-registered member of each charge pair, and pi+ is the first; if this
+# number had moved by one digit the predicate would be selecting the wrong species. The pi-
+# beside it went from 630.922 to 600.871 against Geant4's 600.831.
+#
+# The event count in this file was 20,000 while its header quoted 500,000-event numbers, which
+# the macro as written could not produce - B1 prints a CUMULATIVE dose, so the two counts give
+# 25.2 nGy and 632 nGy for the same physics. It is 500,000 now, which is also what the 0.2%
+# effect left after the fix needs.
 
 /run/initialize
 /control/verbose 0
@@ -23,5 +34,5 @@
 /gun/particle pi+
 /gun/energy 200 MeV
 
-/run/printProgress 5000
-/run/beamOn 20000
+/run/printProgress 100000
+/run/beamOn 500000

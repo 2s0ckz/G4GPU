@@ -8,6 +8,15 @@
 # `hadron_ioni_dedx` the port's two muons were BIT-IDENTICAL, which is what found that bug; the
 # 0.223% that replaced it is the asymmetry Geant4's own tables imply, and the 4.36% is not.
 # docs/RISK.md.
+#
+# RE-RUN AFTER THE V46 FIX, same 500,000 events: 598.660 +/- 0.634 nGy, BIT-IDENTICAL. mu+ is
+# the first-registered member of its pair and must not move. The mu- beside it went from
+# 597.326 to 575.145 against Geant4's 575.568, from 24.7 sigma to 0.49, and the port's own two
+# muons now differ by 4.09% where Geant4's differ by 4.36%.
+#
+# So this file has now caught two opposite failures with the same pair of numbers: a split of
+# ZERO when the shell correction was not reaching G4MuBetheBlochModel, and a split of 0.223%
+# when the reference's was 4.36%. Neither was visible in either muon on its own.
 
 /run/initialize
 /control/verbose 0

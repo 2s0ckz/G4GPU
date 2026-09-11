@@ -1,16 +1,28 @@
 # The port's half of the pi- like-for-like; its partner is pion_minus_emonly.mac. The two files
 # differ only by the inactivations, which is the whole point of keeping them as a pair.
 #
-# MEASURED, 500,000 events:
+# MEASURED, 500,000 events. CLOSED - docs/RISK.md V46.
 #
-#   pi-  port 630.922 +/- 0.666 nGy   Geant4 600.831 +/- 0.636   +5.01%, 32.7 sigma
-#   pi+  port 632.349 +/- 0.668 nGy   Geant4 633.446 +/- 0.668   -0.17%, 1.16 sigma
+#                    port BEFORE         port AFTER          Geant4 EM-only      after
+#   pi-   630.922 +/- 0.666   600.871 +/- 0.636   600.831 +/- 0.636   +0.007%, 0.04 sigma
+#   pi+   632.349 +/- 0.668   632.349 +/- 0.668   633.446 +/- 0.668   -0.17%,  1.16 sigma
 #
-# THE PAIR IS THE MEASUREMENT, not either number. The port separates its two pions by 0.226%
-# and Geant4 separates its own by 5.43%; the restricted dE/dx table Geant4 dumped from the same
-# install separates them by 0.023% in water and 0.233% in the bone the dose is scored in. The
-# port agrees with the table. Geant4's transport does not agree with its own table, by a factor
-# of twenty. docs/RISK.md has the diagnostics and what they exclude.
+# "BEFORE" was +5.01% at 32.7 sigma. The pi+ column is BIT-IDENTICAL across the fix, which is
+# what says the change selected the negative and did not simply rescale both.
+#
+# THE PAIR IS THE MEASUREMENT, not either number, and the pair is now right too: the port
+# separates its two pions by 5.24% where Geant4 separates its own by 5.43%, against 0.226%
+# before. The restricted dE/dx table this install dumps still separates them by 0.023% in
+# water and 0.233% in the scored bone - Geant4's transport still does not agree with Geant4's
+# own dE/dx table, and it never did. What changed is that the port stopped agreeing with the
+# table and started agreeing with the transport, because the table the transport actually
+# reads is the RANGE table, whose interpolation Geant4 makes linear for the second-registered
+# particle of every charge pair. docs/RISK.md V46 has the five source lines; ref/chargeodd/
+# has the diagnostic that found them.
+#
+# The rms moved with the mean: 0.666 -> 0.636 nGy, against Geant4's 0.636. A per-event spread
+# that lands on the reference's is a second and independent sign that the distribution moved
+# and not just its first moment.
 
 /run/initialize
 /control/verbose 0

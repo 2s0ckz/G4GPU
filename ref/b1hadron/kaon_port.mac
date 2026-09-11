@@ -17,6 +17,14 @@
 # The 0.005% at 2,000 events was indeed luck; 0.18% at 1.21 sigma is the real size of the
 # agreement, and it is still agreement. The negative kaon at the same count is +9.52% at
 # 61 sigma - kaon_minus_port.mac and docs/RISK.md.
+#
+# RE-RUN AFTER THE V46 FIX, same 500,000 events: 1242.97 +/- 1.306 nGy, BIT-IDENTICAL. K+ is
+# the FIRST-registered member of its pair and must not move; the K- beside it went from 1239.62
+# to 1132.65 against Geant4's 1131.87, from 61.0 sigma to 0.46.
+#
+# The event count in this file was 2,000 while its header quoted 500,000-event numbers, which
+# the macro as written could not produce - B1's dose is CUMULATIVE. It is 500,000 now: the
+# effect left after the fix is 0.18%, and a 2,000-event run of this beam is +/-1.7%.
 
 /run/initialize
 /control/verbose 0
@@ -25,5 +33,5 @@
 /gun/particle kaon+
 /gun/energy 200 MeV
 
-/run/printProgress 500
-/run/beamOn 2000
+/run/printProgress 100000
+/run/beamOn 500000
