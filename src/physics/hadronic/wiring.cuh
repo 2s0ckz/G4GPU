@@ -29,6 +29,7 @@
 
 #include "core/particle.cuh"
 #include "core/units.cuh"
+#include "data/level_data.cuh"
 #include "physics/decay/decay.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
 
@@ -242,11 +243,22 @@ struct HadronicWiring {
   /// hadron, which costs nothing and behaves exactly as a species with no elastic process
   /// does. `host/hadronic_upload.cuh` fills them.
   ElasticTables<real_t> elastic{};
-  /// `nCapture` - the capture sub-process of the neutron general process. Same state as
-  /// `hadron_elastic`: read by the gate, inert because the table is null. P7's model is
-  /// written and tested (`tests/test_capture.cu`); what is not written is the upload of P3's
-  /// level table, which a cascade on the device would read.
+  /// `nCapture` - the capture sub-process of the neutron general process. Read by
+  /// `step_neutral`'s cross-section gate and inert because that table is null: the neutron
+  /// general process is not wired. P7's model is written and tested
+  /// (`tests/test_capture.cu`), and since P8b so is the device form of the level scheme it
+  /// walks (`tests/test_capture_device.cu`, `level_data` below).
   bool neutron_capture = true;
+  /// P3's PhotonEvaporation5.7 level scheme, or a null view.
+  ///
+  /// The second of the two tables P8 named as blocking the neutron: 174,411 levels and 268,190
+  /// transitions, 9.52 MB on the device, which `G4PhotonEvaporation::BreakUpChain` walks inside
+  /// a capture. `host/level_upload.cuh` fills it and `TransportEngine::SetNuclearLevelData`
+  /// decides whether a run pays for it - off by default, because the one consumer is
+  /// unreachable until the neutron general process is wired and reading 3110 files in every
+  /// gamma run is not free. A null view is exactly the state a species with no capture process
+  /// is in.
+  data::LevelTable level_data{};
   HadronicRefusalBooks books{};
 };
 

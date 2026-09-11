@@ -478,6 +478,10 @@ than a model that is not written:
   268,190 transitions, with no upload path today. `TransportEngine::Upload` refuses a
   cross-section table that arrives without its final states, so the state is enforced and not
   merely current.
+  *(P8b: the level data has an upload path and a device test now - section 2.1.6 - so what is
+  left of this item is P2's five combined tables and the sub-process branch in `step_neutral`.
+  The refusal in `Upload` still stands and is still the thing that keeps them from arriving
+  separately.)*
 
 #### 2.1.6 The isotope abundances, hadElastic and CoulombScat in the steppers (P8b)
 
@@ -499,6 +503,8 @@ what is left.
 | `G4BGGNucleonElasticXS` / `G4BGGPionElasticXS` `BuildPhysicsTable` output, uploaded | y | **V** | same file, 3352 B and 4600 B |
 | `G4AntiNuclElastic` + `G4ComponentAntiNuclNuclearXS` (the antiproton) | y | **-** | Refused by name. `had::elastic_channel(kAntiProton)` is `kAntiNucleusRefused` and the cross section is zero, so an antiproton draws no hadronic interaction length at all |
 | `G4NuclNuclDiffuseElastic` (`G4IonElasticPhysics`, GenericIon) | y | **-** | Not reachable: this port transports no generic ion |
+| `G4NuclearLevelData::UploadNuclearLevelData` - PhotonEvaporation5.7 on the device | y | **V** | `host/level_upload.cuh`. 3108 managers, 174,411 levels and 268,190 transitions, **9.52 MB**. Every manager's level count, level energies, lifetimes, spins and transitions are read through the cascade's own accessors on the host and on the device and compared **exactly**: 0 disagreements. The cascade on top of it - `G4NeutronRadCapture::ApplyYourself` through `G4PhotonEvaporation::BreakUpChain` - runs 448 captures over 14 targets and 4 energies on both sides: 1783 secondaries, worst **5.82e-11 MeV** absolute on an energy and **2.23e-11** on a direction component. `tests/test_capture_device.cu` |
+| the same, at initialisation, whether a neutron arrives or not | y | **P** | `TransportEngine::SetNuclearLevelData` is OFF by default, which Geant4's `G4ExcitationHandler::SetParameters` is not. The one consumer is the capture sub-process of `G4NeutronGeneralProcess`, which is not wired, and `read_all_level_data` opens 3110 files against a B1 run whose whole transport is 750 ms. It becomes unconditional the day the neutron is wired |
 
 **What was found on the way, and both of them are in docs/RISK.md.**
 

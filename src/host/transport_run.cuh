@@ -19,6 +19,7 @@
 #include "core/step_hook.cuh"
 #include "g4/G4Flatten.hh"
 #include "host/hadronic_upload.cuh"
+#include "host/level_upload.cuh"
 #include "host/pe_upload.cuh"
 #include "physics/source.cuh"
 #include "physics/stepper.cuh"
@@ -361,6 +362,24 @@ class TransportEngine {
     had_capture_ = capture;
   }
 
+  /// Read PhotonEvaporation5.7 and upload it, so a capture cascade on the device has a level
+  /// scheme to walk. Set before Upload. **Off by default, and that is a statement about the
+  /// port and not a preference.**
+  ///
+  /// Geant4 does this unconditionally - `G4ExcitationHandler::SetParameters` calls
+  /// `G4NuclearLevelData::UploadNuclearLevelData(Zmax+1)` at initialisation whether a neutron
+  /// ever arrives or not - and this port will too, the day the neutron general process is
+  /// wired. Today it is not (`physics/hadronic/neutron_general_xs.cuh`, and `Upload`'s refusal
+  /// below), so the only consumer of the table is unreachable, and the table costs
+  /// `read_all_level_data` opening **3110 files** against a B1 run whose whole transport is
+  /// 750 ms. Paying that in every gamma run for something nothing reads is the wrong default.
+  ///
+  /// What it is NOT is a switch on the physics: the table is checked against the host copy
+  /// level by level and the cascade on top of it by `tests/test_capture_device.cu`, which calls
+  /// `host/upload_level_data` directly, so the path is exercised whatever this is set to.
+  void SetNuclearLevelData(bool on) { load_level_data_ = on; }
+  bool GetNuclearLevelData() const { return load_level_data_; }
+
   /// How many secondaries the arena behind GetSecondaryInCurrentStep() can hold in one kernel
   /// launch, across every track in flight. Not a per-step limit - a step may create as many
   /// secondaries as physics makes - and the default is sized against the batch. Set before
@@ -447,6 +466,11 @@ class TransportEngine {
   /// host/hadronic_upload.cuh; the view inside it is copied into every kernel launch as part
   /// of `had::HadronicWiring`.
   ElasticTableOwner<real_t> elastic_tables_{};
+  /// PhotonEvaporation5.7 on the device, and the host copy it was uploaded from. Empty unless
+  /// `SetNuclearLevelData(true)` was called before Upload; see that setter for why.
+  LevelTableOwner level_tables_{};
+  data::LevelTableStorage level_storage_{};
+  bool load_level_data_ = false;
   std::vector<data::Material<real_t>> h_mats_;
   std::vector<double> h_voxel_score_;
   geom::Geometry<real_t> geom_{};

@@ -55,7 +55,7 @@ rem Tests that launch real kernels rather than calling __host__ __device__ code 
 rem host. They need the arch flag: StepTally reduces with atomicAdd on a double, which
 rem does not exist before sm_60, and %NV% has no -arch so it defaults below that. This is
 rem how that was found - the test would not compile until it was built like the engine.
-set TESTS_GPU=test_step_hook test_neutron test_step_hadron
+set TESTS_GPU=test_step_hook test_neutron test_step_hadron test_capture_device
 
 rem test_custom_hook is a *project*, not a test of a function: it defines its own stepping
 rem action, instantiates the engine for it in its own translation unit, and links nothing of

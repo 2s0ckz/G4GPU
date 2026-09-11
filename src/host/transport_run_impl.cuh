@@ -860,6 +860,21 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // the detector is actually made of rather than for all 92. See host/hadronic_upload.cuh.
     elastic_tables_ = upload_elastic_tables<real_t>(zs);
 
+    // P3's nuclear level data, when the caller asked for it. See SetNuclearLevelData for why
+    // that is not the default and why Geant4's own answer (unconditional, in
+    // G4ExcitationHandler::SetParameters) will be this port's the day the neutron general
+    // process is wired.
+    if (load_level_data_) {
+      // `Zmax + 1`, which is the convention G4ExcitationHandler::SetParameters applies -
+      // `UploadNuclearLevelData(Zmax+1)` - and `read_all_level_data`'s strict `Z < mZ` is why
+      // the element with the largest Z in the geometry is loaded only because of the +1.
+      int zmax = 20;
+      for (int z : zs) {
+        if (z > zmax) { zmax = z; }
+      }
+      level_tables_ = upload_level_data(level_storage_, zmax + 1);
+    }
+
     // The hadron range table. Built here rather than on demand because a run that will carry
     // a proton needs it before the first primary is seeded, and the engine cannot know what
     // species the generator will produce until it has produced one. Two megabytes in double
@@ -1491,6 +1506,11 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // the hadron range table - and `elastic_xs_per_volume` then returns zero, which is the
         // same "no process" state a lepton is in.
         had_wiring.elastic = elastic_tables_.view;
+        // Null unless SetNuclearLevelData(true) preceded Upload. The one consumer - the capture
+        // sub-process of the neutron general process - is not wired, so this is here to be
+        // reached rather than because anything reaches it; `Upload`'s refusal below is what
+        // keeps the two from arriving separately.
+        had_wiring.level_data = level_tables_.view;
         had_wiring.books.count = d_had_refused_n_;
         had_wiring.books.energy = d_had_refused_e_;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
@@ -1871,6 +1891,7 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_neutron_xs_);
     d_neutron_xs_ = nullptr;
     free_elastic_tables<real_t>(elastic_tables_);
+    free_level_data(level_tables_);
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);
