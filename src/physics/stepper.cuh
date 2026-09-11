@@ -626,39 +626,50 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 /// out of the range table by inversion - but almost none of the same numbers. What is genuinely
 /// different, rather than merely renamed:
 ///
-///   * **Multiple scattering is WentzelVI, not Urban.** Different model, different step limit,
-///     and `facrange` is 0.2 rather than 0.04, which is a factor of five on the step length.
-///     Its lateral displacement is switched off for a heavy particle
-///     (G4EmParameters::MuHadLateralDisplacement is false), so a proton is deflected but never
-///     shifted sideways - the branch step_lepton spends twenty lines on does not exist here.
-///
-///     **This is right for the proton and wrong for the alpha.** Geant4 prints its own answer
-///     at initialisation, and it reads:
+///   * **Multiple scattering is TWO models, and which one is a property of the species.**
+///     Geant4 prints its own answer at initialisation and it reads:
 ///
 ///         msc:  for proton  SubType= 10
 ///                 WentzelVIUni : Emin=    0 eV  Emax=  100 TeV
 ///         msc:  for alpha  SubType= 10
 ///                     UrbanMsc : Emin=    0 eV  Emax=  100 TeV
 ///
-///     G4EmBuilder::ConstructCharged gives an ion `G4hMultipleScattering("ionmsc")` carrying
-///     G4UrbanMscModel, and only muons and singly-charged hadrons get WentzelVI. Using
-///     WentzelVI for the alpha here is a substitution, not a transcription.
+///     `G4EmBuilder::ConstructLightHadrons` calls `SetEmModel(new G4WentzelVIModel())` on the
+///     `G4hMultipleScattering` it gives mu+-, pi+-, K+- and p/pbar; nothing calls it on the
+///     ions', and `G4hMultipleScattering::InitialiseProcess` then defaults to
+///     `new G4UrbanMscModel()`. So the table this function dispatches on is
 ///
-///     **Which species take the substitution is now a predicate**, `uses_wentzel_msc` in
-///     core/particle.cuh, because wiring nine more species made it a list rather than a
-///     footnote about the alpha. WentzelVI is correct for mu+-, pi+-, K+-, p and pbar; it is a
-///     substitution for alpha, He3, GenericIon and - newly - the deuteron and the triton,
-///     which share the physics list's one model-less `G4hMultipleScattering("ionmsc")`.
+///         mu+- pi+- K+- p pbar        WentzelVIUni      SetEmModel, ConstructLightHadrons
+///         alpha He3 deuteron triton   UrbanMsc          no model set, the default
+///         GenericIon                  UrbanMsc          the shared "ionmsc", no model set
 ///
-///     It is not fixed because urban_msc.cuh is transcribed for leptons specifically - its
-///     step limit and its sampler both take `is_positron`, and its transport mean free path
-///     comes from an e-/e+ table - so an alpha would need the model generalised to arbitrary
-///     mass and charge, which is the model itself rather than a dispatch. What the
-///     substitution costs is measured rather than assumed: `tools\compare_b1_beams.ps1` runs
-///     example B1 with an 840 MeV alpha against a real Geant4 build of the same example and
-///     the doses agree to about a per cent, which bounds it. MSC moves a track sideways; the
-///     quantity there is the energy deposited in a 12 cm wide volume, and a few milliradians
-///     of difference in how a track wanders does not move it.
+///     and it is not written from the source alone: the `models` column of
+///     `ref/oracle/species_processes.csv` is model 0's name off each species' own process
+///     manager in a constructed QBBC - the same thing `/particle/process/dump` prints - and
+///     `tests/test_species.cu` compares `uses_wentzel_msc` against it species by species.
+///     `uses_wentzel_msc` in core/particle.cuh is where the table lives; because `type` is a
+///     template parameter of `run_step_hadron` the branch here is resolved at compile time and
+///     neither kernel carries the other model.
+///
+///     Until P14b that predicate named a SUBSTITUTION rather than a dispatch - every ion went
+///     through WentzelVI, because this file's Urban had only the electron's stepping half
+///     (`is_positron` in its step limit and its sampler, and an e-/e+ transport-mfp table).
+///     em/urban_msc.cuh is now general across mass and charge and the substitution is gone.
+///     What it was worth is in docs/RISK.md V61.
+///
+///     What differs between the two, and all of it is `G4EmParameters` picking on the
+///     PARTICLE rather than on the model (`G4EmTableUtil::PrepareMscProcess` on
+///     `GetPDGMass() > MeV`, `G4VMscModel::InitialiseParameters` on `abs(PDGEncoding) == 11`):
+///     both get `facrange` 0.2 rather than the lepton's 0.04, both get the `fMinimal` step
+///     limit type, and both have their lateral displacement switched off
+///     (`MuHadLateralDisplacement` false), so a heavy particle is deflected but never shifted
+///     sideways and the branch step_lepton spends twenty lines on does not exist here. A
+///     comment that attributes 0.2 to WentzelVI and 0.04 to Urban - which this one used to -
+///     has the mechanism backwards.
+///
+///     One thing Urban needs that WentzelVI does not: a step-limit state carried between
+///     steps. fMinimal recomputes its limit only at a geometry boundary, so `msc_tlimit` on
+///     the track holds it, in three states rather than two - see `em::kMscAtBoundary`.
 ///
 ///   * **Nuclear stopping is applied after the continuous loss**, not integrated into the range
 ///     table. G4NuclearStopping is a G4VEmProcess that acts along the step and builds no DEDX
@@ -919,48 +930,94 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         (range > finR) ? range * dRoR + finR * (real_t(1) - dRoR) * (real_t(2) - finR / range)
                        : range;
 
-    // ---- WentzelVI multiple scattering.
+    // ---- MULTIPLE SCATTERING: URBAN FOR THE IONS, WENTZELVI FOR EVERYTHING ELSE HERE.
     //
-    // No table: the transport cross section is closed-form, so lambda comes straight from
-    // wv_transport_xs. That call also fills the per-element single-scattering tables the
-    // sampler needs to pick which atom a discrete scatter happened on, which is why it is made
-    // even where only lambda is wanted.
-    constexpr real_t kCosThetaLim = real_t(-1);  // G4EmParameters::MscThetaLimit() = pi
-    em::WentzelMscState<real_t> st{};
-    em::WentzelElementXs<real_t> els{};
-    st.range = range;
-    st.pre_kin_energy = p.ekin;
-    st.eff_kin_energy = p.ekin;
-    st.single_scattering_mode = false;
-    {
-      const auto s0 = em::wentzel_setup(pd, type, p.ekin, mm.inv_a23,
-                                        static_cast<int>(mm.z[0] + real_t(0.5)), cut,
-                                        kCosThetaLim);
-      st.cos_tet_max_nuc = s0.cos_tet_max_nuc;
-    }
-    // Two different cross sections, and taking one for the other switches multiple scattering
-    // off without saying so. wv_transport_xs called with cos_theta = 1 *returns* the transport
-    // cross section above that angle, which is identically zero; what it is called for here is
-    // its out-parameter xtsec, the total single-scattering rate, and the per-element table the
-    // sampler picks an atom from. lambda_eff is the transport mean free path and comes from
-    // wentzel_lambda, integrated over the whole angular range.
+    // `uses_wentzel_msc` in core/particle.cuh carries the table and its provenance
+    // (`G4EmBuilder::ConstructLightHadrons` calls SetEmModel on the light hadrons' and the
+    // muons' `G4hMultipleScattering`; nothing calls it on the ions', and
+    // `G4hMultipleScattering::InitialiseProcess` then defaults to `new G4UrbanMscModel()`).
+    // Until P14b that predicate named a SUBSTITUTION - every ion was run through WentzelVI
+    // because this file's Urban had only the electron's stepping half - and now it is a
+    // dispatch.
     //
-    // The first version of this took the return value. lambda_eff was then 1e30, every step
-    // fell into single-scattering mode with a zero rate, and wv_sample_scattering returned the
-    // incoming direction unchanged: a proton beam that never scattered at all, with no error
-    // and no warning anywhere.
-    em::wv_transport_xs(mm, pd, type, p.ekin, cut, kCosThetaLim, real_t(1), st.cos_tet_max_nuc,
-                        els, st.xtsec);
-    st.lambda_eff = em::wentzel_lambda(mm, type, pd, p.ekin, cut, kCosThetaLim);
+    // THE BRANCH COSTS NOTHING AT RUN TIME and that is why it is written as one. `type` is
+    // `kType`, a template parameter of `run_step_hadron`, so `uses_wentzel_msc(type)` is a
+    // compile-time constant in each of the thirteen instantiations: the proton kernel contains
+    // no Urban code and the alpha kernel contains no WentzelVI code. Writing it as a run-time
+    // branch instead would put both models' registers and both models' inlined tables into
+    // every kernel, which docs/RISK.md V55 says is the thing that kills ptxas in this file.
+    const bool urban_msc = !uses_wentzel_msc(type);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
-    const real_t t_msc =
-        s.processes.multiple_scattering
-            ? em::wv_step_limit(mm, pd, type, p.ekin, range, st.lambda_eff, st.cos_tet_max_nuc,
-                                kCosThetaLim, safety, s.range_cut, max_step,
-                                em::kHadronFacRange<real_t>())
-            : geom::kInfinity<real_t>();
+
+    // WentzelVI's state, live only on the !urban_msc side.
+    constexpr real_t kCosThetaLim = real_t(-1);  // G4EmParameters::MscThetaLimit() = pi
+    em::WentzelMscState<real_t> st{};
+    em::WentzelElementXs<real_t> els{};
+    // Urban's, live only on the other. The coefficients are a function of the material's Zeff
+    // alone, so the electron's table already holds the right ones; `s.msc` is null in a run
+    // that builds no lepton tables (Scene's own contract: a null table is a process switched
+    // off) and then they are computed here instead.
+    const em::UrbanCoeffs<real_t> uc =
+        (s.msc != nullptr) ? s.msc->coeffs[mat] : em::urban_coeffs(mm);
+    real_t urban_lambda0 = real_t(0);
+    em::MscStep<real_t> urban_state{};
+
+    real_t t_msc = geom::kInfinity<real_t>();
+    if (urban_msc) {
+      // The transport mean free path, EVALUATED AND NOT LOOKED UP. No ion has a cross-section
+      // table: `G4VMscModel::GetParticleChangeForMSC` builds one only for a particle under
+      // 1 GeV not named GenericIon, and `SetForceBuildTable` is called nowhere in 11.1.1, so
+      // `GetTransportMeanFreePath` falls through to `CrossSectionPerVolume` at the energy
+      // asked for. See `em::urban_heavy_lambda`, which is also why it is `__noinline__`.
+      //
+      // The charge here is the BARE one from the definition - 2 for an alpha, Z for a recoil
+      // ion - and not the effective charge. `G4UrbanMscModel::SetParticle` reads
+      // `GetPDGCharge()/eplus` when the track starts and never refreshes it, unlike
+      // `G4VEnergyLossProcess`, which refreshes `chargeSqRatio` from the model on every step
+      // under `if(isIon)`. So the same ion scatters with Z and loses energy with q_eff(E).
+      urban_lambda0 = em::urban_heavy_lambda(mm, p.ekin, pd.mass, pd.charge);
+      if (s.processes.multiple_scattering) {
+        t_msc = em::urban_step_limit_heavy(uc, urban_lambda0, em::kFacRangeMuHad<real_t>(),
+                                           p.ekin, pd.mass, range, safety, max_step, rng,
+                                           p.msc_tlimit);
+      }
+    } else {
+      // No table here either, but for a different reason: WentzelVI's transport cross section
+      // is closed-form, so lambda comes straight from wv_transport_xs. That call also fills
+      // the per-element single-scattering tables the sampler needs to pick which atom a
+      // discrete scatter happened on, which is why it is made even where only lambda is wanted.
+      st.range = range;
+      st.pre_kin_energy = p.ekin;
+      st.eff_kin_energy = p.ekin;
+      st.single_scattering_mode = false;
+      {
+        const auto s0 = em::wentzel_setup(pd, type, p.ekin, mm.inv_a23,
+                                          static_cast<int>(mm.z[0] + real_t(0.5)), cut,
+                                          kCosThetaLim);
+        st.cos_tet_max_nuc = s0.cos_tet_max_nuc;
+      }
+      // Two different cross sections, and taking one for the other switches multiple scattering
+      // off without saying so. wv_transport_xs called with cos_theta = 1 *returns* the transport
+      // cross section above that angle, which is identically zero; what it is called for here is
+      // its out-parameter xtsec, the total single-scattering rate, and the per-element table the
+      // sampler picks an atom from. lambda_eff is the transport mean free path and comes from
+      // wentzel_lambda, integrated over the whole angular range.
+      //
+      // The first version of this took the return value. lambda_eff was then 1e30, every step
+      // fell into single-scattering mode with a zero rate, and wv_sample_scattering returned the
+      // incoming direction unchanged: a proton beam that never scattered at all, with no error
+      // and no warning anywhere.
+      em::wv_transport_xs(mm, pd, type, p.ekin, cut, kCosThetaLim, real_t(1),
+                          st.cos_tet_max_nuc, els, st.xtsec);
+      st.lambda_eff = em::wentzel_lambda(mm, type, pd, p.ekin, cut, kCosThetaLim);
+      if (s.processes.multiple_scattering) {
+        t_msc = em::wv_step_limit(mm, pd, type, p.ekin, range, st.lambda_eff,
+                                  st.cos_tet_max_nuc, kCosThetaLim, safety, s.range_cut,
+                                  max_step, em::kHadronFacRange<real_t>());
+      }
+    }
 
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc), fmin(d_delta, d_decay));
@@ -977,7 +1034,25 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         mm, h, mat, fmax(range - t_step, real_t(0)), p.ekin);
     real_t lambda_eff_end = st.lambda_eff;
     real_t cos_tet_max_end = st.cos_tet_max_nuc;
-    {
+    real_t z_step = t_step;
+    if (urban_msc) {
+      // Urban's general true->geometric branch needs the mean free path at the energy left at
+      // the RESIDUAL RANGE, not at the mean energy WentzelVI uses. Geant4's own two lines:
+      //     rfin = max(currentRange - tPathLength, 0.01*currentRange)
+      //     lambda1 = GetTransportMeanFreePath(particle, GetEnergy(particle, rfin, couple))
+      // and the 1% floor is what keeps a step that consumes the whole range from asking for
+      // the mean free path at zero energy.
+      real_t lam_rfin = real_t(-1);
+      if (s.processes.multiple_scattering) {
+        const real_t rfin = fmax(range - t_step, real_t(0.01) * range);
+        const real_t e_rfin = s.hadron_range->energy_from_range_for(mm, h, mat, rfin, p.ekin);
+        if (e_rfin > real_t(0)) {
+          lam_rfin = em::urban_heavy_lambda(mm, e_rfin, pd.mass, pd.charge);
+        }
+        z_step = em::urban_geom_path(t_step, urban_lambda0, range, lam_rfin, p.ekin, pd.mass,
+                                     urban_state);
+      }
+    } else {
       const real_t e_mid = real_t(0.5) * (e_end + p.ekin);
       if (e_mid > real_t(0)) {
         em::WentzelElementXs<real_t> tmp{};
@@ -990,24 +1065,26 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
                                   cos_tet_max_end, tmp, xt);
         lambda_eff_end = em::wentzel_lambda(mm, type, pd, e_mid, cut, kCosThetaLim);
       }
+      if (s.processes.multiple_scattering) {
+        z_step = em::wv_geom_path(st, t_step, e_end, lambda_eff_end, cos_tet_max_end);
+      }
     }
-
-    const real_t z_step =
-        s.processes.multiple_scattering
-            ? em::wv_geom_path(st, t_step, e_end, lambda_eff_end, cos_tet_max_end)
-            : t_step;
 
     const bool hits_boundary = (d_boundary < z_step);
     const real_t geom_step = hits_boundary ? d_boundary : z_step;
 
     real_t step_len = geom_step;
     if (s.processes.multiple_scattering) {
-      auto recompute = [&](real_t cos_min, real_t& xt) {
-        return em::wv_transport_xs(mm, pd, type, st.eff_kin_energy, cut, kCosThetaLim, cos_min,
-                                   st.cos_tet_max_nuc, els, xt);
-      };
-      step_len =
-          em::wv_true_path(st, geom_step, e_end, lambda_eff_end, cos_tet_max_end, recompute);
+      if (urban_msc) {
+        step_len = em::urban_true_path(geom_step, t_step, urban_state);
+      } else {
+        auto recompute = [&](real_t cos_min, real_t& xt) {
+          return em::wv_transport_xs(mm, pd, type, st.eff_kin_energy, cut, kCosThetaLim,
+                                     cos_min, st.cos_tet_max_nuc, els, xt);
+        };
+        step_len =
+            em::wv_true_path(st, geom_step, e_end, lambda_eff_end, cos_tet_max_end, recompute);
+      }
     }
     // See the note in step_lepton: the true path, which is what the energy loss below is
     // computed against and what G4Step::GetStepLength reports.
@@ -1177,15 +1254,50 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     if (hits_boundary) {
       p.pos = p.pos + geom::kPushDistance<real_t>() * p.dir;
       p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
+      // fMinimal refreshes its step limit at a boundary and nowhere else - not even on the
+      // first step of a track, which is what makes this three states rather than two. See
+      // em::kMscAtBoundary. The field stays dead for a WentzelVI species, whose step limit
+      // carries nothing between steps.
+      if (urban_msc) { p.msc_tlimit = em::kMscAtBoundary<real_t>(); }
     }
     traj.add(pos_before, p.pos, type, p.event, p.rng_key);
 
     // ---- the scattering itself. lat_displacement is false for every heavy particle, so the
-    // returned displacement is zero and there is nothing to apply.
+    // returned displacement is zero and there is nothing to apply - for both models, and it is
+    // `G4EmParameters::MuHadLateralDisplacement` for both rather than a property of either.
     if (s.processes.multiple_scattering) {
-      const auto sc = em::wv_sample_scattering(mm, pd, type, st, els, cut, kCosThetaLim, p.dir,
-                                               em::kHadronLateralDisplacement<real_t>(), rng);
-      p.dir = sc.dir;
+      if (urban_msc) {
+        // G4VMultipleScattering::AlongStepDoIt's own guard: a step that ran out the whole
+        // range is not scattered, and neither is one below geomMin. The rest of the guards are
+        // inside urban_sample_scattering, where Geant4 has them.
+        if (step_len < range && step_len > em::kGeomMin<real_t>()) {
+          // SampleScattering's first four lines choose the energy the ANGLE is sampled at, and
+          // it is not the pre-step energy: over dtrl (5%) of the range it is the energy at the
+          // residual range, over 1% it is the pre-step energy minus dE/dx times the step, and
+          // below that it is the pre-step energy. `urban_scatter_energy` is those four lines;
+          // the mean rather than the fluctuated loss reaches it, for the reason step_lepton
+          // gives - Geant4 samples scattering in G4VMultipleScattering::AlongStepDoIt, which
+          // runs before the energy-loss process's AlongStepDoIt.
+          const real_t e_scat = em::urban_scatter_energy(
+              e_before, step_len, range,
+              s.hadron_range->energy_from_range_for(mm, h, mat,
+                                                    fmax(range - step_len, real_t(0)), e_before),
+              s.hadron_range->dedx_for(mm, h, mat, e_before));
+          const real_t lam_scat = (e_scat > real_t(0))
+                                      ? em::urban_heavy_lambda(mm, e_scat, pd.mass, pd.charge)
+                                      : real_t(-1);
+          const auto sc = em::urban_sample_scattering(
+              mm, uc, urban_lambda0, p.dir, step_len, geom_step, e_scat, e_before,
+              em::kHadronLateralDisplacement<real_t>(), pd.mass, pd.charge, false,
+              em::kTlimitMinMinimal<real_t>(), rng, lam_scat);
+          p.dir = sc.dir;
+        }
+      } else {
+        const auto sc = em::wv_sample_scattering(mm, pd, type, st, els, cut, kCosThetaLim,
+                                                 p.dir,
+                                                 em::kHadronLateralDisplacement<real_t>(), rng);
+        p.dir = sc.dir;
+      }
     }
 
     if (emits_delta && p.ekin > real_t(0)) {

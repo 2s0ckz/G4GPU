@@ -687,15 +687,19 @@ __host__ __device__ inline bool uses_nuclear_stopping(ParticleType /*t*/) {
 /// So the deuteron and the triton scatter by Urban in Geant4, sitting two lines above the
 /// alpha in the same function, and the pion - lighter, same charge - scatters by WentzelVI.
 ///
-/// What the port does with the `false` answer is a SUBSTITUTION, not a transcription:
-/// em/urban_msc.cuh's stepping half is the electron's (it takes `is_positron` and reads an
-/// e-/e+ transport mean free path), so an ion cannot be run through it, and step_hadron uses
-/// WentzelVI for these species too. That has been true of the alpha since it was transported,
-/// and what it costs is measured rather than assumed - `tools/compare_b1_beams.ps1` puts an
-/// 840 MeV alpha's B1 dose within about a per cent of Geant4's. It is recorded as `P` in
-/// docs/PORTED.md for the same reason. This predicate exists so that the substitution is
-/// visible at the point it is made and so that generalising urban_msc.cuh has one call site
-/// to flip rather than a search.
+/// THE `false` ANSWER IS NOW A DISPATCH AND NOT A SUBSTITUTION (P14b). It used to be the
+/// latter: `em/urban_msc.cuh`'s stepping half was the electron's - `is_positron` in its step
+/// limit and its sampler, and an e-/e+ transport-mfp table - so an ion could not be run
+/// through it and `step_hadron` ran WentzelVI for these five species too. That model is now
+/// general across mass and charge and `step_hadron` branches on this predicate, at compile
+/// time, because `type` is a template parameter of `run_step_hadron`. What the substitution
+/// was worth is in docs/RISK.md V61.
+///
+/// The predicate is checked against Geant4 rather than against the source it was read from:
+/// `ref/oracle/species_processes.csv`'s `models` column is model 0's name off each species'
+/// own process manager in a constructed QBBC, and `tests/test_species.cu` compares this
+/// function against it species by species. It reads `UrbanMsc` for alpha, He3, deuteron,
+/// triton and GenericIon and `WentzelVIUni` for the eight below.
 __host__ __device__ inline bool uses_wentzel_msc(ParticleType t) {
   return t == ParticleType::kMuonMinus || t == ParticleType::kMuonPlus
          || t == ParticleType::kPionPlus || t == ParticleType::kPionMinus
