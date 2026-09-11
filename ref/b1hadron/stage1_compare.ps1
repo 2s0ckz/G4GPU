@@ -222,11 +222,18 @@ foreach ($r in $rows) {
       $line += " {0,20} {1,9} {2,7}" -f "-", "-", "-"
     } else {
       $d = $col.Dose
-      $rel = if ($d -ne 0) { ($p.Dose - $d) / $d * 100 } else { 0 }
       $sd = [Math]::Sqrt($p.Rms * $p.Rms + $col.Rms * $col.Rms)
       $sig = if ($sd -gt 0) { [Math]::Abs($p.Dose - $d) / $sd } else { 0 }
-      $line += " {0,11} +/- {1,-6} {2,8}% {3,7}" -f (Fmt $d), (Fmt $col.Rms),
-               ("{0:N2}" -f $rel), ("{0:N1}" -f $sig)
+      # A RELATIVE DIFFERENCE FROM ZERO IS NOT 0.00%, AND THE NEUTRON IS THE FIRST ROW THAT
+      # REACHES IT. This printed `0.00%` when the reference was exactly zero, which reads as
+      # perfect agreement and is the opposite of what it means - the neutron's `no elastic`
+      # column IS exactly zero (500,000 neutrons of 100 MeV with hadElastic off deposit
+      # `0 picoGy`), so the honest cell is a dash. The SIGMA is kept, because it is meaningful
+      # in exactly that case: it says how far from zero the port's dose is, which for the
+      # neutron is the whole of what elastic scattering is worth.
+      $relTxt = if ($d -ne 0) { "{0:N2}%" -f (($p.Dose - $d) / $d * 100) } else { "-" }
+      $line += " {0,11} +/- {1,-6} {2,9} {3,7}" -f (Fmt $d), (Fmt $col.Rms), $relTxt,
+               ("{0:N1}" -f $sig)
     }
   }
   Write-Output $line

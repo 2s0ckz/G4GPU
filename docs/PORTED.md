@@ -767,6 +767,78 @@ capture cross section:
   against 9,021 carrying 13,694.7198 MeV with the real one. Three times the multiplicity, not
   none. docs/RISK.md V60.
 
+**THE STAGE-1 LIKE-FOR-LIKE, AND THE ROW IS NOT A ZERO ANY MORE.** 500,000 neutrons of 100 MeV
+into B1, the Geant4 side through `ref/b1neutron/` - Geant4's own example B1 with
+`SetEnableNeutronGeneralProcess(false)` in a main of ours, which docs/RISK.md V60 is the entry
+about - and `neutronInelastic` inactivated by name:
+
+| | port | G4 stage 1 | diff | sigma | G4 no elastic |
+|---|---|---|---|---|---|
+| neutron | 54.4664 +/- 0.5408 | 54.4573 +/- 0.5361 | **+0.02%** | **0.01** | **0.0000 +/- 0.0000** |
+
+The third column is the whole of the physics: with `hadElastic` off and `nCapture` left ACTIVE,
+500,000 neutrons deposit `0 picoGy  rms = 0 picoGy`. A neutron itself has no ionisation process,
+so every gray in the first column is carried by something elastic scattering made - the recoil
+protons of hydrogen and the recoil nuclei of oxygen, carbon, nitrogen and calcium, which are
+tracks because of 2.1.7 - and `nCapture` contributes nothing at 100 MeV on its own because
+without elastic scattering the neutron never slows to where its cross section matters. So the
+row tests `G4NeutronElasticXS`, `G4ChipsElasticModel` and the recoil transport, and nothing else.
+`ref/b1hadron/stage1_README.md` has the process dump and what the run reports beside the dose
+(7.42 MB of tables, 4453 neutrons killed past 10 us discarding 3.7e-5 MeV, and an empty refusal
+ledger).
+
+Plus, in section 3, **determinism across the launch geometry**: the same 4,800 tracks at 64 and
+at 256 threads a block, tolerance ZERO, every field including each secondary's species, nuclide,
+energy and direction - **0 disagreements**. `step_neutral` had no such check before, because
+until P8d it emitted nothing.
+
+**THE REGISTER AND STACK COST**, `transport_run.cu` with `-Xptxas -v`, measured on this branch
+before and after. The neutral kernel's two instantiations are listed separately for the first
+time, and the reason is the finding in the row below them:
+
+| kernel | inst. | registers | stack frame | spill st/ld | cmem[0] |
+|---|---|---|---|---|---|
+| `run_step_hadron` | 13 | 255 -> 255 | 4576 -> **4592** B | 100/52, unchanged | 1600 -> 1616 |
+| `run_step_neutral<kNeutron>` | 1 | 255 -> 255 | 3744 -> **7264** B | 96/52 -> 248/540 | 1624 -> 1640 |
+| `run_step_neutral<kPiZero>` | 1 | 255 -> 255 | 3744 -> **3152** B | 96/52 -> 524/848 | 1624 -> 1640 |
+| `run_step_lepton` | 2 | 255 -> 255 | 3040 B, unchanged | 80/28, unchanged | 1464, unchanged |
+| `run_step_gamma` | 1 | 255 -> 255 | 2416 B, unchanged | 368/676, unchanged | 1464, unchanged |
+
++3520 bytes on the neutron's frame against the 16384-byte limit `Upload` sets, no change in
+register count, ptxas survived, and **the PI0's frame went DOWN by 592 bytes.** That last one is
+not ptxas reallocating: the species is a TEMPLATE parameter of `run_step_neutral`, so
+`type == ParticleType::kNeutron` is a compile-time constant inside it and every branch this
+package added folds away for the pi0 - the tables, the two cross sections, the sub-process
+choice, both final states. A pi0 pays nothing for the neutron's physics, which is the property
+that made one kernel for two neutral species affordable in the first place and is measured here
+rather than assumed. The +16 bytes of cmem[0] on the two kernels that take a `HadronicWiring` by
+value is `had::NeutronSubTables`' two pointers; the lepton and gamma kernels do not take one and
+did not move.
+
+**THE COMPILE TIME**, which docs/RISK.md V55 says is the thing to watch and which P8c could only
+measure dirty. Same machine, same seventeen entry points, nothing else running, `nvcc -O2
+-arch=sm_86 -Xptxas -v -c`:
+
+| | `transport_run.cu` |
+|---|---|
+| main at 2a6b379 | **22 min 13 s** |
+| with the neutron general process wired | **24 min 44 s** |
+
+**+2 min 31 s, 11%**, for two sub-processes, a 2.5-decade cross-section evaluation and P3's
+whole de-excitation chain arriving in the translation unit. That is what the `__noinline__` on
+`neutron_sub_xs_per_volume`, `neutron_elastic_apply` and `neutron_capture_apply` bought, and it
+is the number to compare the next package against. It also closes V55's own open question: P8c
+recorded "about ninety minutes" for this file with three Geant4 cmake builds beside it, and the
+clean figure for the same source is 22 - so the ninety was the contention, and V55's "wrong
+direction by an order of magnitude" is a factor of 2.8 against the eight minutes it records for
+eleven entry points.
+
+**And the iteration was all on the reproducer**, which is V55's own advice taken: the one-kernel
+translation unit of `run_step_neutral<double, kNeutron>` compiles in **75 seconds**, and it is
+what found the capture capacity's 353 bytes a slot and what showed 13120 bytes at capacity 32.
+The 25 minutes was paid twice - once for the baseline, once at the end - and not once per
+iteration.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

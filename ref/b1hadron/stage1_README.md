@@ -315,8 +315,40 @@ worktree on branch `phys/neutron`. 500,000 neutrons of 100 MeV per run, doses in
 
 ```
 species                     port           G4 stage 1      diff   sigma        G4 no elastic
-neutron        PORT_DOSE +/- PORT_RMS     54.4573 +/- 0.5361   DIFF    SIGMA       0.0000 +/- 0.0000
+neutron         54.4664 +/- 0.5408     54.4573 +/- 0.5361    +0.02%    0.01      0.0000 +/- 0.0000
 ```
+
+**+0.02% and 0.01 sigma**, which is the closest row in this file by a factor of forty. It is one
+measurement and it should not be over-read - 0.01 sigma out of a 1.0-sigma-wide distribution is
+luck at the 1% level, and the honest statement is "inside a sigma", the same statement the
+proton's 0.9 and the alpha's 1.3 make. What is not luck is that the agreement is at all: the
+neutron row was `0.0000` on both sides an hour before this table.
+
+What the port's own run reports beside the dose, all of it printed by the engine:
+
+```
+neutron tables: 7.420 MB - G4NeutronElasticXS and G4NeutronCaptureXS on the device,
+                G4NeutronGeneralProcess 401+71 nodes x 4 materials
+level data:     0.86 MB - 333 managers, 15790 levels, 23206 transitions
+neutron time cut: 4453 neutrons killed past 10 us, 3.74894e-05 MeV discarded
+```
+
+and no hadronic-refusal block at all, which is the ledger saying what it should in stage 1: the
+inelastic sub-process is not a process there, so `kNeutronInelastic` cannot move.
+
+**The 10 us cut fires 4453 times in 500,000 events and discards 3.7e-5 MeV in total.** Both
+halves of that are worth having: the cut is REACHED (0.9% of primaries thermalise and age out,
+so the branch is not dead code) and what it discards is 1e-11 of the beam energy, so the one
+place this transport knowingly does not conserve energy costs this comparison nothing. The
+number is printed rather than argued because `G4NeutronKiller`'s own description is "The process
+to kill particles to save CPU" - it is a budget, not physics, and it does not conserve energy on
+the Geant4 side either.
+
+**And the level data is 0.86 MB here, not the 9.52 MB `tests/test_capture_device.cu` reports.**
+`Upload` passes `zmax + 1` from the scene, which is `G4ExcitationHandler::SetParameters`' own
+convention, and B1's highest Z is calcium's 20 - so a B1 run reads 333 nuclide files and not
+3110. The full-table figure is what a test that loads `data::kLevelZMax` pays; it is not what
+this run pays, and the difference is the reason the upload is per-scene.
 
 ### Reading it, and the third column is the whole of the physics
 

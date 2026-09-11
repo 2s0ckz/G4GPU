@@ -15,10 +15,10 @@ uses, the hadronic process framework and the elastic final states, decay, the co
 de-excitation chain, and transport for eleven more species - is on main, validated class by
 class against the library, and not yet reached by a particle. Phase 2 has landed single Coulomb scattering, PreCompound and the closure of the negative-hadron
 question; decay, hadron elastic scattering, single Coulomb scattering and the **neutron general
-process** are wired into the transport, so a neutron interacts rather than streaming, and its
-elastic and capture final states act. Its inelastic sub-process is Phase 3's and is refused by
-name. The cascades and the string model (Phase 3) have not started. The [status
-tables](#physics) below say exactly what is there and what is not.
+process** are wired into the transport, so a neutron interacts rather than streaming, its elastic
+and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ. Its inelastic
+sub-process is Phase 3's and is refused by name. The cascades and the string model (Phase 3)
+have not started. The [status tables](#physics) below say exactly what is there and what is not.
 
 ---
 
@@ -273,7 +273,7 @@ closed - the same question has the mechanism.
 | γ, e⁻, e⁺ | **transported** |
 | proton, alpha | **transported** |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name |
-| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. The inelastic sub-process is selectable and refused by name with the energy it costs (P9–P11). The 10 µs tracking cut still comes first and still discards rather than deposits. π⁰ decays at once |
+| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). The inelastic sub-process is selectable and refused by name with the energy it costs (P9–P11). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once |
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic` |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |

@@ -5619,7 +5619,8 @@ whether the input is read at all, and the answer is usually two lines up in the 
 ### V53: a neutron that cannot be validated by a dose, and two transcriptions of its table
 
 > **CLOSED BY P8d, AND THE TITLE IS THE PART THAT WAS WRONG.** The neutron's stage-1 row is
-> `54.4573 +/- 0.5361 nGy` on the Geant4 side now, against `0.0000 +/- 0.0000` here, and the
+> `54.4664 +/- 0.5408` for the port against `54.4573 +/- 0.5361` for Geant4 - **+0.02%, 0.01
+> sigma** - where it had been `0.0000 +/- 0.0000` against `0.0000 +/- 0.0000`, and the
 > configuration that produces it took one line of C++ rather than a UI command. What this entry
 > got wrong is one function name - the flag is set in `G4HadronInelasticQBBC`'s CONSTRUCTOR, not
 > in its `ConstructProcess`, and there is a `G4State_PreInit` window between them in which
@@ -6098,9 +6099,15 @@ half is confirmed rather than assumed: `G4HadronicParametersMessenger` builds ex
 commands - `/process/had/verbose`, `/process/had/maxEnergy`, `/process/had/enableCRCoalescence` -
 so there is no `/process/had/enableNeutronGeneralProcess` and no macro can do it.
 
-**What that is worth is the neutron's whole stage-1 row.** With the flag off, the process manager
-holds six entries where it held three, and the run prints them (`ref/b1neutron/run.bat` on
-`ref/b1hadron/stage1_neutron.mac`):
+**What that is worth is the neutron's whole stage-1 row, and the row came out at 0.01 sigma:**
+`54.4664 +/- 0.5408 nGy` for the port against `54.4573 +/- 0.5361` for Geant4, 500,000 neutrons
+of 100 MeV each side, with the diagnostic column - the same Geant4 run with `hadElastic`
+inactivated too - at exactly `0 picoGy`. So the whole of a neutron's B1 dose is elastic
+scattering, and the row is a test of `G4NeutronElasticXS`, `G4ChipsElasticModel` and P8c's recoil
+transport with no dE/dx, no multiple scattering and no capture in it.
+
+With the flag off, the process manager holds six entries where it held three, and the run prints
+them (`ref/b1neutron/run.bat` on `ref/b1hadron/stage1_neutron.mac`):
 
 ```
 [0] Transportation      Active
