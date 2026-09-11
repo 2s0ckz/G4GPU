@@ -5850,3 +5850,69 @@ the pion and a fortieth of what the missing inelastic final states are worth for
 (docs/RESULT.md: 19%). It is recorded because it is the largest unexplained residual in the
 stage-1 table and because three of the nine species were at 24 to 58 sigma one commit ago.
 
+
+---
+
+### V57: the two validated lookups sat next to the two the transport read
+
+`em::HadronRangeTable` has two sets of entry points and `step_hadron` was calling the wrong one.
+
+    dedx_at(species, mat, E)           the table in the TABLE's own terms
+    lookup(species, mat, E)
+    energy_from_range(species, mat, R)
+
+    dedx_for(mat, type, imat, E)       G4VEnergyLossProcess's base-particle scaling on top:
+    range_for(mat, type, imat, E)          scaledE = E * massRatio
+    energy_from_range_for(...)             dE/dx   = chargeSqRatio * table(scaledE)
+                                           range   = table(scaledE)/(chargeSqRatio*massRatio)
+
+The second set is transcribed from `G4VEnergyLossProcess::GetDEDX`, `::GetRange` and
+`::GetKineticEnergy` - `GetDEDXForScaledEnergy` multiplies the table by
+`fFactor = chargeSqRatio`, `GetScaledRangeForScaledEnergy` multiplies by
+`reduceFactor = 1/(chargeSqRatio*massRatio)`, and both look up at `kinEnergy*massRatio` - and
+`tests/test_hadron_range.cu` compares it against `G4EmCalculator::GetDEDX` and `::GetRange` for
+every species this port names. So the scaling was measured against Geant4 and the transport did
+not use it.
+
+**For the ten species that own a table both ratios are exactly 1.0**, which is why this survived
+so long: `G4VEnergyLossProcess::PreparePhysicsTable` sets them from the base particle and leaves
+them at their 1.0 initialisers when there is none, so for p, pbar, pi+-, K+-, mu+-, alpha and
+GenericIon the two sets are the same double and every number this port has ever produced for
+those ten is unchanged. The proton's and the alpha's B1 doses and the proton depth-dose curve do
+not move.
+
+**The deuteron and the triton have kernels and do not own tables.** `hadron_base_particle`
+returns the proton for both - correctly, and its own header explains the arithmetic at length:
+
+    massRatio = m_p/m_d = 0.500248192      massRatio = m_p/m_t = 0.334032895
+
+so the transport was reading a PROTON's range and restricted dE/dx **at the deuteron's own
+kinetic energy**. Measured in water by stepping 200 tracks to a stop and summing the true path
+length (`tests/test_ion_transport.cu` section 2):
+
+    species    E       transport    range_for    error       what the two were
+    deuteron   50 MeV  22.388 mm    12.809 mm    +74.79%     both 22.385 mm - the proton's
+    triton     50 MeV  22.388 mm     9.265 mm   +141.64%     row, at 50 MeV, for both
+
+Two different particles stopping at the same depth to five figures is the signature: 22.387947
+and 22.388005 mm, differing only where the fluctuation sampler sees the particle's own mass.
+
+He3 was not transported when this was found and would have been worse: its base particle is
+GenericIon, `massRatio` is 0.334096 and `chargeSqRatio` is the dynamic effective charge squared
+(4.0007 at 50 MeV in water), so `range_for/lookup` is **0.1032** - a factor of 9.7.
+
+`core/particle.cuh`'s `hadron_base_particle` predicted this exactly - "a deuteron's range would
+have come out as a proton's of the same kinetic energy, which is a factor of about two" - and
+the fix it describes was made in the TABLE and not at the call site. That is the shape worth
+keeping: the package that found the defect fixed the function it owned, the comment recorded the
+consequence, and the one caller that mattered was in another package's file. V53 is the same
+mechanism (the transport read P1's transcription of the neutron grid while P2's bit-exact one sat
+in the next directory) and so is V5/V7.
+
+**Anti-vacuity.** Section 1 of `tests/test_ion_transport.cu` asserts the ratios themselves -
+exactly 1.0 for the ten, and more than 20% away from 1.0 for the three that scale - because
+without it eight of section 2's rows would pass with the unscaled lookup in place. Run with the
+fix removed, section 2 failed as quoted above; run with only the RANGE unscaled and the dE/dx and
+the inverse lookup scaled, all 200 deuterons and all 200 tritons left the 400 mm water cube with
+their full energy (`balance -1.00e+00`), because a long range against a scaled stopping power
+makes the step function propose steps that lose almost nothing.

@@ -732,19 +732,36 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld || s.hadron_range == nullptr) { return false; }
 
-  const em::HadronSpecies sp = em::hadron_species_of<real_t>(type);
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
   rep.material = mat;
-  const real_t range = s.hadron_range->lookup(sp, mat, p.ekin);
+  const data::Material<real_t>& mm = s.materials[mat];
+
+  // ---- the range, THROUGH THE SCALING, and that is not a cosmetic change.
+  //
+  // `range_for`, `dedx_for` and `energy_from_range_for` are `G4VEnergyLossProcess`'s
+  // base-particle scaling: a species with no table of its own reads its base particle's at
+  // `E * massRatio` and rescales by `chargeSqRatio` (em/hadron_range.cuh's own header block).
+  // This function used to call `lookup(sp, ...)`, `dedx_at(sp, ...)` and
+  // `energy_from_range(sp, ...)` - the SPECIES-level entry points, which take an energy already
+  // in the table's own terms and apply no scaling at all.
+  //
+  // For the ten species that own a table both ratios are exactly 1, so every number those ten
+  // have ever produced is unchanged - which is why this went unnoticed. For the DEUTERON and
+  // the TRITON, which P1 gave kernels, massRatio is `m_p/m_d = 0.500246` and `m_p/m_t = 0.334`,
+  // and the transport was reading a PROTON's range and dE/dx at the deuteron's own kinetic
+  // energy. `core/particle.cuh`'s `hadron_base_particle` warns about exactly this arithmetic
+  // ("a deuteron's range would have come out as a proton's of the same kinetic energy, which is
+  // a factor of about two") and the fix it describes was made in the table and not at the call
+  // site. docs/RISK.md V57 has the measurement.
+  const real_t range = s.hadron_range->range_for(mm, type, mat, p.ekin);
 
   // The same two termination guards step_lepton needs, for the same reason: without them a
   // track can stop making progress near the end of its range and never fall below the cut, and
   // the drain loop never empties. 10 um of residual range is a few tens of keV for a proton.
   const real_t kMinUsefulRange = real_t(1e-2);  // mm
   if (p.ekin >= em::kHadronTrackingCut<real_t>() && range >= kMinUsefulRange) {
-    const data::Material<real_t>& mm = s.materials[mat];
     const real_t cut = mm.cut_electron;
 
     int next_volume = geom::kOutsideWorld;
@@ -889,8 +906,12 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // The energy after the whole true step, and the transport mfp at the mean energy - both
     // are inputs to the true/geometric conversion, so both are computed from the uninterrupted
     // step before geometry can cut it short.
-    const real_t e_end =
-        s.hadron_range->energy_from_range(sp, mat, fmax(range - t_step, real_t(0)));
+    // `p.ekin` is the pre-step energy the charge-square ratio is frozen at, which is the
+    // argument `energy_from_range_for` asks for and the same thing Geant4 freezes: see its
+    // header, and G4VEnergyLossProcess, which sets chargeSqRatio in
+    // AlongStepGetPhysicalInteractionLength and holds it for the whole step.
+    const real_t e_end = s.hadron_range->energy_from_range_for(
+        mm, type, mat, fmax(range - t_step, real_t(0)), p.ekin);
     real_t lambda_eff_end = st.lambda_eff;
     real_t cos_tet_max_end = st.cos_tet_max_nuc;
     {
@@ -993,10 +1014,11 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     if (step_len >= range || e_before <= em::kHadronTrackingCut<real_t>()) {
       loss = e_before;
     } else {
-      loss = step_len * s.hadron_range->dedx_at(sp, mat, e_before);
+      loss = step_len * s.hadron_range->dedx_for(mm, type, mat, e_before);
       if (loss > e_before * kLinLossLimit) {
         loss = e_before
-               - s.hadron_range->energy_from_range(sp, mat, fmax(range - step_len, real_t(0)));
+               - s.hadron_range->energy_from_range_for(
+                     mm, type, mat, fmax(range - step_len, real_t(0)), e_before);
       }
       loss = fmin(fmax(loss, real_t(0)), e_before);
 
