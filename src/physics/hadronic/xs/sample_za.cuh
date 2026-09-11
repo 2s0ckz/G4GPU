@@ -61,9 +61,22 @@
 // The random number is drawn ONCE, before the loop, in every one of them. That matters for
 // reproducing a stream: `q = G4UniformRand()` comes before the cross sections are summed, so
 // a port that drew it after would consume the same numbers in a different order.
+//
+// WHERE THE ABUNDANCES COME FROM (P8b)
+//
+// `ElementIsotopes` below used to have no producer at all - "the caller supplies this" - and
+// that was what blocked the elastic and neutron wiring: no table in the port held abundances.
+// `data/isotope_abundance.hh` is G4NistElementBuilder's table now, and `NistIsotopeView` is the
+// adapter that turns a `data::Material`'s element list into the per-element isotope lists these
+// functions index. It is a VIEW rather than an array because the alternative is an
+// `ElementIsotopes[kMaxElements]` on the stack of every step - 16 entries of 32 bytes, 512 bytes
+// on a kernel already measured at 3696 B of stack against a 3072 B limit (docs/RISK.md V22) - so
+// the functions below are templated on the container and index it with `[]`, which a raw
+// pointer, an array and a view all satisfy.
 #pragma once
 #include <cmath>
 
+#include "data/isotope_abundance.hh"
 #include "data/isotope_list.hh"
 #include "data/materials.cuh"
 #include "physics/hadronic/xs/particlexs.cuh"
@@ -84,6 +97,55 @@ struct ElementIsotopes {
   const real_t* abundance = nullptr;   ///< relative abundance, summing to 1
   bool natural_abundance = true;
 };
+
+/// The isotope composition of a NIST-built element, from `data/isotope_abundance.hh`.
+///
+/// G4NistElementBuilder::BuildElement keeps the isotopes with a non-zero abundance and
+/// G4Element::AddIsotope re-normalises them; both are in the generated table, so this is a pair
+/// of pointers into it rather than any arithmetic. `natural_abundance` is true because that is
+/// what BuildElement's last line sets - `theElement->SetNaturalAbundanceFlag(true)` - and it is
+/// the flag that decides which branch of `store_element_xs_fn` is taken.
+///
+/// A Z with no NIST element returns `n = 0`, which every function below treats as "no isotope
+/// information": `store_element_xs_fn` falls through to the element cross section and
+/// `store_sample_za_fn` returns A = 0. That is refused rather than guessed - see
+/// `data::IsotopeRefusal` - because an A of 0 is not a nucleus and a caller that uses it will
+/// produce a recoil with no mass.
+template <typename real_t>
+__host__ __device__ inline ElementIsotopes<real_t> nist_element_isotopes(int Z) {
+  ElementIsotopes<real_t> e;
+  const int n = data::nist_element_n_isotopes(Z);
+  if (n <= 0) { return e; }
+  const int off = data::nist_element_iso_offset()[Z];
+  e.n = n;
+  e.a = data::nist_element_iso_a() + off;
+  e.abundance = data::NistIsotopeAbundance<real_t>::values() + off;
+  e.natural_abundance = true;
+  return e;
+}
+
+/// A material's per-element isotope lists, indexed by element index, without materialising them.
+///
+/// Satisfies the `isos[i]` that `store_compute_cross_section_fn` and `store_sample_za_fn` ask
+/// for. `operator[]` returns by value and the callee binds it to a `const&`, which extends the
+/// temporary's lifetime for the duration of the reference - so there is no array and no
+/// dangling pointer, and the 512 bytes of stack an `ElementIsotopes[16]` would cost are not
+/// spent. The pointers INSIDE the returned struct are into the compiled-in table, which has
+/// static storage duration on the host and lives in the module's constant/global data on the
+/// device, so they outlive every caller.
+template <typename real_t>
+struct NistIsotopeView {
+  const data::Material<real_t>* mat = nullptr;
+  __host__ __device__ ElementIsotopes<real_t> operator[](int i) const {
+    return nist_element_isotopes<real_t>(static_cast<int>(mat->z[i] + real_t(0.5)));
+  }
+};
+
+template <typename real_t>
+__host__ __device__ inline NistIsotopeView<real_t> nist_isotopes_of(
+    const data::Material<real_t>& mat) {
+  return {&mat};
+}
 
 /// The running state ComputeCrossSection leaves for SampleZandA: the material's macroscopic
 /// cross section and the cumulative partial sums per element.
@@ -162,9 +224,13 @@ __host__ __device__ inline XsValue<real_t> store_element_xs_fn(
 }
 
 /// G4CrossSectionDataStore::ComputeCrossSection for any such data set.
-template <typename real_t, typename XsFn>
+///
+/// `isos` is anything indexable by element number - an `ElementIsotopes` array, a pointer to
+/// one, or a `NistIsotopeView`. See the note at the top of this file for why it is not a
+/// pointer any more.
+template <typename real_t, typename XsFn, typename IsoArray>
 __host__ __device__ inline XsValue<real_t> store_compute_cross_section_fn(
-    const XsFn& xs, const data::Material<real_t>& mat, const ElementIsotopes<real_t>* isos,
+    const XsFn& xs, const data::Material<real_t>& mat, const IsoArray& isos,
     MaterialXs<real_t>& out) {
   out.total = real_t(0.0);
   out.n_elements = mat.n_elements;
@@ -182,10 +248,10 @@ __host__ __device__ inline XsValue<real_t> store_compute_cross_section_fn(
 
 /// G4CrossSectionDataStore::SampleZandA for any such data set. See the PxsDataSet overload
 /// below for the parameter meanings; this is that function with the data set abstracted out.
-template <typename real_t, typename XsFn>
+template <typename real_t, typename XsFn, typename IsoArray>
 __host__ __device__ inline TargetZA store_sample_za_fn(const XsFn& xs,
                                                        const data::Material<real_t>& mat,
-                                                       const ElementIsotopes<real_t>* isos,
+                                                       const IsoArray& isos,
                                                        const MaterialXs<real_t>& mxs,
                                                        real_t q_elm, real_t q_iso) {
   TargetZA t;
@@ -216,16 +282,28 @@ __host__ __device__ inline TargetZA store_sample_za_fn(const XsFn& xs,
     }
     return t;
   }
-  real_t temp[64];
-  const int niso = (iso.n < 64) ? iso.n : 64;
+  // TWO PASSES OVER THE ISOTOPES RATHER THAN A `real_t temp[64]`, AND THE NUMBERS ARE THE SAME.
+  //
+  // Geant4 fills `G4double temp[nIso]` with the running sum and then walks it. That array was
+  // 64 doubles here - 512 bytes of kernel stack, in a function `step_neutral` calls on every
+  // neutron capture, against the 3072-byte limit that docs/RISK.md V22 already measures
+  // `run_step_neutral` exceeding at 3696. The second pass re-accumulates the identical partial
+  // sums, because it adds the identical terms in the identical order, so `temp[j] >= sum` and
+  // the re-accumulated `acc >= sum` are the same comparison on the same doubles - not an
+  // equivalent one. What it costs instead is a second evaluation of each isotope cross section,
+  // which is a log-vector lookup; what it buys is that the choice of data set cannot push a
+  // kernel over its stack.
+  //
+  // `tests/test_hadronic_process.cu` section 4 compares this against Geant4's counted
+  // frequencies AND against the analytic weights, and its numbers did not move when the array
+  // went - which is the check that the two passes agree, measured rather than argued.
   real_t sum = real_t(0.0);
-  for (int j = 0; j < niso; ++j) {
-    sum += iso.abundance[j] * xs.isotope(Z, iso.a[j]).value;
-    temp[j] = sum;
-  }
+  for (int j = 0; j < iso.n; ++j) { sum += iso.abundance[j] * xs.isotope(Z, iso.a[j]).value; }
   sum *= q_iso;
-  for (int j = 0; j < niso; ++j) {
-    if (temp[j] >= sum) {
+  real_t acc = real_t(0.0);
+  for (int j = 0; j < iso.n; ++j) {
+    acc += iso.abundance[j] * xs.isotope(Z, iso.a[j]).value;
+    if (acc >= sum) {
       t.a = iso.a[j];
       break;
     }
@@ -269,20 +347,20 @@ __host__ __device__ inline PxsXsFunctions<real_t> pxs_xs_functions(const PxsData
 /// The caller must have run store_compute_cross_section at this energy and material before
 /// store_sample_za: `mxs` is where the element partial sums come from, and nothing here
 /// recomputes them.
-template <typename real_t>
+template <typename real_t, typename IsoArray>
 __host__ __device__ inline XsValue<real_t> store_compute_cross_section(
     const PxsDataSet<real_t>& ds, real_t ekin, real_t loge,
-    const data::Material<real_t>& mat, const ElementIsotopes<real_t>* isos,
+    const data::Material<real_t>& mat, const IsoArray& isos,
     MaterialXs<real_t>& out) {
   return store_compute_cross_section_fn<real_t>(pxs_xs_functions<real_t>(ds, ekin, loge), mat,
                                                isos, out);
 }
 
-template <typename real_t>
+template <typename real_t, typename IsoArray>
 __host__ __device__ inline TargetZA store_sample_za(const PxsDataSet<real_t>& ds, real_t ekin,
                                                     real_t loge,
                                                     const data::Material<real_t>& mat,
-                                                    const ElementIsotopes<real_t>* isos,
+                                                    const IsoArray& isos,
                                                     const MaterialXs<real_t>& mxs,
                                                     real_t q_elm, real_t q_iso) {
   return store_sample_za_fn<real_t>(pxs_xs_functions<real_t>(ds, ekin, loge), mat, isos, mxs,

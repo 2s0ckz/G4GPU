@@ -5680,3 +5680,46 @@ next directory, which is how V5/V7 and V40 each started.
 MECHANICS through it - that the bin comes from log(e) and the interpolation is then linear in e -
 and that claim is still true and still worth a test. It is marked as not being what the transport
 reads.
+
+---
+
+### V60: the NIST element table has 107 elements and 104 of them can exist
+
+`G4NistElementBuilder` carries 107 elements - `maxNumElements` is 108 and `AddElement` is called
+for Z = 1..107. `G4NistManager::FindOrBuildElement(105)` aborts the process.
+
+The path is three classes deep and every step of it is reasonable on its own:
+
+1. For every element above uranium the table's abundance array holds a fabricated 100 on one
+   isotope. Dubnium's is `DbW[11] = {0,0,0,0,0,0,0,100,0,0,0}` over A = 255..265, so Db-262 comes
+   out of `AddElement`'s normalisation with `relAbundance = 1.0`.
+2. `BuildElement` keeps every isotope whose abundance is `> 0.0`, so it does NOT skip these
+   elements for having no natural isotopes - it builds a one-isotope `G4Element` for each.
+3. `G4Element::AddIsotope`, once the declared count is filled, calls
+   `G4AtomicShells::GetNumberOfShells(iz)`. `G4AtomicShells`' tables are declared
+   `fNumberOfShells[105]` and `fIndexOfShells[105]`, so Z = 105 is out of range and the class
+   raises `mat060` as a **FatalException**.
+
+Found by writing `ref/dump/dump_isotopes.cc` to loop over the whole table: it wrote every line up
+to Z = 104 and then killed `g4dump.exe` with
+
+    *** G4Exception : mat060
+          issued by : G4AtomicShells::GetNumberOfShells()
+    Atomic number out of range Z= 105
+
+So 104 is the highest Z at which a `G4Element`, and therefore a `G4Material`, can exist in
+11.1.1 - whatever the NIST database holds. `data/isotope_abundance.hh` carries all 311 abundances
+because they are the data `G4NistElementBuilder` holds, and it carries `kNistBuildableMaxZ = 104`
+beside them because that is the highest Z anything can ask about. `tests/test_isotopes.cu` states
+the 104 and the 3 as arithmetic rather than as literals, so a Geant4 that raises either limit
+fails with the reason visible instead of with a count that is off by three.
+
+Two things worth keeping from it. The first is that `is_natural_isotope(105, 262)` is TRUE in
+`data/natural_isotopes.hh`, and always was: that header's own comment explains the count as "the
+primordial radioisotopes that a list of STABLE nuclides leaves out", which is true of K40 and
+U238 and is not the whole story - 15 of the 311 are trans-uranic nuclides with a fabricated
+abundance, and the de-excitation module's `GetIsotopeAbundance(Z, A) > 0.0` treats them as
+natural because Geant4 does. Reproduced, not corrected. The second is the shape: the failure is
+not in the class that has the limit, it is in the class three levels up that never asks whether
+the element it is building can have electron shells.
+
