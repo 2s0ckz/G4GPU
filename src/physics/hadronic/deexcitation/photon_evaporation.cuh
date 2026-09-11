@@ -252,10 +252,21 @@ struct GammaEmission {
 /// One subtlety that is easy to lose: a level with a FLOATING marker and no transitions falls
 /// back to the level below it when the two are within tolerance, because the floating level is
 /// a duplicate energy carrying only a different marker.
+///
+/// @param creation_time  where the sampled level lifetime is accumulated, or null to discard
+///        it. `G4PhotonEvaporation::GenerateGamma` reads `nucleus->GetCreationTime()`, adds
+///        `-ltime*G4Log(G4UniformRand())` to it when the level is not prompt, and writes the
+///        result onto BOTH the emitted gamma and the residual - so the value is a running
+///        total down a cascade and not a per-transition delta. This module has no creation
+///        time on a Fragment and discarded it; `G4NeutronRadCapture::ApplyYourself` is the
+///        first caller that needs it, because it gives every secondary
+///        `time + max(f->GetCreationTime(), 0.0)`. Null keeps the previous behaviour exactly:
+///        the draw is still made, so the random stream is unchanged either way.
 template <typename Rng>
 __host__ __device__ inline GammaEmission generate_gamma(PhotonEvaporationState& s,
                                                         Fragment& nucleus,
-                                                        const data::LevelTable& lt, Rng& rng) {
+                                                        const data::LevelTable& lt, Rng& rng,
+                                                        double* creation_time = nullptr) {
   GammaEmission out;
   const double tolerance = deex_params().min_excitation;
   const double eexc = nucleus.excitation;
@@ -354,11 +365,21 @@ __host__ __device__ inline GammaEmission generate_gamma(PhotonEvaporationState& 
     s.level_index = data::transition_final_index(tr);
     efinal = data::level_energy(lt, m, s.level_index);
     nucleus.floating_level = data::level_floating(lt, m, s.level_index);
-    // The level lifetime is sampled because fSampleTime is !fRDM = true. The port does not
-    // carry a creation time on a fragment, so the sample is drawn - to keep the random stream
-    // aligned with Geant4's - and the time discarded. Named here because discarding it is a
-    // decision: a neutron time cut (P1's G4NeutronKiller) would need it.
-    if (ltime > 0.0) { (void)(-ltime * std::log(rng.uniform())); }
+    // The level lifetime is sampled because fSampleTime is !fRDM = true. A Fragment carries no
+    // creation time here, so the sample went into `creation_time` if the caller offered one and
+    // was discarded otherwise - the draw is made either way, which is what keeps the random
+    // stream aligned with Geant4's. This USED to be discarded unconditionally, with a comment
+    // saying a neutron time cut would need it: P7's G4NeutronRadCapture is that caller, and it
+    // gives every secondary `time + max(f->GetCreationTime(), 0.0)`.
+    //
+    // `time -= ltime*G4Log(G4UniformRand())` with the log of a uniform in (0,1) being negative,
+    // so the delay ADDS. Accumulated, not assigned: the value is the running total down the
+    // cascade, and Geant4 gets that by reading it off the residual (`nucleus->GetCreationTime()`
+    // at the top of this function) and writing it back at the bottom.
+    if (ltime > 0.0) {
+      const double delay = -ltime * std::log(rng.uniform());
+      if (creation_time != nullptr) { *creation_time += delay; }
+    }
   }
 
   bool is_ll = false;

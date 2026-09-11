@@ -57,8 +57,26 @@ struct LorentzVector {
     return (m2 < 0.0) ? -std::sqrt(-m2) : std::sqrt(m2);
   }
 
+  /// `HepLorentzVector::boostVector()`, which is `pp * (1./ee)` and NOT `pp/ee`
+  /// (LorentzVector.cc:189).
+  ///
+  /// This divided, and the two differ by an ulp. docs/RISK.md V37 already measured what that
+  /// ulp costs in `elastic/hadron_elastic.cuh` - "the recoil direction 5.8e-13 out and the
+  /// alpha-on-Pb recoil energy 2.3e-10 out" - because a recoil is a cancellation and a
+  /// cancellation amplifies an ulp by the ratio of the operands to the result. It costs the
+  /// same thing here, and P7's oracle is what found it: MEASURED, by putting the division back
+  /// and rerunning `tests/test_capture.cu`, the 5493 secondary direction components of a
+  /// capture cascade go from exactly zero to 1.4e-13 and their kinetic energies from exactly
+  /// zero to 2.0e-16. Nothing in P3's own tests could see it: their fragments are at rest or
+  /// nearly so, where the boost vector is zero and the arithmetic never runs.
+  ///
+  /// The `e == 0` guard is not CLHEP's shape - CLHEP prints to cerr and returns `pp/ee` - but
+  /// it is the same answer for `pp == 0` and a kernel cannot print. A non-zero momentum with
+  /// zero energy is unphysical and unreachable from any fragment this module builds.
   __host__ __device__ Vec3d boost_vector() const {
-    return (e == 0.0) ? Vec3d{0.0, 0.0, 0.0} : Vec3d{v.x / e, v.y / e, v.z / e};
+    if (e == 0.0) { return Vec3d{0.0, 0.0, 0.0}; }
+    const double inv = 1.0 / e;
+    return Vec3d{v.x * inv, v.y * inv, v.z * inv};
   }
 
   /// HepLorentzVector::boost(b). Written out rather than assembled from a matrix because
