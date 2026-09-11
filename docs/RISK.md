@@ -5025,6 +5025,12 @@ reproduces the reference's tables and does not reproduce the reference's transpo
 reference quantities do not agree with each other.** Which of the two is right is not something
 this package can settle from outside the EM chain, and it is the largest open item P1 leaves.
 
+**CLOSED by V46.** The last sentence above was right about where to look and wrong about which
+table: the transport reads neither the DEDX table nor the range table's values but the range
+table's *interpolation*, which Geant4 makes LINEAR for the second-registered particle of every
+charge pair and cubic for the first. Every exclusion in this entry holds; each of them tested a
+value, and the defect is in a rule.
+
 **What this cost, and the rule it earns.** Half a day of it went into hypotheses that a 2,000-
 event run had appeared to support and a 500,000-event run then killed - msc twice. B1's printed
 rms is the standard error and scales as 1/sqrt(N) exactly; a 2,000-event B1 run is +/-1.7%, so
@@ -5077,3 +5083,183 @@ defaults below compute 6.0, and `tests/test_neutron.cu` fails to compile because
 `atomicAdd(double*, double)` does not exist there. What it reports is an overload-resolution
 error inside `src/core/track_buffer.cuh`, naming neither the architecture nor the flag.
 `build_all.bat`'s `TESTS_GPU` line already passes `-arch=sm_86`.
+
+
+### V46: the negative of every charge pair is the second particle registered, and loses its spline
+
+V44 left a located question with numbers on it: Geant4's transported B1 dose is 4.36% (mu),
+5.43% (pi) and 9.62% (K) higher for the positive of each charge pair, while
+`G4EmCalculator::GetDEDX` - the process's own restricted dE/dx table - has each pair 0.023%
+apart in water and 0.233% apart in the scored bone. Multiple scattering, the at-rest and
+hadronic processes, decay, a Bragg peak and the dE/dx and range tables' VALUES were all
+excluded there by measurement, and every one of those exclusions holds. What is guilty is the
+INTERPOLATION RULE on one of those tables, and the charge enters only through which member of
+the pair `G4EmBuilder` registers second.
+
+#### The table V44 checked is not the table the transport reads
+
+`G4VEnergyLossProcess::AlongStepDoIt` (utils/src/G4VEnergyLossProcess.cc:825-836) computes the
+continuous loss twice:
+
+```
+  eloss = length*GetDEDXForScaledEnergy(preStepScaledEnergy);      // theDEDXTable
+  if(eloss > preStepKinEnergy*linLossLimit) {                      // linLossLimit = 0.01
+    G4double x = (fRange - length)/reduceFactor;
+    eloss = preStepKinEnergy - ScaledKinEnergyForLoss(x)/massRatio;// theRangeTableForLoss and
+  }                                                               // theInverseRangeTable
+```
+
+A 200 MeV pion in `G4_BONE_COMPACT_ICRU` takes **3.0 steps** across a 60 mm slab, losing about
+5% of its energy on each, so the second branch fires on every step of every track and
+`theDEDXTable` is never read. `ref/chargeodd/` measures it: 20,000 events a side, same seed,
+same geometry, the seven inactivations of `pion_minus_emonly.mac`.
+
+| slab deposit (MeV/event) | pi+ | pi- | split | K+ | K- | split |
+|---|---|---|---|---|---|---|
+| default (linLossLimit 0.01) | 22.8848 | 21.9030 | **+4.48%** | 45.7077 | 41.8842 | **+9.13%** |
+| linLossLimit 0.49 | 22.6465 | 22.7072 | -0.27% | 43.4504 | 44.0598 | -1.38% |
+| dRoverRange 0.002 | 22.8998 | 22.9380 | -0.17% | | | |
+
+The middle row keeps the step lengths and disables only the branch; the last shortens the steps
+so it would not have fired. Either kills the split. And it is the primary's own loss:
+`ke_in - ke_out` carries all of it (22.8804 against 21.8953) while its path length does not
+(60.1273 against 60.1278), and the 200 mm of water upstream splits the arrival energy the same
+way (157.42 against 159.02 MeV) and stops splitting it when the branch is off (157.67 against
+157.62).
+
+#### Why the range table is charge-odd, in five source lines
+
+`ref/oracle/chargeodd_vectors.csv` reads the spline flag off the vectors themselves. Every
+material, 85 nodes and a 100 eV lower edge on all of them:
+
+| particle | dedx_spline | range_spline | invrange_spline |
+|---|---|---|---|
+| mu+, pi+, K+, p | 1 | 1 | 1 |
+| mu-, pi-, K-, pbar | **0** | **0** | 1 |
+
+1. `G4EmBuilder::ConstructLightHadrons` (G4EmBuilder.cc:175-204) creates **one**
+   `G4hBremsstrahlung` and **one** `G4hPairProduction` and registers each to BOTH members of
+   the pair - constructed after part1's `G4hIonisation` and before part2's. G4EmBuilder.cc:
+   248-269 does the same for mu± with `G4MuBremsstrahlung` / `G4MuPairProduction`.
+2. `G4MuBremsstrahlung.cc:82` and `G4MuPairProduction.cc:88` call `SetSpline(false)` in their
+   constructors, and rightly: a radiative restricted dE/dx is identically zero below threshold
+   and a cubic spline through that rings. `G4hBremsstrahlung` and `G4hPairProduction` derive
+   from them (G4hBremsstrahlung.cc:51, G4hPairProduction.cc:51) and inherit it.
+3. `G4LossTableManager::BuildTables` (G4LossTableManager.cc:800-838) walks `loss_vector` in
+   **construction order** and picks the shared radiative processes up through its own "possible
+   case of process sharing between particle/anti-particle" pointer scan. part1 gets
+   `t_list = [hIoni, hBrems, hPairProd]`; part2 gets `[hBrems, hPairProd, hIoni]`.
+4. `G4LossTableBuilder::BuildDEDXTable` (G4LossTableBuilder.cc:161-166) builds the summed
+   vector as `new G4PhysicsLogVector(*pv0)` with `pv0 = (*(list[0]))[i]` - a **copy** of
+   `t_list[0]`'s vector, carrying its `useSpline`. part2's sum inherits hBrems's false.
+5. `BuildRangeTable` (:224-226) copies that vector again for the range table, and its
+   `if(splineFlag) v->FillSecondDerivatives()` is a no-op because
+   `G4PhysicsVector::FillSecondDerivatives` opens with `if(!useSpline) return;`.
+   `BuildInverseRangeTable` (:275) builds a **fresh** `G4PhysicsFreeVector(npoints,
+   splineFlag)` instead, so the inverse stays splined for both charges.
+
+alpha, He3, deuteron, triton and GenericIon are splined because they get no radiative process
+at all (`G4EmBuilder::ConstructIonEmPhysics`, G4EmBuilder.cc:119-145, registers only msc and an
+ionisation process), so `n_dedx` is 1, `BuildTables`' `if (1 < n_dedx)` is false and no summed
+vector is ever made.
+
+#### The consequence, in one column pair
+
+`ref/oracle/chargeodd.csv` dumps `dedx_table` beside `1/(dR/dE)` by central difference on the
+range table. The range table is the integral of the dE/dx table, so their ratio is 1 by
+construction. `G4_BONE_COMPACT_ICRU`, 100 MeV to 1 GeV:
+
+* **pi+** ratio 0.99969 .. 1.00027, smooth.
+* **pi-** ratio 0.97788 .. 1.02953, **piecewise constant over each grid cell** - which is what
+  linear interpolation of R(E) gives, on a 7-bins-per-decade grid whose cells span a factor
+  10^(1/7) = 1.389 in energy.
+
+Over the 20 mm step the transport actually takes, `E - R^-1(R(E) - 20mm)` against `20mm*dedx`:
+pi+ within 0.3%, pi- 7.6% low, kaon- 21% low, anti_proton 28% low - always too little loss,
+because R(E) is convex and a chord over-estimates it.
+
+That also explains every shape V44 recorded and could not attribute. It is **gone by 1 GeV**
+because R(E) is nearly straight on the minimum-ionising plateau (the ratio is 1.0002 there). It
+**orders by 1/beta** because the curvature of R(E) is largest at low velocity. It is **absent
+from the tables' values** because dE/dx is smooth and slowly varying, so its own chord error is
+a tenth of a per cent - it is R(E), spanning five orders of magnitude across the table, whose
+DERIVATIVE the chord destroys.
+
+#### The physics judgement, and what the port does
+
+Geant4 is inconsistent with itself here: its restricted dE/dx table and its range table are
+meant to be an integral pair and for a negative hadron they are not, so the same install gives
+two different stopping powers depending on which of its own tables is asked. The port
+reproduces the transport, because the port's contract is 11.1.1 as it runs and the number a
+user compares is a dose. `em::hadron_table_uses_spline` is the one place that decides, named
+for the registration order rather than for the charge, with the chain above in its comment; the
+second derivatives of the dE/dx and range rows are zeroed for those four species, which is
+exact rather than approximate because a cubic spline with zero second derivatives everywhere
+IS linear interpolation. `tests/test_chargeodd.cu` checks the composition `E - R^-1(R(E) - L)`
+against Geant4's own two lookups: 0.02-0.36% for all eight species after, 10-83% for the four
+negatives before.
+
+**What this is worth reporting upstream.** Nothing in the Geant4 code is a typo. Each of the
+five steps is defensible on its own; the defect is that step 2's correct local decision about a
+radiative table leaks into step 4's choice of template vector, and step 3's ordering decides
+which particle it leaks to. A one-line fix would be for `BuildDEDXTable` to take the spline
+flag from `splineFlag` rather than from `list[0]`'s vector, or for `BuildTables` to put the
+ionisation process first in `t_list`.
+
+**The rule it earns.** V44's four exclusions were all correct and none of them found this,
+because every one of them tested a VALUE. A table is a value, a grid and an interpolation rule,
+and the third is invisible to any comparison that evaluates both sides at the same point. The
+diagnostic that found it evaluates the derivative instead, and it is two columns.
+
+
+### V47: a comment asserting a term is zero, above the code that drops it
+
+`em/wentzel_msc.cuh`'s `wv_sample_single` is `G4WentzelOKandVIxSection::SampleSingleScattering`
+without one factor. Geant4's analytic rejection function is
+
+```
+  grej = (1. - z1*factB + factB1*targetZ*sqrt(z1*factB)*(2. - z1))*fm*fm/(1.0 + z1*factD);
+```
+
+and the port's has no `/(1.0 + z1*factD)`, under this comment:
+
+> factD is sqrt(mom2)/value, set only for particles with a magnetic-moment correction; it is
+> zero for the particles here, so the 1/(1 + z1*factD) factor in the analytic branch is 1.
+
+It is not. `factD = sqrt(mom2)/targetMass` is set by `SetTargetMass`
+(G4WentzelOKandVIxSection.hh), which `SetupTarget` calls for **every** target
+(G4WentzelOKandVIxSection.cc:205), and `G4WentzelVIModel::SampleScattering` calls `SetupTarget`
+at G4WentzelVIModel.cc:615 immediately before `SampleSingleScattering` at :618. For a 200 MeV
+proton on oxygen, `sqrt(mom2)` is 644.5 MeV and `targetMass` is 14903.9 MeV, so factD is 0.0433
+and `1/(1 + z1*factD)` runs from 1 at zero angle to 0.920 at 180 degrees.
+
+Measured, with `tests/test_coulomb_scattering.cu`'s sampler block - 20,000 draws per cell, the
+same (Z, A) and target mass on both sides. Dropping the factor from
+`em::coulomb_sample_single`, which is what `wv_sample_single` does, fails eight of 240 cells:
+
+| species | Z | E | P(scatter) G4 / ours | sigma | chi2/bin |
+|---|---|---|---|---|---|
+| pi+ | 1 | 200 MeV | 0.6085 / 0.6746 | 13.6 | 70.3 |
+| pi- | 1 | 200 MeV | 0.6101 / 0.6683 | 11.9 | 51.8 |
+| mu± | 1 | 200 MeV | 0.522 / 0.573 | 10.1 | 37 |
+| kaon+ | 1 | 200 MeV | 0.5988 / 0.6475 | 9.9 | 33.1 |
+| proton | 1 | 200 MeV | 0.6084 / 0.6489 | 8.3 | 20.4 |
+| pbar | 1 | 200 MeV | 0.5988 / 0.6303 | 6.4 | 13.2 |
+
+All at Z = 1 and the lowest energy sampled, which is where `sqrt(mom2)/targetMass` is largest -
+the scaling the term has, so the failure pattern is itself evidence about which term is
+missing.
+
+`src/physics/em/coulomb_scattering.cuh`'s `coulomb_sample_single` has the factor and takes the
+target mass as an argument, because `G4eCoulombScatteringModel::SampleSecondaries` **overrides**
+SetupTarget's mean atomic mass with the sampled isotope's nuclear mass after the cross sections
+and before the sampler, so the cross section and the sampler see different targets by design.
+`em/wentzel_msc.cuh` is not fixed here: it belongs to no Phase-2 package and one line in it is
+one merge conflict for whoever does own it. What the WentzelVI multiple-scattering angle
+distribution is worth today is not measured - `tests/test_wentzel_msc.cu` passes, so whatever
+it checks is not sensitive to this.
+
+**The rule it earns is V32's and V35's, for the third time.** A comment that argues for a
+weaker claim than the code makes is protecting a gap, and a comment that explains why a term
+can be discarded is the one to re-read when the term turns out to matter. This one names the
+right variable, gives the right formula for it, and then asserts the wrong value.
