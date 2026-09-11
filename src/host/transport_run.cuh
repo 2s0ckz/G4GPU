@@ -237,9 +237,11 @@ struct EventSink {
 ///             using QHook = StepTally<double, BinByEvent, QWeight>;
 ///             TransportEngine<double, QHook> engine;
 ///
-///         and add `template class TransportEngine<double, QHook>;` next to the existing
-///         explicit instantiation at the bottom of transport_run.cu. A custom hook means
-///         rebuilding that translation unit either way - the kernels live there.
+///         and instantiate it in one .cu of your own, as tests/test_custom_hook.cu does. A
+///         custom hook compiles its own kernels - they mangle on the hook type - so it pays
+///         for them once, in its own translation unit, and never rebuilds g4gpu. The stock
+///         hook's kernels are pre-built one family per object in out/transport_run.lib and
+///         nothing downstream recompiles them.
 template <typename real_t, typename StepHook = StepTap<real_t>>
 class TransportEngine {
  public:
@@ -549,10 +551,13 @@ class TransportEngine {
 
 
 // The kernels this engine launches are __global__ templates. A __global__ template defined in
-// a header gets a device stub emitted into every translation unit that instantiates it, and
-// those stubs collide at link time ("is not a specialization of a function template"). So the
-// kernels and these method bodies live in transport_run.cu, and the instantiation for double
-// is declared here and defined there.
+// a header gets a device stub emitted into every translation unit that instantiates it, so the
+// kernels and these method bodies live in host/transport_run_impl.cuh and the instantiation
+// for double is declared here and defined in transport_run.cu. Since P8e the twenty stock
+// kernels are not in that file either - one translation unit per kernel family, archived into
+// out/transport_run.lib - which is what this class's own declaration below does for the host
+// code: it keeps the instantiation in exactly one object. Read the block under the kernels in
+// transport_run_impl.cuh for how the kernels get the same treatment.
 extern template class TransportEngine<double, StepTap<double>>;
 
 }  // namespace g4gpu::host

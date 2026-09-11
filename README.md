@@ -391,7 +391,7 @@ build_all.bat       # everything: drivers, tests, viewer, GUI, example B1, the f
 Individual pieces:
 
 ```
-build_engine.bat            transport_run.obj, the templated stepping kernels
+build_engine.bat            out\transport_run.lib - one translation unit per stepping kernel
 build_view.bat              the OpenGL viewer
 build_gui.bat               the geometry builder
 examples\B1\build.bat       example B1
@@ -508,7 +508,7 @@ then `rm->SetStepHook(QualityFactorScoring(d_w, d_p, n, slot));` before `BeamOn`
 
 **g4gpu is not rebuilt and not edited.** The library is built once and a project compiles
 against it, which is the arrangement Geant4 has. A project with a custom hook does not even
-link `transport_run.obj` - it instantiates its own specialization and owns its own build.
+link `transport_run.lib` - it instantiates its own specialization and owns its own build.
 
 **But the compile time does not go away, it moves.** Measured: a project with its own hook
 takes **208 s** to build; rebuilding the engine takes **202 s**. The transport kernels are

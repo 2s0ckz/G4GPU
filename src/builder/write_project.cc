@@ -1215,9 +1215,9 @@ bool WriteProject(const Model& model, const std::string& dir) {
 
   // ---- build script
   //
-  // Two things about it are deliberate. It links the prebuilt engine and viewer objects
-  // rather than compiling src/host/transport_run.cu itself, because that file takes about
-  // four minutes on its own and build_engine.bat has already done it. And the object files go
+  // Two things about it are deliberate. It links the prebuilt engine archive and viewer
+  // object rather than compiling the engine's eight translation units itself, because that is
+  // minutes of nvcc and build_engine.bat has already done it. And the object files go
   // into build\ rather than next to the source: a project that can import CAD meshes should
   // not have a directory of files called *.obj in it meaning something else entirely.
   {
@@ -1295,8 +1295,8 @@ bool WriteProject(const Model& model, const std::string& dir) {
       << "#   cmake -S . -B build -DG4GPU_DIR=D:/g4gpu\n"
       << "#   cmake --build build --config Release\n"
       << "#\n"
-      << "# transport_run.cu takes about four minutes to compile. If build_engine.bat has\n"
-      << "# already produced it, link that instead:\n"
+      << "# The transport engine is eight translation units and takes minutes to compile. If\n"
+      << "# build_engine.bat has already produced out/transport_run.lib, link that instead:\n"
       << "#\n"
       << "#   cmake -S . -B build -DG4GPU_USE_PREBUILT_ENGINE=ON\n"
       << "cmake_minimum_required(VERSION 3.18)\n"
@@ -1332,7 +1332,12 @@ bool WriteProject(const Model& model, const std::string& dir) {
     }
     f << ")\n"
       << "if(NOT G4GPU_USE_PREBUILT_ENGINE)\n"
-      << "  list(APPEND SOURCES \"${G4GPU_DIR}/src/host/transport_run.cu\")\n"
+      << "  # GLOBbed, and that is the right call here rather than a hand-written list: the\n"
+      << "  # engine is one translation unit per kernel family and the set is the engine's to\n"
+      << "  # know, not this project's. A list written out here would go stale the day a\n"
+      << "  # family is split further, and the symptom would be an unresolved launch stub.\n"
+      << "  file(GLOB G4GPU_ENGINE_UNITS \"${G4GPU_DIR}/src/host/transport_run*.cu\")\n"
+      << "  list(APPEND SOURCES ${G4GPU_ENGINE_UNITS})\n"
       << "  list(APPEND SOURCES \"${G4GPU_DIR}/src/render/vis_manager.cu\")\n"
       << "endif()\n"
       << "set_source_files_properties(${SOURCES} PROPERTIES LANGUAGE CUDA)\n\n"
@@ -1344,7 +1349,7 @@ bool WriteProject(const Model& model, const std::string& dir) {
       << "target_link_libraries(" << app << " PRIVATE opengl32 user32 gdi32)\n"
       << "if(G4GPU_USE_PREBUILT_ENGINE)\n"
       << "  target_link_libraries(" << app << " PRIVATE\n"
-      << "    \"${G4GPU_DIR}/out/transport_run.obj\"\n"
+      << "    \"${G4GPU_DIR}/out/transport_run.lib\"\n"
       << "    \"${G4GPU_DIR}/out/vis_manager.obj\")\n"
       << "endif()\n\n"
       << "# The macros and any data sidecars, beside the executable, because the project\n"

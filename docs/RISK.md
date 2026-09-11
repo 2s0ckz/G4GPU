@@ -6496,3 +6496,161 @@ The fix is package P14c: the e+- tables on Geant4's grid with the clamp replaced
 transport), `G4WentzelVIModel` for e+- above `MscEnergyLimit()` where Geant4 switches from Urban,
 and an energy balance in the device stepping test. Until it lands the port is not to be used for
 electrons or positrons above 100 MeV.
+
+### V65: the translation unit was not the variable, and a smaller one dies where a bigger one lives
+
+`src/host/transport_run.cu` instantiated the engine class, and the eighteen `<<<>>>` launches
+inside `BeamOn` implicitly instantiated eighteen stepping kernels into that one file. It took
+**25 minutes 02 seconds** of nvcc, three packages had waited on it, and with P14b's Urban branch
+live it did not compile at all (V63). This is the split, what it measured, and the two things in
+V55 and V63 that it corrects.
+
+#### The mechanism, and the check that it is working
+
+An explicit instantiation DECLARATION suppresses implicit instantiation, and nvcc honours it for
+a `__global__` template. Measured on a ten-line pair rather than assumed, because everything
+below rests on it:
+
+| | launching object carries the kernel | links | runs |
+|---|---|---|---|
+| `extern template __global__ void k<int,3>(int*);` in the header | **no** - `cuobjdump -res-usage` reports `GLOBAL:0` and no `Function` line | yes | yes, right answer |
+| the same pair with that line deleted | **yes** - `_Z1kIiLi3EEvPT_`, REG:8 | yes | yes |
+
+So the declaration is load-bearing and the inversion says so. The kernels stay in
+`transport_run_impl.cuh`; the block under them declares all eighteen stock specialisations
+`extern template`, and one `transport_run_<species>.cu` per kernel provides the definition.
+`transport_run.cu` keeps the engine's host code and the three utility kernels - the launching
+object's own device code went from 21 functions to 3.
+
+**The link will not catch a mistake here, which is why there is a check on the artefact.** The
+comment at the top of `transport_run_impl.cuh` says a `__global__` template instantiated in two
+translation units is rejected with "explicit specialization ... is not a specialization of a
+function template". On CUDA 11.6 it is not: explicit instantiation definitions of the same
+specialisation in two objects link **cleanly**, the stubs being COMDAT-folded (row 3 of the same
+experiment). A launch added without a declaration therefore costs twenty-five minutes of nvcc
+and says nothing at all. `build_engine.bat` runs `cuobjdump -res-usage out\transport_run.obj |
+findstr run_step_` and fails the build on a hit.
+
+#### The thing this entry exists to correct: smaller is not safer
+
+The first arrangement was one unit per kernel FAMILY - gamma, lepton, neutral, nucleon (p, pbar),
+muon (mu-, mu+), meson (pi+, pi-, K+, K-), ion (the five Urban species). Seven of the eight
+compiled. **The meson unit died with `ptxas died with status 0xC0000005 (ACCESS_VIOLATION)`** -
+the same message as V55 and V63 - and it died with `kUrbanIonMscWired` still FALSE, on code that
+compiles perfectly well as four of the eighteen kernels in the single unit this split replaced.
+It died twice: at 215 s inside the eight-way parallel build, and at **99.7 s alone on an idle
+machine with 31 GB free**, which is what rules out memory pressure and confirms V63's
+"deterministic".
+
+Then the decisive measurement: **one `run_step_hadron` in a unit of its own compiles in 90
+seconds.** pi+ 89.5 s, K+ 93.4 s, both from the family that had just failed.
+
+So V63's conclusion - "the thing that dies is the TRANSLATION UNIT ... the only lever left with
+real headroom is to stop asking one translation unit to hold twenty kernels" - is half right. The
+translation unit's SHAPE is the variable; its SIZE is not, and not even monotonically. Eighteen
+kernels live, four die, one lives. V63 called it "a cliff and not a slope"; the correction is that
+the cliff faces both ways, and the only shape this project has ever measured ptxas to compile for
+every arrangement of the physics - V55's reproducer, V63's nine builds, and these - is one
+`run_step_hadron` on its own. The thirteen charged-hadron kernels are therefore thirteen units.
+`run_step_lepton`'s two instantiations and `run_step_neutral`'s two share a unit each, measured at
+269 s and 260 s; both are one template switched by a compile-time constant and neither is the
+build's long pole.
+
+#### The compile time
+
+Same machine, `nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -v -c`, with three other worktrees
+building beside it as they always are:
+
+| | wall |
+|---|---|
+| one translation unit, eighteen kernels (main at c5c3922) | **25 min 02 s** |
+| eight family units, all started at once (meson died) | 8 min 54 s |
+| seventeen units, six at a time | **6 min 31 s** |
+
+Per unit, measured serially and from the sentinel timestamps of the parallel runs: engine 68 s,
+one hadron kernel 90 s, gamma 146 s, neutral 260 s, lepton 269 s. The FAMILY units, for the
+record that the per-kernel cost rises as the unit shrinks: nucleon (2 kernels) 337 s, muon (2)
+331 s, ion (5) ~560 s - against (1501 - 68)/18 = 80 s a kernel in the single unit. The split
+costs more CPU in total and less wall time, which is the trade it was made for. It also costs
+object size: each unit carries its own copy of every shared `__device__` function, so the
+seventeen objects total **93,738,021 bytes** against one object of 21,829,799, and the archive
+over them is 98,010,048.
+
+#### The registers, which are NOT byte-identical, and the dose, which is
+
+`-Xptxas -v`, before in the single unit and after in the split units. Registers are 255 in every
+stepping kernel on both sides, which is the number the 16384-byte stack limit `Upload` sets is
+measured against (V22). The stack frames and the spills move in both directions, because ptxas
+allocates per MODULE and the modules changed:
+
+| kernel | stack frame | spill st/ld | registers |
+|---|---|---|---|
+| `run_step_gamma` | 2416 -> **3040** B | 368/676 -> **52/20** | 255 |
+| `run_step_lepton` (both) | 3040 -> **3024** B | 80/28 -> **84/32** | 255 |
+| `run_step_hadron` pi+, pi-, K+, K-, mu-, mu+ | 4592 B, unchanged | 100/52 -> **76/52** | 255 |
+| `run_step_hadron` proton | 4592 -> **3920** B | 100/52 -> **200/444** | 255 |
+| `run_step_hadron` antiproton | 4592 -> **3664** B | 100/52 -> **200/444** | 255 |
+| `run_step_hadron` alpha | 4592 -> **3920** B | 100/52 -> **252/344** | 255 |
+| `run_step_hadron` deuteron, triton | 4592 -> **3920** B | 100/52 -> **184/396** | 255 |
+| `run_step_hadron` He3 | 4592 -> **3984** B | 100/52 -> **192/396** | 255 |
+| `run_step_hadron` GenericIon | 4592 -> **4000** B | 184/140 -> **360/432** | 255 |
+| `run_step_neutral<kNeutron>` | 7264 -> **7472** B | 248/540 -> **296/516** | 255 |
+| `run_step_neutral<kPiZero>` | 3152 -> **3008** B | 524/848 -> **528/920** | 255 |
+| `seed_from_primaries` | 704 -> **624** B | 96/88 -> **0/0** | 255 -> **234** |
+
+`cmem[0]` is unchanged in every row - 1464 for the gamma and lepton kernels, 1616 for the
+hadron, 1640 for the neutral - which is the check that only the allocation moved and not the
+argument lists.
+
+Three things in that table are worth reading twice. The gamma kernel's frame GREW 624 bytes
+while its spill traffic FELL from 368/676 to 52/20 without one character of its code changing -
+the exact reverse of the movement V55 recorded for the same kernel when the unit grew, and the
+same phenomenon: with eighteen entry points in a module ptxas was rationing, and with one it is
+not. `seed_from_primaries` is the clearest case, 21 registers and 88 bytes of spill loads
+cheaper for being alone. And the six singly charged mesons and muons held 4592 bytes exactly
+while every nucleon and ion kernel dropped 600-900 bytes and took several hundred bytes of extra
+spill instead - so the reallocation is not uniform even across instantiations of one template.
+
+**These are V55's and V63's reproducer numbers, and that is the cross-check on the whole
+arrangement.** V63's one-kernel control column reads proton 3904 B / 200/444, alpha 3904 /
+252/344, GenericIon 3984 / 360/432. The shipped units read 3920 / 200/444, 3920 / 252/344 and
+4000 / 360/432 - +16 bytes, which is main having moved since. The engine is now built in exactly
+the shape V55 recommended for measuring it.
+
+None of this reaches the arithmetic, and the check that it does not is the dose. B1's
+2,000,000-event gamma gate through the split engine reads **425.847 pGy +/- 0.867682 against
+Geant4's 427.385 +/- 0.87, 1.25138 sigma** - main's recorded number to every digit it prints,
+taken twice. Four more seeds through the same binary: 426.195 (0.968 sigma), 426.917 (0.381),
+427.489 (0.085), 427.288 (0.079) - mean of the five 426.747 +/- 0.315 pGy of seed scatter,
+which is the reference the next two sections are measured against.
+
+#### The two claims this arrangement rests on, each inverted once
+
+**"A species with no instantiation anywhere is an unresolved symbol rather than a track that is
+never stepped."** Archived sixteen of the seventeen objects, leaving the proton's out, and
+relinked example B1 against that:
+
+```
+bad.lib(transport_run.obj) : error LNK2019: unresolved external symbol
+  "void __cdecl g4gpu::host::run_step_hadron<double,9,struct g4gpu::StepTap<double> >(...)"
+  referenced in function
+  "...g4gpu::host::TransportEngine<double,struct g4gpu::StepTap<double> >::BeamOn(...)"
+fatal error LNK1120: 1 unresolved externals
+```
+
+Species 9 is `kProton`, and the function it is missing from is named. So the glob in
+`build_engine.bat` cannot silently lose a species.
+
+**"The engine's own object carries no stepping kernel."** Removed `extern template
+G4GPU_STEP_GAMMA(StepTap<double>);` from `transport_run_impl.cuh`, recompiled
+`transport_run.cu` alone - 77.2 s, which is itself the measure of what the eighteen kernels were
+costing that file - and ran the gate's own command:
+
+```
+> cuobjdump -res-usage out\transport_run.obj | findstr /c:"run_step_"
+ Function _ZN5g4gpu4host14run_step_gammaIdNS_7StepTapIdEEEE...
+```
+
+With the declaration in place the same command matches nothing. Both halves measured on the real
+engine rather than on the ten-line pair, and the declaration put back afterwards.
+

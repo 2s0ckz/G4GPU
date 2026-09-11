@@ -8,7 +8,9 @@ rem   build_all.bat test     build, then tests only
 rem
 rem For iterating, not for deciding: tools\quick.ps1 builds and runs a named subset in seconds
 rem rather than the twenty minutes this takes, most of which is rebuilding the transport
-rem engine, the viewer, the GUI and example B1.
+rem engine, the viewer, the GUI and example B1. The engine's share of that is no longer the
+rem bulk of it: since P8e it is eight translation units compiled at once rather than one
+rem holding every kernel, which took 24 minutes on its own. docs/RISK.md V65.
 rem
 rem   tools\quick.ps1 hadron          every test matching *hadron*
 rem   tools\quick.ps1 -Check proton   the proton depth-dose comparison alone
@@ -65,7 +67,7 @@ rem because it compiles the transport kernels for its own hook type - which is t
 rem of the arrangement and is measured in docs/RESULT.md rather than hidden.
 set TESTS_PROJECT=test_custom_hook
 
-rem Tests that run a real scene through the STOCK engine: they link out\transport_run.obj
+rem Tests that run a real scene through the STOCK engine: they link out\transport_run.lib
 rem rather than instantiating their own kernels, so they build in seconds where
 rem TESTS_PROJECT takes minutes. test_trajectory needs a real shower because what it checks -
 rem that a track's recorded segments join up - is a property of a path, and a synthetic step
@@ -110,7 +112,7 @@ for %%T in (%TESTS_PROJECT%) do (
 )
 for %%T in (%TESTS_SCENE%) do (
   %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
-    "%~dp0out\transport_run.obj" -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
+    "%~dp0out\transport_run.lib" -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
 )
 for %%T in (%TESTS_HOOK%) do (
   %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu ^

@@ -839,6 +839,50 @@ what found the capture capacity's 353 bytes a slot and what showed 13120 bytes a
 The 25 minutes was paid twice - once for the baseline, once at the end - and not once per
 iteration.
 
+#### 2.1.9 One translation unit per kernel, and the ion's multiple scattering turned on (P8e)
+
+Nothing in this section is new physics. It is the compiler wall that `2.1.7`'s ion transport and
+section `1.1`'s Urban model had been waiting behind, and the numbers that came out once it was
+gone. docs/RISK.md **V65**.
+
+**What the engine is now.** `src/host/transport_run.cu` instantiated `TransportEngine<double,
+StepTap<double>>`, and the eighteen `<<<>>>` launches inside `BeamOn` implicitly instantiated
+eighteen stepping kernels into that one file: **25 min 02 s** of nvcc, and `ptxas died with
+status 0xC0000005` as soon as P14b's Urban branch was live in it (V63). The kernels are declared
+`extern template` under their definitions in `transport_run_impl.cuh` and defined one per
+translation unit beside it - sixteen of them - which `build_engine.bat` compiles six at a time
+and archives into `out/transport_run.lib`. `transport_run.cu` keeps the engine's host code and
+the three utility kernels; its object went from 21 device functions to 3.
+
+**The granularity is a measurement, and it corrects V55 and V63.** One unit per kernel FAMILY put
+pi+, pi-, K+ and K- together, and ptxas died on that unit - with the Urban flag still off, on
+code that compiles as four of the eighteen kernels in the single unit. Alone on an idle machine
+it died in 99.7 s; one `run_step_hadron` on its own compiles in 90 s. So a translation unit does
+not get safer by being made smaller, and "the translation unit is the variable" is not the whole
+story: its shape is, and not monotonically in its size.
+
+| | wall |
+|---|---|
+| one unit, eighteen kernels | **25 min 02 s** |
+| eight family units at once (the meson unit died) | 8 min 54 s |
+| seventeen units, six at a time | **6 min 31 s** |
+
+**Registers: 255 in every stepping kernel, before and after.** The stack frames and the spill
+counts move in both directions, because ptxas allocates per module - `run_step_gamma` grows 624
+bytes of frame and drops from 368/676 to 52/20 bytes of spill without one character of its code
+changing, which is exactly the movement V55 recorded in reverse when the unit grew. V65 has the
+table. The check that none of it reaches the answer is B1's 2,000,000-event gate, which reads
+**425.847 pGy +/- 0.867682 against Geant4's 427.385 +/- 0.87, 1.25138 sigma** - main's recorded
+number to every digit it prints. Four more seeds: 426.195, 426.917, 427.489, 427.288 pGy.
+
+**`kUrbanIonMscWired` is true.** Section 1.1's `V` for the ion branch becomes `T`, and the
+substitution section `2.3` has recorded since the alpha was first transported - every ion
+scattered by WentzelVI because this port's Urban had only the electron's stepping half - is
+over. What it is worth: **TBD_ION**.
+
+**The electron's `extremesmallstep` branch**, V62's named gap and README's open question 3:
+**TBD_ESS**.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

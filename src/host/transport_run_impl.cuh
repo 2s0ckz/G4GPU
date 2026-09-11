@@ -16,10 +16,18 @@
 // instantiates a DIFFERENT specialization, whose kernels mangle to different symbols, and the
 // two coexist.
 //
+// SINCE P8e THE STOCK HOOK'S KERNELS ARE NOT IN transport_run.cu EITHER. They are one
+// translation unit per kernel family - gamma, lepton, neutral, nucleon, muon, meson, ion -
+// each holding nothing but the explicit instantiations for its own family, compiled in
+// parallel and archived into out/transport_run.lib. What puts them there is the block of
+// explicit instantiation DECLARATIONS below the kernels in this file; read it before adding a
+// kernel or a species, because a launch without a matching declaration silently goes back to
+// being compiled into the engine's own unit. docs/RISK.md V65.
+//
 // So the rule for including this file is narrow and worth stating plainly:
 //
 //   * A project that uses the stock hook must NOT include it. Include host/transport_run.cuh
-//     and link out/transport_run.obj - which is what every example here does. Its own files
+//     and link out/transport_run.lib - which is what every example here does. Its own files
 //     still go through nvcc, because the headers they include carry __host__ __device__
 //     functions, but they compile with -c rather than -dc and instantiate no kernels, so they
 //     compile in seconds.
@@ -718,6 +726,103 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   }
   if (requeue) { out.append(p); }
 }
+
+
+// ---------------------------------------------------------------- where the stock kernels live
+//
+// ONE TRANSLATION UNIT PER KERNEL FAMILY, AND THIS BLOCK IS WHAT PUTS THEM THERE.
+//
+// Every kernel above is a __global__ template, and until P8e all twenty specialisations the
+// stock hook needs were instantiated implicitly, by the launches in BeamOn, into whichever
+// translation unit instantiated the engine class - src/host/transport_run.cu, one file, about
+// 24 minutes of nvcc. With the ion's Urban msc dispatched in step_hadron that file stopped
+// compiling at all: `ptxas died with status 0xC0000005`, deterministically, and no arrangement
+// of __noinline__ got it back (docs/RISK.md V55, V63 - nine builds, one of which compiled).
+//
+// An explicit instantiation DECLARATION suppresses the implicit instantiation. So the engine's
+// translation unit now emits no device code for these kernels at all: it emits a call to a
+// host-side launch stub, and the stub and the kernel behind it come from one of the sixteen
+// src/host/transport_run_*.cu beside it, compiled in parallel by build_engine.bat and archived
+// into out/transport_run.lib.
+//
+// ONE UNIT PER KERNEL, AND THE GRANULARITY IS A MEASUREMENT AND NOT A PREFERENCE. The first
+// arrangement was one unit per kernel FAMILY, which put the four charged mesons - pi+, pi-, K+,
+// K- - in a unit of their own, and ptxas died on it with the same 0xC0000005 that V63 is about,
+// in 100 seconds, deterministically, alone on the machine with nothing else compiling. The same
+// four kernels compile perfectly well inside the eighteen-kernel unit this split replaced. So a
+// translation unit does not get safer by being made smaller: what V63 called a cliff is a cliff
+// in both directions, and the only shape this project has ever measured ptxas to compile for
+// every arrangement of the physics is ONE `run_step_hadron` on its own. The thirteen are
+// therefore thirteen units. `run_step_lepton`'s and `run_step_neutral`'s pairs share a unit
+// each, measured to compile in 269 and 260 seconds; those two templates are switched by a
+// compile-time constant and neither pair is the build's long pole.
+//
+// Measured, on a ten-line pair rather than assumed - and inverted, because the whole split
+// rests on it: with the declaration, `cuobjdump -res-usage` on the launching object reports no
+// device function and the program still runs; with the line deleted, the launching object
+// carries the kernel again. That is the check, and build_engine.bat runs the same cuobjdump
+// over out/transport_run.obj so that a launch added without a declaration here is caught by
+// the build rather than by somebody wondering why the engine takes 24 minutes again.
+//
+// IT HAS TO BE CAUGHT THAT WAY, because the link will not do it. The comment at the top of
+// this file says a __global__ template instantiated in two translation units is rejected with
+// "explicit specialization ... is not a specialization of a function template". That is the
+// error this arrangement was built to avoid, and on CUDA 11.6 it does not happen: explicit
+// instantiation definitions of the same specialisation in two objects link CLEANLY, the stubs
+// being COMDAT-folded (measured on the same pair). So the duplicate is silent, and what it
+// costs is compile time rather than a link error. Exactly one definition per specialisation,
+// enforced by the object check, is the rule; the error message is not a safety net.
+//
+// A project with its own hook is unaffected. These declarations name StepTap<double> and
+// nothing else, so a different hook's specialisations still instantiate implicitly in the one
+// translation unit that instantiates the engine for it - see the note at the top of this file,
+// and tests/test_custom_hook.cu, which is that arrangement built and run by build_all.bat.
+//
+// The three utility kernels - seed_from_primaries, count_species, scatter_species - are NOT
+// declared here. They are templated on real_t alone, hold no physics, and compile in seconds;
+// they stay in the engine's own object, which is where their only launches are.
+// The four signatures, written once. Each family's .cu says `template G4GPU_STEP_ION(...);`
+// against the same macro this block says `extern template G4GPU_STEP_ION(...);` against, so a
+// parameter added to a kernel cannot leave a declaration and a definition disagreeing - which
+// would not be a compile error, only a specialisation that stopped matching and quietly went
+// back to being instantiated wherever it was launched.
+#define G4GPU_STEP_GAMMA(HOOK)                                                               \
+  __global__ void run_step_gamma<double, HOOK>(                                              \
+      Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
+      double*, int, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+#define G4GPU_STEP_LEPTON(POSITRON, HOOK)                                                    \
+  __global__ void run_step_lepton<double, POSITRON, HOOK>(                                   \
+      Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
+      double*, int, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+#define G4GPU_STEP_HADRON(TYPE, HOOK)                                                        \
+  __global__ void run_step_hadron<double, TYPE, HOOK>(                                       \
+      Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
+      double*, int, had::HadronicWiring<double>, vis::TrajectoryBuffer, int*, SecondaryArena, \
+      EmitterBooks, HOOK)
+#define G4GPU_STEP_NEUTRAL(TYPE, HOOK)                                                       \
+  __global__ void run_step_neutral<double, TYPE, HOOK>(                                      \
+      Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
+      double*, int, const had::NeutronGeneralXs<double>*, had::HadronicWiring<double>,       \
+      double*, int*, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+
+extern template G4GPU_STEP_GAMMA(StepTap<double>);
+extern template G4GPU_STEP_LEPTON(false, StepTap<double>);
+extern template G4GPU_STEP_LEPTON(true, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kProton, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kAntiProton, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kMuonMinus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kMuonPlus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kPionPlus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kPionMinus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kKaonPlus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kKaonMinus, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kAlpha, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kDeuteron, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kTriton, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kHe3, StepTap<double>);
+extern template G4GPU_STEP_HADRON(ParticleType::kGenericIon, StepTap<double>);
+extern template G4GPU_STEP_NEUTRAL(ParticleType::kNeutron, StepTap<double>);
+extern template G4GPU_STEP_NEUTRAL(ParticleType::kPiZero, StepTap<double>);
 
 
 // ---------------------------------------------------------------- method bodies

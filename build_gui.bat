@@ -1,9 +1,9 @@
 @echo off
 rem Builds g4builder: the model-building GUI.
 rem
-rem Links the prebuilt engine object rather than compiling transport_run.cu itself - that is
-rem twelve minutes of nvcc for a file that has not changed. build_engine.bat decides by
-rem timestamp whether it needs rebuilding (tools/freshness.ps1).
+rem Links the prebuilt engine archive rather than compiling the engine's eight translation
+rem units itself - minutes of nvcc for files that have not changed. build_engine.bat decides by
+rem timestamp whether they need rebuilding (tools/freshness.ps1).
 rem
 rem The viewer's translation unit is *not* linked here: the builder has its own render path
 rem and its own panels, and pulling in vis_manager.obj would give it a second window

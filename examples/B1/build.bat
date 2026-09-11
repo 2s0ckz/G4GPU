@@ -18,9 +18,10 @@ rem "transport_run.obj(4): fatal error C1004: unexpected end-of-file found" - a 
 rem on a binary, at line 4. Compiling to objects and linking them separately avoids the
 rem question entirely.
 rem
-rem -c, not -dc: these files launch no kernels (the launches live in transport_run.cu), so they
-rem need no relocatable device code, and mixing -dc objects with the engine object - which is
-rem compiled without it - would fail at device link.
+rem -c, not -dc: these files launch no kernels (the launches live in the engine, whose eight
+rem translation units build_engine.bat archives into out\transport_run.lib), so they need no
+rem relocatable device code, and mixing -dc objects with the engine's - which are compiled
+rem without it - would fail at device link.
 call "%~dp0../../setupenv.bat" || exit /b 1
 call "%~dp0../../build_engine.bat" || exit /b 1
 call "%~dp0../../build_vis.bat" || exit /b 1
