@@ -162,7 +162,7 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4SeltzerBergerModel` | bremsstrahlung below 1 GeV, from the G4EMLOW tables | `test_brems` | < 1e-6 (726 pts) |
 | `G4eBremsstrahlungRelModel` | bremsstrahlung above 1 GeV, with LPM | `test_brems_rel` | 0.108% (1,284 pts, 1 MeV–100 TeV) |
 | `G4eeToTwoGammaModel` | positron annihilation, at rest and in flight | `test_annihilation` | < 1e-6 (1,764 pts) |
-| `G4UrbanMscModel` | multiple scattering | `test_urban_general`, `test_msc` | **6.7e-16** |
+| `G4UrbanMscModel` | multiple scattering, cross section | `test_urban_general`, `test_msc` | **6.7e-16** |
 | `G4UniversalFluctuation` | energy-loss fluctuations | `test_fluctuation` | mean preserved to < 0.1% |
 | `G4VRangeToEnergyConverter` | production cuts | `test_cuts` | 0.018% |
 
@@ -182,7 +182,8 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4MuBremsstrahlungModel`, `G4MuPairProductionModel` | muon radiative losses | `test_muon` | < 1e-6 |
 | `G4hBremsstrahlungModel`, `G4hPairProductionModel` | hadron radiative losses | `test_hadron_radiative` | < 1e-6 |
 | `G4WentzelOKandVIxSection` | the Wentzel single-scattering engine | `test_wentzel` | 0.0002% (12,266 pts) |
-| `G4WentzelVIModel` | multiple scattering for hadrons | `test_wentzel_msc` | round trip < 1e-6; single-scattering sampler within 3.3 σ over 240 cells × 400,000 draws || `G4CoulombScattering` + `G4eCoulombScatteringModel` | single Coulomb scattering, the discrete partner of WentzelVI: e± above 100 MeV, every charged hadron from 100 eV | `test_coulomb_scattering` | cross section exact (0 to 5.5e-15) on 17,520 points at both cuts; sampler χ²/bin 2.87 over 4.8 M draws |
+| `G4UrbanMscModel`, ion branch | multiple scattering for alpha, He3, the deuteron, the triton and every real nuclide — the model QBBC actually gives them, `fMinimal` step limit, `facrange` 0.2, no lateral displacement. Validated, and **not yet reached in transport**: see open question 2 | `test_ion_msc` | transport mfp **6.9e-16** (1,200 pts); step limit and both path conversions **exactly 0** (750 rows); angle within 3.4 σ and χ²/bin 2.18 over 300 cells × 400,000 draws |
+| `G4WentzelVIModel` | multiple scattering for the muons and the singly charged hadrons | `test_wentzel_msc` | round trip < 1e-6; single-scattering sampler within 3.3 σ over 240 cells × 400,000 draws || `G4CoulombScattering` + `G4eCoulombScatteringModel` | single Coulomb scattering, the discrete partner of WentzelVI: e± above 100 MeV, every charged hadron from 100 eV | `test_coulomb_scattering` | cross section exact (0 to 5.5e-15) on 17,520 points at both cuts; sampler χ²/bin 2.87 over 4.8 M draws |
 | `G4ScreeningMottCrossSection` | the Mott/Rutherford ratio | `test_mott` | see note ¹ |
 | `G4ComponentBarNucleonNucleusXsc` | Barashenkov nucleon–nucleus cross sections, Z = 2…92 | `test_nucleon_xs` | **2.0e-15** (10,738 pts) |
 
@@ -271,11 +272,11 @@ closed - the same question has the mechanism.
 | | status |
 |---|---|
 | γ, e⁻, e⁺ | **transported** |
-| proton, alpha | **transported** |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name |
 | neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). The inelastic sub-process is selectable and refused by name with the energy it costs (P9–P11). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once |
-| He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic` |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
+| proton, alpha | **transported**. Multiple scattering is WentzelVI for the proton, which is right, and WentzelVI for the alpha, which is the substitution in open question 2 |
+| He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and WentzelVI multiple scattering where Geant4 uses Urban (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
 | hyperons, K⁰L/K⁰S, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species, fatal as a primary |
@@ -288,7 +289,6 @@ closed - the same question has the mechanism.
 | `G4BinaryCascade`, `G4BinaryLightIonReaction`, `G4CascadeInterface` (Bertini), FTF + Lund fragmentation, `G4GeneratorPrecompoundInterface` | inelastic final states | Phase 3, not started; the largest part of the port |
 | `G4StoppingPhysics`, gamma-/electro-/muon-nuclear | capture at rest, `G4EmExtraPhysics` | Phase 3 (P12, P13) |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
-| `G4UrbanMscModel::ComputeTruePathLengthLimit`, ion branch | the `fMinimal` step limit and the `mass ≥ masslimite` path | the Urban *cross section* is general and exact; the *stepping* half is still the electron's, so alpha, He3, the deuteron, the triton and every real nuclide scatter by WentzelVI, which is the wrong model for them. What it costs the recoil ions is nothing measurable: each has a range under 10 µm and dies on its first step, so no scattering code runs for it |
 | `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | absent. It returns immediately unless a step loses ≥ 5% of the energy, so it is a correction on the long steps of a slowing ion; the recoil ions stop in one step |
 | `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead |
 | `G4NuclNuclDiffuseElastic` + `G4ComponentGGNuclNuclXsc` as `ionElastic` | the ion's OWN elastic scattering | both halves are ported; the channel is not wired, so a transported ion draws no hadronic interaction length. Bounded at ~1e-9 per recoil — a micrometre of range against a metre of mean free path |
@@ -299,7 +299,7 @@ A class-by-class inventory of all three Geant4 process trees — 568 electromagn
 
 ### Open questions
 
-Three things are measured, documented and unresolved rather than unknown:
+Four things are measured, documented and unresolved rather than unknown:
 
 1. **Negative hadrons.** Two discrepancies, one closed. Geant4's own transport gave μ⁻, π⁻ and
    K⁻ a B1 dose 4.4%, 5.4% and 9.6% below their positive partners at 200 MeV while its dE/dx
@@ -313,8 +313,35 @@ Three things are measured, documented and unresolved rather than unknown:
    table level: `test_hadron_range` shows K⁻ and p̄ in air off Geant4's `GetDEDX` by 11% and 15%
    between 1 and 3 MeV and nowhere else, undiagnosed, left visible rather than absorbed into a
    tolerance.
-2. **The ion step limit** above.
-3. **The neutron's inelastic sub-process, and what the port does with it instead.** The first
+2. **The ion's multiple scattering is written, checked and one line from being live — and the
+   line is held by a compiler, not by the physics.** QBBC scatters alpha, He3, the deuteron, the
+   triton and every real nuclide by `G4UrbanMscModel` and only the muons and the singly charged
+   hadrons by WentzelVI (`G4EmBuilder::ConstructLightHadrons` calls `SetEmModel` on theirs and
+   nothing calls it on the ions'). `em/urban_msc.cuh` is now general across mass and charge, the
+   step limit is `fMinimal` with `facrange` 0.2 and no lateral displacement as
+   `G4EmParameters` gives a particle over 1 MeV, and `tests/test_ion_msc.cu` pins it against
+   three new oracle files — transport mean free path 6.9e-16 over 1,200 points, step limit and
+   both path conversions exactly 0 over 750 rows, angle within 3.4 σ at χ²/bin 2.18 over 300
+   cells of 400,000 draws, lateral displacement exactly zero on both sides. It runs on the
+   device in `test_step_hadron` (host against device to 1.06e-13 over 900 steps) and
+   `test_ion_transport`. What it does not survive is `src/host/transport_run.cu`, the single
+   translation unit that instantiates all twenty kernels: `ptxas died with status 0xC0000005`,
+   deterministically, where the same file without it takes 24 minutes and succeeds. Nine
+   arrangements were built and one compiled. `kUrbanIonMscWired` in `src/physics/stepper.cuh`
+   therefore holds it off, every ion is still scattered by WentzelVI, and the fix is to split
+   that translation unit — RISK **V63** has the builds, the measurements and what the
+   substitution is worth.
+3. **The electron's `extremesmallstep` branch.** `G4UrbanMscModel::SampleCosineTheta` evaluates
+   `theta0` at `tsmall = min(tlimitmin, lambdalimit)` and scales it by `sqrt(t/tsmall)` for a
+   step below that, and takes the tail parameter `u` from `log(tsmall/lambda0)` rather than from
+   `log(tau)`. This port has never had either half. It is real for an electron — `tlimitmin` is
+   `0.87·Z^(2/3)·stepmin`, about 2.3e-4 mm for a 1 MeV electron in water against `lambdalimit`'s
+   1 mm, and steps that short happen at the end of a range — and switching it on moves every
+   lepton number in the port including B1's 6 MeV gamma dose, so P14b, whose claim is that the
+   ion path changed and the lepton path did not, left it off and measured it instead: the
+   FNV-1a over 3,840 lepton cells goes from `7b153737a45f0b9e` to `d366e264fe441b2f` (RISK V62).
+   The ion path has it, where `tsmall` is the constant 1e-7 mm that `fMinimal` never recomputes.
+4. **The neutron's inelastic sub-process, and what the port does with it instead.** The first
    like-for-like with a hadronic-chain process wired — decay — put every positive hadron within
    two sigma of Geant4 with elastic inactivated on both sides
    (`ref/b1hadron/stage1_compare.ps1`). P8b added the isotope abundances that `SampleZandA`

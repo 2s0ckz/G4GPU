@@ -105,6 +105,156 @@ __host__ __device__ __noinline__ void coulomb_apply(const Scene<real_t>& s, Trac
   }
 }
 
+/// THE ION'S URBAN MSC IS WRITTEN, ORACLED AND SWITCHED OFF, AND THE THING THAT SWITCHES IT
+/// OFF IS A COMPILER BUG. Read docs/RISK.md V63 before touching this.
+///
+/// Every piece of physics below is transcribed and checked: `tests/test_ion_msc.cu` compares it
+/// against `ref/oracle/ion_msc_{step,limit,sample}.csv` - the transport mean free path to
+/// 6.9e-16 over 1,200 points, the step limit and both path conversions to exactly 0 over 750
+/// rows, the angle within 3.4 sigma at chi2/bin 2.18 over 300 cells of 400,000 draws - and
+/// `tests/test_step_hadron.cu` runs it on the DEVICE, host against device to 1.06e-13 over 900
+/// steps, with `tests/test_ion_transport.cu` stepping an alpha, a deuteron, a triton, He3 and
+/// an oxygen recoil to a stop through it.
+///
+/// What it does not survive is `transport_run.cu`, the one translation unit that instantiates
+/// all twenty kernels: `nvcc error : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)`,
+/// deterministically, against the same file at 2a6b379 which takes twenty-four minutes and
+/// succeeds. Nine arrangements of this same code were built; one of them compiled, and it then
+/// hit a device-side misaligned access that could not be localised because compute-sanitizer's
+/// device memcheck is unsupported on this card. The remaining fix is to SPLIT that translation
+/// unit - the hadron kernels into one object and the rest into another - which is the same
+/// medicine docs/RISK.md V55 prescribed one size smaller, and `src/host/transport_run.cu`,
+/// `build_engine.bat` and `build_all.bat` are not P14b's files to change.
+///
+/// So `kUrbanIonMscWired` is false and every ion is still scattered by WentzelVI, which is the
+/// substitution docs/PORTED.md has recorded since the alpha was first transported. It is one
+/// line rather than a rewrite, and flipping it is the whole of the remaining work. What it
+/// costs is measured rather than assumed - V63 has the step counts and the stage-1 alpha dose.
+constexpr bool kUrbanIonMscWired = false;
+
+/// URBAN'S STEP FOR A HEAVY PARTICLE IS THREE `__noinline__` FUNCTIONS AND THE KERNEL BODY
+/// HOLDS ONLY THE CALLS, BECAUSE OTHERWISE ptxas DIES SOONER. docs/RISK.md V55 and V63.
+///
+/// Inlined at the call site, the Urban branch put the sampler, the Zeff coefficients and five
+/// more expansions of the ion's energy machinery - `energy_from_range_for` and `dedx_for`
+/// inline `G4ionEffectiveCharge` and its correction for a real ion - into thirteen
+/// `run_step_hadron` instantiations, and `transport_run.cu` ended in
+///
+///     ptxas warning : Stack size for entry function 'run_step_hadron<double, 13, ...>'
+///                     cannot be statically determined
+///     Internal error
+///     nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+///
+/// in three minutes, against the same file at 2a6b379 which grinds for twenty-four and
+/// succeeds. Species 13 is `kGenericIon`, and 12, 16 and 17 - He3, deuteron, triton - appear in
+/// the same warnings: the Urban kernels and only those, so the message named the culprit. The
+/// failure is deterministic - the same source twice dies at the same four minutes - and it is a
+/// CLIFF rather than a slope: neighbouring arrangements of the same code fall on either side of
+/// it for no reason visible in the source. docs/RISK.md V63 has the seven builds it took to
+/// find a shape on the right side, and the two theories they killed.
+///
+/// What survives, and the rule for anyone editing this: **keep the Urban code out of the kernel
+/// body.** The three functions below are entered once per step each; everything they need -
+/// the Zeff coefficients, the mean free path, the range-table lookups - is computed inside
+/// them. None is on the lepton path, which is the point of their being separate functions
+/// rather than `__noinline__` on the shared ones: an inlining boundary changes which
+/// multiply-adds nvcc contracts, and the electron's last bits are B1's gamma gate.
+///
+/// `ComputeTruePathLengthLimit`'s fMinimal branch, and the transport mean free path it needs.
+/// @p tlimit is the state the track carries; see `em::kMscAtBoundary`.
+/// @return the msc step limit, and lambda0 for the two calls below.
+template <typename real_t>
+struct UrbanHadronLimit {
+  real_t t_msc;
+  real_t lambda0;
+};
+
+template <typename real_t, typename Rng>
+__host__ __device__ __noinline__ UrbanHadronLimit<real_t> urban_hadron_limit(
+    const data::Material<real_t>& mm, const ParticleDef<real_t>& pd, real_t kinetic,
+    real_t range, real_t safety, real_t t_path, bool msc_on, Rng& rng, real_t& tlimit) {
+  // The transport mean free path, EVALUATED AND NOT LOOKED UP. No ion has a cross-section
+  // table: `G4VMscModel::GetParticleChangeForMSC` builds one only for a particle under 1 GeV
+  // not named GenericIon, and `SetForceBuildTable` is called nowhere in 11.1.1, so
+  // `GetTransportMeanFreePath` falls through to `CrossSectionPerVolume` at the energy asked
+  // for. See `em::urban_heavy_lambda`.
+  //
+  // The charge is the BARE one from the definition - 2 for an alpha, Z for a recoil ion - and
+  // not the effective charge. `G4UrbanMscModel::SetParticle` reads `GetPDGCharge()/eplus` when
+  // the track starts and never refreshes it, unlike `G4VEnergyLossProcess`, which refreshes
+  // `chargeSqRatio` from the model on every step under `if(isIon)`. So the same ion scatters
+  // with Z and loses energy with q_eff(E).
+  UrbanHadronLimit<real_t> out{geom::kInfinity<real_t>(), real_t(0)};
+  out.lambda0 = em::urban_heavy_lambda(mm, kinetic, pd.mass, pd.charge);
+  if (msc_on) {
+    // COMPUTED FROM Zeff AND NOT READ OFF `s.msc`, though the electron's table holds exactly
+    // these numbers for exactly these materials: `build_urban_table` fills it by calling this
+    // same function, so the values are bit-identical (tests/test_ion_msc.cu section 8 asserts
+    // that on every field of every material), and computing drops both a global load whose
+    // struct is not 16-byte-regular and the ion's dependence on a LEPTON table being present,
+    // which `Scene` does not promise.
+    const em::UrbanCoeffs<real_t> uc = em::urban_coeffs(mm);
+    out.t_msc = em::urban_step_limit_heavy(uc, out.lambda0, em::kFacRangeMuHad<real_t>(),
+                                           kinetic, pd.mass, range, safety, t_path, rng,
+                                           tlimit);
+  }
+  return out;
+}
+
+/// `ComputeGeomPathLength`, with the lambda lookup its general branch needs:
+///
+///     rfin = max(currentRange - tPathLength, 0.01*currentRange)
+///     lambda1 = GetTransportMeanFreePath(particle, GetEnergy(particle, rfin, couple))
+///
+/// The 1% floor is what keeps a step that consumes the whole range from asking for the mean
+/// free path at zero energy.
+template <typename real_t>
+__host__ __device__ __noinline__ real_t urban_hadron_geom_path(
+    const Scene<real_t>& s, const data::Material<real_t>& mm, const em::SteppedHadron<real_t>& h,
+    int mat, real_t lambda0, real_t range, real_t t_step, real_t kinetic,
+    em::MscStep<real_t>& st) {
+  real_t lam_rfin = real_t(-1);
+  const real_t rfin = fmax(range - t_step, real_t(0.01) * range);
+  const real_t e_rfin = s.hadron_range->energy_from_range_for(mm, h, mat, rfin, kinetic);
+  if (e_rfin > real_t(0)) {
+    lam_rfin = em::urban_heavy_lambda(mm, e_rfin, h.def.mass, h.def.charge);
+  }
+  return em::urban_geom_path(t_step, lambda0, range, lam_rfin, kinetic, h.def.mass, st);
+}
+
+/// `SampleScattering`, with the post-step energy it samples at.
+///
+/// Its first four lines replace the pre-step energy with a post-step one in three bands of
+/// tPathLength/currentRange (0.05 = dtrl, then 0.01), which is `em::urban_scatter_energy` - and
+/// both of the table lookups that needs are here rather than at the call site. The MEAN loss
+/// reaches it and not the fluctuated one, for the reason step_lepton gives: Geant4 samples
+/// scattering in `G4VMultipleScattering::AlongStepDoIt`, which runs before the energy-loss
+/// process's.
+///
+/// @return the new direction. The displacement is not returned because it is identically zero:
+///         `MuHadLateralDisplacement` is false, which `ref/oracle/ion_msc_sample.csv` confirms
+///         on all 300 of its rows.
+template <typename real_t, typename Rng>
+__host__ __device__ __noinline__ Vec3<real_t> urban_hadron_scatter(
+    const Scene<real_t>& s, const data::Material<real_t>& mm, const em::SteppedHadron<real_t>& h,
+    int mat, real_t lambda0, const Vec3<real_t>& dir, real_t step_len, real_t geom_step,
+    real_t range, real_t e_before, Rng& rng) {
+  const em::UrbanCoeffs<real_t> uc = em::urban_coeffs(mm);
+  const real_t e_scat = em::urban_scatter_energy(
+      e_before, step_len, range,
+      s.hadron_range->energy_from_range_for(mm, h, mat, fmax(range - step_len, real_t(0)),
+                                            e_before),
+      s.hadron_range->dedx_for(mm, h, mat, e_before));
+  const real_t lam_scat = (e_scat > real_t(0))
+                              ? em::urban_heavy_lambda(mm, e_scat, h.def.mass, h.def.charge)
+                              : real_t(-1);
+  const auto sc = em::urban_sample_scattering<real_t, Rng>(
+      mm, uc, lambda0, dir, step_len, geom_step, e_scat, e_before,
+      em::kHadronLateralDisplacement<real_t>(), h.def.mass, h.def.charge, false,
+      em::kTlimitMinMinimal<real_t>(), rng, lam_scat);
+  return sc.dir;
+}
+
 /// Advances one photon by a single step.
 /// @param edep energy deposited in the scoring volume by this step, MeV
 /// @param rep what the step did, beyond depositing energy: the true path length, the process
@@ -946,7 +1096,11 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // no Urban code and the alpha kernel contains no WentzelVI code. Writing it as a run-time
     // branch instead would put both models' registers and both models' inlined tables into
     // every kernel, which docs/RISK.md V55 says is the thing that kills ptxas in this file.
-    const bool urban_msc = !uses_wentzel_msc(type);
+    //
+    // AND `kUrbanIonMscWired` IS FALSE, so today it is WentzelVI for everything here and the
+    // Urban branch below is compile-time dead. That is a compiler wall and not a gap in the
+    // physics; the flag's own comment has it, docs/RISK.md V63 has the evidence.
+    const bool urban_msc = kUrbanIonMscWired && !uses_wentzel_msc(type);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
@@ -955,34 +1109,18 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     constexpr real_t kCosThetaLim = real_t(-1);  // G4EmParameters::MscThetaLimit() = pi
     em::WentzelMscState<real_t> st{};
     em::WentzelElementXs<real_t> els{};
-    // Urban's, live only on the other. The coefficients are a function of the material's Zeff
-    // alone, so the electron's table already holds the right ones; `s.msc` is null in a run
-    // that builds no lepton tables (Scene's own contract: a null table is a process switched
-    // off) and then they are computed here instead.
-    const em::UrbanCoeffs<real_t> uc =
-        (s.msc != nullptr) ? s.msc->coeffs[mat] : em::urban_coeffs(mm);
+    // Urban's, and deliberately two scalars and nothing else: everything the model needs is
+    // computed inside the three `urban_hadron_*` functions above. Read their shared header
+    // before moving any of it back here - the kernel body is where it cannot go.
     real_t urban_lambda0 = real_t(0);
     em::MscStep<real_t> urban_state{};
 
     real_t t_msc = geom::kInfinity<real_t>();
     if (urban_msc) {
-      // The transport mean free path, EVALUATED AND NOT LOOKED UP. No ion has a cross-section
-      // table: `G4VMscModel::GetParticleChangeForMSC` builds one only for a particle under
-      // 1 GeV not named GenericIon, and `SetForceBuildTable` is called nowhere in 11.1.1, so
-      // `GetTransportMeanFreePath` falls through to `CrossSectionPerVolume` at the energy
-      // asked for. See `em::urban_heavy_lambda`, which is also why it is `__noinline__`.
-      //
-      // The charge here is the BARE one from the definition - 2 for an alpha, Z for a recoil
-      // ion - and not the effective charge. `G4UrbanMscModel::SetParticle` reads
-      // `GetPDGCharge()/eplus` when the track starts and never refreshes it, unlike
-      // `G4VEnergyLossProcess`, which refreshes `chargeSqRatio` from the model on every step
-      // under `if(isIon)`. So the same ion scatters with Z and loses energy with q_eff(E).
-      urban_lambda0 = em::urban_heavy_lambda(mm, p.ekin, pd.mass, pd.charge);
-      if (s.processes.multiple_scattering) {
-        t_msc = em::urban_step_limit_heavy(uc, urban_lambda0, em::kFacRangeMuHad<real_t>(),
-                                           p.ekin, pd.mass, range, safety, max_step, rng,
-                                           p.msc_tlimit);
-      }
+      const auto lim = urban_hadron_limit(mm, pd, p.ekin, range, safety, max_step,
+                                          s.processes.multiple_scattering, rng, p.msc_tlimit);
+      urban_lambda0 = lim.lambda0;
+      t_msc = lim.t_msc;
     } else {
       // No table here either, but for a different reason: WentzelVI's transport cross section
       // is closed-form, so lambda comes straight from wv_transport_xs. That call also fills
@@ -1024,35 +1162,36 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     t_step = fmin(fmin(t_step, fmin(d_coul, d_elastic)), range);
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
-    // are inputs to the true/geometric conversion, so both are computed from the uninterrupted
-    // step before geometry can cut it short.
+    // are inputs to WentzelVI's true/geometric conversion, so both are computed from the
+    // uninterrupted step before geometry can cut it short.
     // `p.ekin` is the pre-step energy the charge-square ratio is frozen at, which is the
     // argument `energy_from_range_for` asks for and the same thing Geant4 freezes: see its
     // header, and G4VEnergyLossProcess, which sets chargeSqRatio in
     // AlongStepGetPhysicalInteractionLength and holds it for the whole step.
-    const real_t e_end = s.hadron_range->energy_from_range_for(
-        mm, h, mat, fmax(range - t_step, real_t(0)), p.ekin);
-    real_t lambda_eff_end = st.lambda_eff;
-    real_t cos_tet_max_end = st.cos_tet_max_nuc;
+    //
+    // Inside the WentzelVI branch and not above it, because Urban's conversion asks for the
+    // energy at the RESIDUAL RANGE instead and computing both would be a second expansion of
+    // `energy_from_range_for` in every ion kernel - which is what killed ptxas once already.
+    // Seeded from `st` INSIDE the WentzelVI branch and not here, so that in an Urban kernel
+    // `st` and `els` are written and read only in code the compile-time branch deletes and are
+    // dead. `em::WentzelElementXs` is two arrays of `data::kMaxElements` doubles - 264 bytes of
+    // local per kernel - and reading `st.lambda_eff` unconditionally kept all of it alive in
+    // five kernels that never touch WentzelVI. See the header above `urban_hadron_limit` for
+    // why every byte of that is worth moving.
+    real_t e_end = real_t(0);
+    real_t lambda_eff_end = real_t(0);
+    real_t cos_tet_max_end = real_t(0);
     real_t z_step = t_step;
     if (urban_msc) {
-      // Urban's general true->geometric branch needs the mean free path at the energy left at
-      // the RESIDUAL RANGE, not at the mean energy WentzelVI uses. Geant4's own two lines:
-      //     rfin = max(currentRange - tPathLength, 0.01*currentRange)
-      //     lambda1 = GetTransportMeanFreePath(particle, GetEnergy(particle, rfin, couple))
-      // and the 1% floor is what keeps a step that consumes the whole range from asking for
-      // the mean free path at zero energy.
-      real_t lam_rfin = real_t(-1);
       if (s.processes.multiple_scattering) {
-        const real_t rfin = fmax(range - t_step, real_t(0.01) * range);
-        const real_t e_rfin = s.hadron_range->energy_from_range_for(mm, h, mat, rfin, p.ekin);
-        if (e_rfin > real_t(0)) {
-          lam_rfin = em::urban_heavy_lambda(mm, e_rfin, pd.mass, pd.charge);
-        }
-        z_step = em::urban_geom_path(t_step, urban_lambda0, range, lam_rfin, p.ekin, pd.mass,
-                                     urban_state);
+        z_step = urban_hadron_geom_path(s, mm, h, mat, urban_lambda0, range, t_step, p.ekin,
+                                        urban_state);
       }
     } else {
+      lambda_eff_end = st.lambda_eff;
+      cos_tet_max_end = st.cos_tet_max_nuc;
+      e_end = s.hadron_range->energy_from_range_for(mm, h, mat,
+                                                    fmax(range - t_step, real_t(0)), p.ekin);
       const real_t e_mid = real_t(0.5) * (e_end + p.ekin);
       if (e_mid > real_t(0)) {
         em::WentzelElementXs<real_t> tmp{};
@@ -1271,26 +1410,8 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         // range is not scattered, and neither is one below geomMin. The rest of the guards are
         // inside urban_sample_scattering, where Geant4 has them.
         if (step_len < range && step_len > em::kGeomMin<real_t>()) {
-          // SampleScattering's first four lines choose the energy the ANGLE is sampled at, and
-          // it is not the pre-step energy: over dtrl (5%) of the range it is the energy at the
-          // residual range, over 1% it is the pre-step energy minus dE/dx times the step, and
-          // below that it is the pre-step energy. `urban_scatter_energy` is those four lines;
-          // the mean rather than the fluctuated loss reaches it, for the reason step_lepton
-          // gives - Geant4 samples scattering in G4VMultipleScattering::AlongStepDoIt, which
-          // runs before the energy-loss process's AlongStepDoIt.
-          const real_t e_scat = em::urban_scatter_energy(
-              e_before, step_len, range,
-              s.hadron_range->energy_from_range_for(mm, h, mat,
-                                                    fmax(range - step_len, real_t(0)), e_before),
-              s.hadron_range->dedx_for(mm, h, mat, e_before));
-          const real_t lam_scat = (e_scat > real_t(0))
-                                      ? em::urban_heavy_lambda(mm, e_scat, pd.mass, pd.charge)
-                                      : real_t(-1);
-          const auto sc = em::urban_sample_scattering(
-              mm, uc, urban_lambda0, p.dir, step_len, geom_step, e_scat, e_before,
-              em::kHadronLateralDisplacement<real_t>(), pd.mass, pd.charge, false,
-              em::kTlimitMinMinimal<real_t>(), rng, lam_scat);
-          p.dir = sc.dir;
+          p.dir = urban_hadron_scatter(s, mm, h, mat, urban_lambda0, p.dir, step_len,
+                                       geom_step, range, e_before, rng);
         }
       } else {
         const auto sc = em::wv_sample_scattering(mm, pd, type, st, els, cut, kCosThetaLim,

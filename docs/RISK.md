@@ -6164,3 +6164,303 @@ two-body decay (n + p -> d + gamma) that never opens the level scheme at all. So
 water phantom mostly makes is the one that does not read the 9.52 MB this port uploads for it -
 which is worth knowing for the opposite reason as well: a B1 neutron dose is not a test of the
 level data.
+
+---
+
+### V61: the model is allowed to be a model, and the condition is a species name
+
+`docs/PORTED.md` 4.3 is this project's most reliable rule. Geant4 does not run the model; it
+runs a table built from the model, so match the grid and the spline or the numbers will be
+right and the transport wrong. V5, V7 and V53 are three separate half-days spent learning it.
+
+P14b is where it inverts, and the inversion is one line of
+`G4VMscModel::GetParticleChangeForMSC` (G4VMscModel.cc:94):
+
+```
+    if(p->GetParticleName() != "GenericIon" &&
+       (p->GetPDGMass() < CLHEP::GeV || ForceBuildTableFlag()) ) {
+      ... xSectionTable = builder->BuildTableForModel(...) ...
+    }
+```
+
+`G4VMscModel::GetTransportMeanFreePath` reads that table when it exists,
+
+```
+    x = pFactor*(*xSectionTable)[basedCoupleIndex]->Value(ekin)/(ekin*ekin);
+```
+
+and evaluates the model when it does not:
+
+```
+    x = pFactor*CrossSectionPerVolume(pBaseMaterial, part, ekin, 0.0, DBL_MAX);
+```
+
+`SetForceBuildTable` is called **nowhere** in 11.1.1. `grep -rn "SetForceBuildTable" source/`
+returns its declaration in `G4VEmModel.hh`, its definition eight hundred lines below, and the
+`flagForceBuildTable = false` initialiser. No caller. So the flag is always false and the test
+is "not named GenericIon, and under a GeV".
+
+Every species `G4UrbanMscModel` serves fails it. GenericIon by name; alpha at 3727.4 MeV, He3
+and triton at 2808, deuteron at 1875.6 by mass. e-, e+, the muons and the singly charged
+hadrons pass it - and the last two use WentzelVI, so the only species in QBBC that both reads
+an Urban lambda table and exists is the electron and the positron.
+
+**What it would have cost to get this backwards.** The port's `UrbanTable` is a 240-bin log
+grid from 1 keV to 100 MeV with log-log interpolation. An 840 MeV alpha is off the top of it
+entirely, so the natural "add the ion to the table that is already there" would have clamped
+every B1 alpha step to the 100 MeV value - and the alpha's transport mean free path in water is
+4.72e6 mm at 840 MeV against 3.08e5 mm at 200 MeV, a factor of 15. That is not an interpolation
+error, it is the wrong number by an order of magnitude, and it would have arrived as a dose
+difference of a per cent with nothing pointing at the table. `urban_heavy_lambda` evaluates
+instead, and `tests/test_ion_msc.cu` section 2 is exact against `1/CrossSectionPerVolume` to
+6.9e-16 over 1,200 points.
+
+**The other half of the entry, which is the one that will come up again.** The three parameters
+that differ between a lepton's msc and a hadron's - the step limit type, `facrange` and the
+lateral-displacement flag - are chosen by the PARTICLE and not by the model.
+`G4EmTableUtil::PrepareMscProcess` (G4EmTableUtil.cc:531-539):
+
+```
+    if(part.GetPDGMass() > CLHEP::MeV) {
+      stepLimit = param->MscMuHadStepLimitType();          // fMinimal
+      facrange = param->MscMuHadRangeFactor();             // 0.2
+      latDisplacement = param->MuHadLateralDisplacement(); // false
+    } else {
+      stepLimit = param->MscStepLimitType();               // fUseSafety
+      facrange = param->MscRangeFactor();                  // 0.04
+      latDisplacement = param->LateralDisplacement();      // true
+    }
+```
+
+and `G4VMscModel::InitialiseParameters` makes the same split on `abs(PDGEncoding) == 11`.
+`src/physics/stepper.cuh`'s header said, for as long as it had a hadron kernel, that "`facrange`
+is 0.2 rather than 0.04" as a property of **WentzelVI** - and every number it produced was
+right, because every species that reached that code was a hadron. The comment had the mechanism
+backwards and would have been read as authority the first time anyone gave a lepton a WentzelVI
+step or an ion an Urban one. Which is what P14b did.
+
+**What the substitution was worth.** The five species Geant4 scatters by Urban were stepped
+with WentzelVI from the day each gained a kernel. Measured three ways, in increasing order of
+what they touch:
+
+- **the step count**, `tests/test_ion_transport.cu` section 2, a track stepped to a stop in
+  water: alpha 200 MeV 16.5 steps -> 16.0, deuteron 50 MeV 14.5 -> 14.0, He3 20 MeV 3.5 -> 3.0,
+  O16 20 MeV 1.6 -> 1.0, with the total path length unmoved to 4e-7 in every row. The proton is
+  bit-identical, as it must be.
+- **the step limit**, `ref/oracle/ion_msc_limit.csv`: 436 of 450 cells are not limited by msc
+  at all, because `facrange*max(range, lambda0)` exceeds the whole remaining range whenever the
+  transport mean free path is more than five times it - and for an ion it is 0.64 to 40,000
+  times it. The seven cells where it bites are Ca40 at 0.05 MeV/u in all five materials and O16
+  in the lead-bearing one, and they include both arms of
+  `(currentRange > lambda0) ? facrange*currentRange : facrange*lambda0`. So the model Geant4
+  gives an ion mostly declines to shorten its step, and the model this port was substituting
+  did shorten it.
+- **the dose**, and the honest summary is that it is small and was always going to be. Multiple
+  scattering moves a track sideways; B1's scoring volume is 12 cm wide and the quantity is the
+  energy deposited in it. Example B1's stage-1 alpha at 500,000 events a side: Geant4 stage 1
+  12,336.9 +/- 13.0077 nGy against 12,313.6 +/- 12.9789 for the port at 2a6b379, **-0.19% and
+  1.27 sigma** - and the after-number is not measured, for the reason V63 is about.
+
+The order of those three is the lesson. The step count moved by 3%, the step limit's behaviour
+changed qualitatively, and the dose did not move measurably - so a package with only the dose to
+go on could not have told whether it had done anything at all. What told it was the oracle, and
+the oracle had to be built for a model with no callable surface (see
+`ref/dump/dump_ion_msc.cc`'s header for how: drive the real process off the particle's own
+process manager, and use the fact that `ComputeTrueStepLength(g)` with `g == zPathLength`
+returns `tPathLength` and mutates nothing).
+
+
+---
+
+### V62: a branch missing from the electron path, found by generalising it and left alone
+
+`G4UrbanMscModel::SampleCosineTheta` has a sub-case this port has never had:
+
+```
+    G4bool extremesmallstep = false;
+    G4double tsmall = std::min(tlimitmin,lambdalimit);
+    G4double theta0;
+    if(trueStepLength > tsmall) {
+      theta0 = ComputeTheta0(trueStepLength,kinEnergy);
+    } else {
+      theta0 = std::sqrt(trueStepLength/tsmall)*ComputeTheta0(tsmall,kinEnergy);
+      extremesmallstep = true;
+    }
+    ...
+    G4double u = !extremesmallstep ? G4Exp(ltau*onesixth)
+      : G4Exp(G4Log(tsmall/lambda0)*onesixth);
+```
+
+Two halves, sixteen lines apart, and the second is the one that gets dropped: `theta0` is right
+where the flag is set and `u` is right where it is read.
+
+It is reachable for an electron. `lambdalimit` is 1 mm and `ComputeTlimitmin` gives
+`0.87*Z23*stepmin`, so for a 1 MeV electron in water - `stepmin = lambda0*1e-3/(2e-3 + T*
+(stepmina + stepminb*T))` is 6.9e-5 mm - `tsmall` comes out at 2.3e-4 mm. Steps that short
+happen at the end of an electron's range, which is where most of the dose is.
+
+**Measured and not fixed, and the reason is the package boundary.** P14b's whole claim is that
+the ion path changed and the lepton path did not, proved by an FNV-1a over every double the
+e-/e+ path produces - lambda, theta0, 64 sampler draws, both path conversions, the step limit
+and its two carried state variables, and the full sample_scattering including the displacement -
+over 3,840 (material, charge, energy, step) cells. That hash is `7b153737a45f0b9e` before and
+after. Switch `t_small` on for the lepton overload and it becomes `d366e264fe441b2f`, which is
+at once the anti-vacuity check on the probe and the measurement of the gap: it is real, and it
+moves B1's 6 MeV gamma dose, which is the gate P14b is required not to move.
+
+So the ion path has the branch - `t_small` there is the 1e-7 mm that `fMinimal` never
+recomputes, which makes it live only for a step between 0.1 and 1 angstrom and therefore
+unreachable in transport - and the lepton path does not, named in `urban_msc.cuh`'s lepton
+overload, in `docs/PORTED.md` 1.1 and in README's open question 2. Whoever owns the lepton path
+next should turn it on and re-take the gamma gate deliberately.
+
+**The anti-vacuity story here is worth more than the finding.** The first check written for
+this branch - that the sampled cos(theta) is continuous at `t == tsmall` and discontinuous below
+it - passes with the `u` half deleted, because `theta0`'s `sqrt(t/tsmall)` alone already
+separates the branched result from the unbranched one. What sees `u` is that `lambdaeff` is
+`trueStepLength/tau` with `tau = trueStepLength/lambda0`, hence lambda0 identically: so with the
+branch on, every term of `xsi` is independent of the step length and two sub-tsmall steps must
+give the same `xsi`. Making that comparison non-vacuous took two further conditions. `xsi` is
+clamped at 1.9 wherever it lands below it, which hides the question entirely in 110 of 380
+cells. And `UrbanDebug::branch` cannot be used to ask "did the main branch run", because the
+struct is value-initialised to 0 and `branch` is set to 2 only once the fallbacks are live - so
+a 2 nm step against air's 1e10 mm mean free path takes the `tau < tausmall` exit and leaves
+`branch` 0 with `xsi` 0, indistinguishable from a main-branch call by that field. Both are
+conditions in `tests/test_ion_msc.cu` section 7 now, and both counts are printed, so a material
+that lifts `xsi` off the floor makes the check stronger instead of quietly weaker.
+
+
+---
+
+### V63: nine builds to find the one that compiles, and it was not the one that ran
+
+P14b generalised `G4UrbanMscModel`'s stepping half off the electron and wired the five species
+QBBC scatters by Urban - alpha, He3, deuteron, triton, GenericIon - to it in `step_hadron`.
+Every test passes. `src/host/transport_run.cu` does not compile.
+
+```
+ptxas warning : Stack size for entry function
+                'run_step_hadron<double, ParticleType 13, StepTap<double>>' cannot be
+                statically determined
+Internal error
+nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+```
+
+V55 is the same file and the same message one size smaller, and its remedy - `__noinline__` on
+the branch that almost never runs - is the first thing tried here. **It does not work, and
+applying more of it makes things worse.** Nine builds, each a full `examples\B1\build.bat`
+against the same worktree, with the same source at 2a6b379 as the control:
+
+| arrangement | result |
+|---|---|
+| 2a6b379, no Urban dispatch at all | **built, 24 min** |
+| Urban inlined at the call site | died, 3 min |
+| `urban_step_limit_heavy` and the sampler `__noinline__` | died, 3 min |
+| + the range lookups and the conversion moved into two helpers | **built, 28 min** |
+| the Zeff coefficients bound by reference rather than copied | died, 3 min |
+| + two more `__noinline__` wrappers, coefficients resolved inside | died, 4 min |
+| those wrappers removed, `alignas(16)` on `UrbanCoeffs` kept | died, 15 min |
+| coefficients computed instead of read, two helpers | died, 4 min |
+| three helpers, kernel body holds only the calls | died, 18 min |
+| + WentzelVI's 264-byte state made dead in the Urban kernels | died, 20 min |
+
+Four things that table settles, and they are why it is here rather than a sentence.
+
+**It is deterministic.** The same source compiled twice dies at the same four minutes. The
+varying times are how far ptxas gets before it falls over, not noise.
+
+**It names the culprit.** Species 13 is `kGenericIon`; 12, 16 and 17 - He3, deuteron, triton -
+appear in the warnings of the later runs. The Urban kernels and only those. Nothing on the
+lepton, gamma, neutral or singly-charged-hadron side is implicated, and the proton kernel is
+byte-identical to the control in every column of `-Xptxas -v`.
+
+**Per-kernel size is not the variable.** V55's one-kernel reproducer - a ten-line translation
+unit instantiating exactly one `run_step_hadron` - compiles every one of these arrangements in
+about seventy seconds, and it says the Urban kernels got *smaller*:
+
+    kernel        registers   stack frame      spill st/ld          compile
+    proton        255 -> 255  3904 -> 3904 B   200/444 -> 200/444   60 -> 65 s
+    alpha         255 -> 255  3904 -> 3888 B   252/344 -> 160/224   65 -> 71 s
+    GenericIon    255 -> 255  3984 -> 3888 B   360/432 -> 244/340   67 -> 78 s
+
+The register budget this package was warned about had room it did not need: Urban's stepping
+half has no per-element table where WentzelVI's `WentzelElementXs` is two arrays of sixteen
+doubles the sampler picks a target atom out of. So the thing that dies is the TRANSLATION UNIT,
+exactly as V55 said - and unlike V55 there is no amount of `__noinline__` that fixes it.
+
+**It is a cliff and not a slope.** Rows 4 and 5 differ by one binding of one local. Rows 9 and
+10 remove code and get further without getting there. An arrangement either falls on the right
+side or it does not, for no reason visible in the source, and the only lever left with real
+headroom is to stop asking one translation unit to hold twenty kernels.
+
+#### The one that compiled then faulted
+
+Row 4 built, and the 500,000-event stage-1 alpha run through it ended with
+
+    CUDA error misaligned address at src/host/transport_run.cuh:89
+
+on the first batch, while the 2,000,000-event gamma run through the same binary was fine. Line
+89 is the `cudaMemcpy` in `TrackBuffer::count()`, which is simply the first synchronising call
+after the launch, so it says nothing about where.
+
+The obvious suspect was wrong, and eliminating it is worth recording because it is a real
+hazard that happens not to be this one. `em::UrbanCoeffs` is `G4UrbanMscModel::mscData`'s field
+list - seventeen doubles, 136 bytes, not a multiple of 16 - so in `UrbanTable::coeffs[]` the
+odd-indexed entries start 8 bytes off a 16-byte boundary, and B1's water envelope is material
+1. Row 4 copied one of those out by value where `step_lepton` has always bound a reference, and
+nvcc reads a struct copy of that size with `ld.global.v2.f64`. That is a complete and plausible
+account of the symptom, including why only the alpha run saw it. **It is also not what
+happened**: a twelve-line device probe that copies `coeffs[mat]` by value for every material
+out of a real uploaded table returns `cudaSuccess` on all four, odd indices included. The
+alignment reasoning was right and the conclusion was wrong, which is V37's shape again.
+
+Where the fault actually is remains unknown. `compute-sanitizer --tool memcheck` on this card
+answers "Device not supported. Please refer to the Supported Devices section" and reports only
+the host-side API error, so the faulting kernel and instruction are not available, and the
+arrangement that produced it cannot be rebuilt to try again - rows 5 through 10 are every
+attempt to get back to a compiling shape and none of them compiled.
+
+#### What is on the branch, and what it is worth
+
+`kUrbanIonMscWired` in `src/physics/stepper.cuh` is `false`. The dispatch, the model and the
+oracle are all there; the flag makes the Urban branch compile-time dead so the engine builds,
+and every ion is still scattered by WentzelVI - the substitution `docs/PORTED.md` has recorded
+since the alpha was first transported. It is one line, and the work to flip it is to split
+`transport_run.cu` so the hadron kernels are their own translation unit. That file,
+`build_engine.bat` and `build_all.bat` belong to P1.
+
+The physics behind the flag is not a sketch. `tests/test_ion_msc.cu` against three new oracle
+files - `ion_msc_step.csv`, `ion_msc_limit.csv`, `ion_msc_sample.csv`, 750 + 450 + 300 rows over
+(alpha, He3, C12, O16, Ca40) x five materials x six energies per nucleon:
+
+- the transport mean free path to **6.9e-16** over 1,200 points;
+- the step limit and both directions of the true<->geometric path conversion to **exactly 0**
+  over 750 rows;
+- the randomised limit within **1.1 sigma** of its mean and 1.5 of its standard deviation on the
+  seven of 150 cells it is reached in;
+- the angle within **3.4 sigma** on `<1 - cos>` at **chi2/bin 2.18** over 300 cells of 400,000
+  draws, with the lateral displacement exactly zero on all 300 rows on both sides;
+- and it runs on the DEVICE: `tests/test_step_hadron.cu` agrees host against device to 1.06e-13
+  over 900 steps with the flag on, and `tests/test_ion_transport.cu` steps an alpha, a
+  deuteron, a triton, He3 and an oxygen recoil to a stop through it.
+
+And what the substitution is worth, measured with the flag on, which is the number this entry
+exists to leave behind:
+
+- **Step counts**, `tests/test_ion_transport.cu` section 2, a track stepped to a stop in water:
+  alpha 200 MeV 16.5 steps -> 16.0, deuteron 50 MeV 14.5 -> 14.0, He3 20 MeV 3.5 -> 3.0, O16
+  20 MeV 1.6 -> 1.0, total path length unmoved to 4e-7 in every row, proton bit-identical.
+- **The step limit**: `facrange*max(range, lambda0)` exceeds the whole remaining range in 436 of
+  450 oracle cells, because Urban's transport mean free path for an ion runs from 0.64 to 40,000
+  times its range. So Geant4's model mostly declines to shorten an ion's step where the
+  substituted one shortened it.
+- **The dose**: example B1's stage-1 alpha, 840 MeV, 500,000 events a side. Geant4 stage 1 gives
+  12,336.9 +/- 13.0077 nGy and the port at 2a6b379 gives 12,313.6 +/- 12.9789 - **-0.19%, 1.27
+  sigma**. The after-number is not measured, because measuring it needs the engine the first
+  half of this entry is about. B1's scoring volume is 12 cm wide and multiple scattering moves a
+  track sideways, so the expectation was always that this would be the least sensitive of the
+  three, and the step counts are the reason to believe the model changed at all.
+
+B1's 6 MeV gamma gate through the row-4 binary - the only engine ever built with this code -
+reads **425.847 pGy against 427.385, 1.2514 sigma**, which is main's recorded number to every
+digit it prints. The lepton path did not move, which is the other half of what P14b had to show.

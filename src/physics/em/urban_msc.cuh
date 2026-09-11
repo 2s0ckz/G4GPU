@@ -52,6 +52,23 @@
 namespace g4gpu::em {
 
 /// Per-material Urban coefficients, derived from Zeff exactly as InitialiseModelCache does.
+///
+/// **DO NOT COPY ONE OUT OF `UrbanTable::coeffs` ON THE DEVICE.** The field list is
+/// `G4UrbanMscModel::mscData`'s - seventeen doubles, 136 bytes, which is not a multiple of 16 -
+/// so every odd-indexed entry of that array starts 8 bytes off a 16-byte boundary, and nvcc
+/// reads a struct copy of this size with `ld.global.v2.f64`. A kernel that copies one out
+/// faults with `CUDA error misaligned address` on exactly half the materials, which in example
+/// B1 is the water envelope: it presents as "the alpha dies on its first step and the
+/// 2,000,000-event gamma run is fine", because `step_lepton` binds a reference to the same
+/// field and always has.
+///
+/// Three ways out and only the third survives the compiler: `alignas(16)` on this struct pads
+/// it to 144 = 9*16 and makes the copy legal, but changes the register allocation enough to
+/// take ptxas down on `transport_run.cu`; a reference that may point either here or at a local
+/// fallback is a generic pointer that may alias local memory, and ptxas cannot then bound the
+/// kernel's stack; and CALLING `urban_coeffs` is free of both, costs one log, one exp, one
+/// sqrt and twenty flops, and is bit-identical to the table because `build_urban_table` fills
+/// the table with this same function. `step_hadron` computes. docs/RISK.md V63.
 template <typename real_t>
 struct UrbanCoeffs {
   real_t coeffth1, coeffth2;
@@ -725,6 +742,10 @@ __host__ __device__ inline real_t urban_step_limit(const UrbanCoeffs<real_t>& c,
 ///                 currentMinimalStep and this function only ever shortens
 /// @param tlimit   the carried state; see kMscAtBoundary for the three cases
 /// @return the limited TRUE path length
+/// Inlined here and not in the kernel: its one transport caller is `urban_hadron_limit` in
+/// stepper.cuh, which is `__noinline__`. Read the shared header above it before changing that -
+/// what `transport_run.cu` does when Urban is inlined into thirteen kernels is not a slow
+/// build, it is `ptxas died with status 0xC0000005`.
 template <typename real_t, typename Rng>
 __host__ __device__ inline real_t urban_step_limit_heavy(const UrbanCoeffs<real_t>& c,
                                                          real_t lambda0, real_t facrange,

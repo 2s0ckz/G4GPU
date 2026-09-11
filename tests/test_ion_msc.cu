@@ -706,6 +706,45 @@ int main() {
     if (bad) { ++fails; }
   }
 
+  // ---------------------------------------------------------------- 8. computed == tabulated
+  //
+  // NOT PHYSICS, AND IT COST A DEVICE RUN AND FIVE ENGINE BUILDS. `step_hadron` COMPUTES the
+  // per-material coefficients rather than reading `s.msc->coeffs[mat]`, which holds exactly
+  // these numbers for exactly these materials. The reason is in `em::UrbanCoeffs`: the struct
+  // is seventeen doubles, so in that array every odd entry begins 8 bytes off a 16-byte
+  // boundary, nvcc reads a copy of one with `ld.global.v2.f64`, and the run ends in
+  //
+  //     CUDA error misaligned address at src/host/transport_run.cuh:89
+  //
+  // on the alpha's first step - while the 2,000,000-event gamma run is fine, because
+  // `step_lepton` binds a reference to the same field and always has. Both ways of fixing THAT
+  // (padding the struct, binding a reference) take ptxas down on `transport_run.cu`.
+  //
+  // So the invariant that has to hold is the one asserted here: the computed coefficients and
+  // the tabulated ones are the same numbers, bit for bit, on every material. If they ever stop
+  // being, the ion and the electron are scattering in two different materials of the same name.
+  {
+    em::UrbanTable<real_t> tab{};
+    em::build_urban_table<real_t>(mats, data::kNumMaterials, tab);
+    int bad = 0;
+    for (int m = 0; m < data::kNumMaterials; ++m) {
+      const auto a = em::urban_coeffs(mats[m]);
+      const auto& b = tab.coeffs[m];
+      const real_t* pa = reinterpret_cast<const real_t*>(&a);
+      const real_t* pb = reinterpret_cast<const real_t*>(&b);
+      for (std::size_t k = 0; k < sizeof(a) / sizeof(real_t); ++k) {
+        if (pa[k] != pb[k]) { ++bad; }
+      }
+    }
+    std::printf("\n== 8. the coefficients step_hadron computes against the ones the electron's "
+                "table holds ==\n");
+    std::printf("  %d materials x %zu fields, %d differ; sizeof(UrbanCoeffs) %zu bytes "
+                "(%zu mod 16, which is why they are computed)\n",
+                data::kNumMaterials, sizeof(em::UrbanCoeffs<real_t>) / sizeof(real_t), bad,
+                sizeof(em::UrbanCoeffs<real_t>), sizeof(em::UrbanCoeffs<real_t>) % 16);
+    if (bad != 0) { ++fails; }
+  }
+
   std::printf("\n%s (%d failures)\n", fails ? "FAILED" : "PASSED", fails);
   return fails ? 1 : 0;
 }
