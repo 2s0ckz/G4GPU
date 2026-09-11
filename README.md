@@ -36,6 +36,12 @@ other seeds give +1.44, −0.26, +0.37 and +0.32 σ: the spread is about 1 σ an
 which is what agreement between two Monte Carlos looks like and is the only thing a single
 number here can mean. The gate is 3 σ.
 
+A twelve-beam sweep of the same geometry - photons at 1, 6 and 100 MeV, electrons at 20, 100 and
+1000 MeV, protons at 210, 400 and 1000 MeV, alphas at 840, 1600 and 4000 MeV, the port against
+Geant4 with only the physics the port lacks inactivated - is in [`docs/B1_SWEEP.md`](docs/B1_SWEEP.md):
+eleven rows within statistics, one defect (electrons above 100 MeV, open question 5), and the
+port's event loop 11 to 39 times faster than Geant4's single-threaded EM-only loop.
+
 ### Throughput
 
 Events per second in real time, excluding initialisation - geometry, physics tables, data
@@ -362,6 +368,13 @@ Four things are measured, documented and unresolved rather than unknown:
    higher-energy electron vanishes after its first step (RISK V64). Photons to 100 MeV, protons to
    1 GeV and alphas to 4 GeV agreed with Geant4 within statistics in the same sweep. Fix in
    progress (P14c); do not use the port for e+- above 100 MeV until it lands.
+5. **Electrons and positrons above 100 MeV are 100 MeV electrons.** The B1 sweep of
+   2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first time and the
+   port deposited 46% of Geant4's dose; at 150, 300, 600 and 1000 MeV it deposits exactly its
+   100 MeV dose. The e± range table stops at 100 MeV and clamps, so the excess energy of a
+   higher-energy electron vanishes after its first step (RISK V64). Photons to 100 MeV, protons to
+   1 GeV and alphas to 4 GeV agreed with Geant4 within statistics in the same sweep. Fix in
+   progress (P14c); do not use the port for e± above 100 MeV until it lands.
 
 
 ---
