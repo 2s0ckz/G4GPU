@@ -7,13 +7,15 @@ rem ref/dump/dump_<package>.cc to build. A worktree has no ref/dumpbuild, becaus
 rem is gitignored, so the build tree is configured here on first use with the same generator
 rem and Geant4 the original was.
 call "%~dp0..\..\setupenv.bat" || exit /b 1
-set "SRC=%~dp0"
+set "SRC=%~dp0."
 set "BLD=%~dp0..\dumpbuild"
 if not exist "%BLD%\CMakeCache.txt" (
   echo configuring %BLD%
-  rem One line on purpose: a caret continuation inside this block fails under a CRLF checkout -
-  rem which is what a fresh worktree gets with core.autocrlf - and cmd then passes the tail of
-  rem the command as the source directory. The main checkout has LF endings and never showed it.
+  rem SRC must not end in a backslash: %~dp0 does, and inside -S "%SRC%" that backslash escapes
+  rem the closing quote for cmake's argument parser, which then swallows `-B ... -G "Visual Studio 16`
+  rem into the source path and reports a source directory of `2019 -A x64 -DGeant4_DIR=...`. The
+  rem trailing dot on SRC above is the fix (P7 found it; the caret theory before it was wrong). It
+  rem only ever bit in a fresh worktree - the main checkout has a CMakeCache.txt and skips this block.
   cmake -S "%SRC%" -B "%BLD%" -G "Visual Studio 16 2019" -A x64 -DGeant4_DIR="D:/Documents/Geant4/Windows/geant4-v11.1.1-install/lib/cmake/Geant4" || exit /b 1
 )
 cmake --build "%BLD%" --config Release
