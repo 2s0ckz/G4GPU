@@ -7910,9 +7910,16 @@ macros:
 | 1 GeV e- into B1, dose per 10,000 events | | vs Geant4 (1M) |
 |---|--:|--:|
 | port, `kWentzelLeptonMscWired` **false** | 23,734.2 +/- 24.06 pGy | -0.532%, **-3.74 sigma** |
-| port, `kWentzelLeptonMscWired` **true** (ships) | **23,782.0 +/- 23.97 pGy** | -0.332%, **-2.33 sigma** |
+| port, `kWentzelLeptonMscWired` **true** | **23,782.0 +/- 23.97 pGy** | -0.332%, **-2.33 sigma** |
+| *the same, after V96's continuous loss - what ships* | *23,767.8 +/- 23.95 pGy* | *-0.391%, -2.75 sigma* |
 | Geant4 11.1.1 EM-only, 1,000,000 events | 23,861.2 +/- 24.04 pGy | - |
 | *Geant4 11.1.1 EM-only, 100,000 events (the sweep's)* | *24,027.3 +/- 76.2 pGy* | |
+
+The third row is there so that this entry's number is not read as the shipping one: P14d's second
+change (V96) moved this row a further -14.2 pGy, -0.060%, which two 1,000,000-event samples
+cannot resolve - their difference carries 34 pGy of noise, so 0.42 sigma - and the two changes
+together ship at -0.391%. The msc number this entry measures is the +47.8 pGy between the first
+two rows, taken with everything else held fixed.
 
 So **the second msc model is worth +47.8 pGy, +0.201% of the row**, and it moves the row from
 -0.53% to -0.33%. It is a fifth of the deficit. V83 called it "the leading candidate for the
@@ -8069,6 +8076,16 @@ RISES as the track slows, so it returns slightly more than `L*dedx(E_pre)`. Drop
 linear form on every step whose loss is under 1% of the energy therefore takes slightly less per
 step, which is why the track-step count rises 0.26% and the dose falls 0.017%. Geant4 makes
 exactly this approximation, and `linLossLimit` is where it stops making it.
+
+**The sweep's electron rows move the same way and by more, because they are electron beams.**
+`tools/b1_sweep.ps1 -Only "e-_1000,e-_100"` on the shipping engine against the same Geant4
+columns: the 100 MeV row 3.3174E-007 -> **3.3132E-007** Gy, -0.09% -> **-0.22%** (0.4 -> 0.8
+sigma), and the 1 GeV row 2.3720E-007 -> **2.3713E-007**, -1.28% -> -1.31% at 2.9 sigma either
+way. At 1,000,000 events a side the two rows read **-0.205% (-1.46 sigma)** at 100 MeV and
+**-0.391% (-2.75 sigma)** at 1 GeV, the latter a further -0.060% on V95's msc row - a movement
+two independent 1,000,000-event samples cannot resolve (0.42 sigma) and which is therefore
+quoted from the gate, where five seeds do resolve it. docs/B1_SWEEP.md carries all three engine
+states side by side.
 
 **What does NOT move is the msc arm.** `G4UrbanMscModel::SampleScattering` (G4UrbanMscModel.cc:
 786-792) takes its own post-step energy from `GetEnergy(particle, currentRange-tPathLength,

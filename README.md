@@ -58,9 +58,10 @@ eleven rows within statistics, one defect (electrons above 100 MeV, RISK V64), a
 event loop 11 to 39 times faster than Geant4's single-threaded EM-only loop. **That defect is
 fixed**: the e± tables are on Geant4's own grid now (P14c) and `G4WentzelVIModel` steps an e±
 above 100 MeV, as Geant4 does (P14d), which took the 1 GeV electron row from -53.96% (154.9
-sigma) to **-0.33%** (2.3 sigma) — the last figure at 1,000,000 events a side, because Geant4's
-own reference for that beam moves 2.3 sigma of its own quoted rms between 100,000 events and
-1,000,000. What is left of the row is named and still open: open question 5.
+sigma) to **-0.39%** (2.8 sigma) and the 100 MeV one to -0.21% (1.5 sigma) — both at 1,000,000
+events a side, because Geant4's own reference for the 1 GeV beam moves 2.3 sigma of its own
+quoted rms between 100,000 events and 1,000,000. What is left of the row is named and still
+open: open question 5.
 
 ### Throughput
 
@@ -412,7 +413,7 @@ send every one of them somewhere else.
    selectable, refused by name, and the neutron is then killed with its energy deposited
    locally, which is not what Geant4 does.
  5. **Electrons and positrons above 100 MeV: the clamp is gone, the msc model is Geant4's, and
-   the row is still 2.3 sigma low.** The B1
+   the row is still 2.8 sigma low.** The B1
    sweep of 2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first
    time and the port deposited 46% of Geant4's dose: the e+- range table stopped at 100 MeV and
    clamped, so a higher-energy electron's excess vanished after its first step (RISK V64). P14c
@@ -426,10 +427,10 @@ send every one of them somewhere else.
    and every positron in this port was reading the electron's range table (RISK V77). A third,
    RISK V82, was found by the device energy balance the fix came with: `step_lepton` was
    splitting the continuous loss and depositing only the collision half. **The 1 GeV B1 row went
-   from -53.96% to -0.33%** (154.9 sigma to 2.3), the WentzelVI half of that being +0.201% of
+   from -53.96% to -0.39%** (154.9 sigma to 2.8), the WentzelVI half of that being +0.201% of
    the row, and B1's 6 MeV gamma gate is identical across the msc switch to every printed digit
    and every one of its 25,993,577 track-steps. What is still open under it: the remaining
-   -0.33%, for which the DISCRETE rates are the largest named candidate — this port draws them
+   -0.39%, for which the DISCRETE rates are the largest named candidate — this port draws them
    from the models rather than from `G4VEnergyLossProcess`'s lambda tables and its integral
    approach (RISK V78) — while `extremesmallstep` (RISK V62) is now EXCLUDED by measurement, at
    one part in 240,000 of the same row (RISK V95). And the 100,000-event statistics the sweep

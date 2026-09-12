@@ -177,37 +177,58 @@ MscEnergyLimit()` = 100 MeV is stepped by `G4WentzelVIModel` and one below it by
 `G4UrbanMscModel`, which is what `G4EmStandardPhysics::ConstructProcess` builds. docs/RISK.md
 V95 has the compile, the kernel and the two inversions; this is the dose.
 
-| beam | events | port before | port after | G4 EM-only | diff before | diff after | sigma before | sigma after |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|
-| gamma 6 MeV | 2,000,000 | 8.5189E-008 | 8.5189E-008 | 8.5615E-008 | -0.50% | -0.50% | -1.7 | -1.7 |
-| e- 100 MeV | 300,000 | 3.3174E-007 | 3.3174E-007 | 3.3204E-007 | -0.09% | -0.09% | -0.4 | -0.4 |
-| **e- 1000 MeV** | 100,000 | 2.3626E-007 | **2.3720E-007** | 2.4027E-007 | -1.67% | **-1.28%** | -3.7 | **-2.9** |
+P14d carries TWO changes to the lepton path and the rows are taken after each, because they are
+not the same kind of change: the msc switch touches only e+- above 100 MeV, and the continuous
+loss (RISK V96, `G4VEnergyLossProcess::AlongStepDoIt`'s `length*dE/dx` in front of the range
+inversion) touches every electron step in every run.
 
-The first two rows are IDENTICAL, not merely consistent - every digit the run prints, and
-25,993,577 track-steps either way for the gamma gate. `G4RegionModels::SelectIndex` tests
-`e <= lowKineticEnergy[idx]`, so 100 MeV belongs to Urban and `step_lepton`'s branch is a strict
-`>`; a 6 MeV photon makes no secondary above 100 MeV and a 100 MeV electron beam starts exactly
-at the boundary. A branch that draws no uniform cannot move a seeded run.
+| beam | events | main | + WentzelVI | **+ linear loss (ships)** | G4 EM-only | sigma: main / wv / ships |
+|---|--:|--:|--:|--:|--:|--:|
+| gamma 6 MeV | 2,000,000 | 8.5189E-008 | 8.5189E-008 | **8.5172E-008** | 8.5615E-008 | -1.7 / -1.7 / **-1.8** |
+| e- 100 MeV | 300,000 | 3.3174E-007 | 3.3174E-007 | **3.3132E-007** | 3.3204E-007 | -0.4 / -0.4 / **-0.8** |
+| **e- 1000 MeV** | 100,000 | 2.3626E-007 | 2.3720E-007 | **2.3713E-007** | 2.4027E-007 | **-3.7 / -2.9 / -2.9** |
+
+The first two rows are IDENTICAL ACROSS THE MSC SWITCH - not merely consistent: every digit the
+run prints, and 25,993,577 track-steps either way for the gamma gate.
+`G4RegionModels::SelectIndex` tests `e <= lowKineticEnergy[idx]`, so 100 MeV belongs to Urban and
+`step_lepton`'s branch is a strict `>`; a 6 MeV photon makes no secondary above 100 MeV and a
+100 MeV electron beam starts exactly at the boundary. A branch that draws no uniform cannot move
+a seeded run. They are NOT identical across the loss change, and could not be: -0.017% on the
+gamma gate (RISK V96's five-seed table, which is where that one is resolved) and -0.13% on the
+100 MeV electron, whose own run-to-run error is 0.18%.
 
 **The 100,000-event 1 GeV row is not precise enough to carry the finding, and the reason is the
 reference.** Both sides re-taken at 1,000,000 events:
 
 | 1 GeV e-, dose per 10,000 events | | vs Geant4 (1M) |
 |---|--:|--:|
-| port, WentzelVI off | 23,734.2 ± 24.06 pGy | -0.532%, -3.74 σ |
-| **port, WentzelVI on (ships)** | **23,782.0 ± 23.97 pGy** | **-0.332%, -2.33 σ** |
+| port, main | 23,734.2 ± 24.06 pGy | -0.532%, -3.74 σ |
+| port, + WentzelVI | 23,782.0 ± 23.97 pGy | -0.332%, -2.33 σ |
+| **port, + linear loss (ships)** | **23,767.8 ± 23.95 pGy** | **-0.391%, -2.75 σ** |
 | Geant4 11.1.1 EM-only, 1,000,000 events | 23,861.2 ± 24.04 pGy | — |
-| *Geant4 11.1.1 EM-only, 100,000 events (this table's)* | *24,027.3 ± 76.2 pGy* | |
+| *Geant4 11.1.1 EM-only, 100,000 events (the table above)* | *24,027.3 ± 76.2 pGy* | |
 
-Geant4's two samples of its own configuration differ by -0.69%, which is 2.3 σ of the
+and the **100 MeV** row at the same statistics: port **11,069.6 ± 10.98** pGy against Geant4's
+**11,092.3 ± 10.98** — **-0.205%, -1.46 σ**, where its own 300,000-event row reads -0.22% and
+-0.8 σ.
+
+Geant4's two samples of its own 1 GeV configuration differ by -0.69%, which is 2.3 σ of the
 100,000-event run's quoted rms on a pair that shares its first 100,000 events. The dose a 1 GeV
 electron puts in a 6 cm trapezoid 19 cm inside the envelope is heavy-tailed, so that rms
 converges slowly. **Part of the -1.67% recorded above was the reference and not the port**, and
 this row wants 1,000,000 events on both sides.
 
-**What the switch was worth: +47.8 pGy, +0.201% of the row, -0.53% to -0.33%.** A fifth of the
-deficit, and not all of it. Of the two other terms V83 named, `extremesmallstep` (RISK V62) is
-excluded by measurement - forced off, the same 1,000,000-event row moves by 0.1 pGy and 209 of
-205,579,159 track-steps - and the discrete rates (RISK V78) are the largest candidate left,
+**What the msc switch was worth: +47.8 pGy, +0.201% of the row, -0.53% to -0.33%.** A fifth of
+the deficit, and not all of it. Of the two other terms V83 named, `extremesmallstep` (RISK V62)
+is excluded by measurement - forced off, the same 1,000,000-event row moves by 0.1 pGy and 209
+of 205,579,159 track-steps - and the discrete rates (RISK V78) are the largest candidate left,
 together with the possibility that the residual is the photon rows' own -0.27%/-0.52% arriving
 through a shower rather than anything on the lepton path. docs/RISK.md V95.
+
+**And what the loss change was worth here: -14.2 pGy, -0.060%, which is NOT resolved on one
+seed.** Two port runs of 1,000,000 events differ by 34 pGy of sampling noise, so 0.42 σ; the
+change is real and deterministic but this row cannot measure it, and the place it IS resolved is
+the gamma gate's five seeds (-0.0710 ± 0.0045 pGy, RISK V96). The row ships at **-0.391%,
+-2.75 σ**, and the direction is the same one the gate sees: the linear form takes slightly less
+per short step than the inversion it replaces. What this row says about that is only that it is
+small.
