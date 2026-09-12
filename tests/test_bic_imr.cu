@@ -28,6 +28,13 @@
 //   bic_imr_obe.csv      G4AngularDistribution::DifferentialCrossSection on a cos(theta) grid,
 //                        so that a disagreement in the one-boson-exchange formula is separated
 //                        from a disagreement in the twelve halvings that invert it. 4,200 points.
+//   bic_imr_collision    G4CollisionNN::IsInCharge and its recast total, plus the two elastic
+//                        channels' own IsInCharge and cross sections, over four nucleon pairs x
+//                        two mass shells x three kinematic tilts x 157 energies.
+//   bic_imr_elastic_fs   G4VElasticCollision::FinalState - both outgoing four-momenta and the
+//                        number of uniforms consumed, same grid x 8 phases. The TILT is what
+//                        makes the rotations in it observable at all: with both tracks along +z
+//                        they are the identity (docs/RISK.md V75).
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -44,6 +51,7 @@
 #include <vector>
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
+#include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
 
 using namespace g4gpu;
@@ -375,6 +383,143 @@ int main() {
       cmp_scaled(b_dsig, got, want, 1e-6,
                  std::string(sym ? "sym" : "asym") + " s=" + std::to_string(s) +
                      " cos=" + std::to_string(ct));
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // -------------------------------------------------------------------------------------------
+  // 3b. The two elastic collision channels: who is in charge, the three cross sections a pair is
+  //     asked for, and the two outgoing four-momenta. Half the rows have particle 1 thirty MeV
+  //     off its mass shell downwards, which is what the nuclear potential does to a cascade
+  //     nucleon - and three separate things in this path read a mass (the composite's recast, the
+  //     angular distribution, the outgoing momenta), so an on-shell-only comparison would make
+  //     all three agree and check none of them.
+  //
+  //     The INPUT four-momenta come from the oracle rather than being reconstructed from
+  //     sqrt(s). They have to: in an off-shell row the energy is lowered at fixed three-momentum,
+  //     so the invariant mass no longer determines the pair, and inverting it gives a different
+  //     configuration with the same sqrt(s). The first version of this block did invert it, and
+  //     it disagreed by 2.49 relative on the np total - which was the reconstruction and not the
+  //     port.
+  // -------------------------------------------------------------------------------------------
+  const int b_incharge = new_bucket("CollisionIsInCharge", 0.0);
+  const int b_csec = new_bucket("CollisionCrossSection", 1e-15);
+  const int b_fsempty = new_bucket("ElasticFinalStateEmpty", 0.0);
+  // Three buckets, by how much of the transform is non-trivial. With both tracks along +z the
+  // two rotations are the identity and the boost is along one axis; tilting the projectile makes
+  // both rotations real; giving the target a momentum of its own makes the boost general. The
+  // three worst errors then say how many ulps each step of the chain costs, which is the only
+  // way to tell accumulation from a transcription error - and inside a cascade every collision
+  // is the third kind.
+  const int b_fs0 = new_bucket("ElasticFinalState along +z", 1e-15);
+  const int b_fs1 = new_bucket("ElasticFinalState tilted projectile", 3e-15);
+  const int b_fs2 = new_bucket("ElasticFinalState general boost", 5e-15);
+  const int b_fsdraws = new_bucket("ElasticFinalStateDraws", 0.0);
+
+  // The pair the two collision files describe, rebuilt from the dumped four-momenta.
+  struct InPair {
+    int pdg1, pdg2;
+    double m1, m2;          ///< the PDG masses
+    imr::LorentzVector p1, p2;
+    double actual1, actual2;  ///< G4KineticTrack::GetActualMass(), sqrt(|p.mag2()|)
+  };
+  auto make_pair = [&](const std::string& pair, const std::vector<std::string>& r) -> InPair {
+    InPair q;
+    if (pair == "pp") { q.pdg1 = q.pdg2 = 2212; q.m1 = q.m2 = mp; }
+    else if (pair == "nn") { q.pdg1 = q.pdg2 = 2112; q.m1 = q.m2 = mn; }
+    else if (pair == "np") { q.pdg1 = 2112; q.pdg2 = 2212; q.m1 = mn; q.m2 = mp; }
+    else { q.pdg1 = 2212; q.pdg2 = 2112; q.m1 = mp; q.m2 = mn; }
+    // Columns 4..7 are particle 1's four-momentum and 8..11 particle 2's, as the dump wrote
+    // them - all three spatial components, because the tilted rows have all three.
+    q.p1 = imr::LorentzVector(deex::Vec3d{dv(r, 4), dv(r, 5), dv(r, 6)}, dv(r, 7));
+    q.p2 = imr::LorentzVector(deex::Vec3d{dv(r, 8), dv(r, 9), dv(r, 10)}, dv(r, 11));
+    // `GetActualMass()` is `sqrt(|the4Momentum.mag2()|)` - the absolute value, so a spacelike
+    // tracking momentum gives a positive mass. bic/kinetic_track.cuh says why.
+    q.actual1 = std::sqrt(std::fabs(q.p1.e * q.p1.e - g4gpu::mag2(q.p1.v)));
+    q.actual2 = std::sqrt(std::fabs(q.p2.e * q.p2.e - g4gpu::mag2(q.p2.v)));
+    return q;
+  };
+
+  {
+    const auto rows = read_csv("bic_imr_collision.csv");
+    for (const auto& r : rows) {
+      const std::string pair = sv(r, 0);
+      const InPair q = make_pair(pair, r);
+      const std::string where = pair + " off=" + sv(r, 1) + " tilt=" + sv(r, 2) +
+                                " sqrt(s)=" + std::to_string(dv(r, 3));
+
+      cmp_int(b_incharge, imr::collision_nn_is_in_charge(q.pdg1, q.pdg2) ? 1 : 0, iv(r, 12),
+              where + " nn");
+      cmp_int(b_incharge, imr::nn_elastic_is_in_charge(q.pdg1, q.pdg2) ? 1 : 0, iv(r, 13),
+              where + " nnEl");
+      cmp_int(b_incharge, imr::np_elastic_is_in_charge(q.pdg1, q.pdg2) ? 1 : 0, iv(r, 14),
+              where + " npEl");
+
+      imr::XsecRefusal xref;
+      cmp_scaled(b_csec,
+                 imr::collision_nn_cross_section(q.pdg1, q.pdg2, q.p1, q.p2, q.actual1,
+                                                 q.actual2, q.m1, q.m2, xref) /
+                     imr::millibarn(),
+                 dv(r, 15), 1e-6, where + " total");
+      if (imr::nn_elastic_is_in_charge(q.pdg1, q.pdg2)) {
+        cmp_scaled(b_csec,
+                   imr::nn_elastic_cross_section(q.pdg1, q.pdg2, q.p1, q.p2, q.m1, q.m2, xref) /
+                       imr::millibarn(),
+                   dv(r, 16), 1e-6, where + " nnEl");
+      }
+      if (imr::np_elastic_is_in_charge(q.pdg1, q.pdg2)) {
+        cmp_scaled(b_csec,
+                   imr::np_elastic_cross_section(q.pdg1, q.pdg2, q.p1, q.p2, q.m1, q.m2, xref) /
+                       imr::millibarn(),
+                   dv(r, 17), 1e-6, where + " npEl");
+      }
+      if (xref.any()) {
+        std::printf("REFUSED cross section: %s\n", where.c_str());
+        ++fails;
+      }
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_elastic_fs.csv");
+    for (const auto& r : rows) {
+      const std::string pair = sv(r, 0);
+      const InPair q = make_pair(pair, r);
+      const int phase = iv(r, 12);
+      const int want_empty = iv(r, 13);
+      CycleRng rng;
+      rng.reset(phase);
+      imr::AngularRefusal aref;
+      const bool is_np = imr::np_elastic_is_in_charge(q.pdg1, q.pdg2);
+      const imr::ElasticFinalState fs = imr::elastic_final_state(
+          is_np, q.p1, q.p2, q.actual1, q.actual2, q.m1, q.m2, rng, aref);
+      const std::string where = pair + " off=" + sv(r, 1) + " tilt=" + sv(r, 2) + " sqrt(s)=" +
+                                std::to_string(dv(r, 3)) + " phase=" + std::to_string(phase);
+      cmp_int(b_fsempty, fs.empty ? 1 : 0, want_empty, where);
+      // note: b_fs is chosen below, after the two scales are known.
+      cmp_int(b_fsdraws, rng.n, iv(r, 22), where);
+      if (want_empty != 0 || fs.empty) { continue; }
+      // The scale a component is compared against is the MAGNITUDE of its own three-momentum,
+      // not 1 MeV and not the component. A component is `p_cm * sin(theta) * cos(phi)` rotated
+      // into the lab, so `|p|` is what it is built from and a component near zero is a
+      // cancellation between terms of that size. The worst row in this file is a p2y of
+      // -0.114 MeV beside a p2x of -285 MeV: against a 1 MeV floor it reads as 1.14e-13 and
+      // against its own vector's 308 MeV as 3.7e-16, which is one and a half ulps and is what
+      // it is. Measured, not assumed - the first version of this block used the 1 MeV floor and
+      // reported exactly that row.
+      const double s1 = std::sqrt(dv(r, 14) * dv(r, 14) + dv(r, 15) * dv(r, 15) +
+                                  dv(r, 16) * dv(r, 16));
+      const double s2 = std::sqrt(dv(r, 18) * dv(r, 18) + dv(r, 19) * dv(r, 19) +
+                                  dv(r, 20) * dv(r, 20));
+      const int tl = iv(r, 2);
+      const int b_fs = (tl == 0) ? b_fs0 : ((tl == 1) ? b_fs1 : b_fs2);
+      cmp_scaled(b_fs, fs.p1.v.x, dv(r, 14), s1, where + " p1x");
+      cmp_scaled(b_fs, fs.p1.v.y, dv(r, 15), s1, where + " p1y");
+      cmp_scaled(b_fs, fs.p1.v.z, dv(r, 16), s1, where + " p1z");
+      cmp_scaled(b_fs, fs.p1.e, dv(r, 17), s1, where + " p1e");
+      cmp_scaled(b_fs, fs.p2.v.x, dv(r, 18), s2, where + " p2x");
+      cmp_scaled(b_fs, fs.p2.v.y, dv(r, 19), s2, where + " p2y");
+      cmp_scaled(b_fs, fs.p2.v.z, dv(r, 20), s2, where + " p2z");
+      cmp_scaled(b_fs, fs.p2.e, dv(r, 21), s2, where + " p2e");
     }
   }
 

@@ -61,6 +61,9 @@
 #include "G4AngularDistributionPP.hh"
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
+#include "G4CollisionNN.hh"
+#include "G4CollisionNNElastic.hh"
+#include "G4CollisionnpElastic.hh"
 #include "G4Deuteron.hh"
 #include "G4DynamicParticle.hh"
 #include "G4ExcitationHandler.hh"
@@ -1008,6 +1011,134 @@ void write_imr_angular_sweep() {
   std::fclose(f);
 }
 
+/// The two elastic collision channels end to end: `IsInCharge`, the channel's own cross section,
+/// `G4CollisionNN`'s recast total, and the two outgoing four-momenta `G4VElasticCollision::
+/// FinalState` produces under the prescribed cycle.
+///
+/// The tracks are built OFF SHELL on purpose in half the cases. A cascade nucleon is below its
+/// PDG mass by the nuclear potential, and three separate things in this path read a mass: the
+/// composite's recast reads `GetActualMass()` and `GetPDGMass()`, the angular distribution is
+/// sampled with the actual masses, and the outgoing momenta are built with the PDG ones. An
+/// on-shell-only dump would make all three agree and check none of them.
+void write_imr_collision() {
+  FILE* f = std::fopen("bic_imr_collision.csv", "w");
+  std::fprintf(f,
+               "pair,offshell,tilt,sqrt_s_MeV,in1x,in1y,in1z,in1e,in2x,in2y,in2z,in2e,"
+               "in_charge_nn,in_charge_nnel,in_charge_npel,"
+               "sigma_total_mb,sigma_nnel_mb,sigma_npel_mb\n");
+  FILE* g = std::fopen("bic_imr_elastic_fs.csv", "w");
+  std::fprintf(g,
+               "pair,offshell,tilt,sqrt_s_MeV,in1x,in1y,in1z,in1e,in2x,in2y,in2z,in2e,"
+               "phase,empty,p1x,p1y,p1z,p1e,p2x,p2y,p2z,p2e,draws\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {{"pp", p, p}, {"nn", n, n}, {"np", n, p}, {"pn", p, n}};
+
+  // sqrt(s) from just above the two-nucleon threshold to 3.5 GeV, which covers QBBC's whole BIC
+  // window for a nucleon (1.5 GeV of kinetic energy on a nucleon at rest is sqrt(s) = 2.4 GeV)
+  // and runs past it into the patch's transition region.
+  std::vector<double> grid;
+  for (double e = 1880.0; e <= 2400.0; e += 20.0) { grid.push_back(e); }
+  for (double e = 2450.0; e <= 3500.0; e += 50.0) { grid.push_back(e); }
+
+  G4CollisionNN nnComposite;
+  G4CollisionNNElastic nnEl;
+  G4CollisionnpElastic npEl;
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(eng);
+
+  for (const Pair& pr : pairs) {
+    for (int off = 0; off < 2; ++off) {
+      // `off` shifts particle 1's ENERGY down by 30 MeV at fixed three-momentum, which is what
+      // a nuclear potential does to a cascade nucleon: the track is then off its mass shell
+      // downwards and `GetActualMass()` is below `GetPDGMass()`.
+      for (int tilt = 0; tilt < 3; ++tilt) {
+        // WHY THE TILT EXISTS. `G4VElasticCollision::FinalState` builds a rotation that takes
+        // particle 1 onto the +z axis in the CM frame and inverts it afterwards. With both
+        // tracks along z - which is how every projectile arrives, because
+        // G4HadProjectile::InitialiseLocal stores (0,0,p,E), docs/RISK.md V75 - both rotations
+        // are the IDENTITY and the whole block is unobservable. It was measured: composing with
+        // `toZ` instead of `toZ.inverse()` changed none of 24,576 momentum components.
+        //
+        // Inside a cascade nothing is along z. A track has been through G4RKPropagation and
+        // possibly an earlier collision, and the target nucleon carries Fermi momentum. So
+        // tilt 1 rotates particle 1 into the x-z plane and tilt 2 gives it all three components
+        // AND gives particle 2 a momentum of its own, which is the configuration
+        // `G4Scatterer::Scatter` actually hands the channel.
+        for (double want : grid) {
+          G4LorentzVector q1, q2;
+          imr_make_pair(pr.a, pr.b, want, q1, q2);
+          if (tilt == 1) {
+            G4ThreeVector v = q1.vect();
+            v.rotateY(0.5236);  // 30 degrees, into the x-z plane
+            q1.setVect(v);
+          } else if (tilt == 2) {
+            G4ThreeVector v = q1.vect();
+            v.rotateY(0.9);
+            v.rotateZ(2.1);
+            q1.setVect(v);
+            // Particle 2 given a Fermi-scale momentum of its own, on its own mass shell.
+            const G4ThreeVector v2(37.0, -52.0, 21.0);
+            q2 = G4LorentzVector(
+                v2, std::sqrt(v2.mag2() + pr.b->GetPDGMass() * pr.b->GetPDGMass()));
+          }
+          if (off != 0) { q1.setE(q1.e() - 30.0); }
+          G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+          G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+          const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+          // The two INPUT four-momenta are dumped as well as sqrt(s). They have to be: in the
+          // off-shell rows the energy is lowered at fixed three-momentum, so sqrt(s) no longer
+          // determines the pair - a reader who inverted `s = m1^2 + m2^2 + 2 m2 E1` would get a
+          // different kinematic configuration with the same invariant mass, and the recast in
+          // G4CollisionNN::CrossSection reads the energy and the momentum separately.
+          std::fprintf(f,
+                       "%s,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                       "%d,%d,%d,%.17g,%.17g,%.17g\n",
+                       pr.name, off, tilt, s, q1.x(), q1.y(), q1.z(), q1.t(), q2.x(), q2.y(),
+                       q2.z(), q2.t(),
+                       nnComposite.IsInCharge(t1, t2) ? 1 : 0, nnEl.IsInCharge(t1, t2) ? 1 : 0,
+                       npEl.IsInCharge(t1, t2) ? 1 : 0,
+                       nnComposite.CrossSection(t1, t2) / millibarn,
+                       nnEl.IsInCharge(t1, t2) ? nnEl.CrossSection(t1, t2) / millibarn : 0.0,
+                       npEl.IsInCharge(t1, t2) ? npEl.CrossSection(t1, t2) / millibarn : 0.0);
+
+          const bool is_np = npEl.IsInCharge(t1, t2);
+          const bool is_nn = nnEl.IsInCharge(t1, t2);
+          if (!is_np && !is_nn) { continue; }
+          const char* kIn = "%s,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,";
+          for (int phase = 0; phase < 8; ++phase) {
+            eng->reset(phase);
+            G4KineticTrackVector* fs =
+                is_np ? npEl.FinalState(t1, t2) : nnEl.FinalState(t1, t2);
+            std::fprintf(g, kIn, pr.name, off, tilt, s, q1.x(), q1.y(), q1.z(), q1.t(), q2.x(),
+                         q2.y(), q2.z(), q2.t(), phase);
+            if (fs == nullptr || fs->size() < 2) {
+              std::fprintf(g, "1,0,0,0,0,0,0,0,0,%d\n", eng->draws());
+            } else {
+              const G4LorentzVector a = (*fs)[0]->Get4Momentum();
+              const G4LorentzVector b = (*fs)[1]->Get4Momentum();
+              std::fprintf(g, "0,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", a.x(),
+                           a.y(), a.z(), a.t(), b.x(), b.y(), b.z(), b.t(), eng->draws());
+            }
+            if (fs != nullptr) {
+              for (auto* kt : *fs) { delete kt; }
+              delete fs;
+            }
+          }
+        }
+      }
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1020,6 +1151,7 @@ void dump_bic(const DumpContext&) {
   write_imr_xsec();
   write_imr_angular();
   write_imr_angular_sweep();
+  write_imr_collision();
 }
 
 }  // namespace
@@ -1029,5 +1161,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_nucleus.csv bic_nucleons.csv bic_field.csv bic_rk.csv "
                     "bic_nucleus_stats.csv bic_nucleus_moments.csv bic_blir.csv "
                     "bic_blir_status.csv bic_apply.csv bic_apply_status.csv "
-                    "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv",
+                    "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv "
+                    "bic_imr_collision.csv bic_imr_elastic_fs.csv",
                     dump_bic);
