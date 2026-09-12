@@ -6733,6 +6733,137 @@ four extra seeds - bit-identical to the flag-off engine in all five, to every di
 
 #### The electron's `extremesmallstep`: V62's gap, decided by measurement
 
-TBD_ESS
+V62 is the entry; the short form is that `G4UrbanMscModel::SampleCosineTheta` evaluates `theta0`
+at `tsmall = min(tlimitmin, lambdalimit)` and scales it by `sqrt(t/tsmall)` for a step below
+that, and sixteen lines further down takes the tail parameter `u` from `log(tsmall/lambda0)`
+rather than from `log(tau)`. Both halves have been in `em::urban_sample_cos_theta` since P14b
+generalised it. What the lepton path lacked was the THRESHOLD: it passed zero.
+
+**The threshold is the one the track carries, and that is the whole correctness of the branch.**
+`p.msc_tlimitmin` is written by `urban_step_limit` on the first step and after each boundary and
+held for every step in between, which is exactly how Geant4 holds its member. A tlimitmin
+recomputed at the sampling site would be a different number wherever the branch actually fires -
+many steps after the last refresh, at the end of a range - so it would be right precisely where
+the branch never runs. `em::urban_t_small` does the `min`; `step_lepton` passes it.
+
+**And the `min` is load-bearing, which was not obvious.** Measured over B1's four materials:
+
+```
+material   E(MeV)    lambda0(mm)    stepmin(mm)  tlimitmin(mm)     tsmall(mm)
+water           1        6.29035    0.000299137    0.000580732    0.000580732
+water           6         113.72    0.000435918    0.000846272    0.000846272
+bone            1        2.74506    0.000146284    0.000342135    0.000342135
+air             1        5195.56        0.35552         1.1599              1
+air             6          93979       0.494985        1.61491              1
+```
+
+In water and bone `tsmall` IS `tlimitmin`, three to eight ten-thousandths of a millimetre. In AIR at
+1 and 6 MeV `tlimitmin` runs past `lambdalimit` and the 1 mm cap is what takes effect - so a
+version that dropped the `min` as "almost always tlimitmin" would have been wrong in the one
+material B1's world volume is made of.
+
+**The branch is reachable and it does something, and neither is assumed.** The same step sampled
+from the same seed with the threshold off and on, 1 MeV electron in water, `tsmall` = 5.80732e-4
+mm:
+
+| step | cos off | cos on | |
+|---|---|---|---|
+| 0.01 tsmall | 0.999999084 | 0.999999674 | differs |
+| 0.5 tsmall | 0.999985984 | 0.999983694 | differs |
+| 0.999 tsmall | 0.999967428 | 0.999967421 | differs |
+| **1.000 tsmall** | 0.999967389 | 0.999967389 | **identical** |
+| 1.001 tsmall | 0.999967349 | 0.999967349 | identical |
+| 100 tsmall | 0.992640282 | 0.992640282 | identical |
+
+Continuous at `t == tsmall`, live below it, inert above it - which is the shape the transcription
+has to have, and is what V62's own anti-vacuity note says is easy to get half right.
+
+**The decision is the gate's, and the gate barely notices.** Example B1's 2,000,000-event gamma
+gate, five seeds, the same source tree rebuilt with one `constexpr` different and every other
+object in the archive the same file. The dose column is `427.385 +` the difference each run
+prints, because the "scaled to 10k events" line prints six significant figures and the movement
+is in the seventh:
+
+| seed | off (pGy) | on (pGy) | change | track-steps, off -> on |
+|---|---|---|---|---|
+| default | 425.84739 | 425.84670 | -0.00069 | 26,064,061 -> 26,064,064 |
+| 1 | 426.19466 | 426.19534 | +0.00068 | 26,026,886 -> 26,026,732 |
+| 2 | 426.91679 | 426.91701 | +0.00022 | 26,038,801 -> 26,038,750 |
+| 3 | 427.48937 | 427.48706 | **-0.00231** | 26,038,916 -> 26,038,655 |
+| 4 | 427.28796 | 427.28824 | +0.00028 | 26,050,353 -> 26,050,418 |
+| **mean of five** | **426.74723** | **426.74687** | **-0.00036 +/- 0.00053** | |
+
+**It stays on.** The largest single-seed movement is 0.0023 pGy - 0.0026 of the 0.87 pGy that
+run's own rms gives it, and 0.00054% of the dose - and the mean of five is -0.00036 +/- 0.00053
+pGy, which is consistent with zero at 0.7 standard errors. The port's agreement with Geant4
+reads 1.25138 sigma before and **1.25195** after on the gate's
+own seed, and 0.67 sigma either way on the five-seed mean (426.747 +/- 0.388 against 427.385 +/-
+0.87). The rule of this project is that Geant4's code is the answer unless the port moves away
+from Geant4 by more than statistics, and this does not move the port at all; there is nothing
+here to run down.
+
+**V62's sentence needs one qualification, and it is a qualification and not a correction.**
+"Switching it on moves every lepton number in the port including B1's 6 MeV gamma dose" is true,
+and it is what P14b was right to protect: the gate is NOT bit-identical across this flag, and
+P14b's claim was that its commit changed the ion path and did not touch a lepton, which any
+movement at all would have broken. What V62 had no reason to measure is the SIZE of it. The
+branch fires on roughly one lepton step in 10^5 of B1's shower - the track-step count moves by
++3, -154, -51, -261 and +65 out of 26 million - and where it fires it is worth a few
+milliradians of a deflection that was a few milliradians anyway (the probe table above: 1.4
+mrad against 0.8 at a hundredth of `tsmall`). The threshold table says where those steps are:
+`tsmall` is 3 to 8e-4 mm in the water, A-150 and bone that hold all of B1's dose, and the 1 mm
+cap in the AIR of the world volume - so the material the branch is most often reached in is the
+one with nothing to deposit. A flag that had to be decided by this dose could not have been
+decided; what decides it is that it is Geant4's code and the dose says it costs nothing.
+
+**The stage-1 alpha row does not move either, and that is not a tautology**: an 840 MeV alpha
+makes delta rays, and every one of them is stepped by `run_step_lepton`. 500,000 events with the
+branch on read **12,316.4 +/- 12.9790 nGy, -1.12 sigma**, this entry's own alpha row to every
+printed digit, with **33,432,276** track-steps against 33,432,228 - 48 lepton steps of 33 million
+took the branch and the dose did not notice.
+
+**And the kernel costs nothing for it, measured rather than expected.** `-Xptxas -v` on the
+shipped lepton unit: `run_step_lepton<double,true,...>` and `<double,false,...>` both 3024 bytes
+of stack frame, 84/32 bytes of spill, 255 registers and 1464 bytes of cmem[0] - V65's flag-off
+column to the byte, for a branch that adds a `min`, a compare and two transcendentals on the path
+it takes. The kernel was already at the 255-register cap and ptxas found the room in the frame it
+had.
+
+#### The inversion: a null result is worth nothing unless the gate could have seen it
+
+"The dose does not move" and "the measurement is not looking" are the same observation from the
+outside, so the threshold was made wrong on purpose and the gate taken again. `step_lepton`
+passing `urban_t_small(p.msc_tlimitmin * 1000)` - the branch unchanged, the threshold a thousand
+times too large, so it fires on steps Geant4 samples normally - rebuilt as the ONE unit that
+holds `run_step_lepton`, with the other sixteen objects in the archive byte-for-byte the ones the
+table above was taken with, relinked, same seed:
+
+| | dose | vs Geant4 | track-steps |
+|---|---|---|---|
+| threshold off (what shipped until now) | 425.84739 pGy | 1.25138 sigma | 26,064,061 |
+| **threshold as Geant4 computes it** | **425.84670** | **1.25195** | **26,064,064** |
+| threshold x1000 | **425.828** | **1.26693** | **26,071,487** |
+
+These runs are deterministic to the last digit, so every digit of a difference is signal rather
+than sample: x1000 moves the dose **27 times** as far as the branch itself does (-0.0184 pGy
+against -0.00069) and changes the sixth significant figure of the line the gate prints, where the
+real branch changes the seventh, and it moves **7,423** track-steps where the real branch moves
+3. The gate can see this code. It reports a small number because the number is small.
+
+The perturbation was then reverted, the same one unit rebuilt and example B1 relinked a third
+time, and the gate came back to **425.847 pGy +/- 0.86768, -1.5383 pGy, 1.25195 sigma,
+26,064,064 track-steps** - the "on" row above in every field, which is also the check that the
+three runs differ by the threshold and by nothing else in the machine.
+
+#### Both switches on, which is the state that ships
+
+Every number this entry claims for the ion was re-taken with BOTH flags true, because the first
+half of it was measured with the lepton branch still off and a claim taken in a configuration
+that is not the shipped one is not a claim about the port. `test_ion_msc` 6.93e-16 / exactly 0 /
+1.10 and 1.49 sigma / 3.43 sigma at chi2/bin 2.18; `test_step_hadron` 1.060e-13 over 900 steps
+host against device, with `elastic_apply` at 5.799e-11 and `coulomb_fire` at 2.160e-14;
+`test_ion_transport` alpha 16.0 steps, deuteron 14.0, He3 3.0, O16 1.0. Unchanged, as they have
+to be - `kLeptonExtremeSmallStep` is read at exactly one place in the tree and it is inside
+`step_lepton` - but "has to be" is the sentence this project does not accept on its own.
 
 

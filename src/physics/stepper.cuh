@@ -160,7 +160,21 @@ constexpr bool kUrbanIonMscWired = true;
 /// and held for every step in between, exactly as Geant4 holds its member; a tlimitmin
 /// recomputed at the sampling site would be a different number wherever the branch actually
 /// fires, which is many steps after the last refresh. See `em::urban_t_small`.
-constexpr bool kLeptonExtremeSmallStep = false;
+///
+/// WHAT IT COSTS, which is why V62 could leave it off and V66 could not. Five seeds of example
+/// B1's 2,000,000-event gamma gate with this constexpr the only difference: the dose moves by at
+/// most 0.0023 pGy and by -0.00036 +/- 0.00053 on the mean of the five, against the 0.87 pGy that
+/// each run's own rms gives it, so the port reads 1.25138 sigma from Geant4 before and 1.25195
+/// after. The branch fires on about one lepton step in 10^5 - B1's track-step count moves by tens
+/// out of 26 million - and the stage-1 alpha row does not move to any printed digit even though
+/// every delta ray an 840 MeV alpha makes is stepped here. The kernel is 3024 bytes of frame,
+/// 84/32 of spill and 255 registers either way. So V62's "it moves every lepton number" is true,
+/// the gate is NOT bit-identical across this flag, and the size of it is the seventh digit.
+///
+/// The threshold x1000 - same seed, same binary but this one unit - moves the dose 27 times as
+/// far, to 425.828 pGy and 1.26693 sigma, which is how it is known that the gate can see this
+/// code at all and that the small number above is the physics rather than a measurement asleep.
+constexpr bool kLeptonExtremeSmallStep = true;
 
 /// URBAN'S STEP FOR A HEAVY PARTICLE IS THREE `__noinline__` FUNCTIONS AND THE KERNEL BODY
 /// HOLDS ONLY THE CALLS, BECAUSE OTHERWISE ptxas DIES SOONER. docs/RISK.md V55 and V63.

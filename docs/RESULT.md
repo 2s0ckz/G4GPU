@@ -54,6 +54,14 @@ prints it as its gate on every run. The run quoted above is older than that shif
 -0.26, +0.37, +0.32 sigma), which is what a single-sample comparison between two Monte Carlos can
 mean.
 
+**Still 425.847 after P8e, and that is a measurement rather than an absence of one.** P8e split
+the transport translation unit and turned on the two switches it had been holding shut - the
+ion's `G4UrbanMscModel` and the electron's `extremesmallstep` branch. The gate was re-taken on
+five seeds after each: 425.847 +/- 0.86768 pGy, **1.25195 sigma**, against 1.25138 before, with
+426.195 / 426.917 / 427.487 / 427.288 on the other four. The figure this document and the README
+record survives to every digit they record it to; what moved is the seventh. docs/RISK.md V65 and
+V66.
+
 ## Geometry against Geant4's own G4VSolid
 
 All 18 primitives and the three boolean operations, over 120,000 pseudo-random

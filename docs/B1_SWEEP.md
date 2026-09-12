@@ -96,9 +96,13 @@ one to quote, and it says: same answer, one GPU against one core, 11 to 39 times
   (RISK V63: the Urban ion branch is transcribed and matches Geant4, but enabling it crashes the
   compiler until the transport translation unit is split). The alpha rows above carry that
   substitution and agree within 0.25% regardless.
+  **Both halves of that caveat ended the same day** — P8e split the unit and `kUrbanIonMscWired`
+  is true (RISK V65, V66). The rows above were taken before it and are left as they were taken;
+  what the substitution was worth on the stage-1 alpha is +0.023%, well inside the 0.25%.
 - The electron path lacks Urban's `extremesmallstep` branch (RISK V62), left off pending a
   measurement of what it does to the gamma gate; the photon and low-energy electron rows above
-  carry that too.
+  carry that too. **The measurement was taken by P8e and the branch is on** (RISK V66): it moves
+  the 2,000,000-event gamma gate by 0.0004 pGy on the mean of five seeds, so these rows stand.
 - The `e- 20 MeV` row deposits only through bremsstrahlung photons (the electron's own range is
   10 cm and the trapezoid starts 19 cm in), so it tests the radiative chain at 0.9% statistics.
 - Geant4 was single-threaded by choice: the timing is one core against one GPU, and the EM-only
