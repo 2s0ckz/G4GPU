@@ -59,10 +59,15 @@
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4Deuteron.hh"
+#include "G4DynamicParticle.hh"
 #include "G4ExcitationHandler.hh"
 #include "G4Fancy3DNucleus.hh"
 #include "G4FermiMomentum.hh"
+#include "G4HadFinalState.hh"
+#include "G4HadProjectile.hh"
+#include "G4HadSecondary.hh"
 #include "G4HadronicInteractionRegistry.hh"
+#include "G4IonTable.hh"
 #include "G4KineticTrack.hh"
 #include "G4KineticTrackVector.hh"
 #include "G4Neutron.hh"
@@ -70,6 +75,7 @@
 #include "G4NuclearShellModelDensity.hh"
 #include "G4NucleiProperties.hh"
 #include "G4Nucleon.hh"
+#include "G4Nucleus.hh"
 #include "G4PhysicsModelCatalog.hh"
 #include "G4PionMinus.hh"
 #include "G4PionPlus.hh"
@@ -446,6 +452,139 @@ void write_nucleus_stats() {
   std::fclose(g);
 }
 
+/// bic_blir.csv and bic_blir_status.csv - G4BinaryLightIonReaction::ApplyYourself below its
+/// 50 MeV/nucleon fusion threshold, which is the arm this package has ported.
+///
+/// **Why this file exists.** Everything above is the machinery UNDER the two models; this is the
+/// only place a whole model is called the way the framework calls it. `FuseNucleiAndPrompound`
+/// is private, `SetLighterAsProjectile` is private, and the compound fragment they build is
+/// never handed back - so the fusion gate, the swap, the exciton configuration (pA particles of
+/// which pZ charged, zero holes) and the boost back out of the Breit frame have exactly one
+/// observable: the secondary list. It is compared statistically, the way
+/// `dump_precompound.cc`'s `preco_apply.csv` is.
+///
+/// **What each column can catch.** `status` is the fusion gate's verdict and is DETERMINISTIC
+/// per case - `isAlive` means `m2Compound < mFused^2` and the primary came back untouched - so
+/// a port that got `GetIonMass` or the kinematics wrong changes an integer, not a distribution.
+/// `sum_a` and `sum_z` are the compound's own (pZ+tZ, pA+tA) and must be exact in every event.
+/// The per-species counts and energy moments are the de-excitation; `mean_pz` and `mean_e` are
+/// the energy-momentum balance the swap would break.
+///
+/// N is 5,000 and not the 20,000 of the sampling files above: one event here is a complete
+/// pre-equilibrium and evaporation cascade on a compound of up to A = 220, where one event
+/// there is a nucleus. 5,000 keeps a 5-sigma band at about 1.5% on the common species and the
+/// whole file inside a minute on both sides.
+void write_blir() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  auto* blir = new G4BinaryLightIonReaction(preco);
+  blir->SetMinEnergy(0.0);
+  blir->SetMaxEnergy(6.0 * CLHEP::GeV);
+
+  G4IonTable* ions = G4IonTable::GetIonTable();
+
+  /// (projectile Z, A; kinetic energy PER NUCLEON; target Z, A). Every case is below the
+  /// 50 MeV/nucleon gate AFTER the swap, which for the H1 targets is not the same number: a
+  /// C12 at 45 MeV/nucleon on H1 swaps, and the quantity the gate tests becomes
+  /// `(gamma-1)*m_proton`, 45.3 MeV. The two alpha-on-H1 rows are there for the OTHER branch:
+  /// Li5 is unbound, so `mFused` can exceed the invariant mass of alpha+p and the model returns
+  /// the primary alive. Which of them does is the oracle's to say, not this comment's.
+  struct BCase { int pz, pa; double ekin_per_a; int tz, ta; const char* name; };
+  const BCase kCases[] = {
+    {1, 2,  10.0,  6,  12, "d10_C12"},     {1, 2,  45.0,  6,  12, "d45_C12"},
+    {1, 2,  10.0, 13,  27, "d10_Al27"},    {1, 2,  45.0, 13,  27, "d45_Al27"},
+    {1, 2,  10.0, 82, 208, "d10_Pb208"},   {1, 2,  45.0, 82, 208, "d45_Pb208"},
+    {2, 4,  10.0,  6,  12, "a10_C12"},     {2, 4,  25.0,  6,  12, "a25_C12"},
+    {2, 4,  45.0,  6,  12, "a45_C12"},     {2, 4,  10.0,  8,  16, "a10_O16"},
+    {2, 4,  25.0, 26,  56, "a25_Fe56"},    {2, 4,  45.0, 26,  56, "a45_Fe56"},
+    {2, 4,  10.0, 82, 208, "a10_Pb208"},   {2, 4,  45.0, 82, 208, "a45_Pb208"},
+    {6, 12, 10.0,  6,  12, "C12_10_C12"},  {6, 12, 25.0, 82, 208, "C12_25_Pb208"},
+    {6, 12, 10.0,  1,   1, "C12_10_H1"},   {6, 12, 45.0,  1,   1, "C12_45_H1"},
+    {2, 4,   1.0,  1,   1, "a1_H1"},       {2, 4,  10.0,  1,   1, "a10_H1"},
+  };
+  const int kN = 5000;
+
+  FILE* f = std::fopen("bic_blir.csv", "w");
+  std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
+                  "mean_mult2\n");
+  FILE* g = std::fopen("bic_blir_status.csv", "w");
+  std::fprintf(g, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,status,n_secondaries,sum_z,sum_a,"
+                  "mean_e_MeV,mean_pz_MeV,mean_mult\n");
+
+  for (const BCase& c : kCases) {
+    const G4ParticleDefinition* part = ions->GetIon(c.pz, c.pa, 0.0);
+    if (part == nullptr) {
+      std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,NO_ION,0,0,0,0,0,0\n", c.name, c.pz, c.pa,
+                   c.ekin_per_a, c.tz, c.ta, kN);
+      continue;
+    }
+    CLHEP::HepRandom::setTheSeed(555000L + c.pa * 1000 + c.ta + G4int(c.ekin_per_a));
+
+    std::map<int, long long> count;
+    std::map<int, double> sum_e, sum_e2, sum_k2;
+    std::map<int, int> per_event;
+    long long n_alive = 0, n_kill = 0, n_sec = 0;
+    // The compound's (Z, A) as the secondaries add up to it, and the totals for the balance.
+    long long sum_z = -1, sum_a = -1;
+    bool za_varies = false;
+    double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+
+    for (int n = 0; n < kN; ++n) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1),
+                           c.ekin_per_a * c.pa * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      G4HadFinalState* r = blir->ApplyYourself(proj, nucleus);
+      if (r == nullptr) { continue; }
+      if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
+      ++n_kill;
+      per_event.clear();
+      long long ez = 0, ea = 0;
+      G4LorentzVector tot(0., 0., 0., 0.);
+      const std::size_t ns = r->GetNumberOfSecondaries();
+      n_sec += static_cast<long long>(ns);
+      for (std::size_t i = 0; i < ns; ++i) {
+        const G4HadSecondary* s = r->GetSecondary(i);
+        const G4DynamicParticle* p = s->GetParticle();
+        const int pdg = p->GetDefinition()->GetPDGEncoding();
+        const double ekin = p->GetKineticEnergy() / MeV;
+        ++count[pdg];
+        sum_e[pdg] += ekin;
+        sum_e2[pdg] += ekin * ekin;
+        ++per_event[pdg];
+        tot += p->Get4Momentum();
+        if (pdg > 1000000000) {
+          ea += (pdg / 10) % 1000;
+          ez += (pdg / 10000) % 1000;
+        } else if (pdg == 2112) { ea += 1; }
+        else if (pdg == 2212) { ea += 1; ez += 1; }
+      }
+      for (const auto& kv : per_event) {
+        sum_k2[kv.first] += double(kv.second) * kv.second;
+      }
+      if (sum_z < 0) { sum_z = ez; sum_a = ea; }
+      else if (ez != sum_z || ea != sum_a) { za_varies = true; }
+      sum_tot_e += tot.e() / MeV;
+      sum_tot_pz += tot.z() / MeV;
+    }
+
+    const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
+    std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g\n", c.name,
+                 c.pz, c.pa, c.ekin_per_a, c.tz, c.ta, kN,
+                 (n_alive == kN) ? "isAlive" : ((n_kill == kN) ? "stopAndKill" : "MIXED"),
+                 n_sec, za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
+                 sum_tot_pz / nk, double(n_sec) / nk);
+    for (const auto& kv : count) {
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, c.pz,
+                   c.pa, c.ekin_per_a, c.tz, c.ta, kN, kv.first, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second),
+                   sum_k2[kv.first] / nk);
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -453,6 +592,7 @@ void dump_bic(const DumpContext&) {
   write_nucleus_and_nucleons();
   write_field_and_rk();
   write_nucleus_stats();
+  write_blir();
 }
 
 }  // namespace
@@ -460,5 +600,6 @@ void dump_bic(const DumpContext&) {
 G4GPU_REGISTER_DUMP("bic",
                     "bic_limits.csv bic_density.csv bic_density_radius.csv bic_fermi.csv "
                     "bic_nucleus.csv bic_nucleons.csv bic_field.csv bic_rk.csv "
-                    "bic_nucleus_stats.csv bic_nucleus_moments.csv",
+                    "bic_nucleus_stats.csv bic_nucleus_moments.csv bic_blir.csv "
+                    "bic_blir_status.csv",
                     dump_bic);
