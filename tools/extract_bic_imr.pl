@@ -251,7 +251,10 @@ my $n_res_cols = 0;for my $t (@res_tables) {
     # whatever the port's compiler does.
     my @s = grab("$imr/src/$cls.cc", qr/const G4double \Q$cls\E::sigma\Q$c\E\[121\]/, undef);
     my $got = scalar(@s);
-    die "$cls::sigma$c has $got values, more than the 121 it is declared with\n" if $got > 121;
+    # The `::` is escaped: `"$cls::sigma$c"` interpolates the package variable `$cls::sigma`,
+    # which is empty and which perl warns about once per run.
+    die "${cls}\:\:sigma$c has $got values, more than the 121 it is declared with\n"
+      if $got > 121;
     push @{ $short{$tag} }, "$c:$got" if $got != 121;
     push @s, (0) x (121 - $got);
     push @flat, @s;
@@ -351,6 +354,76 @@ printf "  ok %-46s %d columns x 120, grid increasing\n", 'detailed-balance phase
        scalar(@dbi_cols);
 
 # =============================================================================================
+# 7. The resonance masses and widths, which `G4VScatteringCollision::SampleResonanceMass` needs.
+#
+#    They live in three places: `G4ExcitedDeltaConstructor::mass/width` (nine Delta* multiplets),
+#    `G4ExcitedNucleonConstructor::mass/width` (fifteen N*), and four inline literals in
+#    `G4ShortLivedConstructor::ConstructResonances` for the ground-state Delta(1232).
+#
+#    TWO THINGS IN HERE ARE NOT WHAT THE NAMES SAY, and both are asserted rather than tidied.
+#
+#    * **delta- has a different width from its three partners.** 117 MeV against 120 - a
+#      charge-state-dependent width inside one isospin multiplet, which `SampleResonanceMass`
+#      reads, so the delta- mass spectrum is 2.5% narrower than the delta0's.
+#    * **the names and the masses disagree, and for two multiplets they are SWAPPED.**
+#      delta(1930) is built at 1950 MeV and delta(1950) at 1930; delta(1905) is at 1880 and
+#      delta(1910) at 1890; N(1990) is at 1950, N(2220) at 2250 and N(2250) at 2275. The
+#      cross-section table columns are keyed by NAME (`sigmaND1930`), so the column called 1930
+#      is applied to a particle of mass 1950.
+# =============================================================================================
+my $sl = "$g4/source/particles/shortlived/src";
+my @dstar_mass  = grab("$sl/G4ExcitedDeltaConstructor.cc",
+                       qr/const G4double G4ExcitedDeltaConstructor::mass\[\]/, 9);
+my @dstar_width = grab("$sl/G4ExcitedDeltaConstructor.cc",
+                       qr/const G4double G4ExcitedDeltaConstructor::width\[\]/, 9);
+my @nstar_mass  = grab("$sl/G4ExcitedNucleonConstructor.cc",
+                       qr/const G4double G4ExcitedNucleonConstructor::mass\[\]/, 15);
+my @nstar_width = grab("$sl/G4ExcitedNucleonConstructor.cc",
+                       qr/const G4double G4ExcitedNucleonConstructor::width\[\]/, 15);
+# The source writes them in GeV and MeV; the port stores MeV.
+@dstar_mass = map { $_ * 1000 } @dstar_mass;
+@nstar_mass = map { $_ * 1000 } @nstar_mass;
+
+# The ground-state Delta, four inline literals. Asserted as an exact ordered set, because the
+# odd one out is the whole point.
+{
+  open my $cfh, '<', "$sl/G4ShortLivedConstructor.cc" or die "cannot open G4ShortLivedConstructor.cc: $!";
+  local $/;
+  my $body = <$cfh>;
+  close $cfh;
+  my @got;
+  while ($body =~ /"(delta(?:\+\+|\+|0|-))",\s*1\.232\*GeV,\s*([\d.]+)\*MeV/g) {
+    push @got, "$1=$2";
+  }
+  my $want = 'delta++=120.0 delta+=120.0 delta0=120.0 delta-=117.0';
+  die "the ground-state Delta widths changed:\n  got  @got\n  want $want\n"
+    if join(' ', @got) ne $want;
+  ++$checks;
+  printf "  ok %-46s %s\n", 'ground-state Delta widths', 'three at 120 MeV, delta- at 117';
+}
+# The name/mass mismatches, asserted so a release that regularises them is visible.
+{
+  my @dnames = (1600, 1620, 1700, 1900, 1905, 1910, 1920, 1930, 1950);
+  my @nnames = (1440, 1520, 1535, 1650, 1675, 1680, 1700, 1710, 1720, 1900, 1990, 2090, 2190,
+                2220, 2250);
+  my @mismatch;
+  for my $i (0 .. 8) {
+    push @mismatch, "delta($dnames[$i])=$dstar_mass[$i]" if abs($dstar_mass[$i] - $dnames[$i]) > 0.5;
+  }
+  for my $i (0 .. 14) {
+    push @mismatch, "N($nnames[$i])=$nstar_mass[$i]" if abs($nstar_mass[$i] - $nnames[$i]) > 0.5;
+  }
+  my $want = 'delta(1620)=1630 delta(1905)=1880 delta(1910)=1890 delta(1930)=1950 '
+           . 'delta(1950)=1930 N(1440)=1430 N(1520)=1515 N(1650)=1655 N(1680)=1685 '
+           . 'N(1990)=1950 N(2090)=2080 N(2220)=2250 N(2250)=2275';
+  die "the resonance name/mass mismatches changed:\n  got  @mismatch\n  want $want\n"
+    if join(' ', @mismatch) ne $want;
+  ++$checks;
+  printf "  ok %-46s %d of 24 names differ from their mass\n", 'resonance name vs mass',
+         scalar(@mismatch);
+}
+
+# =============================================================================================
 # Write the header.
 # =============================================================================================
 my $out = 'src/physics/hadronic/bic/im_r/imr_tables.hh';
@@ -432,6 +505,10 @@ for my $t (@res_tables) {
 emit($fh, 'double', 'res_energy', 8, @{ $res_energy{'nd'} });
 emit($fh, 'double', 'dbi_sqrts', 8, @dbi_e);
 emit($fh, 'double', 'dbi_integral', 8, @dbi_flat);
+emit($fh, 'double', 'deltastar_mass', 5, @dstar_mass);
+emit($fh, 'double', 'deltastar_width', 5, @dstar_width);
+emit($fh, 'double', 'nstar_mass', 5, @nstar_mass);
+emit($fh, 'double', 'nstar_width', 5, @nstar_width);
 for my $t (@res_tables) {
   my ($cls, $egrid, $cols, $tag) = @$t;
   print $fh "__host__ __device__ inline const int* res_masses_$tag() {

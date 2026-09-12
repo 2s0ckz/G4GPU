@@ -75,6 +75,7 @@
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
 #include "G4Clebsch.hh"
+#include "G4ConcreteMesonBaryonToResonance.hh"
 #include "G4ConcreteNNToDeltaDelta.hh"
 #include "G4ConcreteNNToDeltaDeltastar.hh"
 #include "G4ConcreteNNToDeltaNstar.hh"
@@ -1858,6 +1859,150 @@ void write_imr_nnchannels() {
   std::fclose(g);
 }
 
+/// G4VScatteringCollision::FinalState through the concrete channels that inherit it - the two
+/// outgoing four-momenta with the resonance masses sampled from a Breit-Wigner - and
+/// G4VAnnihilationCollision::FinalState, which G4ConcreteMesonBaryonToResonance inherits.
+///
+/// The number of uniforms each call consumes is dumped with the momenta, because it is what the
+/// cascade's random stream depends on and because it varies: a stable product draws none for its
+/// mass, a short-lived one draws exactly one, and the zero-width shortcut draws none either.
+void write_imr_resonance_fs() {
+  FILE* f = std::fopen("bic_imr_resfs.csv", "w");
+  std::fprintf(f,
+               "family,in1,in2,out1,out2,sqrt_s_MeV,in1z,in1e,in2e,phase,n,"
+               "p1x,p1y,p1z,p1e,p2x,p2y,p2z,p2e,draws\n");
+  FILE* g = std::fopen("bic_imr_annihfs.csv", "w");
+  std::fprintf(g, "name,sqrt_s_MeV,in1z,in1e,in2e,p1x,p1y,p1z,p1e,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+
+  struct Chan {
+    const char* family;
+    const G4ParticleDefinition* i1;
+    const G4ParticleDefinition* i2;
+    int o1;
+    int o2;
+    int kind;
+  };
+  std::vector<Chan> chans;
+  // One nucleon-plus-resonance channel and one resonance-pair channel from each family, so that
+  // both the one-sample and the two-sample paths are exercised - and the delta- specifically,
+  // whose width is 117 MeV where its three partners are 120.
+  chans.push_back({"nd", p, p, 2112, 2224, 0});
+  chans.push_back({"nd", n, n, 2212, 1114, 0});     // a delta-
+  chans.push_back({"dd", n, n, 1114, 2214, 1});     // two short-lived
+  chans.push_back({"dd", p, p, 2214, 2214, 1});
+  chans.push_back({"ndstar", n, p, 2212, 32114, 2});
+  chans.push_back({"ndstar", p, p, 2212, 2218, 2});
+  chans.push_back({"ddstar", n, n, 1114, 32214, 3});
+  chans.push_back({"ddstar", p, p, 2224, 2118, 3});
+  chans.push_back({"nnstar", p, p, 2212, 12212, 4});
+  chans.push_back({"nnstar", n, n, 2112, 100012110, 4});
+  chans.push_back({"dnstar", n, n, 1114, 12212, 5});
+  chans.push_back({"dnstar", p, p, 2224, 12112, 5});
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(eng);
+
+  for (const Chan& c : chans) {
+    const G4ParticleDefinition* o1 = ptable->FindParticle(c.o1);
+    const G4ParticleDefinition* o2 = ptable->FindParticle(c.o2);
+    if (o1 == nullptr || o2 == nullptr) { continue; }
+    G4VCollision* ch = nullptr;
+    switch (c.kind) {
+      case 0: ch = new G4ConcreteNNToNDelta(c.i1, c.i2, o1, o2); break;
+      case 1: ch = new G4ConcreteNNToDeltaDelta(c.i1, c.i2, o1, o2); break;
+      case 2: ch = new G4ConcreteNNToNDeltaStar(c.i1, c.i2, o1, o2); break;
+      case 3: ch = new G4ConcreteNNToDeltaDeltastar(c.i1, c.i2, o1, o2); break;
+      case 4: ch = new G4ConcreteNNToNNStar(c.i1, c.i2, o1, o2); break;
+      default: ch = new G4ConcreteNNToDeltaNstar(c.i1, c.i2, o1, o2); break;
+    }
+    for (double want = 2200.0; want <= 6000.0; want += 100.0) {
+      G4LorentzVector q1, q2;
+      imr_make_pair(c.i1, c.i2, want, q1, q2);
+      G4KineticTrack t1(c.i1, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(c.i2, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        G4KineticTrackVector* fs = ch->FinalState(t1, t2);
+        const int nprod = (fs == nullptr) ? 0 : static_cast<int>(fs->size());
+        std::fprintf(f, "%s,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d,", c.family,
+                     c.i1->GetPDGEncoding(), c.i2->GetPDGEncoding(), c.o1, c.o2, s, q1.z(),
+                     q1.t(), q2.t(), phase, nprod);
+        if (nprod < 2) {
+          std::fprintf(f, "0,0,0,0,0,0,0,0,%d\n", eng->draws());
+        } else {
+          const G4LorentzVector a = (*fs)[0]->Get4Momentum();
+          const G4LorentzVector b = (*fs)[1]->Get4Momentum();
+          std::fprintf(f, "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", a.x(), a.y(),
+                       a.z(), a.t(), b.x(), b.y(), b.z(), b.t(), eng->draws());
+        }
+        if (fs != nullptr) {
+          for (auto* kt : *fs) { delete kt; }
+          delete fs;
+        }
+      }
+    }
+    delete ch;
+  }
+
+  // G4VAnnihilationCollision::FinalState, through G4ConcreteMesonBaryonToResonance - the only
+  // subclass the binary cascade reaches. It draws NO uniform.
+  {
+    const G4ParticleDefinition* pip = G4PionPlus::PionPlusDefinition();
+    // The partial-width LABEL is not decoration: G4XAnnihilationChannel looks it up in
+    // G4ResonancePartialWidth and stores whatever comes back, so a label that is not in the
+    // table leaves a null pointer for the cross section to dereference. The first version of this
+    // block passed "dump" and killed the whole oracle run after writing 69 of its 112 rows.
+    // The PION CHARGE has to match the resonance's isospin. `GetOutgoingParticle` adds the two
+    // incoming iso3 values and asks G4ParticleTypeConverter for the state of the outgoing
+    // multiplet with that iso3 - and if there is none it prints one line and THROWS a
+    // G4HadronicException. A pi+ on a proton is iso3 = +3, which a Delta (isospin 3/2) has and an
+    // N* (isospin 1/2) does not, so pi+ p -> N* kills the program. The first version of this
+    // block asked for exactly that and took the whole oracle run down with it.
+    struct Res { int code; const char* label; int pion; };
+    const Res kRes[] = {{2214, "D1232_Npi", 211}, {32214, "D1600_Npi", 211},
+                        {12212, "N1440_Npi", -211}};
+    for (const Res& r : kRes) {
+      const int code = r.code;
+      const G4ParticleDefinition* res = ptable->FindParticle(code);
+      if (res == nullptr) { continue; }
+      const G4ParticleDefinition* pion =
+          (r.pion > 0) ? pip : static_cast<const G4ParticleDefinition*>(
+                                   G4PionMinus::PionMinusDefinition());
+      G4ConcreteMesonBaryonToResonance mb(p, pion, res, r.label);
+      for (double want = 1200.0; want <= 3000.0; want += 50.0) {
+        G4LorentzVector q1, q2;
+        imr_make_pair(pion, p, want, q1, q2);
+        G4KineticTrack t1(pion, 0.0, G4ThreeVector(0, 0, 0), q1);
+        G4KineticTrack t2(p, 0.0, G4ThreeVector(0, 0, 0), q2);
+        const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+        eng->reset(0);
+        G4KineticTrackVector* fs = mb.FinalState(t1, t2);
+        if (fs != nullptr && !fs->empty()) {
+          const G4LorentzVector a = (*fs)[0]->Get4Momentum();
+          std::fprintf(g, "%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", code, s,
+                       q1.z(), q1.t(), q2.t(), a.x(), a.y(), a.z(), a.t(), eng->draws());
+        }
+        if (fs != nullptr) {
+          for (auto* kt : *fs) { delete kt; }
+          delete fs;
+        }
+      }
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1877,6 +2022,7 @@ void dump_bic(const DumpContext&) {
   write_imr_meson();
   write_imr_resonance_xsec();
   write_imr_nnchannels();
+  write_imr_resonance_fs();
 }
 
 }  // namespace
@@ -1892,5 +2038,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv "
                     "bic_imr_meson.csv bic_imr_meson_fs.csv "
                     "bic_imr_resxsec.csv bic_imr_species.csv "
-                    "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv",
+                    "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv "
+                    "bic_imr_resfs.csv bic_imr_annihfs.csv",
                     dump_bic);

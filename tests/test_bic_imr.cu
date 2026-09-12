@@ -74,6 +74,10 @@
 //   bic_imr_nnpartial    G4CollisionNN's eight partial cross sections, the ones FinalState
 //                        selects on, with the input four-momenta so nothing has to be rebuilt.
 //   bic_imr_nnselect     which component one prescribed uniform lands in, 8 phases per energy.
+//   bic_imr_resfs        G4VScatteringCollision::FinalState through twelve concrete channels from
+//                        all six families - the two outgoing four-momenta with the resonance
+//                        masses sampled from a Breit-Wigner, and the number of uniforms drawn.
+//   bic_imr_annihfs      G4VAnnihilationCollision::FinalState, which draws none at all.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -94,6 +98,7 @@
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
+#include "physics/hadronic/bic/im_r/resonance_fs.cuh"
 #include "physics/hadronic/bic/im_r/resonance_tables.cuh"
 #include "physics/hadronic/bic/im_r/scatterer.cuh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
@@ -1124,6 +1129,98 @@ int main() {
                 pair + " sqrt(s)=" + std::to_string(sqrt_s) + " phase=" + sv(r, 5));
         cmp_int(b_select, rng.n, iv(r, 7), pair + " draws");
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3i. What comes OUT of a resonance channel: G4VScatteringCollision::FinalState with the
+  //     resonance masses sampled from a Breit-Wigner, and G4VAnnihilationCollision::FinalState.
+  //
+  //     The number of uniforms each call draws is compared too, and it varies - a stable product
+  //     draws none for its mass, a short-lived one draws exactly one - so a port that resampled
+  //     a nucleon would agree on nothing after the first collision of an event.
+  // -------------------------------------------------------------------------------------------
+  const int b_resspec = new_bucket("ResonanceMassAndWidth", 0.0);
+  const int b_resfs = new_bucket("ScatteringFinalState", 5e-15);
+  const int b_resfsd = new_bucket("ScatteringFinalStateDraws", 0.0);
+  const int b_annih = new_bucket("AnnihilationFinalState", 1e-15);
+  {
+    // The port's mass and width table against Geant4's own definitions, species by species.
+    const auto srows = read_csv("bic_imr_species.csv");
+    for (const auto& r : srows) {
+      const int pdg = iv(r, 0);
+      if (sv(r, 1) == "MISSING") { continue; }
+      const imr::SpeciesProperties s = imr::species_properties(pdg, mp, mn);
+      if (!s.known) {
+        std::printf("REFUSED species properties for %d (%s)\n", pdg, sv(r, 1).c_str());
+        ++fails;
+        continue;
+      }
+      cmp_int(b_resspec, (std::fabs(s.mass - dv(r, 2)) < 1e-9) ? 1 : 0, 1, sv(r, 1) + " mass");
+      cmp_int(b_resspec, (std::fabs(s.width - dv(r, 3)) < 1e-9) ? 1 : 0, 1, sv(r, 1) + " width");
+      cmp_int(b_resspec, s.short_lived ? 1 : 0, iv(r, 7), sv(r, 1) + " IsShortLived");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_resfs.csv");
+    const double m_pip = 139.5701;
+    for (const auto& r : rows) {
+      const int in1 = iv(r, 1), in2 = iv(r, 2), out1 = iv(r, 3), out2 = iv(r, 4);
+      const double m1 = (in1 == 2212) ? mp : mn;
+      const double m2 = (in2 == 2212) ? mp : mn;
+      const imr::LorentzVector p1v(deex::Vec3d{0.0, 0.0, dv(r, 6)}, dv(r, 7));
+      const imr::LorentzVector p2v(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 8));
+      const int phase = iv(r, 9);
+      const int nprod = iv(r, 10);
+      const imr::SpeciesProperties s1 = imr::species_properties(out1, mp, mn);
+      const imr::SpeciesProperties s2 = imr::species_properties(out2, mp, mn);
+      CycleRng rng;
+      rng.reset(phase);
+      imr::ResonanceFsRefusal fref;
+      const imr::ElasticFinalState fs = imr::scattering_final_state(
+          p1v, p2v, m1, m2, s1, s2, mn, m_pip, rng, fref);
+      const std::string where = sv(r, 0) + " " + sv(r, 3) + "+" + sv(r, 4) + " sqrt(s)=" +
+                                std::to_string(dv(r, 5)) + " phase=" + std::to_string(phase);
+      cmp_int(b_resfsd, fs.empty ? 0 : 2, nprod, where + " product count");
+      cmp_int(b_resfsd, rng.n, iv(r, 19), where + " draws");
+      // Two branches of SampleResonanceMass are unreachable for the species this cascade
+      // produces, and the assertions say so rather than leaving them untested. The narrowest
+      // short-lived width here is 100 MeV, nine orders above the `gamma < 1e-10*GeV` shortcut;
+      // and the mass window never closes, which Geant4 agrees with - it prints
+      // "SampleResonanceMass: particle out of mass range" when it does, and the oracle run
+      // printed it zero times over these 3,744 calls.
+      cmp_int(b_resfsd, fref.mass_window_empty ? 1 : 0, 0, where + " mass window never closes");
+      cmp_int(b_resfsd, fref.mass_window_zeroed ? 1 : 0, 0, where + " and is never zeroed");
+      if (nprod < 2 || fs.empty) { continue; }
+      const double sc1 = std::sqrt(dv(r, 11) * dv(r, 11) + dv(r, 12) * dv(r, 12) +
+                                   dv(r, 13) * dv(r, 13));
+      const double sc2 = std::sqrt(dv(r, 15) * dv(r, 15) + dv(r, 16) * dv(r, 16) +
+                                   dv(r, 17) * dv(r, 17));
+      cmp_scaled(b_resfs, fs.p1.v.x, dv(r, 11), sc1, where + " p1x");
+      cmp_scaled(b_resfs, fs.p1.v.y, dv(r, 12), sc1, where + " p1y");
+      cmp_scaled(b_resfs, fs.p1.v.z, dv(r, 13), sc1, where + " p1z");
+      cmp_scaled(b_resfs, fs.p1.e, dv(r, 14), sc1, where + " p1e");
+      cmp_scaled(b_resfs, fs.p2.v.x, dv(r, 15), sc2, where + " p2x");
+      cmp_scaled(b_resfs, fs.p2.v.y, dv(r, 16), sc2, where + " p2y");
+      cmp_scaled(b_resfs, fs.p2.v.z, dv(r, 17), sc2, where + " p2z");
+      cmp_scaled(b_resfs, fs.p2.e, dv(r, 18), sc2, where + " p2e");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_annihfs.csv");
+    for (const auto& r : rows) {
+      const imr::LorentzVector p1v(deex::Vec3d{0.0, 0.0, dv(r, 2)}, dv(r, 3));
+      const imr::LorentzVector p2v(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 4));
+      const imr::LorentzVector got = imr::annihilation_final_state(p1v, p2v);
+      const std::string where = sv(r, 0) + " sqrt(s)=" + std::to_string(dv(r, 1));
+      const double sc = std::sqrt(dv(r, 5) * dv(r, 5) + dv(r, 6) * dv(r, 6) +
+                                  dv(r, 7) * dv(r, 7));
+      cmp_scaled(b_annih, got.v.x, dv(r, 5), sc, where + " px");
+      cmp_scaled(b_annih, got.v.y, dv(r, 6), sc, where + " py");
+      cmp_scaled(b_annih, got.v.z, dv(r, 7), sc, where + " pz");
+      cmp_scaled(b_annih, got.e, dv(r, 8), sc, where + " e");
+      // It draws no uniform at all.
+      cmp_int(b_annih, 0, iv(r, 9), where + " draws");
     }
   }
 

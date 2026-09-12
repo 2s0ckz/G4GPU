@@ -3220,6 +3220,40 @@ __host__ __device__ inline const double* dbi_integral() {
   return v;
 }
 
+__host__ __device__ inline const double* deltastar_mass() {
+  static const double v[9] = {
+    1600, 1630, 1700, 1900, 1880,
+    1890, 1920, 1950, 1930,
+  };
+  return v;
+}
+
+__host__ __device__ inline const double* deltastar_width() {
+  static const double v[9] = {
+    320.0, 140.0, 300.0, 200.0, 330.0,
+    280.0, 260.0, 360.0, 280.0,
+  };
+  return v;
+}
+
+__host__ __device__ inline const double* nstar_mass() {
+  static const double v[15] = {
+    1430, 1515, 1535, 1655, 1675,
+    1685, 1700, 1710, 1720, 1900,
+    1950, 2080, 2190, 2250, 2275,
+  };
+  return v;
+}
+
+__host__ __device__ inline const double* nstar_width() {
+  static const double v[15] = {
+    350.0, 115.0, 150.0, 140.0, 150.0,
+    130.0, 150.0, 100.0, 250.0, 500.0,
+    555.0, 350.0, 500.0, 400.0, 500.0,
+  };
+  return v;
+}
+
 __host__ __device__ inline const int* res_masses_nd() {
   static const int v[1] = {1232};
   return v;

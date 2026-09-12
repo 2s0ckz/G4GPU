@@ -8610,3 +8610,59 @@ from the template gives 310 concrete channels instead of 306 and moves the selec
 port lists the six out, and `tests/test_bic_imr.cu` asserts the total is exactly 306 and that
 every one of them balances charge - the check `G4CollisionComposite::Resolve` does at construction
 time and prints to `G4cerr`.
+
+### V110: delta- is 3 MeV narrower than its three partners, and five resonance names are not their masses
+
+`G4VScatteringCollision::FinalState` samples a short-lived product's mass from a Breit-Wigner
+about its PDG pole with its PDG width, so both numbers are physics and not bookkeeping. Two things
+about them in 11.1.1 are worth knowing before reading a resonance spectrum out of this model.
+
+**The four Delta(1232) charge states do not share a width.**
+`G4ShortLivedConstructor::ConstructResonances` builds them with four separate constructor calls:
+
+    "delta++",  1.232*GeV,  120.0*MeV
+    "delta+",   1.232*GeV,  120.0*MeV
+    "delta0",   1.232*GeV,  120.0*MeV
+    "delta-",   1.232*GeV,  117.0*MeV
+
+An isospin multiplet with a charge-dependent width. `SampleResonanceMass` reads it, so a delta-
+comes out of the cascade with a mass distribution 2.5% narrower than a delta0's - MEASURED:
+giving it 120 MeV moves a momentum component by 9.0e-3 relative. The three that agree also
+disagree with the Particle Data Group's 117 MeV, so it is the ODD ONE that matches the book.
+
+**Five of the twenty-four resonance names differ from the mass the particle is built with, and
+two multiplets are swapped.** `G4ExcitedDeltaConstructor` and `G4ExcitedNucleonConstructor` carry
+a name array and a mass array side by side, and thirteen of the twenty-four entries disagree:
+
+    delta(1620) -> 1630     delta(1905) -> 1880     delta(1910) -> 1890
+    delta(1930) -> 1950     delta(1950) -> 1930     <-- swapped
+    N(1440) -> 1430   N(1520) -> 1515   N(1650) -> 1655   N(1680) -> 1685
+    N(1990) -> 1950   N(2090) -> 2080   N(2220) -> 2250   N(2250) -> 2275
+
+Most are roundings of the PDG's central values. The delta(1930)/delta(1950) pair is not: they are
+each other's masses. And it matters because the CROSS-SECTION tables are keyed by NAME -
+`G4XNDeltastarTable::xMap["delta(1930)+"]` selects the column called `sigmaND1930` - while the
+KINEMATICS use the PDG mass. So the production cross section computed for "1930" is applied to a
+particle that comes out at 1950 MeV, and vice versa.
+
+Both are reproduced and both are pinned by `tools/extract_bic_imr.pl`, which asserts the four
+ground-state widths as an ordered set and the thirteen name/mass mismatches as an exact list - so
+a release that regularises either fails there rather than moving a resonance spectrum quietly.
+
+**And two branches of `SampleResonanceMass` are unreachable**, which the test asserts rather than
+leaves untested:
+
+  * the `gamma < 1E-10*GeV` shortcut, which returns `max(minMass, min(maxMass, poleMass))` and
+    draws NO uniform. The narrowest short-lived width the cascade produces is 100 MeV, nine orders
+    above it.
+  * the three-step fallback for an empty mass window - print, subtract a pion mass, then allow
+    zero. Geant4 prints `##### SampleResonanceMass: particle out of mass range` unconditionally
+    when it fires, with no verbose flag, and the oracle run printed it zero times over 3,744
+    calls. The port counts instead of printing and the test asserts the count is zero.
+
+**One more thing that throws.** `G4ConcreteMesonBaryonToResonance::GetOutgoingParticle` adds the
+two incoming iso3 values and asks for the outgoing multiplet's state with that iso3; if there is
+none it prints one line and throws a `G4HadronicException`. A pi+ on a proton is iso3 = +3, which
+a Delta has and an N* does not - so `pi+ p -> N*` terminates the program. Nothing protects that
+path except the cross section being zero there. It took the oracle run down once, from a dump that
+called `FinalState` without first asking for the cross section.
