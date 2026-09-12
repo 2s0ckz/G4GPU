@@ -394,3 +394,178 @@ minute and not a day (`docs/RISK.md` has the histories):
 - **A comment that explains why information is discarded** is the one to re-read when
   something needs that information (V35). And a comment that argues for a weaker claim than the
   code makes is protecting a gap (V32, V35).
+
+---
+
+## 9. P11d - DecayStrongResonances, and the decay engine it shares with P9
+
+Written by P11c after the FTFP entry point was finished, so that **P9d builds the engine once,
+for both callers.** Everything below is measured, not remembered: the species list and its
+fractions come from 14,000 `ftf::apply_yourself` events over seven beams, and every decay table
+was read out of `G4ParticleTable` in a running Geant4 through `ref/dump/dump_ftf.cc`.
+
+### 9.1 Why one module, and where it goes
+
+FTFP is blocked on exactly one thing. Its 96-point generality sweep - `apply_yourself` at three
+energies inside every FTFP row of `ref/oracle/ftf_windows.csv`, on carbon and on lead - runs 44
+points and refuses 52, **and all 52 are the same refusal**:
+`preco::GeneratorRefusal::short_lived_track`, which is P6's by-name refusal of
+`G4DecayKineticTracks` (docs/RISK.md V100). It also costs 80% of ion events and 32% of sub-GeV
+anti-nucleon ones. The Binary cascade reaches the same code through the same door, and its
+cascade makes the same Deltas and N*, so the engine belongs under `bic/` behind a contract
+header in the shape of `bic/nucleus/nucleus_model.cuh`: plain structs in, plain structs out, no
+knowledge of either caller.
+
+### 9.2 The two entry points, and they are the same three lines
+
+```
+G4DecayStrongResonances::Propagate(secondaries, nucleus)     [hadronic/util]
+    -> G4DecayKineticTracks decay(secondaries)               // changes the list IN SITU
+    -> then copies every surviving track into a G4ReactionProduct and returns
+
+G4GeneratorPrecompoundInterface::Propagate(secondaries, nucleus)          [binary_cascade]
+G4GeneratorPrecompoundInterface::PropagateNuclNucl(secondaries, t, p)
+    -> G4DecayKineticTracks decay(secondaries)               // the FIRST line of both
+    -> then the capture loop and the residual
+```
+
+`G4DecayStrongResonances::Propagate` is `G4DecayKineticTracks` plus a type conversion and
+nothing else - 20 lines, no physics of its own. So the engine is:
+
+```
+G4DecayKineticTracks::Decay(G4KineticTrackVector*)           [hadronic/util]
+    for i over a list that GROWS as it goes:
+      if (track->GetDefinition()->IsShortLived()) daughters = track->Decay();
+      append daughters, delete the parent, null its slot
+    then erase the null slots
+    - the growing loop is the recursion: a daughter that is itself short-lived is decayed too
+    - each daughter inherits the parent's CreatorModelID, ParentResonanceDef, and a
+      ParentResonanceID that is `round(parent 4-momentum .mag() / keV)`
+
+G4KineticTrack::Decay()                                      [hadronic/util]
+    1. sample a channel from theActualWidth[] (see 9.4), repeat up to 10,000 times until the
+       daughter masses fit under the parent's ACTUAL mass
+    2. for a channel with 1 or 2 short-lived daughters, draw those daughters' masses with
+       G4SampleResonance::SampleMass - P11 already has this as ftf_sample_resonance_mass
+    3. G4GeneralPhaseSpaceDecay(parentName, parentMass, BR, nDaughters, names, masses).DecayIt()
+    4. boost every product by the parent's boostVector, keep position, formationTime = 0
+```
+
+### 9.3 What FTFP actually produces - 27 species, and the shape of the problem
+
+14,000 events over {p on C at 10 GeV, p on Pb at 50 GeV, pi+ on Al at 10 GeV, pbar on C at 5
+GeV, pbar on C at 50 MeV, C12 on C at 8 GeV/n, Fe56 on Pb at 8 GeV/n}: **312,632 tracks, 44,759
+of them short-lived (14.3%), and 72.6% of events carry at least one.** That last number is why
+this is not an edge case.
+
+| PDG | name | tracks | share | mass (MeV) | width (MeV) | channels |
+|---:|---|---:|---:|---:|---:|---:|
+| 2114 | delta0 | 8797 | 19.7% | 1232.0 | 120.0 | 3 |
+| 2214 | delta+ | 8013 | 17.9% | 1232.0 | 120.0 | 3 |
+| 1114 | delta- | 6625 | 14.8% | 1232.0 | 117.0 | 1 |
+| 2224 | delta++ | 5337 | 11.9% | 1232.0 | 120.0 | 1 |
+| 113 | rho0 | 3615 | 8.1% | 775.26 | 149.1 | 1 |
+| 223 | omega | 3565 | 8.0% | 782.65 | 8.49 | 3 |
+| -213 | rho- | 3515 | 7.9% | 775.8 | 150.3 | 1 |
+| 213 | rho+ | 3499 | 7.8% | 775.8 | 150.3 | 1 |
+| 323 | k_star+ | 364 | 0.8% | 891.76 | 50.3 | 2 |
+| 313 | k_star0 | 331 | 0.7% | 895.55 | 47.3 | 2 |
+| 3214 | sigma(1385)0 | 280 | 0.6% | 1383.7 | 36.0 | 3 |
+| -313 | anti_k_star0 | 163 | 0.4% | 895.55 | 47.3 | 2 |
+| -323 | k_star- | 135 | 0.3% | 891.76 | 50.3 | 2 |
+| -2214 | anti_delta+ | 113 | 0.3% | 1232.0 | 120.0 | 2 |
+| -2114 | anti_delta0 | 83 | 0.2% | 1232.0 | 120.0 | 2 |
+| -2224 | anti_delta++ | 68 | 0.2% | 1232.0 | 120.0 | 1 |
+| 3224 | sigma(1385)+ | 68 | 0.2% | 1382.8 | 36.0 | 3 |
+| 3114 | sigma(1385)- | 51 | 0.1% | 1387.2 | 39.4 | 3 |
+| 333 | phi | 32 | 0.07% | 1019.46 | 4.247 | 3 |
+| 225 | f2(1270) | 30 | 0.07% | 1275.5 | 186.7 | 6 |
+| 115 | a2(1320)0 | 26 | 0.06% | 1318.3 | 107.0 | 7 |
+| -3214 | anti_sigma(1385)0 | 24 | 0.05% | 1383.7 | 36.0 | 3 |
+| -3224 | anti_sigma(1385)+ | 14 | 0.03% | 1382.8 | 36.0 | 3 |
+| -1114 | anti_delta- | 6 | 0.01% | 1232.0 | 117.0 | 1 |
+| -3114 | anti_sigma(1385)- | 3 | 0.01% | 1387.2 | 39.4 | 3 |
+| 3314 | xi(1530)- | 1 | 0.002% | 1535.0 | 9.9 | 3 |
+| 3324 | xi(1530)0 | 1 | 0.002% | 1531.8 | 9.1 | 3 |
+
+**Four facts that size the job**, all of them from the tables and not from the list above:
+
+1. **68 channels in all, and EVERY ONE of them is `Phase Space`** - `G4PhaseSpaceDecayChannel`,
+   `GetKinematicsName() == "Phase Space"`. No Dalitz, no KL3, no muon-decay form; the decay
+   forms P4 ported for the long-lived species are not needed here.
+2. **63 of the 68 are two-body**, 3 are three-body (omega -> pi+ pi- pi0, and two of a2(1320)0's)
+   and **2 are FOUR-body** (f2(1270) -> 4pi). `G4GeneralPhaseSpaceDecay::DecayIt` therefore
+   needs its two-body closed form, its three-body form, and the N-body form for N = 4.
+3. **Only FIVE channels of the 68 have a SHORT-LIVED daughter**: a2(1320)0's pi rho (x2) and
+   omega pi pi (x2), and phi -> rho0 pi0. Those five are the only ones that need
+   `G4SampleResonance::SampleMass` at decay time, and the only ones whose `theActualWidth[]`
+   needs `IntegrateCMMomentum` (see 9.4). They belong to two species that are together 0.13% of
+   the short-lived tracks, so a first cut that REFUSES them by name and covers the other 63
+   channels reaches 99.87% of what FTFP makes.
+4. Every daughter of the other 63 is stable or long-lived: nucleons, pions, kaons, gammas,
+   lambdas, sigmas, xis - all of them species P1 already transports.
+
+### 9.4 `theActualWidth[]`, which is the only hard arithmetic
+
+`G4KineticTrack`'s CONSTRUCTOR fills one width per channel, at the track's ACTUAL (sampled) mass
+rather than at the pole, and `Decay()` samples the channel from those. For a channel with
+`nDaughters` 2 or 3:
+
+```
+thePoleWidth   = channel->GetBR() * parent->GetPDGWidth()
+theMassRatio   = thePoleMass / theActualMass
+theMomRatio    = theActualMom / thePoleMom
+theActualWidth = thePoleWidth * theMassRatio * theMomRatio
+```
+
+and for `nDaughters == 1` (none of the 27 has one) it is just `BR * width`. What differs is how
+the two momenta are got:
+
+* **both daughters long-lived** (63 of the 68 channels): `EvaluateCMMomentum(mass, m[2])`, the
+  closed two-body form, at the actual mass and at the pole mass. No integration.
+* **one daughter short-lived** (5 channels): `IntegrateCMMomentum(lowerLimit)` and
+  `IntegrateCMMomentum(lowerLimit, polemass)` - a numerical integral of the two-body momentum
+  over the resonant daughter's Breit-Wigner, from `G4SampleResonance::GetMinimumMass(daughter)`
+  upwards. The daughters are SWAPPED so the short-lived one is in slot 1.
+* **both daughters short-lived** (none of the 68): `IntegrateCMMomentum2()`, a double integral.
+* **three daughters, one short-lived** (none of the 68): the two long-lived masses are ADDED and
+  `IntegrateCMMomentum(0.0)` is used.
+* **three daughters, none short-lived** (3 channels): `theDaughterMass[1] += theDaughterMass[2]`
+  and then the closed two-body form on the pair.
+
+So the integrator is needed by five channels out of 68 and by no channel at all if those five
+are refused by name. `G4SampleResonance` itself - `SampleMass`, `BrWigInt0`, `BrWigInv`,
+`GetMinimumMass` - is already ported in `ftf/string_fragmentation.cuh` and
+`data/ftf_hadrons.hh`'s `minmass` column.
+
+### 9.5 What the contract has to carry
+
+A track in, a list of tracks out, and nothing that knows about strings or cascades:
+
+```
+struct DecayTrack { int pdg; LorentzVector momentum; Vec3d position; double formation_time;
+                    int creator_model_id; int parent_resonance_pdg; int parent_resonance_id; };
+decay_kinetic_tracks(DecayTrack* list, int& n, int capacity, const DecayTables*, Rng&) -> refusal
+```
+
+`preco::CascadeTrack` already carries `pdg`, `momentum`, `position`, `formation_time`,
+`creator_model_id` and `is_short_lived`, so the natural shape is for the engine to take a
+`CascadeTrack` list in place and for P6 to call it where `G4DecayKineticTracks` is called - the
+first line of both `Propagate` entry points - after which `GeneratorRefusal::short_lived_track`
+can be deleted rather than reported. The two `parent_resonance_*` fields are new; Geant4 sets
+them on every daughter and nothing in QBBC's scoring reads them, so they are bookkeeping to
+carry rather than physics to reproduce.
+
+The tables are data and belong in `src/data/`, generated the way `data/ftf_hadrons.hh` is: a
+dump that walks `G4ParticleTable`, a Perl generator under `tools/`, and a test that diffs the
+two so that a Geant4 release which changes a branching ratio fails a row instead of quietly
+changing a shower. 27 species and 68 channels is a small file; the same generator should take
+the species list as an argument, because the Binary cascade's set is not identical to FTFP's
+and the union is what the module needs.
+
+### 9.6 What P11d does once the module exists
+
+Wire `G4DecayStrongResonances::Propagate` - the `hitCount == GetMassNumber()` exit of
+`G4TheoFSGenerator::ApplyYourself`, which QBBC reaches on hydrogen and on any target whose every
+nucleon was hit - to the shared engine, delete `kDecayStrongResonances`, and re-run the 96-point
+sweep. On the numbers above that is the last refusal in it.
