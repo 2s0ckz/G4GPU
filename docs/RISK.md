@@ -6767,6 +6767,25 @@ appear zero times in the generator, so a generated project instantiates no kerne
 compiles in seconds. Its template is left alone; if it ever gains a device hook, this mechanism
 is what it needs and the two call sites in `build_all.bat` are the pattern.
 
+It still builds and runs with the engine in seventeen units and two hook archives beside it:
+**56.9 s** for the eight generated sources and the link, and `MyDetector.exe -n 10000` reports
+`dose1 220.721 MeV / 1309.8 pGy`, `cells 194.774 MeV / 975 pGy`, and the host `SteppingAction`'s
+own sum at **220.721 MeV** - the same number `dose1` reports, by the other route, which is what
+`tools/compare_project.ps1` exists to compare.
+
+**And a caveat that this package does not own but had to work around.** The pipeline's
+generated-project stage cannot be run from a worktree as written. `src/host/g4builder.cu` line
+1874 saves the selftest's project to the literal `"D:/g4gpu/out/selftest_project"`, and the
+dialog PNGs beside it to the same hard-coded root; `src/builder/write_project.cc` writes
+`call "D:/g4gpu/build_engine.bat"` into every project's `build.bat` and `set(G4GPU_DIR
+"D:/g4gpu")` into its CMakeLists. So a `g4builder.exe -selftest` built in a worktree writes into
+MAIN'S `out\`, and the `build.bat` it generates would rebuild MAIN'S engine - which is V45, and
+what every worktree agent is told not to do. The numbers above were therefore taken on a COPY:
+the generated project copied into the worktree with those absolute references rewritten, built
+against this branch's engine. What is under test - the generated sources and the generated build
+recipe - is untouched by that substitution. Recorded because it also means the generated-project
+stage of a `build_all` run from a worktree is testing main's tree rather than the branch.
+
 
 ### V66: two switches that had been shut by a compiler and by a package boundary
 
