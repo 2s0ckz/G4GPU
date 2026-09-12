@@ -8235,13 +8235,13 @@ machinery (`G4SampleResonance`, `G4Integrator`, `IntegrateCMMomentum`) that
 closes three refusals at once. Until then the FTFP arm makes strings, fragments them and reports
 at the boundary; it does not silently de-excite a rho.
 
-### V101: the FTF interaction workspace is 289 kB, and that is per track
+### V101: the FTF interaction workspace is 332 kB, and that is per track
 
-`sizeof(ftf::FtfWorkspace<250, 64, 512, 320, 256, 96>)` is 289,152 bytes. It holds two
+`sizeof(ftf::FtfWorkspace<250, 64, 512, 320, 256, 96>)` is 332,368 bytes. It holds two
 `bic::Nucleon` arrays (250 + 64 nucleons at 72 bytes), one shared `Nucleus3DScratch`, a
-501-slot splitable-hadron pool at 104 bytes each, 512 interactions at 32, 320 `ExcitedString`s
+565-slot splitable-hadron pool at 168 bytes each, 512 interactions at 32, 320 `ExcitedString`s
 at 184, and P11's 53,816-byte string-decay workspace. Every byte is behind a pointer and none of
-it is on the stack - the device probe is a 768-byte frame with nothing spilled - but it is one
+it is on the stack - the device probe is an 880-byte frame with nothing spilled - but it is one
 per TRACK IN FLIGHT, not one per string or per event.
 
 For scale: P11's string-decay workspace alone is 53,816 bytes and P9's nucleus 18 kB, so this is

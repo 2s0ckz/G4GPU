@@ -1168,12 +1168,14 @@ growth at sqrt(10) says "real", not "physics".
 Device probe, never launched, `-arch=sm_86`: `ftf_apply_device_probe`, which instantiates the
 whole of `ftf::apply_yourself`, is **255 registers, an 880-byte stack frame and 0 bytes spilled**
 in the entry function; `ftf_scatter` compiled on its own spills 24 bytes of stores and 48 of
-loads, which the entry's own frame absorbs. 400 bytes cmem[0], 5,968 bytes cmem[2]. The hand-over into P6 is behind a `__noinline__` and costs a 0-byte frame, because it
-stops at `propagate_residual` and does not pull in `preco::deexcite`'s 10 kB.
-`sizeof(FtfWorkspace<250,64,512,320,256,96>)` is **289,152 bytes** - two nuclei, a
-501-slot splitable-hadron pool, the interaction list, 320 excited strings and P11's 53,816-byte
-string-decay workspace - one per TRACK in flight and every byte behind a pointer. That is five
-times P11's and it is the number to look at before this runs on a device: docs/RISK.md V101.
+loads, which the entry's own frame absorbs. 400 bytes cmem[0], 5,968 bytes cmem[2]. The
+hand-over into P6 is behind a `__noinline__` and costs a 0-byte frame, because it stops at
+`propagate_residual` and does not pull in `preco::deexcite`'s 10 kB.
+`sizeof(FtfWorkspace<250,64,512,320,256,96>)` is **332,368 bytes** - two nuclei, a 565-slot
+splitable-hadron pool (the 64 extra slots are G4FTFAnnihilation's `theAdditionalString`), the
+interaction list, 320 excited strings and P11's 53,816-byte string-decay workspace - one per
+TRACK in flight and every byte behind a pointer. That is six times P11's and it is the number to
+look at before this runs on a device: docs/RISK.md V101.
 
 ### 2.2 What QBBC needs and is not there
 
