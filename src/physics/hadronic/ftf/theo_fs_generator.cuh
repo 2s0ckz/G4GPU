@@ -121,6 +121,21 @@ struct FtfWorkspace {
   int n_escaped = 0;
   preco::HitNucleon hit[kMaxTargetA];
   int n_hit = 0;
+  /// The PROJECTILE nucleus's wounded nucleons. `PropagateNuclNucl` reads both lists at once -
+  /// it builds two residuals and a track can be captured by either - so the two cannot share
+  /// one array the way the two nuclei share `Nucleus3DScratch`.
+  preco::HitNucleon hit_proj[kMaxProjA];
+  int n_hit_proj = 0;
+  /// `MakeCoalescence`'s output. It is a separate list because the function takes a const input
+  /// and writes the survivors plus the deuterons it made; `PropagateNuclNucl` then reads THIS
+  /// list and not `tracks`.
+  preco::CascadeTrack coalesced[kMaxTracks];
+  /// MakeCoalescence's per-track scratch, in the workspace rather than on the stack - see the
+  /// overload P11c added to P6's file. Without it the list is capped at 64 and Fe on Pb at 20
+  /// GeV per nucleon is refused for capacity in half its events.
+  bool coal_consumed[kMaxTracks];
+  int coal_partner[kMaxTracks];
+  int n_coalesced = 0;
 
   FtfApplyReport report;
 };
@@ -399,6 +414,45 @@ __host__ __device__ inline preco::WoundedNucleus ftf_wounded_nucleus(
   return nuc;
 }
 
+/// The same for the PROJECTILE nucleus, which exists only for an ion beam.
+///
+/// `G4TheoFSGenerator::ApplyYourself` passes `theHighEnergyGenerator->GetProjectileNucleus()`
+/// as PropagateNuclNucl's third argument, and the interface reads exactly the same four things
+/// off it as off the target: the initial (A, Z), the nuclear radius, and each hit nucleon's
+/// charge, binding energy and four-momentum. The momenta are the LAB ones: `Scatter` has
+/// already transformed every hit nucleon of both nuclei with `toLab`.
+template <int kA, int kP, int kI, int kS, int kT, int kPS>
+__host__ __device__ inline preco::WoundedNucleus ftf_wounded_projectile(
+    FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws) {
+  ws->n_hit_proj = 0;
+  for (int i = 0; i < ws->model.projectile.my_a; ++i) {
+    const bic::Nucleon& n = ws->model.projectile.nucleons[i];
+    if (!n.hit) { continue; }
+    if (ws->n_hit_proj >= kP) {
+      ws->report.refused = FtfRefusal::kWoundedNucleonCapacity;
+      break;
+    }
+    preco::HitNucleon h;
+    h.charge = n.charge();
+    h.pdg_mass = n.pdg_mass();
+    h.binding_energy = n.binding_energy;
+    h.momentum = n.momentum;
+    h.is_lambda = (n.type == bic::kLambda);
+    ws->hit_proj[ws->n_hit_proj++] = h;
+  }
+  // The INITIAL (A, Z), which is what `GetMassNumber()`/`GetCharge()` return on a G4V3DNucleus
+  // however many of its nucleons were hit - NOT `projectile_residual_a`, which G4FTFModel has
+  // already decremented. The interface subtracts the hit nucleons itself.
+  preco::WoundedNucleus nuc;
+  nuc.a = ws->model.projectile.my_a;
+  nuc.z = ws->model.projectile.my_z;
+  nuc.lambdas = 0;
+  nuc.radius = ws->model.projectile.nuclear_radius();
+  nuc.hit = ws->hit_proj;
+  nuc.n_hit = ws->n_hit_proj;
+  return nuc;
+}
+
 /// The hand-over into P6, behind a `__noinline__` so that its 10 kB of stack
 /// (docs/PORTED.md 2.1.10: `preco::deexcite` inlines whole at about 10,080 bytes) is not added
 /// to every frame that merely calls FTF.
@@ -413,6 +467,92 @@ __host__ __device__ __noinline__ preco::CascadeResidual ftf_propagate(
     const Vec4& primary_p4, Rng& rng) {
   return preco::propagate_residual(ws->tracks, ws->n_tracks, nuc, primary_p4, ws->escaped, kT,
                                    ws->n_escaped, ws->report.generator, rng);
+}
+
+/// The nucleus-nucleus hand-over, behind the same `__noinline__` and for the same reason.
+///
+/// `MakeCoalescence` is inside `PropagateNuclNucl` in Geant4 and outside
+/// `propagate_nucl_nucl_residuals` here, so it is called from this one place, immediately
+/// before, which is the same sequence. It consumes no deviates. What comes BEFORE it in Geant4
+/// is `G4DecayKineticTracks`, which P6 refuses by name (`GeneratorRefusal::short_lived_track`);
+/// this function therefore reports rather than decays, and a list carrying a rho or a Delta
+/// stops here. docs/RISK.md V100 and V114.
+template <int kA, int kP, int kI, int kS, int kT, int kPS, typename Rng>
+__host__ __device__ __noinline__ preco::NuclNuclResiduals ftf_propagate_nucl_nucl(
+    FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws, const preco::WoundedNucleus& target,
+    const preco::WoundedNucleus& projectile, const Vec4& primary_p4, int primary_baryon,
+    Rng& rng) {
+  ws->n_coalesced =
+      preco::make_coalescence(ws->tracks, ws->n_tracks, ws->coalesced, kT, ws->coal_consumed,
+                              ws->coal_partner, kT, ws->report.generator);
+  if (ws->report.generator.any()) { return preco::NuclNuclResiduals(); }
+  return preco::propagate_nucl_nucl_residuals(ws->coalesced, ws->n_coalesced, target,
+                                              projectile, primary_p4, primary_baryon,
+                                              ws->escaped, kT, ws->n_escaped,
+                                              ws->report.generator, rng);
+}
+
+/// The escaped tracks, as `G4HadFinalState` secondaries.
+///
+/// `time = max(GetFormationTime(), 0)` and the primary's global time is added by the process,
+/// not here. The mass is the PDG one when the table has the code, because that is what the
+/// G4ReactionProduct the interface builds carries; a deuteron out of `MakeCoalescence` is not
+/// in `data/ftf_hadrons.hh` and falls back to its own invariant mass.
+template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS>
+__host__ __device__ inline void ftf_emit_escaped(FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+                                                 HadFinalState<real_t, kMaxSec>& out) {
+  for (int i = 0; i < ws->n_escaped; ++i) {
+    const preco::CascadeTrack& t = ws->escaped[i];
+    const data::FtfHadron* d = data::ftf_find_hadron(t.pdg);
+    HadSecondary<real_t> s;
+    s.pdg = t.pdg;
+    s.z = 0;
+    s.a = 0;
+    s.mass = static_cast<real_t>((d != nullptr) ? d->mass : t.momentum.mag());
+    s.kin_energy = static_cast<real_t>(t.momentum.e) - s.mass;
+    const double p = std::sqrt(g4gpu::mag2(t.momentum.v));
+    s.direction = (p > 0.0)
+                      ? Vec3<real_t>{static_cast<real_t>(t.momentum.v.x / p),
+                                     static_cast<real_t>(t.momentum.v.y / p),
+                                     static_cast<real_t>(t.momentum.v.z / p)}
+                      : Vec3<real_t>{real_t(0), real_t(0), real_t(1)};
+    s.time = static_cast<real_t>((t.formation_time > 0.0) ? t.formation_time : 0.0);
+    s.creator_model_id = t.creator_model_id;
+    if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
+  }
+}
+
+/// One excited residual, handed on as a (Z, A, E*) secondary in the LAB frame.
+///
+/// P3's de-excitation is the caller's next call and `CascadeResidual` carries the fragment it
+/// needs. `boost_back` is non-zero only for `PropagateNuclNucl`'s PROJECTILE residual, which
+/// `propagate_nucl_nucl_residuals` leaves at rest because Geant4 de-excites it in its own frame
+/// and boosts the PRODUCTS back. Handing the fragment on in the lab instead is the same physics
+/// at this boundary - a de-excitation of a moving fragment works in its rest frame and boosts
+/// back - and it keeps the two residuals the same kind of object for the caller.
+template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS>
+__host__ __device__ inline void ftf_emit_residual(const preco::CascadeResidual& residual,
+                                                  const Vec3d& boost_back,
+                                                  FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+                                                  HadFinalState<real_t, kMaxSec>& out) {
+  if (!residual.exists) { return; }
+  deex::LorentzVector p4 = residual.fragment.momentum;
+  if (boost_back.x != 0.0 || boost_back.y != 0.0 || boost_back.z != 0.0) {
+    p4.boost(boost_back);
+  }
+  HadSecondary<real_t> s;
+  s.z = residual.fragment.z;
+  s.a = residual.fragment.a;
+  s.pdg = pdg_nuclear_code(s.z, s.a);
+  s.mass =
+      static_cast<real_t>(residual.fragment.ground_state_mass + residual.fragment.excitation);
+  s.kin_energy = static_cast<real_t>(p4.e) - s.mass;
+  const double p = std::sqrt(g4gpu::mag2(p4.v));
+  s.direction = (p > 0.0) ? Vec3<real_t>{static_cast<real_t>(p4.v.x / p),
+                                         static_cast<real_t>(p4.v.y / p),
+                                         static_cast<real_t>(p4.v.z / p)}
+                          : Vec3<real_t>{real_t(0), real_t(0), real_t(1)};
+  if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
 }
 
 /// G4TheoFSGenerator::ApplyYourself, as the package's entry point.
@@ -512,10 +652,25 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   for (int i = 0; i < ws->model.target.my_a; ++i) {
     if (ws->model.target.nucleons[i].hit) { ++hit_count; }
   }
+  // THE ION ARM. `ApplyYourself` takes it whenever `GetProjectileNucleus()` is not null, and
+  // it does NOT apply the `hitCount != GetMassNumber()` test that chooses between Propagate and
+  // G4DecayStrongResonances for a hadron beam - a nucleus-nucleus collision always goes to
+  // PropagateNuclNucl, even one that hit every target nucleon.
   if (ws->model.has_projectile_nucleus) {
-    // PropagateNuclNucl - a second residual for the projectile, plus MakeCoalescence. Not
-    // written: preco::propagate_residual is the hadron-nucleus arm only.
-    ws->report.refused = FtfRefusal::kPropagateNuclNucl;
+    const preco::WoundedNucleus tnuc = ftf_wounded_nucleus(ws, target.a, target.z);
+    if (ws->report.refused != FtfRefusal::kNone) { return; }
+    const preco::WoundedNucleus pnuc = ftf_wounded_projectile(ws);
+    if (ws->report.refused != FtfRefusal::kNone) { return; }
+    const preco::NuclNuclResiduals both = ftf_propagate_nucl_nucl(
+        ws, tnuc, pnuc, primary_p4, ws->model.projectile_baryon, rng);
+    if (ws->report.generator.any()) { return; }
+    ftf_emit_escaped(ws, out);
+    ftf_emit_residual(both.target, Vec3d{0.0, 0.0, 0.0}, ws, out);
+    // The projectile residual comes back in its own rest frame; `projectile_boost_to_cm` is
+    // `findBoostToCM()` = -p/E, so the way back to the lab is its negation.
+    const Vec3d back{-both.projectile_boost_to_cm.x, -both.projectile_boost_to_cm.y,
+                     -both.projectile_boost_to_cm.z};
+    ftf_emit_residual(both.projectile, back, ws, out);
     return;
   }
   if (hit_count == ws->model.target.my_a) {
@@ -529,46 +684,8 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   const preco::CascadeResidual residual = ftf_propagate(ws, nuc, primary_p4, rng);
   if (ws->report.generator.any()) { return; }
 
-  // G4HadFinalState assembly. `time = max(GetFormationTime(), 0)` and the primary's global time
-  // is added by the process, not here.
-  for (int i = 0; i < ws->n_escaped; ++i) {
-    const preco::CascadeTrack& t = ws->escaped[i];
-    const data::FtfHadron* d = data::ftf_find_hadron(t.pdg);
-    HadSecondary<real_t> s;
-    s.pdg = t.pdg;
-    s.z = 0;
-    s.a = 0;
-    s.mass = static_cast<real_t>((d != nullptr) ? d->mass : t.momentum.mag());
-    s.kin_energy = static_cast<real_t>(t.momentum.e) - s.mass;
-    const double p = std::sqrt(g4gpu::mag2(t.momentum.v));
-    s.direction = (p > 0.0)
-                      ? Vec3<real_t>{static_cast<real_t>(t.momentum.v.x / p),
-                                     static_cast<real_t>(t.momentum.v.y / p),
-                                     static_cast<real_t>(t.momentum.v.z / p)}
-                      : Vec3<real_t>{real_t(0), real_t(0), real_t(1)};
-    s.time = static_cast<real_t>((t.formation_time > 0.0) ? t.formation_time : 0.0);
-    s.creator_model_id = t.creator_model_id;
-    if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
-  }
-
-  // The excited residual is handed on as a (Z, A, E*) secondary; P3's de-excitation is the
-  // caller's next call, and `CascadeResidual` carries the fragment it needs.
-  if (residual.exists) {
-    HadSecondary<real_t> s;
-    s.z = residual.fragment.z;
-    s.a = residual.fragment.a;
-    s.pdg = pdg_nuclear_code(s.z, s.a);
-    s.mass = static_cast<real_t>(residual.fragment.ground_state_mass +
-                                 residual.fragment.excitation);
-    s.kin_energy = static_cast<real_t>(residual.fragment.momentum.e) - s.mass;
-    const double p = std::sqrt(g4gpu::mag2(residual.fragment.momentum.v));
-    s.direction = (p > 0.0) ? Vec3<real_t>{
-                                  static_cast<real_t>(residual.fragment.momentum.v.x / p),
-                                  static_cast<real_t>(residual.fragment.momentum.v.y / p),
-                                  static_cast<real_t>(residual.fragment.momentum.v.z / p)}
-                            : Vec3<real_t>{real_t(0), real_t(0), real_t(1)};
-    if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
-  }
+  ftf_emit_escaped(ws, out);
+  ftf_emit_residual(residual, Vec3d{0.0, 0.0, 0.0}, ws, out);
 }
 
 }  // namespace g4gpu::hadronic::ftf

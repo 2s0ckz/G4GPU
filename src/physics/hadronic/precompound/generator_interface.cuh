@@ -316,23 +316,26 @@ propagate_residual(const CascadeTrack* tracks, int n_tracks, const WoundedNucleu
 ///
 /// Writes the surviving tracks into `out` in Geant4's resulting order: the un-paired tracks in
 /// their original order, then the deuterons in the order they were created. Returns the count.
+///
+/// This is the form that takes its scratch from the caller.
+///
+/// `consumed` is the null pointer Geant4 leaves in the vector before erasing it, and `partner`
+/// records which neutron each proton took; both are one entry per input track. The four-argument
+/// form below keeps them on the stack, which caps the list at 64 - fine for a cascade at a few
+/// GeV, and NOT fine for Fe on Pb at 20 GeV per nucleon, where FTFP hands PropagateNuclNucl
+/// upwards of a hundred tracks and half the events were refused for capacity. P11c added this
+/// overload so a caller with a workspace can pass one; the old signature and its 64 are
+/// untouched, so P9's and P10's callers are unchanged.
 __host__ __device__ inline int make_coalescence(const CascadeTrack* in, int n_in,
-                                               CascadeTrack* out, int out_capacity,
-                                               GeneratorRefusal& ref) {
+                                                CascadeTrack* out, int out_capacity,
+                                                bool* consumed, int* partner, int scratch_cap,
+                                                GeneratorRefusal& ref) {
   const double mass_cut = deex::pdg_mass_deuteron() + coalescence_delta_m();
   int n_out = 0;
-  // `consumed` is the null pointer Geant4 leaves in the vector before erasing it, and
-  // `partner` records which neutron each proton took. Two passes over `in` rather than one
-  // in-place edit, because the input is const and a kernel has nowhere to allocate. 64 is the
-  // largest list this signature accepts and it is a stated refusal rather than a silent
-  // truncation; a cascade at a few GeV makes tens of tracks, not hundreds.
-  const int kMaxTracks = 64;
-  if (n_in > kMaxTracks) {
+  if (n_in > scratch_cap) {
     ref.capacity = true;
     return 0;
   }
-  bool consumed[kMaxTracks];
-  int partner[kMaxTracks];
   for (int i = 0; i < n_in; ++i) {
     consumed[i] = false;
     partner[i] = -1;
@@ -369,6 +372,17 @@ __host__ __device__ inline int make_coalescence(const CascadeTrack* in, int n_in
     out[n_out++] = d;
   }
   return n_out;
+}
+
+/// The original signature: the scratch is two 64-entry stack arrays, and a longer list is a
+/// stated refusal rather than a silent truncation.
+__host__ __device__ inline int make_coalescence(const CascadeTrack* in, int n_in,
+                                                CascadeTrack* out, int out_capacity,
+                                                GeneratorRefusal& ref) {
+  constexpr int kMaxTracks = 64;
+  bool consumed[kMaxTracks];
+  int partner[kMaxTracks];
+  return make_coalescence(in, n_in, out, out_capacity, consumed, partner, kMaxTracks, ref);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -8779,3 +8779,36 @@ the asymmetry is asserted directly - `tests/test_bic_imr.cu` carries the pi+ Del
 other reason. MEASURED: removing the generic-type gate, so that all 25 resonance channels are
 summed for a pion on a Delta as well, moves the partial by 1.77e+12 relative and turns 300 NULL
 selections into channel 0.
+
+### V114: a 64-track stack array was the whole of the ion arm's capacity limit
+
+`preco::make_coalescence` kept its two bookkeeping arrays - `consumed` and `partner`, one entry
+per input track - on the stack, and refused any list longer than 64 rather than truncating it.
+That is the right shape of refusal and the wrong number for FTFP: a cascade at a few GeV makes
+tens of tracks, and Fe on Pb at 20 GeV per nucleon hands `PropagateNuclNucl` upwards of a
+hundred. Over the P11c grid - {alpha, C12, O16, Fe56} x {H, C, O, Al, Fe, Pb} x {3, 8, 20} GeV
+per nucleon - the cap fired on **52% of Fe + Pb events at 20 GeV/nucleon** and on 49 of the 72
+grid points at all, and it fired AFTER the strings had been made and fragmented, so the work was
+done and thrown away.
+
+The fix is an overload that takes the scratch from the caller; the four-argument signature and
+its 64 are untouched, so P9's and P10's callers are unchanged, and FTF passes two
+workspace-resident arrays of `kMaxTracks`. With it the ion arm has no capacity refusal anywhere
+on that grid. It is recorded because the number was invisible from inside P6 - nothing there
+knows how long an FTFP track list is - and because the same shape (a local array sized for the
+caller the author had in mind) is the one thing this port keeps out of `__host__ __device__`
+code by rule, and it still got in.
+
+What the ion arm reaches now, 72 points x 500 events: **7,081 events produce a final state with
+8.52 secondaries each, 4,634 of them carrying BOTH residuals, and baryon number and charge are
+exactly right on every one of them** - the assertion is free of any oracle because
+`G4GeneratorPrecompoundInterface`'s own debug block checks the same two sums. The remaining
+28,919 are `GeneratorRefusal::short_lived_track`, which is V100's gap and not this one:
+`G4DecayKineticTracks` is the first line of `PropagateNuclNucl` as it is of `Propagate`, and
+until it is written an ion event that produced a rho or a Delta stops there.
+
+The perturbation that proves the assertion: giving the projectile's `WoundedNucleus` the
+ALREADY-DECREMENTED `projectile_residual_a`/`_z` that `G4FTFModel::GetResiduals` leaves behind,
+instead of the initial `GetMassNumber()`/`GetCharge()` the interface expects, loses baryon
+number in 1,415 of 1,462 events, charge in 988, and produces 178 secondaries whose PDG code is
+not a nuclide at all. It is a one-word mistake and nothing else in the final state looks wrong.

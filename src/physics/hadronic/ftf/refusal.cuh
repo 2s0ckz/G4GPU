@@ -118,11 +118,12 @@ enum class FtfRefusal : int {
   kAdjustNucleons,
 
   /// G4GeneratorPrecompoundInterface::PropagateNuclNucl, which G4TheoFSGenerator calls instead
-  /// of Propagate whenever the high-energy generator has a PROJECTILE nucleus. It builds a
-  /// second residual for the projectile remnant and runs MakeCoalescence over the secondaries.
-  /// P6 ported `Propagate` (docs/PORTED.md 2.1.4) and marked the nucleus-nucleus arm `P`; this
-  /// package therefore produces strings and a wounded target for an ion beam and refuses at the
-  /// hand-over rather than dropping the projectile remnant.
+  /// of Propagate whenever the high-energy generator has a PROJECTILE nucleus. WIRED since
+  /// P11c: P6's `preco::propagate_nucl_nucl_residuals` and `preco::make_coalescence` were
+  /// already written, and `ftf_propagate_nucl_nucl` calls them behind the same `__noinline__`
+  /// the hadron arm uses. The value is kept because an enumerator's number is what the oracle
+  /// rows of a refused case carry, and because P6's own anti-nucleus and hypernucleus arms of
+  /// that function are still refused - they report through `GeneratorRefusal` and not here.
   kPropagateNuclNucl,
 
   /// G4DecayStrongResonances (`G4TheoFSGenerator::theDecay`), the path taken when EVERY nucleon

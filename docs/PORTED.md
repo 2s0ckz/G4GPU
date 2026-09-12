@@ -1082,7 +1082,7 @@ what anyone means by "the Glauber model":
 | **G4DiffractiveExcitation** (`ExciteParticipants`, `_doChargeExchange`, `_doDiffraction`, `_doNonDiffraction`, `CreateStrings`, `ChooseP`, `GaussianPt`, `UnpackMeson`, `UnpackBaryon`, `NewNucleonId`) | **V** | `ftf/diffractive_excitation.cuh`. The same grid: both PDG codes (a charge exchange changes them), four-momenta, statuses, collision counts and draw count - 1,536 comparisons, worst 0, reaching all four arms. `M0projectile` is the PDG mass and not `Pprojectile.mag()` (the two `Uzhi Aug.2019` comments), which is what puts the nucleons back on shell. **Refused by name:** the kinky-string arm, unreachable because `Pt2Kink` is 0 |
 | **G4FTFModel** (`Init`, `GetStrings`, `StoreInvolvedNucleon`, `ReggeonCascade`, `PutOnMassShell`, `ComputeNucleusProperties`, `GenerateDeltaIsobar`, `SamplingNucleonKinematics`, `CheckKinematics`, `FinalizeKinematics`, `ExciteParticipants`, `BuildStrings`, `GetResiduals`, `GaussianPt`) | **P** | `ftf/ftf_model.cuh`. No exact oracle - every path starts from a sampled nucleus - so it is checked statistically, below. `ExciteParticipants`' inelastic-rejection factor is an INTEGER division and reads as a smooth suppression: docs/RISK.md V99. **Refused by name:** `AdjustNucleons` and its three algorithm methods (`kAdjustNucleons`), reached only below 1 GeV/c per nucleon, i.e. only by an anti-baryon; an anti-NUCLEUS projectile, because P9's `bic::Nucleon` has no anti types to re-type into. The annihilation branch of `ExciteParticipants` is written, `theAdditionalString` with it, and the participant pool carries 64 slots for it past the two nuclei |
 | **G4VPartonStringModel::Scatter** (the rotation to z, the 1000-attempt loop, the string-vector assembly, the wounded-nucleus rotation to the lab, the unphysical-residual table, the `SumMass > InvMass` check) | **V** | `ftf/theo_fs_generator.cuh`. The retry loop is the model and not a safety net: each attempt REBUILDS BOTH NUCLEI, so one `apply_yourself` call's deviate count is not a function of the physics alone. It is also a CONDITIONING and not a filter on failures - the unphysical-residual table rejects the attempts with the most hit nucleons, 7.2% of them for C12 on carbon and 1.6% for a proton, which moves every distribution measured through it (docs/RISK.md V105). `ftf_prescatter.csv` measures the model with the loop taken off and that table's own four-way outcome: 18,569/673/711/47 against Geant4's 18,573/675/697/55 out of 20,000. After 1000 attempts Geant4 returns the primary unchanged at `z = 2*OuterRadius` - an elastic-looking final state out of an inelastic process - and `kScatterAttemptsExhausted` says so |
-| **G4TheoFSGenerator::ApplyYourself** | **P** | same file, entry point `ftf::apply_yourself()`. The two dummy branches below 100 MeV (a charm/bottom hadron, a hypernucleus) are reproduced rather than refused, because returning the primary IS what Geant4 does. **Refused by name:** `PropagateNuclNucl` (2.1.4 ported only the hadron-nucleus arm), `G4DecayStrongResonances` (taken when EVERY target nucleon was hit), `G4QuasiElasticChannel` and `G4CRCoalescence`, both unreachable in QBBC |
+| **G4TheoFSGenerator::ApplyYourself** | **P** | same file, entry point `ftf::apply_yourself()`. The two dummy branches below 100 MeV (a charm/bottom hadron, a hypernucleus) are reproduced rather than refused, because returning the primary IS what Geant4 does. **Both hand-overs are wired**: `Propagate` for a hadron beam and, since P11c, `PropagateNuclNucl` for an ion one - with `MakeCoalescence` in front of it, both residuals emitted, and the projectile's boosted back to the lab from the rest frame `propagate_nucl_nucl_residuals` leaves it in. **Refused by name:** `G4DecayStrongResonances` (taken when EVERY target nucleon was hit), `G4QuasiElasticChannel` and `G4CRCoalescence`, both unreachable in QBBC |
 | **G4FTFAnnihilation** (`Annihilate`, `Create3QuarkAntiQuarkStrings`, `Create1DiquarkAntiDiquarkString`, `Create2QuarkAntiQuarkStrings`, `Create1QuarkAntiQuarkString`, `UnpackBaryon`, `GaussianPt`) | **V** | `ftf/annihilation.cuh`. All four channels and the nine-by-two weight table that picks among them. Nine collisions x 8 phases - both PDG codes, both four-momenta, statuses, collision counts, the projectile's time and position, both partons AND their momenta, the additional string with its own two partons, and the draw count: **2,862 comparisons, worst 0**, reaching all four channels. `GetProbabilityOfAnnihilation()` is non-zero only for an anti-baryon projectile, so no other beam reaches this at all. It is also the only producer of `theAdditionalString`, which is what makes `CreateStrings`' `HadronIsString` arm reachable - and that arm rebuilds the string from the parton objects as they are, so `SplitableHadron` has to store the parton momenta that nothing else in FTF reads back |
 
 **The energy windows, read from the CONSTRUCTED processes and not from the builders.**
@@ -1118,9 +1118,8 @@ Below 1 GeV/c it is refused at `AdjustNucleons` (`kAdjustNucleons`), which is wh
 strip nucleons off the nucleus before the collision. An ION beam builds its projectile nucleus,
 its participants and its strings - the nucleus-nucleus arms of `GetList`, `ReggeonCascade`,
 `PutOnMassShell` and `BuildStrings` are written and take the same code as the hadron arms - and
-is refused at the hand-over, because `PropagateNuclNucl` is 2.1.4's gap and not this package's.
-Every ion case agrees statistically once the port is measured the way the oracle was:
-docs/RISK.md V105.
+since P11c it goes through the hand-over too, on `PropagateNuclNucl`. Every ion case agrees
+statistically once the port is measured the way the oracle was: docs/RISK.md V105.
 
 **And one gap that is not this package's but is on its main path.** 2.1.4 refuses
 `G4DecayKineticTracks`, the first line of both `Propagate` entry points, which decays every
@@ -1140,12 +1139,20 @@ Every one of the 23 statistical rows is under 5 sigma, worst **4.13** (`p_O_10` 
 and 20,301 comparisons in all, in **156 s**.
 
 **The generality sweep.** `ftf_windows.csv` has 17 FTFP rows; the test runs `apply_yourself` at
-three energies inside each, on carbon and on lead - 96 (beam, energy, target) points. **11 ran
-to a final state, 85 refused BY NAME, none was silent.** The 85 break down as 31
-`preco::GeneratorRefusal` (P6's `Propagate`, and V100 says why every FTFP event reaches it), 24
-`kAdjustNucleons` (an anti-baryon below 1 GeV/c), 24 `kPropagateNuclNucl` (d, t, He3, alpha at
-the hand-over) and 6 `kHadronNucleonXscRefused` (the lambda beam, which has no cross-section
-branch below this package).
+three energies inside each, on carbon and on lead - 96 (beam, energy, target) points. **21 ran
+to a final state, 75 refused BY NAME, none was silent.** The 75 break down as 45
+`preco::GeneratorRefusal` (P6's `G4DecayKineticTracks`, and V100 says why every FTFP event
+reaches it), 24 `kAdjustNucleons` (an anti-baryon below 1 GeV/c) and 6
+`kHadronNucleonXscRefused` (the lambda beam, which has no cross-section branch below this
+package). **`kPropagateNuclNucl` is gone from the sweep**: the ion arm is wired (2.1.11c).
+
+**The ion arm's own grid.** {alpha, C12, O16, Fe56} at {3, 8, 20} GeV per nucleon on {H, C, O,
+Al, Fe, Pb} - the P11c brief's grid, and between them the beams and the targets a
+galactic-cosmic-ray transport problem is made of - 72 points x 500 events. **7,081 events
+produce a final state, 8.52 secondaries each, 4,634 of them carrying BOTH residuals, and baryon
+number and charge are exactly right on every one.** That assertion needs no oracle row:
+`G4GeneratorPrecompoundInterface` checks the same two sums in its own debug block. The other
+28,919 are `short_lived_track`.
 
 Three of the thirteen exist to LOCALISE a disagreement rather than to find one: the impact
 parameter is the geometry alone, `participants` is `A - NumberOfTargetSpectatorNucleons` (the

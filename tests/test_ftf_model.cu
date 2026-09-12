@@ -1909,6 +1909,104 @@ int main(int argc, char** argv) {
     }
   }
 
+
+  // -------------------------------------------------------------------------------------------
+  // 9. The ion arm end to end, and the one thing it can be held to without an oracle
+  //
+  // `PropagateNuclNucl` builds TWO residuals and lets a track be captured by either nucleus, so
+  // a mistake in which (A, Z) each residual starts from does not change how many secondaries
+  // come out or what species they are - it changes only the books. Baryon number and charge are
+  // the books: every secondary of a nucleus-nucleus collision, the escaped tracks and both
+  // residuals together, must carry exactly `A_proj + A_targ` and `Z_proj + Z_targ`. Geant4
+  // checks the same two sums in `G4GeneratorPrecompoundInterface`'s own debug block.
+  //
+  // It is an assertion and not a comparison, so it needs no oracle row - which is what makes it
+  // usable on the grid the P11c brief names: {alpha, C12, O16, Fe56} at {3, 8, 20} GeV per
+  // nucleon on {H, C, O, Al, Fe, Pb}, the last two of which are what water and a spacecraft
+  // wall are made of.
+  // -------------------------------------------------------------------------------------------
+  {
+    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+    WS* ws = new WS();
+    static physics::hadronic::HadFinalState<double, 128> out;
+    struct Ion { const char* name; int a, z; };
+    const Ion beams[] = {{"alpha", 4, 2}, {"C12", 12, 6}, {"O16", 16, 8}, {"Fe56", 56, 26}};
+    const Ion targets[] = {{"H1", 1, 1},   {"C12", 12, 6},   {"O16", 16, 8},
+                           {"Al27", 27, 13}, {"Fe56", 56, 26}, {"Pb207", 207, 82}};
+    const double per_nucleon[] = {3000.0, 8000.0, 20000.0};
+    const int n_events = quick ? 100 : 500;
+    long long points = 0, ran = 0, refused = 0, bad_b = 0, bad_q = 0, unknown = 0;
+    long long secondaries = 0, with_two_residuals = 0;
+    for (const Ion& b : beams) {
+      const double mass = deex::nuclear_mass(b.a, b.z);
+      for (const Ion& t : targets) {
+        for (double pn : per_nucleon) {
+          ++points;
+          physics::hadronic::HadProjectile<double> hp;
+          hp.pdg = 1000000000 + b.z * 10000 + b.a * 10;
+          hp.mass = mass;
+          hp.charge = b.z;
+          hp.baryon_number = b.a;
+          hp.kin_energy = pn * b.a;
+          physics::hadronic::HadNucleus nuc;
+          nuc.a = t.a;
+          nuc.z = t.z;
+          for (int ev = 0; ev < n_events; ++ev) {
+            out = physics::hadronic::HadFinalState<double, 128>();
+            Philox<double> rng(static_cast<uint32_t>(ev), 53u);
+            ftf::apply_yourself(hp, nuc, out, ws, lund, rng);
+            if (out.n_secondaries == 0 || ws->report.any()) {
+              ++refused;
+              continue;
+            }
+            ++ran;
+            secondaries += out.n_secondaries;
+            int bsum = 0, qsum = 0, nres = 0;
+            for (int k = 0; k < out.n_secondaries; ++k) {
+              const auto& s = out.secondaries[k];
+              if (s.a > 0) {
+                bsum += s.a;
+                qsum += s.z;
+                ++nres;
+              } else {
+                const data::FtfHadron* d = data::ftf_find_hadron(s.pdg);
+                if (d != nullptr) {
+                  bsum += d->baryon;
+                  qsum += static_cast<int>(d->charge);
+                } else if (s.pdg == 1000010020) {  // MakeCoalescence's deuteron
+                  bsum += 2;
+                  qsum += 1;
+                } else {
+                  ++unknown;
+                }
+              }
+            }
+            if (nres >= 2) { ++with_two_residuals; }
+            if (bsum != b.a + t.a) { ++bad_b; }
+            if (qsum != b.z + t.z) { ++bad_q; }
+          }
+        }
+      }
+    }
+    std::printf("\nion arm: %lld (beam, target, energy) points x %d events - %lld ran, "
+                "%lld refused by name\n", points, n_events, ran, refused);
+    std::printf("    %.2f secondaries per event, %lld events with both residuals, "
+                "%lld unknown PDG codes\n", ran ? double(secondaries) / ran : 0.0,
+                with_two_residuals, unknown);
+    std::printf("    baryon number wrong in %lld of %lld, charge wrong in %lld\n", bad_b, ran,
+                bad_q);
+    if (ran == 0) {
+      std::printf("FAIL: the ion arm produced no final state at any of the %lld points\n",
+                  points);
+      ++fails;
+    }
+    if (bad_b != 0 || bad_q != 0 || unknown != 0) {
+      std::printf("FAIL: ion arm conservation - %lld baryon, %lld charge, %lld unknown\n",
+                  bad_b, bad_q, unknown);
+      ++fails;
+    }
+    delete ws;
+  }
   // -------------------------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------------------------
