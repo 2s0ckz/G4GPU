@@ -451,10 +451,14 @@ int main() {
                   (int)in_csv.size(), data::kFtfHadronCount);
       ++fails;
     }
-    if (dropped != 31) {
-      std::printf("FAIL: dropped %lld nucleus/geantino rows, expected 31\n", dropped);
-      ++fails;
-    }
+    // How many NUCLEUS rows the oracle carries is not asserted, and the measurement that
+    // settled it is in tools/ftf_hadrons.pl: the same dump program wrote 31 on one run and
+    // 1,783 on another, because G4ParticleTable holds whatever G4IonTable has been asked for
+    // so far in that process and the ftf dump runs after three dumps that create ions. The 485
+    // hadrons were identical to the last bit in both. The two directions above are the
+    // assertion that matters; this line only reports what was skipped.
+    std::printf("  (ftf_hadrons.csv: %lld nucleus/geantino rows skipped, %d hadrons compared)\n",
+                dropped, (int)in_csv.size());
     // The table is binary-searched, so it must be strictly ascending.
     for (int i = 1; i < data::kFtfHadronCount; ++i) {
       if (data::ftf_hadrons()[i].pdg <= data::ftf_hadrons()[i - 1].pdg) {

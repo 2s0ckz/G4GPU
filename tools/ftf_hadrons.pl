@@ -81,7 +81,6 @@ close $fh;
 my $EXPECT_ROWS = 485;
 my $EXPECT_QUARKS = 12;
 my $EXPECT_DIQUARKS = 50;
-my $EXPECT_DROPPED = 31;
 
 my $nq = grep { $_->{sub} eq 'quark' } @rows;
 my $nd = grep { $_->{sub} eq 'di_quark' } @rows;
@@ -90,8 +89,18 @@ die "ftf_hadrons.pl: expected $EXPECT_ROWS rows, got " . scalar(@rows) . "\n"
 die "ftf_hadrons.pl: expected $EXPECT_QUARKS quarks, got $nq\n" unless $nq == $EXPECT_QUARKS;
 die "ftf_hadrons.pl: expected $EXPECT_DIQUARKS diquarks, got $nd\n"
     unless $nd == $EXPECT_DIQUARKS;
-die "ftf_hadrons.pl: expected $EXPECT_DROPPED nuclei/geantinos dropped, got $dropped\n"
-    unless $dropped == $EXPECT_DROPPED;
+
+# The number DROPPED is deliberately not asserted, and the two runs that settled it are worth
+# recording: the same g4dump.exe, run twice from ref/oracle/run.bat, wrote 31 nucleus rows on
+# one occasion and 1,783 on another, with the 485 hadrons identical to the last bit both times.
+# G4ParticleTable holds whatever G4IonTable has been asked to create SO FAR in that process,
+# and the ftf dump runs after the decay, de-excitation and elastic dumps, each of which creates
+# ions of its own; so the count is a property of which other packages' dumps ran before this
+# one, not of Geant4 and not of this package. Asserting it makes P11's test fail when P3 adds a
+# nuclide to its dump. What IS asserted is the part that is a property of Geant4: the 485
+# non-ion particles, the 12 quarks and the 50 diquarks below.
+print STDERR "ftf_hadrons.pl: $dropped nuclei/geantinos dropped, "
+           . scalar(@rows) . " hadrons kept\n";
 
 # Every code SetMinMasses and G4HadronBuilder reach must be present or absent deliberately.
 # These eleven are the ones whose presence the tables depend on and whose absence would change

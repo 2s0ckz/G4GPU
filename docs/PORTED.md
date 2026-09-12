@@ -953,13 +953,57 @@ first time the full de-excitation chain has been compiled for a device.
 One finding here belongs to P3 and is filed where P9's oracle found it: `G4PhotonEvaporation`
 creates one electron rest mass out of nothing per conversion electron, 511 keV, because the
 atomic binding energy that should pay for it is a local initialised to zero. docs/RISK.md V76.
+#### 2.1.11 FTFP: the tuned parameters and the Lund string fragmentation (P11, first half)
+
+The bottom half of QBBC's FTFP arm: `G4FTFParameters`, which is a large table of tuned constants
+plus the hadron-nucleon cross sections every FTF interaction samples its impact parameter from,
+and the whole of `G4LundStringFragmentation` - one excited string in, a list of hadrons out. The
+entry point of the package, `ftf::apply_yourself`, does **not** exist yet: `G4FTFModel`,
+`G4FTFParticipants`, `G4DiffractiveExcitation`, `G4ExcitedStringDecay` and `G4TheoFSGenerator`
+are the top half and are not written, so nothing in the port yet PRODUCES a string for this code
+to fragment. What is here is exact against Geant4 11.1.1 and has no caller.
+
+**Why the exact half is exact.** The same technique as 2.1.4's: `ref/dump/dump_ftf.cc` installs
+an eight-value uniform cycle as CLHEP's engine, so every sampler and the whole fragmentation
+chain become deterministic functions of (inputs, phase), and every row carries **the number of
+deviates the call consumed** as well as its answer. That count is half the comparison - a
+transcription can produce the right hadron from the wrong number of random numbers, and then
+every later hadron in the event is wrong. It is how the K0 substitution in `G4KineticTrack`'s
+constructor was found: a `kaon0` becomes a K0S or a K0L on a coin toss, that toss spends a
+deviate, and a port that substitutes the species without spending it shifts the entire remaining
+stream by one.
+
+| Geant4 class | | Where |
+|---|:--:|---|
+| **G4FTFParameters** (constructor for all five projectile classes, every getter, `ProcParams[5][7]`, `GetProcProb`, the profile functions, the nuclear-destruction parameters) | **V** | `ftf/ftf_parameters.cuh`. `InitForInteraction` draws no random number, so the oracle has no phase axis: 1,716 rows x 66 columns (22 projectiles x 6 targets x 13 momenta), 21,780 `GetProcProb` points over a rapidity grid that crosses every `Ymin` including the -100 and 1000 sentinels, 8,748 profile-function points. Worst 4.4e-16. **Refused by name:** hyperon projectiles (Lambda, Sigma+-, Xi-), because `G4HadronNucleonXsc::HyperonNucleonXscNS` is `P` in 2.1.1 - 4,920 oracle rows tallied as refusals. An ANTI-hyperon is not refused: Geant4 overwrites both cross sections in the Arkhipov block, so the refused branch never reaches the answer, and the port defers the refusal until after that block. docs/RISK.md V86 |
+| **G4VLongitudinalStringDecay** (`SetMinMasses` and its six tables, `SampleQuarkFlavor`, `SampleQuarkPt`, `CreatePartonPair`, `QuarkSplitup`, `ProduceOneHadron`, `PossibleHadronMass`, `SetMinimalStringMass`, `IsItFragmentable`) | **V** | `ftf/lund_tables.cuh`, `ftf/string_decay.cuh`, `ftf/lund_fragment.cuh`. All 1,510 table entries, 9,000 `SetMinimalStringMass` triples including the DiQuark-AntiDiquark re-arrangement arm, the samplers at 8 phases each with their draw counts. The three index errors in `SetMinMasses` are transcribed as written and asserted by name - docs/RISK.md V85 - and `Kappa` is 1e30 for the reason V87 gives |
+| **G4HadronBuilder** (`Build`, `BuildLowSpin`, `BuildHighSpin`, `Meson`, `Barion`) | **V** | `ftf/hadron_builder.cuh`; all 8,800 (parton, parton, phase) triples the tables can reach x 3 entry points, PDG code and draw count, worst 0. The 61 charmed and bottom substitutions are REACHABLE - `EnableBCParticles` is 1, so `SampleQuarkFlavor` draws a c or a b once in four thousand splits - and are checked |
+| **G4LundStringFragmentation** (`FragmentString`, `Loop_toFragmentString`, `Splitup`, `SplitEandP`, `SplitLast`, `SampleState`, `GetLightConeZ`, `Sample4Momentum`, `StopFragmenting`, `DiQuarkSplitup`, the four last-splitting enumerations, `lambda`) | **V** | `ftf/lund_fragment.cuh`, entry point `ftf::ftf_fragment_string()`. 19 string cases x 2 directions x 8 phases, hadron by hadron: species, four-momentum, formation time and the event's total draw count, worst 9.1e-14. The final-state ENUMERATION is dumped as well as the sampled index (`ftf_laststates.csv`), because `SampleState` collapses up to 350 weighted states to one number and a weight change of a few per cent moves no index - measured, and invisible at 20,000 events too. Statistically: 19 cases x 20,000 strings, species counts and multiplicities, worst 3.6 sigma against a 5-sigma gate; at 200,000 a side every case agrees to 0.16% (docs/RISK.md V88) |
+| G4FragmentingString (all four constructors, `TransformToAlignedCms`, `TransformToCenterOfMass`, `LorentzRotate`, the light-cone accessors) | **V** | `ftf/fragmenting_string.cuh`. The redundancy in the state is reproduced rather than derived: `Pplus` after a `SetPleft` is `(Pleft+Pright).plus()`, which is not the same double as `Pleft.plus()+Pright.plus()` |
+| CLHEP `HepLorentzRotation` (`set(bx,by,bz)`, `rotateY`, `rotateZ`, `inverse`, `vectorMultiplication`), `Hep3Vector::phi`/`theta` | **V** | `ftf/lorentz.cuh`. Transcribed as a MATRIX and not as `boost()` + rotations: composing then applying is a different order of products, and the difference is at the last bit of every hadron momentum, which is the size the oracle compares at |
+| `G4KineticTrack`'s constructor, the one line of it that is physics | **V** | the kaon0 / anti_kaon0 -> K0S or K0L coin toss, in `ftf/lund_fragment.cuh`. The masses are equal to the last bit, so it changes no kinematics - only the species and the stream |
+| **G4ExcitedStringDecay** (`FragmentStrings`, `EnergyAndMomentumCorrector`) | **-** | not written |
+| **G4FTFModel**, G4FTFParticipants, G4DiffractiveExcitation, G4ElasticHNScattering, G4FTFAnnihilation, G4DiffractiveSplitableHadron, G4VPartonStringModel, G4InteractionContent, G4ExcitedString | **-** | not written. This is the half that makes the strings, samples the impact parameter, excites the participants and hands a `WoundedNucleus` to 2.1.4's `Propagate` |
+| **G4TheoFSGenerator** | **-** | not written |
+| G4QGSModel and the QGS string arm | **-** | refused by name: not in QBBC's FTFP chain, and 2.1.4's note on the null `GetPrimaryProjectile()` (docs/RISK.md V50) is why it must stay refused rather than half-built |
+
+Tests: `test_ftf_params.cu` - 152,576 exact comparisons, worst 4.4e-16, 4,920 rows refused by
+name. `test_ftf_lund.cu` - 70,555 comparisons, of which 26,400 are draw counts and 889 are
+statistical z-scores.
+
+Device probe (`ftf_lund_device_probe`, never launched, `-Xptxas -v` on sm_52): **210 registers,
+152-byte stack frame, 0 bytes spilled**, 213,047 bytes gmem for the tables, 6,160 bytes cmem[2].
+`ftf_fragment_string` itself inlines to a 0-byte frame. The workspace is 33,320 bytes and lives
+behind a pointer, one per track: the 350-entry final-state enumeration is 5,600 of it and the
+three hadron lists 27,648, and on the stack it would blow `Upload`'s 16,384-byte frame limit
+before the first string fragmented.
 
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |
 |---|---|:--:|
 | `G4HadronElasticPhysicsXS` | process `G4HadronElasticProcess`; cross sections `G4BGGNucleonElasticXS`, `G4NeutronElasticXS`, `G4BGGPionElasticXS`, `G4ChipsProtonElasticXS`, `G4ComponentGGHadronNucleusXsc`; final states `G4HadronElastic`, `G4ChipsElasticModel`, `G4ElasticHadrNucleusHE`, `G4AntiNuclElastic` | XS partial (above), **final state absent** |
-| `G4HadronInelasticQBBC` | `G4HadronInelasticProcess`; `G4ParticleInelasticXS`, `G4BGGPionInelasticXS`, `G4NeutronInelasticXS`; models `G4BinaryCascade`, `G4CascadeInterface` (Bertini), `G4TheoFSGenerator` + `G4FTFModel` + `G4ExcitedStringDecay` + `G4QGSModel`, `G4PreCompoundModel`, `G4GeneratorPrecompoundInterface`, `G4ExcitationHandler` | cross sections **V** (2.1.1); `G4ExcitationHandler` **V** (2.1.3); `G4PreCompoundModel` **V**, `G4GeneratorPrecompoundInterface` **P** (2.1.4); the process, the cascades and the strings: **none** |
+| `G4HadronInelasticQBBC` | `G4HadronInelasticProcess`; `G4ParticleInelasticXS`, `G4BGGPionInelasticXS`, `G4NeutronInelasticXS`; models `G4BinaryCascade`, `G4CascadeInterface` (Bertini), `G4TheoFSGenerator` + `G4FTFModel` + `G4ExcitedStringDecay` + `G4QGSModel`, `G4PreCompoundModel`, `G4GeneratorPrecompoundInterface`, `G4ExcitationHandler` | cross sections **V** (2.1.1); `G4ExcitationHandler` **V** (2.1.3); `G4PreCompoundModel` **V**, `G4GeneratorPrecompoundInterface` **P** (2.1.4); the FTFP arm's string FRAGMENTATION and its tuned parameters **V** (2.1.11), the model above them **none**; the process and the cascades: **none** |
 | `G4IonPhysicsXS` | `G4ParticleInelasticXS`, `G4BinaryLightIonReaction` | **none** |
 | `G4IonElasticPhysics` | `G4ComponentGGNuclNuclXsc`, `G4NuclNuclDiffuseElastic` | **none** |
 | `G4StoppingPhysics` | `G4HadronStoppingProcess`, `G4HadronicAbsorptionBertini`, `G4HadronicAbsorptionFritiof`, `G4MuonMinusCapture`, `G4EmCaptureCascade` | **none** |

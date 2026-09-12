@@ -7553,3 +7553,119 @@ electron depth-dose comparison (`ref/oracle/run.bat` now produces
 `ref/oracle/electron_depth.csv`, 100,000 events of 1 GeV in 4 m of water, peak at 680 mm =
 1.88 X0); the Geant4 half is produced and checked, and the PORT half is not quoted, because
 what it would measure is this.
+
+### V85: two lines of the meson table write their weights one index high, and the eta loses it
+
+`G4VLongitudinalStringDecay::SetMinMasses` builds the tables that decide what a string's LAST
+splitting can decay into. The d-dbar row of the meson table is written as
+
+    Meson[0][0][2] = 221; MesonWeight[0][0][3] = pspin*(1-mix0-mix1);   // Eta
+    Meson[0][0][3] = 331; MesonWeight[0][0][4] = pspin*mix1;            // Eta'
+    Meson[0][0][4] = 223; MesonWeight[0][0][4] = (1-pspin)*mix1;        // omega
+
+- both weights land one slot past their code, and the omega then overwrites slot 4. The u-ubar
+row eleven lines below (`Meson[1][1][*]`) is the same five lines with consistent indices. So
+`MesonWeight[0][0][2]`, the eta's, is 0; `[3]` holds 0.125, which is the eta's number sitting on
+the eta'; `[4]` holds the omega's 0.25; and the row sums to 0.875 where u-ubar's sums to 1.0.
+
+The consequence is exact rather than statistical. `Quark_AntiQuark_lastSplitting` enumerates
+every (left, right) meson pair the row allows and `SampleState` picks one with probability
+proportional to its weight, so a d-quark string that produces a d-dbar pair from the vacuum
+enumerates the eta and samples it with weight zero: that channel yields no eta at all, and yields
+the eta' at the eta's rate. It is reachable from any ordinary proton or pion beam - it is the
+last splitting of a light q-qbar string, which is most strings.
+
+Two more index errors in the same function. `Meson[3][3][0] *= ProbEta_c/pspin_meson[2]` and its
+three neighbours multiply the PDG CODE by a probability ratio instead of the weight:
+441*(0.1/0.3) truncates to the integer 147 and 443*(0.9/0.7) to 569, and the Baryon table's final
+null sweep is not applied to Meson, so 147 survives in the table as a particle code with no
+particle behind it. Those four are unreachable while `Prob_QQbar[3] = Prob_QQbar[4] = 0`, which
+is every QBBC run, because the c-cbar and b-bbar production probabilities of the LAST splitting
+are zero.
+
+The port transcribes all of it with Geant4's indices (`src/physics/hadronic/ftf/lund_tables.cuh`),
+because the alternative is a port that produces etas Geant4 does not. `tests/test_ftf_params.cu`
+asserts the two row sums by name - 0.875 for d-dbar, 1.0 for u-ubar - and asserts
+`MesonWeight[0][0][2] == 0`, so a future "fix" to the indices fails the test rather than silently
+changing every small-string decay. `ref/oracle/ftf_lund_tables.csv` carries all 1,510 entries.
+If Geant4 ever fixes this, those three assertions are the ones to delete, and the oracle will say
+so first.
+
+### V86: FTF's elastic cross section on a neutron is a proton's inelastic subtracted
+
+`G4FTFParameters::G4FTFParameters` builds the hadron-nucleon cross sections that drive the whole
+impact-parameter sampling of an FTF interaction. For the "interaction on a neutron" pair it asks
+`G4ComponentGGHadronNucleusXsc` for (Z, A) = (0, 1). That component's A == 1 branch computes the
+proton and neutron cross sections separately and then combines them: `fTotalXsc` is the
+Z-weighted sum, which with Z = 0 is correctly the hadron-NEUTRON total, but `fInelasticXsc` is
+assigned `hpInXsc`, the hadron-PROTON inelastic, computed before the Z = 0 weighting that removed
+it from the total. So
+
+    Xelastic(on a neutron) = sigma_tot(h n) - sigma_inel(h p)
+
+mixing two different targets. It propagates into `FTFXelastic`, the elastic slope, `Gamma0` and
+the average Pt^2 of elastic scattering, i.e. into every nucleus with neutrons in it - which is
+every nucleus this port is for. The nucleus-projectile arm is worse: its "PN" pair is
+`GetTotalIsotopeCrossSection(Neutron, ..., 0, 1)`, a NEUTRON projectile on a neutron target, so
+the mixed term of a nucleus-nucleus average is built from n+n rather than from p+n, with its
+elastic part then n+n total minus n+p inelastic.
+
+This is Geant4 11.1.1's arithmetic and the port reproduces it exactly - 7,020 cross-section
+points and 5,616 geometry points at 4e-16 in `tests/test_ftf_params.cu`. It is recorded here
+because it is the kind of difference a reader of the port will find and take for a transcription
+error, and because if Geant4 changes it the port's numbers move with no other warning.
+
+### V87: the string tension is 1e30, and nothing in QBBC reads it
+
+`G4VLongitudinalStringDecay`'s base constructor assigns `Kappa = 1.0*GeV/fermi` directly.
+`G4LundStringFragmentation`'s constructor then calls `SetStringTensionParameter(1.*GeV/fermi)`,
+and that setter multiplies its argument by `GeV/fermi` again. The result is
+1e30 MeV^2/mm^2 rather than 1e15 MeV/mm; `ref/oracle/ftf_lund_params.csv` says `Kappa,1e+30`.
+
+It has no symptom because its only reader is `CalculateHadronTimePosition`, which only
+`G4QGSMFragmentation` calls, and QGS is not in QBBC. The port carries 1e30 and
+`tests/test_ftf_params.cu` asserts it, so that a port that "corrects" the units fails rather than
+diverges from Geant4 by a factor of 1e15 in a quantity nobody looks at. If QGS is ever ported,
+this is the first number to check, and the second is whether Geant4 has fixed it by then.
+
+### V88: 20,000 events is the oracle's limit, and four port seeds agreed on its fluctuation
+
+The Lund fragmentation's statistical half (`ref/oracle/ftf_fragstat*.csv`) runs 20,000 strings per
+case on each side and compares species counts and multiplicities. At that size the port's mean
+multiplicity came out ABOVE Geant4's in 12 of the 15 fragmenting cases, combining across cases to
++3.3 sigma, and it stayed above when the port's Philox seed was changed three more times: +3.3,
++1.1, +2.7, +1.8. Four independent port samples, all high. That reads as a real excess of about
+0.2% in hadrons per string, and it is not one.
+
+The reason the four agree is that they share one oracle sample. Each z is
+`(m_port - m_oracle)/sigma`, and a single low fluctuation of the 20,000-event ORACLE biases every
+comparison the same way no matter how many times the port is re-sampled. Re-running this dump's
+fragstat block at N = 200,000 against the port at the same 200,000 moved the combination to
+**-1.8**, with 8 of 15 cases negative, every case within 0.16%, and the largest single case at
+1.8 sigma. The 20,000-event oracle was the limit, not the port.
+
+Two lessons, both general. Re-seeding the PORT is not an independent measurement when the
+reference is a fixed sample - it measures the port's own variance and says nothing about the
+reference's. And a statistical oracle needs its own size recorded and raised, not just the port's:
+`n_events` is now a column of `ftf_fragstat.csv` and `tests/test_ftf_lund.cu` runs the port at
+whatever the oracle ran at, so that enlarging the campaign is a one-line change in the dump
+instead of two constants that can go out of step. The committed size stays 20,000 because 200,000
+takes this dump from about one minute to seven, and the 5-sigma per-species tolerance absorbs
+the difference.
+
+### V89: the test asserted a number that belonged to another package's dump
+
+`ref/oracle/ftf_hadrons.csv` is the whole initialised `G4ParticleTable`, which includes every
+nucleus `G4IonTable` has been asked to create SO FAR IN THAT PROCESS. `ref/dump/g4dump.cc` runs
+the registered dumps in one process, in link order, and the ftf dump runs after the decay,
+de-excitation and elastic dumps, each of which creates ions of its own. The same g4dump.exe wrote
+31 nucleus rows on one run and 1,783 on another, with the 485 hadrons identical to the last bit
+both times.
+
+`tools/ftf_hadrons.pl` and `tests/test_ftf_params.cu` both asserted that exactly 31 rows were
+dropped, and the second run of the oracle turned that into a FAIL of a passing port: the header
+`src/data/ftf_hadrons.hh` regenerates byte-identically from either file. Both assertions are
+gone, replaced by a printed count; what is still asserted is the part that is a property of
+Geant4 - the 485 non-ion particles compared in both directions, the 12 quarks, the 50 diquarks,
+and every mass, width, charge and subtype. An assertion on a number that another package's dump
+can change is a test that fails for the wrong package, and this one would have failed for P3.

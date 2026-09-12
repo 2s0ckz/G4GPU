@@ -210,6 +210,46 @@ struct TagFragmentable {
 };
 template struct PrivateBridge<TagFragmentable, &G4LundStringFragmentation::IsItFragmentable>;
 
+// The three functions that ENUMERATE SplitLast's final states. They are the one part of the
+// fragmentation the eight-value cycle cannot resolve: they fill FS_LeftHadron/FS_RightHadron/
+// FS_Weight with up to 350 entries and SampleState then collapses all of that to one index, so
+// a weight change of a few per cent moves no index and is invisible in ftf_fragment.csv - and,
+// measured, is still invisible at 20,000 events per case (about 0.7 sigma). Dumping the list
+// itself makes the weights exact. FS_* and NumberOf_FS are public members of
+// G4VLongitudinalStringDecay; only these three methods are private.
+using LastSplitFn = G4bool (G4LundStringFragmentation::*)(G4FragmentingString*&,
+                                                          G4ParticleDefinition*&,
+                                                          G4ParticleDefinition*&);
+struct TagQQbarLast {
+  using type = LastSplitFn;
+  friend type bridge(TagQQbarLast);
+};
+template struct PrivateBridge<TagQQbarLast,
+                              &G4LundStringFragmentation::Quark_AntiQuark_lastSplitting>;
+
+struct TagQDiQLast {
+  using type = LastSplitFn;
+  friend type bridge(TagQDiQLast);
+};
+template struct PrivateBridge<TagQDiQLast,
+                              &G4LundStringFragmentation::Quark_Diquark_lastSplitting>;
+
+struct TagDiQADiQAbove {
+  using type = LastSplitFn;
+  friend type bridge(TagDiQADiQAbove);
+};
+template struct PrivateBridge<
+    TagDiQADiQAbove,
+    &G4LundStringFragmentation::Diquark_AntiDiquark_aboveThreshold_lastSplitting>;
+
+struct TagDiQADiQBelow {
+  using type = LastSplitFn;
+  friend type bridge(TagDiQADiQBelow);
+};
+template struct PrivateBridge<
+    TagDiQADiQBelow,
+    &G4LundStringFragmentation::Diquark_AntiDiquark_belowThreshold_lastSplitting>;
+
 // ---------------------------------------------------------------------------------------------
 // The grid
 // ---------------------------------------------------------------------------------------------
@@ -647,6 +687,31 @@ void dump_samplers() {
   }
   L->SetStrangenessSuppression((1.0 - 0.12) / 2.0);
 
+  // The HEAVY branch of SampleQuarkFlavor. ProbCB is 2.5e-4 in a real run and the cycle's
+  // smallest deviate is 0.05, so the branch is unreachable at the physical value and the first
+  // version of this dump never entered it. SetProbCCbar and SetProbBBbar are public and are
+  // not locked by the run state, so the branch can be reached by raising them - the same
+  // technique dump_precompound.cc uses on SetOPTxs to reach all five inverse cross sections.
+  // Three settings: c only, b only, and both, so that the `ksi < ProbCCbar` split inside the
+  // branch is decided both ways.
+  {
+    const double saved_c = L->ProbCCbar;
+    const double saved_b = L->ProbBBbar;
+    const double heavy[3][2] = {{0.5, 0.0}, {0.0, 0.5}, {0.2, 0.6}};
+    for (const auto& hb : heavy) {
+      L->SetProbCCbar(hb[0]);
+      L->SetProbBBbar(hb[1]);
+      for (int phase = 0; phase < 8; ++phase) {
+        eng.reset(phase);
+        const int q = L->SampleQuarkFlavor();
+        std::fprintf(f, "SampleQuarkFlavorHeavy,%.17g,%.17g,0,0,%d,%d,%d\n", hb[0], hb[1],
+                     phase, q, eng.draws());
+      }
+    }
+    L->SetProbCCbar(saved_c);
+    L->SetProbBBbar(saved_b);
+  }
+
   for (double ptmax : {-1.0, 100.0, 500.0, 2000.0, 1.0e5}) {
     for (int phase = 0; phase < 8; ++phase) {
       eng.reset(phase);
@@ -691,14 +756,26 @@ void dump_samplers() {
 /// string, each at several masses spanning the three regimes - below the minimal mass (one
 /// hadron), just above it (SplitLast only) and far above it (the fragmentation loop runs).
 struct StringCase { int left, right; double mass; const char* name; };
+/// The first two and the ninth are BELOW the string's minimal mass, so `IsItFragmentable` is
+/// false for them and FragmentString takes the ProduceOneHadron branch instead of the loop -
+/// the one path the first version of this dump did not reach, found by the port's test having
+/// no coverage for it. minMassQQbarStr[0][0] is 339.95 MeV and minMassQDiQStr[0][1][1] is
+/// 1144.54, so 300 and 1000 are below and 400 and 2000 above.
+///
+/// `u-ubar-1.5` and `s-sbar-1.5` are there to measure what docs/RISK.md V85 costs: at 1.5 GeV
+/// a quarter of the events are a bare SplitLast, which is the only place the Meson/MesonWeight
+/// tables are read, and the d-dbar row of those tables is the broken one.
 const StringCase kStrings[] = {
-  {1, -1, 400.0, "d-dbar-0.4"},       {1, -1, 1500.0, "d-dbar-1.5"},
-  {1, -1, 5000.0, "d-dbar-5"},        {1, -1, 20000.0, "d-dbar-20"},
-  {2, -2, 5000.0, "u-ubar-5"},        {3, -3, 5000.0, "s-sbar-5"},
-  {2, -1, 5000.0, "u-dbar-5"},        {1, 2103, 2000.0, "d-ud1-2"},
+  {1, -1, 300.0, "d-dbar-0.3"},       {1, -1, 400.0, "d-dbar-0.4"},
+  {1, -1, 1500.0, "d-dbar-1.5"},      {1, -1, 5000.0, "d-dbar-5"},
+  {1, -1, 20000.0, "d-dbar-20"},      {2, -2, 1500.0, "u-ubar-1.5"},
+  {2, -2, 5000.0, "u-ubar-5"},        {3, -3, 1500.0, "s-sbar-1.5"},
+  {3, -3, 5000.0, "s-sbar-5"},        {2, -1, 5000.0, "u-dbar-5"},
+  {1, 2103, 1000.0, "d-ud1-1"},       {1, 2103, 2000.0, "d-ud1-2"},
   {1, 2103, 5000.0, "d-ud1-5"},       {1, 2103, 20000.0, "d-ud1-20"},
   {2, 2101, 5000.0, "u-ud0-5"},       {3, 2103, 5000.0, "s-ud1-5"},
   {2101, -2101, 5000.0, "ud0-ud0bar-5"}, {2103, -2103, 20000.0, "ud1-ud1bar-20"},
+  {2101, -2101, 2000.0, "ud0-ud0bar-2"},
 };
 
 /// IsItFragmentable, StopFragmenting and Sample4Momentum on their own, which is the point of
@@ -743,6 +820,58 @@ void dump_decisions() {
                      p.e(), ap.px(), ap.py(), ap.pz(), ap.e(), eng.draws());
       }
     }
+    delete s;
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  delete L;
+}
+
+/// The final-state enumeration itself: which (left, right) pairs each of the three
+/// last-splitting functions lists, in order, and with what weight. This is what makes the
+/// |p|^3 in the diquark-antidiquark weight and the zero c and b entries of Prob_QQbar exact
+/// rather than merely consistent with a sampled index.
+void dump_last_states() {
+  LundProbe* L = new LundProbe();
+  FILE* f = std::fopen("ftf_laststates.csv", "w");
+  std::fprintf(f, "which,left,right,mass,ok,number_of_fs,index,fs_left,fs_right,fs_weight\n");
+  CycleEngine eng;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+  for (const StringCase& sc : kStrings) {
+    G4ExcitedString* s = make_string(sc.left, sc.right, sc.mass, 1);
+    G4FragmentingString* fs = new G4FragmentingString(*s);
+    fs->SetLeftPartonStable();  // SplitLast does this before it dispatches
+    L->SetMinimalStringMass(fs);
+    G4ParticleDefinition* lh = nullptr;
+    G4ParticleDefinition* rh = nullptr;
+    L->NumberOf_FS = 0;
+    for (G4int i = 0; i < 350; ++i) { L->FS_Weight[i] = 0.; }
+    eng.reset(0);
+    const char* which = nullptr;
+    G4bool ok = false;
+    if (fs->IsAFourQuarkString()) {
+      which = "DiQ-ADiQ-above";
+      ok = (L->*bridge(TagDiQADiQAbove()))(fs, lh, rh);
+    } else if (fs->DecayIsQuark() && fs->StableIsQuark()) {
+      which = "Q-Qbar";
+      ok = (L->*bridge(TagQQbarLast()))(fs, lh, rh);
+    } else {
+      which = "Q-DiQ";
+      ok = (L->*bridge(TagQDiQLast()))(fs, lh, rh);
+    }
+    if (L->NumberOf_FS == 0) {
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,-1,0,0,0\n", which, sc.left, sc.right, sc.mass,
+                   ok ? 1 : 0, L->NumberOf_FS);
+    }
+    for (G4int i = 0; i < L->NumberOf_FS; ++i) {
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%d,%.17g\n", which, sc.left, sc.right,
+                   sc.mass, ok ? 1 : 0, L->NumberOf_FS, i,
+                   L->FS_LeftHadron[i] ? L->FS_LeftHadron[i]->GetPDGEncoding() : 0,
+                   L->FS_RightHadron[i] ? L->FS_RightHadron[i]->GetPDGEncoding() : 0,
+                   L->FS_Weight[i]);
+    }
+    delete fs;
     delete s;
   }
   CLHEP::HepRandom::setTheEngine(saved);
@@ -801,6 +930,19 @@ void dump_fragstat() {
   std::fprintf(f, "case,mass,n_events,pdg,count,sum_e,sum_pz,sum_pt2\n");
   FILE* g = std::fopen("ftf_fragstat_mult.csv", "w");
   std::fprintf(g, "case,mass,n_events,multiplicity,count\n");
+  // 20,000 events a case, and the number is written into every row so that the test runs the
+  // port at whatever the oracle ran at rather than at a constant of its own.
+  //
+  // WHAT 20,000 COSTS, MEASURED. At 20,000 the port's mean multiplicity came out ABOVE the
+  // oracle's in 12 of the 15 fragmenting cases, combining to +3.3 sigma, and it stayed above
+  // for four different port seeds (+3.3, +1.1, +2.7, +1.8) - which looks like a real excess
+  // and is not one. The four port samples share one oracle sample, so a single low fluctuation
+  // of THAT sample biases all four comparisons the same way. Re-running this block at
+  // N = 200,000, against the port at the same 200,000, moved the combination to -1.8 with 8 of
+  // 15 cases negative and every case within 0.16%. The 20,000-event oracle is itself the
+  // limit, not the port. Raising N here to 200,000 takes this dump from about one minute to
+  // seven, which is why it is not the committed value; the test's tolerance of 5 sigma per
+  // species is what absorbs the difference.
   const int N = 20000;
   for (const StringCase& sc : kStrings) {
     std::map<int, long long> count;
@@ -848,6 +990,7 @@ void dump_ftf(const DumpContext&) {
   dump_build();
   dump_samplers();
   dump_decisions();
+  dump_last_states();
   dump_fragment();
   dump_fragstat();
 }
@@ -857,6 +1000,6 @@ void dump_ftf(const DumpContext&) {
 G4GPU_REGISTER_DUMP("ftf",
                     "ftf_params.csv ftf_procprob.csv ftf_geom.csv ftf_lund_params.csv "
                     "ftf_lund_tables.csv ftf_hadrons.csv ftf_minmass.csv ftf_build.csv "
-                    "ftf_samplers.csv ftf_decisions.csv ftf_fragment.csv ftf_fragstat.csv "
+                    "ftf_samplers.csv ftf_decisions.csv ftf_laststates.csv ftf_fragment.csv ftf_fragstat.csv "
                     "ftf_fragstat_mult.csv",
                     dump_ftf);
