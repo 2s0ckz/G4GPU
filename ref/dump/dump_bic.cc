@@ -75,6 +75,8 @@
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
 #include "G4Clebsch.hh"
+#include "G4BaryonPartialWidth.hh"
+#include "G4BaryonWidth.hh"
 #include "G4ConcreteMesonBaryonToResonance.hh"
 #include "G4ConcreteNNToDeltaDelta.hh"
 #include "G4ConcreteNNToDeltaDeltastar.hh"
@@ -108,6 +110,7 @@
 #include "G4PionZero.hh"
 #include "G4PreCompoundModel.hh"
 #include "G4Proton.hh"
+#include "G4ResonanceNames.hh"
 #include "G4RKPropagation.hh"
 #include "G4Scatterer.hh"
 #include "G4ShortLivedConstructor.hh"
@@ -2003,6 +2006,88 @@ void write_imr_resonance_fs() {
   std::fclose(g);
 }
 
+/// G4XAnnihilationChannel::CrossSection through every one of the 25 channels
+/// G4CollisionMesonBaryonToResonance builds, and the two mass-dependent width tables underneath
+/// it - the only cross section a pion in the binary cascade has.
+///
+/// The pion charge is chosen per resonance so that the outgoing iso3 exists: a Delta (isospin
+/// 3/2) can take a pi+ on a proton and an N* (isospin 1/2) cannot, and asking for the impossible
+/// one throws (docs/RISK.md V110).
+void write_imr_annih() {
+  FILE* f = std::fopen("bic_imr_annih.csv", "w");
+  std::fprintf(f,
+               "label,res_pdg,pion_pdg,sqrt_s_MeV,in1z,in1e,in2e,in_charge,sigma_mb,"
+               "width_MeV,partial_MeV\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* pip = G4PionPlus::PionPlusDefinition();
+  const G4ParticleDefinition* pim = G4PionMinus::PionMinusDefinition();
+
+  struct R { int code; const char* label; bool delta; };
+  const R kAll[] = {
+      {2214, "D1232_Npi", true},  {32214, "D1600_Npi", true}, {2122, "D1620_Npi", true},
+      {12214, "D1700_Npi", true}, {12122, "D1900_Npi", true}, {2126, "D1905_Npi", true},
+      {22122, "D1910_Npi", true}, {22214, "D1920_Npi", true}, {12126, "D1930_Npi", true},
+      {2218, "D1950_Npi", true},
+      {12212, "N1440_Npi", false}, {2124, "N1520_Npi", false}, {22212, "N1535_Npi", false},
+      {32212, "N1650_Npi", false}, {2216, "N1675_Npi", false}, {12216, "N1680_Npi", false},
+      {22124, "N1700_Npi", false}, {42212, "N1710_Npi", false}, {32124, "N1720_Npi", false},
+      {42124, "N1900_Npi", false}, {12218, "N1990_Npi", false}, {52214, "N2090_Npi", false},
+      {2128, "N2190_Npi", false},  {100002210, "N2220_Npi", false},
+      {100012210, "N2250_Npi", false}};
+
+  G4BaryonWidth theWidth;
+  G4BaryonPartialWidth thePartWidth;
+  G4ResonanceNames theNames;
+
+  for (const R& r : kAll) {
+    const G4ParticleDefinition* res = ptable->FindParticle(r.code);
+    if (res == nullptr) { continue; }
+    // A Delta takes iso3 = +3 from a pi+ on a proton; an N* needs iso3 = +1, so a pi- on a
+    // proton (-2 + 1 = -1) reaches its neutron-like partner instead, and the pi+ would throw.
+    // TWO pion charges per Delta channel, not one. With a pi+ on a proton the total iso3 is +3,
+    // which only one Clebsch-Gordan path reaches, so the NORMALISATION in
+    // NormalizedClebschGordan divides by 1 and the `isoRes < iso3` guard compares 3 with 3 and
+    // does not fire - both were MEASURED unobservable on a pi+-only grid. A pi0 on a proton is
+    // iso3 = +1, where two paths contribute and the normalisation bites. `IsInCharge` compares
+    // G4ParticleTypeConverter GENERIC types, and all three pions are PION, so a pi0 is a
+    // configuration the cascade really produces.
+    for (int pc = 0; pc < 2; ++pc) {
+    const G4ParticleDefinition* pion =
+        (pc == 1) ? static_cast<const G4ParticleDefinition*>(G4PionZero::PionZeroDefinition())
+                  : (r.delta ? pip : pim);
+    if (pc == 1 && !r.delta) { continue; }  // pi0 p is iso3 = +1, which an N* does reach
+    const G4ParticleDefinition* out = res;
+    G4ConcreteMesonBaryonToResonance ch(p, pion, out, r.label);
+    // The two width vectors, straight from the tables, so a disagreement in the cross section
+    // can be traced to one of the three factors rather than to their product.
+    const G4String shortName = theNames.ShortName(res->GetParticleName());
+    G4PhysicsVector* wv = theWidth.MassDependentWidth(shortName);
+    G4PhysicsVector* pv = thePartWidth.MassDependentWidth(r.label);
+    for (double want = 1100.0; want <= 3000.0; want += 25.0) {
+      G4LorentzVector q1, q2;
+      imr_make_pair(pion, p, want, q1, q2);
+      G4KineticTrack t1(pion, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(p, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      const bool inCharge = ch.IsInCharge(t1, t2);
+      G4bool dummy = false;
+      const double w = (wv != nullptr) ? wv->GetValue(s, dummy) : res->GetPDGWidth();
+      const double pw = (pv != nullptr) ? pv->GetValue(s, dummy) : res->GetPDGWidth();
+      std::fprintf(f, "%s,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%.17g,%.17g\n", r.label,
+                   r.code, pion->GetPDGEncoding(), s, q1.z(), q1.t(), q2.t(), inCharge ? 1 : 0,
+                   inCharge ? ch.CrossSection(t1, t2) / millibarn : 0.0, w, pw);
+    }
+    delete wv;
+    delete pv;
+    }
+  }
+  std::fclose(f);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -2023,6 +2108,7 @@ void dump_bic(const DumpContext&) {
   write_imr_resonance_xsec();
   write_imr_nnchannels();
   write_imr_resonance_fs();
+  write_imr_annih();
 }
 
 }  // namespace
@@ -2039,5 +2125,5 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_meson.csv bic_imr_meson_fs.csv "
                     "bic_imr_resxsec.csv bic_imr_species.csv "
                     "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv "
-                    "bic_imr_resfs.csv bic_imr_annihfs.csv",
+                    "bic_imr_resfs.csv bic_imr_annihfs.csv bic_imr_annih.csv",
                     dump_bic);

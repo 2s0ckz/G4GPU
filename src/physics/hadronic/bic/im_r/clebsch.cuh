@@ -217,6 +217,30 @@ __host__ __device__ inline double clebsch_weight(int two_j1, int two_m1, int two
   return value;
 }
 
+/// `G4Clebsch::NormalizedClebschGordan(2J, 2m, 2J1, 2J2, 2m1, 2m2)` - the probability that a
+/// state (J, m) decomposes into exactly (J1, m1) and (J2, m2), normalised over every m1 the pair
+/// allows. `G4XAnnihilationChannel` multiplies its cross section by it.
+///
+/// The argument order is not `ClebschGordan`'s: the TOTAL spin and projection come first, then
+/// the two constituents' spins, then their projections. And the `twoJ1 == 0 || twoJ2 == 0` guard
+/// returns ZERO, not one - the caller `G4XAnnihilationChannel::NormalizedClebsch` has already
+/// returned 1 for that case one line earlier, so the guard here is unreachable from it.
+__host__ __device__ inline double normalized_clebsch_gordan(int two_j, int two_m, int two_j1,
+                                                            int two_j2, int two_m1, int two_m2,
+                                                            ClebschRefusal& ref) {
+  double cleb = 0.0;
+  if (two_j1 == 0 || two_j2 == 0) { return cleb; }
+  double sum = 0.0;
+  for (int m1c = -two_j1; m1c <= two_j1; m1c += 2) {
+    const int m2c = two_m - m1c;
+    const double prob = clebsch_gordan(two_j1, m1c, two_j2, m2c, two_j, ref);
+    sum += prob;
+    if (m2c == two_m2 && m1c == two_m1) { cleb += prob; }
+  }
+  if (sum > 0.0) { cleb /= sum; }
+  return cleb;
+}
+
 /// `G4Clebsch::GenerateIso3` - REFUSED. See the file header for the four reasons; the two
 /// early returns that DO have a well-defined answer are kept, because they are the ones the
 /// binary cascade's own pairs reach when one outgoing isospin is zero, and because a caller that

@@ -78,6 +78,9 @@
 //                        all six families - the two outgoing four-momenta with the resonance
 //                        masses sampled from a Breit-Wigner, and the number of uniforms drawn.
 //   bic_imr_annihfs      G4VAnnihilationCollision::FinalState, which draws none at all.
+//   bic_imr_annih        G4XAnnihilationChannel over all 25 pion-nucleon resonance channels and
+//                        two pion charges, with the two mass-dependent widths dumped beside the
+//                        cross section so a disagreement says which of the three factors it is.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -99,6 +102,7 @@
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_fs.cuh"
+#include "physics/hadronic/bic/im_r/xsec_annihilation.cuh"
 #include "physics/hadronic/bic/im_r/resonance_tables.cuh"
 #include "physics/hadronic/bic/im_r/scatterer.cuh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
@@ -1159,6 +1163,7 @@ int main() {
       cmp_int(b_resspec, (std::fabs(s.mass - dv(r, 2)) < 1e-9) ? 1 : 0, 1, sv(r, 1) + " mass");
       cmp_int(b_resspec, (std::fabs(s.width - dv(r, 3)) < 1e-9) ? 1 : 0, 1, sv(r, 1) + " width");
       cmp_int(b_resspec, s.short_lived ? 1 : 0, iv(r, 7), sv(r, 1) + " IsShortLived");
+      cmp_int(b_resspec, s.two_spin, iv(r, 6), sv(r, 1) + " 2J from the PDG code's last digit");
     }
   }
   {
@@ -1222,6 +1227,91 @@ int main() {
       // It draws no uniform at all.
       cmp_int(b_annih, 0, iv(r, 9), where + " draws");
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3j. G4XAnnihilationChannel - the pion-nucleon resonance production cross section, which is
+  //     the only thing a pion in the binary cascade can do (docs/RISK.md V107). All 25 channels
+  //     G4CollisionMesonBaryonToResonance builds, over 77 energies each.
+  //
+  //     The two mass-dependent widths are compared separately from the cross section, because
+  //     two of the 25 have a BROKEN map key and fall back to a constant, and the only way to see
+  //     that in the product would be to notice it is the wrong shape.
+  // -------------------------------------------------------------------------------------------
+  const int b_annw = new_bucket("AnnihilationWidths", 1e-14);
+  const int b_annx = new_bucket("AnnihilationCrossSection", 1e-13);
+  const int b_annk = new_bucket("AnnihilationBrokenKeys", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_annih.csv");
+    long long n1700_distinct = 0;
+    long long n2250_distinct = 0;
+    double n1700_first = -1.0;
+    double n2250_first = -1.0;
+    for (const auto& r : rows) {
+      const std::string label = sv(r, 0);
+      if (label.size() < 5) { continue; }
+      const bool is_delta = (label[0] == 'D');
+      const int mass = std::atoi(label.substr(1, 4).c_str());
+      const int res_pdg = iv(r, 1);
+      const int pion_pdg = iv(r, 2);
+      const double sqrt_s = dv(r, 3);
+      const imr::LorentzVector p1v(deex::Vec3d{0.0, 0.0, dv(r, 4)}, dv(r, 5));
+      const imr::LorentzVector p2v(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 6));
+      const std::string where = label + " sqrt(s)=" + std::to_string(sqrt_s);
+      const imr::SpeciesProperties res = imr::species_properties(res_pdg, mp, mn);
+      if (!res.known) {
+        std::printf("REFUSED resonance properties for %d (%s)\n", res_pdg, label.c_str());
+        ++fails;
+        continue;
+      }
+      // The two widths.
+      const double got_w =
+          imr::annih_variable_width(mass, is_delta, res.width, sqrt_s);
+      const double got_pw =
+          imr::annih_variable_partial_width(mass, is_delta, res.width, sqrt_s);
+      cmp_scaled(b_annw, got_w, dv(r, 9), 1e-9, where + " total width");
+      cmp_scaled(b_annw, got_pw, dv(r, 10), 1e-9, where + " partial width");
+      if (label == "N1700_Npi") {
+        if (n1700_first < 0.0) { n1700_first = dv(r, 10); }
+        if (dv(r, 10) != n1700_first) { ++n1700_distinct; }
+      }
+      if (label == "N2250_Npi") {
+        if (n2250_first < 0.0) { n2250_first = dv(r, 9); }
+        if (dv(r, 9) != n2250_first) { ++n2250_distinct; }
+      }
+      // The cross section.
+      imr::AnnihRefusal aref;
+      const int iso31 = (pion_pdg == 211) ? 2 : ((pion_pdg == -211) ? -2 : 0);
+      // The pion MASS comes from its own dumped four-momentum, not from a constant: a pi0 is
+      // 134.977 MeV where a pi+ is 139.570, and p_CM squared is in the denominator. Passing the
+      // charged mass for every row put the pi0 cross sections 44% out.
+      const double m_pion = std::sqrt(dv(r, 5) * dv(r, 5) - dv(r, 4) * dv(r, 4));
+      const double got = imr::x_annihilation_channel(
+          0, m_pion, 2, iso31,         // the pion: spin 0, isospin 1
+          1, mp, 1, 1,                 // the proton: 2J = 1, 2I = 1, 2I3 = +1
+          mass, is_delta, res.two_spin, res.mass, res.width,
+          is_delta ? 3 : 1, sqrt_s, aref);
+      // The cross section is a product of a Breit-Wigner, a branching ratio and a Clebsch-Gordan
+      // ratio, each of which is itself a quotient, so the bucket is a little looser than the
+      // widths it is built from - and it crosses zero where the isospin forbids the channel.
+      cmp_scaled(b_annx, got / imr::millibarn(), dv(r, 8), 1e-9, where);
+      if (aref.unknown_resonance) {
+        std::printf("REFUSED annihilation cross section: %s\n", where.c_str());
+        ++fails;
+      }
+    }
+    // The two broken keys, asserted from the oracle's own data: a working channel's width varies
+    // with sqrt(s) over these 77 points and these two do not, because their map key is missing.
+    cmp_int(b_annk, n1700_distinct, 0, "N(1700)'s partial width is constant - the key is gone");
+    cmp_int(b_annk, n2250_distinct, 0, "N(2250)'s total width is constant - no key at all");
+    cmp_int(b_annk, (n1700_first == 150.0) ? 1 : 0, 1, "and it is the PDG width, 150 MeV");
+    cmp_int(b_annk, (n2250_first == 500.0) ? 1 : 0, 1, "and it is the PDG width, 500 MeV");
+    cmp_int(b_annk, imr::partial_width_column(1700, false), -1, "no N1700_Npi column");
+    cmp_int(b_annk, imr::total_width_column(2250, false), -1, "no N(2250) column");
+    cmp_int(b_annk, (imr::partial_width_column(1700, true) >= 0) ? 1 : 0, 1,
+            "but D1700_Npi is there");
+    cmp_int(b_annk, (imr::total_width_column(2220, false) >= 0) ? 1 : 0, 1,
+            "and N(2220) is there");
   }
 
   // -------------------------------------------------------------------------------------------

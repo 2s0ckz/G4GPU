@@ -98,13 +98,33 @@ struct ResonanceFsRefusal {
 struct SpeciesProperties {
   double mass = 0.0;
   double width = 0.0;
+  /// `GetPDGiSpin()`, twice the spin. Taken from the PDG code, whose LAST DIGIT is 2J+1 for
+  /// every baryon here - the rule the encodings are built on, and checked against Geant4's own
+  /// definitions species by species rather than assumed.
+  int two_spin = 0;
   bool short_lived = false;
   bool known = false;
 };
 
+/// 2J from a baryon PDG code: the last digit is 2J+1 - EXCEPT for the four highest N*, whose
+/// codes are 100002210, 100002110, 100012210 and 100012110.
+///
+/// Those four do not follow the rule. A PDG code's last digit is 2J+1 and theirs is 0, which
+/// would be 2J = -1; Geant4 gives all four `GetPDGiSpin() == 9`, and the codes are the
+/// nine-digit "extended" form the standard reserves for nuclei, used here because the ordinary
+/// encoding has no room for another N* at that spin. So the rule is applied where it holds and
+/// the four are named - and the test compares every species' 2J against Geant4's own definition,
+/// which is what turns this from an assumption into a checked table.
+__host__ __device__ inline int two_spin_from_pdg(int pdg) {
+  const int c = (pdg < 0) ? -pdg : pdg;
+  if (c == 100002210 || c == 100002110 || c == 100012210 || c == 100012110) { return 9; }
+  return (c % 10) - 1;
+}
+
 __host__ __device__ inline SpeciesProperties species_properties(int pdg, double proton_mass,
                                                                 double neutron_mass) {
   SpeciesProperties s;
+  s.two_spin = two_spin_from_pdg(pdg);
   if (pdg == kPdgProton) {
     s.mass = proton_mass;
     s.width = 0.0;

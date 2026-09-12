@@ -424,6 +424,81 @@ my @nstar_width = grab("$sl/G4ExcitedNucleonConstructor.cc",
 }
 
 # =============================================================================================
+# 8. The mass-dependent resonance widths G4XAnnihilationChannel divides one by the other.
+#
+#    `G4BaryonWidth` carries the TOTAL width of each resonance against sqrt(s), and
+#    `G4BaryonPartialWidth` the partial width into N pi. `Branch()` is their ratio. Both are 120
+#    points on their own energy grid, keyed by a G4String.
+#
+#    TWO OF THE KEYS ARE WRONG, and the port reproduces both:
+#
+#    * `G4BaryonPartialWidth`'s constructor writes `wMap["D1700_Npi"]` TWICE - once at line 939
+#      with `pwN1700_Npi` (the N(1700) data under the Delta's label) and once at line 1007 with
+#      `pwD1700_Npi`. The second overwrites the first, so there is no `N1700_Npi` key at all and
+#      the `pwN1700_Npi` array is compiled in and unreachable.
+#    * `G4BaryonWidth`'s map stops at `N(2220)`: there is no `N(2250)` entry, though the particle
+#      exists and is produced.
+#
+#    In both cases `MassDependentWidth` returns 0 and `G4XAnnihilationChannel` silently falls back
+#    to the constant `resonance->GetPDGWidth()`. docs/RISK.md V111.
+# =============================================================================================
+my @bw_names = qw(N1440 N1520 N1535 N1650 N1675 N1680 N1700 N1710 N1720 N1900 N1990 N2090
+                  N2190 N2220 N2250 Delta D1600 D1620 D1700 D1900 D1905 D1910 D1920 D1930 D1950);
+my @bw_arrays = qw(wN1440 wN1520 wN1535 wN1650 wN1675 wN1680 wN1700 wN1710 wN1720 wN1900 wN1990
+                   wN2090 wN2190 wN2220 wN2250 wDelta wD1600 wD1620 wD1700 wD1900 wD1905 wD1910
+                   wD1920 wD1930 wD1950);
+my @bw_grid = grab("$imr/src/G4BaryonWidth.cc",
+                   qr/const G4double G4BaryonWidth::baryonEnergyTable\[120\]/, 120);
+my @bw_flat;
+for my $a (@bw_arrays) {
+  push @bw_flat, grab("$imr/src/G4BaryonWidth.cc",
+                      qr/const G4double G4BaryonWidth::\Q$a\E\[120\]/, 120);
+}
+# The two classes name the ground-state Delta differently - `wDelta` for the total width and
+# `pwD1232_Npi` for the partial - so the array lists are written out rather than derived from one
+# name list. `pwN1700_Npi` IS extracted even though no map key reaches it: it is compiled into the
+# program and the port carries it, so that a release which fixes the key finds the data already
+# there and checked.
+my @pw_arrays = qw(pwN1440_Npi pwN1520_Npi pwN1535_Npi pwN1650_Npi pwN1675_Npi pwN1680_Npi
+                   pwN1700_Npi pwN1710_Npi pwN1720_Npi pwN1900_Npi pwN1990_Npi pwN2090_Npi
+                   pwN2190_Npi pwN2220_Npi pwN2250_Npi pwD1232_Npi pwD1600_Npi pwD1620_Npi
+                   pwD1700_Npi pwD1900_Npi pwD1905_Npi pwD1910_Npi pwD1920_Npi pwD1930_Npi
+                   pwD1950_Npi);
+my @pw_grid = grab("$imr/src/G4BaryonPartialWidth.cc",
+                   qr/const G4double G4BaryonPartialWidth::energies\[120\]/, 120);
+my @pw_flat;
+for my $a (@pw_arrays) {
+  push @pw_flat, grab("$imr/src/G4BaryonPartialWidth.cc",
+                      qr/const G4double G4BaryonPartialWidth::\Q$a\E\[120\]/, 120);
+}
+# The two broken keys, asserted so a release that fixes either is visible here first.
+{
+  open my $cfh, '<', "$imr/src/G4BaryonPartialWidth.cc" or die "cannot open: $!";
+  local $/;
+  my $body = <$cfh>;
+  close $cfh;
+  my @d1700;
+  while ($body =~ /wMap\["D1700_Npi"\]\s*=\s*\(G4double\*\)\s*(\w+);/g) { push @d1700, $1; }
+  die "D1700_Npi is assigned " . scalar(@d1700) . " times (@d1700), expected twice "
+    . "(pwN1700_Npi then pwD1700_Npi)\n"
+    if join(',', @d1700) ne 'pwN1700_Npi,pwD1700_Npi';
+  die "N1700_Npi has a key after all\n" if $body =~ /wMap\["N1700_Npi"\]/;
+  ++$checks;
+  printf "  ok %-46s %s\n", 'G4BaryonPartialWidth N1700_Npi',
+         'no key; D1700_Npi assigned twice';
+}
+{
+  open my $cfh, '<', "$imr/src/G4BaryonWidth.cc" or die "cannot open: $!";
+  local $/;
+  my $body = <$cfh>;
+  close $cfh;
+  die "N(2250) has a key in G4BaryonWidth after all\n" if $body =~ /wMap\["N\(2250\)"\]/;
+  die "N(2220) is missing from G4BaryonWidth\n" if $body !~ /wMap\["N\(2220\)"\]/;
+  ++$checks;
+  printf "  ok %-46s %s\n", 'G4BaryonWidth N(2250)', 'no key; the map stops at N(2220)';
+}
+
+# =============================================================================================
 # Write the header.
 # =============================================================================================
 my $out = 'src/physics/hadronic/bic/im_r/imr_tables.hh';
@@ -470,6 +545,8 @@ constexpr int kCompositePoints = 32;     ///< G4CollisionComposite::nPoints
 constexpr int kResonanceTableSize = 121;  ///< every G4X*Table column and its shared energy grid
 constexpr int kDbiSize = 120;             ///< G4DetailedBalancePhaseSpaceIntegral
 constexpr int kDbiColumns = 25;
+constexpr int kBaryonWidthSize = 120;    ///< G4BaryonWidth::wSize and G4BaryonPartialWidth::wSize
+constexpr int kBaryonWidthColumns = 25;  ///< the fifteen N* and the ten Deltas, in that order
 
 /// How many sigma columns each of the six resonance tables has. `res_masses_*()` lists the
 /// resonance masses in the order `res_sigma_*()` lays the columns out, 121 values each.
@@ -509,6 +586,10 @@ emit($fh, 'double', 'deltastar_mass', 5, @dstar_mass);
 emit($fh, 'double', 'deltastar_width', 5, @dstar_width);
 emit($fh, 'double', 'nstar_mass', 5, @nstar_mass);
 emit($fh, 'double', 'nstar_width', 5, @nstar_width);
+emit($fh, 'double', 'baryon_width_grid', 8, @bw_grid);
+emit($fh, 'double', 'baryon_width', 8, @bw_flat);
+emit($fh, 'double', 'baryon_partial_width_grid', 8, @pw_grid);
+emit($fh, 'double', 'baryon_partial_width', 8, @pw_flat);
 for my $t (@res_tables) {
   my ($cls, $egrid, $cols, $tag) = @$t;
   print $fh "__host__ __device__ inline const int* res_masses_$tag() {

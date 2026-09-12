@@ -8666,3 +8666,50 @@ none it prints one line and throws a `G4HadronicException`. A pi+ on a proton is
 a Delta has and an N* does not - so `pi+ p -> N*` terminates the program. Nothing protects that
 path except the cross section being zero there. It took the oracle run down once, from a dump that
 called `FinalState` without first asking for the cross section.
+
+### V111: two map keys make two resonances fall back to a constant width, and nothing says so
+
+`G4XAnnihilationChannel` is the only cross section a pion in the binary cascade has (docs/RISK.md
+V107 - the elastic half is identically zero over the whole window). It is a relativistic
+Breit-Wigner whose width is mass-dependent, read from two `G4String`-keyed maps:
+
+    widthTable     = resWidths.MassDependentWidth(shortName);      // G4BaryonWidth
+    partWidthTable = resPartWidths.MassDependentWidth(partWidthLabel);  // G4BaryonPartialWidth
+
+Both return **0** for a key they do not hold, and `VariableWidth` and `VariablePartialWidth` then
+use the constant `resonance->GetPDGWidth()` instead, with nothing printed and no flag set. Two of
+the twenty-five channels take that path.
+
+**`G4BaryonPartialWidth` has no `N1700_Npi` key.** Its constructor writes `wMap["D1700_Npi"]`
+twice - at line 939 with `pwN1700_Npi` (the N(1700) data, under the DELTA's label) and again at
+line 1007 with `pwD1700_Npi`. `std::map::operator[]` overwrites, so the Delta's entry is correct
+and the N(1700)'s does not exist; the `pwN1700_Npi` array is compiled into every Geant4 binary and
+is unreachable. `N(1700)`'s branching ratio is therefore `150 MeV / Gamma(s)` - a constant divided
+by a function, which is not a branching ratio and is not bounded by 1.
+
+**`G4BaryonWidth` has no `N(2250)` key.** Its map runs N(1440) to N(2220) and then jumps to the
+Deltas. N(2250) exists as a particle, `G4CollisionMesonBaryonToResonance` builds a channel for it,
+and its total width is the flat 500 MeV instead of the threshold-suppressed shape its fourteen
+siblings get.
+
+Both are visible in the oracle and the test asserts them from it: over the 77 energies dumped per
+channel, a working channel's width takes 77 distinct values and these two take ONE - 150 MeV and
+500 MeV, their PDG widths. `tools/extract_bic_imr.pl` asserts the double assignment and the
+missing key in the Geant4 source, so a release that fixes either fails there first; and the
+`pwN1700_Npi` data is extracted and carried anyway, so that such a release finds it already
+checked.
+
+**Three smaller things in the same class, all inert and all transcribed.** The isospin factor
+`NormalizedClebschGordan` divides the chosen squared Clebsch-Gordan coefficient by the sum over
+every pion projection the pair allows - and for a pion on a nucleon that sum is over a complete
+set, so unitarity makes it exactly 1. Removing the division changes none of the 2,695 cross
+sections; so does swapping the two constituents, by the symmetry of the squares; and the
+`isoRes < iso3` guard never fires, because a pi+ on a proton gives iso3 = +3 against a Delta's
+isoRes of 3 and the N* channels are reached with a pi- or a pi0.
+
+**A note on hbarc.** The cross section ends in `hbarc_squared`, and CLHEP DERIVES that -
+`hbar_Planck * c_light` with `hbar_Planck = h_Planck/twopi` - where the Particle Data Group's
+quoted 197.32696812 MeV fm is 6e-8 below it. Pasting the PDG decimal put every one of these cross
+sections 1.25e-7 out, which the oracle reported on the first channel it reached. It is the same
+lesson `core/units.cuh` records for `barn()`: where CLHEP computes a constant, compute it the same
+way.
