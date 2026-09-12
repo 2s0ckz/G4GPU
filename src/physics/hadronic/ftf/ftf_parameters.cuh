@@ -317,7 +317,16 @@ struct FtfParameters {
   real_t avarage_pt2_of_elastic_scattering;  ///< MeV^2 (Geant4's spelling)
   real_t gamma0;
 
-  real_t proc_params[5][7];
+  /// EVERY MEMBER THAT ONLY THE CONSTRUCTOR SETS CARRIES ITS CONSTRUCTOR VALUE HERE.
+  /// `ftf_parameters_reset` is G4FTFParameters::Reset, and Reset does not touch row 4 of
+  /// ProcParams, the kink switch, the gluon-splitting probabilities or the diffraction-
+  /// dissociation switch - in Geant4 those are set once, by the constructor. A
+  /// `FtfParameters<double> p;` on the stack followed by `ftf_init_for_interaction` therefore
+  /// left them INDETERMINATE, and one of them decides physics: an indeterminate
+  /// `enable_diff_dissociation_for_b_greater_10` that happened to be non-zero kept projectile
+  /// and target diffraction ON for every target with A > 10, where Geant4 switches both off.
+  /// docs/RISK.md V104.
+  real_t proc_params[5][7] = {};
 
   real_t delta_prob_at_quark_exchange;
   real_t prob_of_same_quark_exchange;
@@ -329,8 +338,10 @@ struct FtfParameters {
   real_t average_pt2;
   real_t prob_log_distr;
 
-  real_t pt2_kink;
-  real_t quark_probabilities_at_gluon_split_up[3];
+  real_t pt2_kink = real_t(0.0) * units::GeV<real_t>() * units::GeV<real_t>();
+  real_t quark_probabilities_at_gluon_split_up[3] = {
+      real_t(1.0) / real_t(3.0), real_t(1.0) / real_t(3.0) + real_t(1.0) / real_t(3.0),
+      real_t(1.0) / real_t(3.0) + real_t(1.0) / real_t(3.0) + real_t(1.0) / real_t(3.0)};
 
   real_t max_number_of_collisions;
   real_t prob_of_inel_interaction;
@@ -342,7 +353,7 @@ struct FtfParameters {
   real_t pt2_of_nuclear_destruction;
   real_t max_pt2_of_nuclear_destruction;
 
-  bool enable_diff_dissociation_for_b_greater_10;
+  bool enable_diff_dissociation_for_b_greater_10 = false;
 
   /// Not a Geant4 member. True when InitForInteraction's last `if (Xtotal == 0.0)` block ran,
   /// i.e. when the cross sections were recomputed for a PROTON because the projectile's came
@@ -351,16 +362,16 @@ struct FtfParameters {
   /// already as the projectile and changes nothing - but for a projectile that is not a
   /// nucleon it substitutes one, and that is a different physics. Reported rather than
   /// refused, because refusing would delete an interaction Geant4 performs.
-  bool nucleon_assumed;
+  bool nucleon_assumed = false;
 
   /// The tune index GetIndexTune returned. 0 in every QBBC run; a non-zero value is
   /// kFtfTuneNonDefault.
-  int index_tune;
+  int index_tune = 0;
 
-  FtfRefusal refused;
+  FtfRefusal refused = FtfRefusal::kNone;
   /// Which of G4HadronNucleonXsc's unported branches the projectile needed, when `refused` is
   /// kHadronNucleonXscRefused.
-  xs::XsRefusal xs_refused;
+  xs::XsRefusal xs_refused = xs::XsRefusal::kNone;
 };
 
 /// G4FTFParameters::Reset. Note the `i < 4` bound on a `[5][7]` array - see the file header.

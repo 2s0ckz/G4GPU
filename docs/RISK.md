@@ -8289,3 +8289,48 @@ property of Geant4 and not of the test. No oracle this package can build will ev
 two, and a future tune that gives them different values would make a silently-swapped port wrong
 with no existing test able to see it. The perturbation that DOES bite that arm is the sign of
 `Qplus = -(TPlusNew - Ptarget.plus())`, which fails four exact buckets and two statistics.
+
+### V104: an uninitialised bool decided whether a nucleus diffracts, and it read as true
+
+`G4FTFParameters` sets `EnableDiffDissociationForBGreater10` in its CONSTRUCTOR, from
+`G4HadronicParameters::Instance()->EnableDiffDissociationForBGreater10()` - false in every stock
+build. `Reset()`, which `InitForInteraction` calls first, does not touch it, and neither do the
+gluon-splitting probabilities, the kink switch, or row 4 of the `[5][7]` `ProcParams` array. The
+port had all of those in `ftf_parameters_construct`, and `ftf_parameters_construct` HAD NO
+CALLER: every `FtfParameters<double> p;` on a stack, and every one inside a workspace, went into
+`ftf_init_for_interaction` with those members indeterminate.
+
+The one that decides physics is the bool. `InitForInteraction` reads
+
+    if ((AbsProjectileBaryonNumber > 10 || NumberOfTargetNucleons > 10)
+        && !EnableDiffDissociationForBGreater10) { SetParams(2, 0,...,-100); SetParams(3, ...); }
+
+so for any target heavier than A = 10 - carbon included - Geant4 switches BOTH projectile and
+target diffraction dissociation off, and `GetProcProb(2, y)` and `GetProcProb(3, y)` return zero.
+Reading the stack byte as true kept them on: 0.207 each for p + C at 4.7 GeV/c instead of 0.
+
+Two things about how it surfaced are worth keeping. The first is that it is undefined behaviour,
+so it moved: the excite rows passed for days and then began failing after unrelated code was
+added above them, and the first hypothesis - that the oracle table had changed - was wrong. Two
+runs of the same `g4dump.exe` write all 38 `ftf_*.csv` byte-identically, which is what finally
+ruled the oracle out.
+
+The second is where it shows. `ProbOfDiffraction == 0` is also the third arm of
+
+    if (SqrtS < M0projectile + TargetDiffStateMinMass || SqrtS < ProjectileDiffStateMinMass +
+        M0target || ProbOfDiffraction == 0.0) ProbExc = 0.0;
+
+at the end of `ExciteParticipants_doChargeExchange`, so with diffraction off, `ProbExc` is zero,
+`G4UniformRand() > 0` is always true, and EVERY charge exchange on a nuclear target ends in an
+elastic scattering of the two new hadrons rather than an excitation. Half of the p + C phases
+changed branch. The `excite verdict` and `excite species` buckets stayed exact through all of it
+- the two hadrons come out with the same PDG codes either way - and only the status, the
+four-momenta and the draw count could see it. Perturbing the default back to true reproduces the
+original failure exactly (`p_C_4GeV ph 0 tstatus got 0 want 2`, `draws got 14 want 11`,
+`p_C_50GeV ph 0 tpz` at 5.140e+01) and takes eleven statistical rows with it, the worst at
+44.2 sigma.
+
+The fix is that every member the Geant4 constructor sets and `Reset` does not now carries its
+constructor value as a default member initialiser, so a default-constructed `FtfParameters`
+equals a default-constructed `G4FTFParameters`. `ftf_parameters_construct` stays for a caller
+that wants to pass a non-stock `EnableDiffDissociationForBGreater10`.
