@@ -8812,3 +8812,44 @@ ALREADY-DECREMENTED `projectile_residual_a`/`_z` that `G4FTFModel::GetResiduals`
 instead of the initial `GetMassNumber()`/`GetCharge()` the interface expects, loses baryon
 number in 1,415 of 1,462 events, charge in 988, and produces 178 secondaries whose PDG code is
 not a nuclide at all. It is a one-word mistake and nothing else in the final state looks wrong.
+
+### V115: the sub-GeV arm shares its residual over a different set of nucleons
+
+`G4FTFModel::GetResiduals` has two arms and they are not the same algorithm with a different
+constant in it. Above 1 GeV/c per nucleon it boosts to the residual's c.m.s., rebuilds every
+spectator's momentum and hands the wounded nucleons an equal share of the residual four-momentum
+- one share per INVOLVED nucleon, `NumberOfInvolvedNucleonsOfTarget`. Below it there is no boost
+and no rebuild, because `AdjustNucleons` has already given every participant its kinematics one
+collision at a time, and the share is divided by `NumberOfTargetParticipant` - the nucleons whose
+`GetSoftCollisionCount()` is non-zero, which is a SUBSET of the involved ones.
+
+The nucleons in the difference - marked involved by the participant list and never actually
+collided - are not left alone. Their splitable hadron is deleted, `Hit(nullptr)` un-marks them,
+and their binding energy is set to zero: they go back into the residual nucleus as though they
+had never been picked. A port that reused the high-energy arm's loop would divide by the wrong
+count AND leave those nucleons as holes in the wounded nucleus P6 reads, so the residual would
+lose both energy and mass number.
+
+The arm is now written (P11c), with `AdjustNucleons` and its three algorithm methods. What
+reaches it: an anti-nucleon below 1 GeV/c, which is 936 MeV of kinetic energy or less, and
+nothing else - QBBC hands FTFP every other beam at 3 GeV and above. Over 72 (beam, target,
+energy) points - {pbar, nbar} x {H, C, O, Al, Fe, Pb} x {1, 10, 50, 100, 200, 400} MeV - and 500
+events each, **24,366 of 36,000 produce a final state, with baryon number and charge exactly
+right on every one and no event refused at AdjustNucleons**. The 11,634 others are
+`short_lived_track` and, on hydrogen, `kDecayStrongResonances` (every nucleon of the target is
+hit, so `hitCount == A` and `ApplyYourself` takes the decay-only exit).
+
+Energy is the loose check and it is loose in Geant4 too: the residual carries a table mass and
+an excitation that are not the sum of what went in, so the balance is a bias of **2.09 MeV on a
+12 GeV total** for the worst of the 72 points. That is the number a gross error has to beat, and
+it does not have to try hard: swapping `XminusResidual` for `XminusNucleon` in the residual's
+light-cone term of `_afterSampling` - one word, in a line whose two halves both read
+`XminusResidual` - takes the imbalance to **19.3 GeV**, a factor of nine million, while baryon
+number and charge stay exactly right. The two assertions see different mistakes and both are
+needed.
+
+One thing worth keeping about the transcription. In interaction case 2 - a fresh projectile
+nucleon meeting a target nucleon that already collided - Geant4 stores the PROJECTILE residual in
+the variables named `TResidual*`, and `_afterSampling` reads them back out of the same names into
+`ProjectileResidual*`. It is not a mistake and the port keeps the names, because renaming them to
+match their meaning in case 2 would make the three cases stop lining up with the source.

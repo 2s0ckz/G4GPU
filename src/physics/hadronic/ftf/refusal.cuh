@@ -113,8 +113,11 @@ enum class FtfRefusal : int {
   /// the projectile's lab momentum per nucleon is below `LowEnergyLimit` = 1 GeV/c. The only
   /// projectile QBBC gives FTFP below that momentum is an anti-baryon, which
   /// `G4HadronicBuilder::BuildFTFP_BERT(..., bert=false)` registers at every energy; every
-  /// other beam enters FTFP at 3 GeV kinetic energy and is far above it. So this refusal and
-  /// kFtfAnnihilation are the two halves of the same gap: the sub-GeV anti-nucleon arm.
+  /// other beam enters FTFP at 3 GeV kinetic energy and is far above it. WRITTEN since P11c
+  /// (`ftf/adjust_nucleons.cuh`), together with the low-energy arm of `GetResiduals`, so the
+  /// sub-GeV anti-nucleon arm runs; the value is kept because an enumerator's number is what
+  /// the oracle rows of a refused case carry, and because the hypernucleus branch of the
+  /// projectile residual's mass still reports - as `kHyperNucleus`, not here.
   kAdjustNucleons,
 
   /// G4GeneratorPrecompoundInterface::PropagateNuclNucl, which G4TheoFSGenerator calls instead

@@ -34,8 +34,9 @@
 // an anti-baryon projectile, which it gives FTFP at every energy
 // (`G4HadronicBuilder::BuildFTFP_BERT(..., bert=false)`); every other projectile enters FTFP at
 // 3 GeV kinetic energy and is far above 1 GeV/c. `AdjustNucleons` and its three algorithm
-// methods are REFUSED BY NAME (`kAdjustNucleons`), so an anti-nucleon below 1 GeV/c is reported
-// rather than approximated.
+// methods are WRITTEN since P11c, in `ftf/adjust_nucleons.cuh`, and so is the low-energy arm of
+// `GetResiduals`, which shares the residual over the nucleons that ACTUALLY collided and un-hits
+// the ones that were marked involved and never did.
 //
 // ## Two masses of the same residual nucleus
 //
@@ -60,6 +61,7 @@
 #include "data/ftf_hadrons.hh"
 #include "physics/hadronic/bic/nucleus/nucleus_model.cuh"
 #include "physics/hadronic/deexcitation/nuclear_masses.cuh"
+#include "physics/hadronic/ftf/adjust_nucleons.cuh"
 #include "physics/hadronic/ftf/annihilation.cuh"
 #include "physics/hadronic/ftf/diffractive_excitation.cuh"
 #include "physics/hadronic/ftf/elastic_hn.cuh"
@@ -164,6 +166,10 @@ struct FtfModelWorkspace {
   /// G4FTFAnnihilation's three-string channel has filled this event.
   int n_additional = 0;
   AnnihCommon annih;
+  /// AdjustNucleons' CommonVariables, in the workspace for the same reason every other
+  /// per-collision block is: it is 400-odd bytes and the low-energy arm calls it once per
+  /// collision.
+  AdjustCommon adjust;
 
   // ---- the strings this model produces ----
   ExcitedString strings[kMaxStrings];
@@ -941,17 +947,44 @@ __host__ __device__ inline bool ftf_model_excite_participants(
       continue;
     }
 
+    // The two nucleons the interaction was built from. `GetProjectileNucleon()` is null for a
+    // hadron projectile, and AdjustNucleons never dereferences it in interaction case 1 - which
+    // is the only case a hadron projectile can take.
+    const bic::Nucleon* proj_nucleon = (collision.projectile_nucleon >= 0)
+                                           ? &w->projectile.nucleons[collision.projectile_nucleon]
+                                           : nullptr;
+    const bic::Nucleon* targ_nucleon = (collision.target_nucleon >= 0)
+                                           ? &w->target.nucleons[collision.target_nucleon]
+                                           : nullptr;
+    const AdjustResidual proj_res{&w->projectile_residual_a, &w->projectile_residual_z,
+                                  &w->projectile_residual_lambda, &w->projectile_residual_exc,
+                                  &w->projectile_residual_p4};
+    const AdjustResidual targ_res{&w->target_residual_a, &w->target_residual_z, nullptr,
+                                  &w->target_residual_exc, &w->target_residual_p4};
+
     if (collision.status) {
       if (rng.uniform() < w->params.prob_of_elastic_scatt) {
         if (!w->high_energy_inter) {
-          w->report.refused = FtfRefusal::kAdjustNucleons;
-          return false;
+          const bool ok = ftf_adjust_nucleons(
+              projectile, proj_nucleon, target, targ_nucleon, /*annihilation=*/false,
+              w->has_projectile_nucleus, &w->params, proj_res, targ_res, &w->adjust, rng);
+          if (w->adjust.refused != FtfRefusal::kNone) {
+            w->report.refused = w->adjust.refused;
+            return false;
+          }
+          if (!ok) { continue; }
         }
         inner_success = ftf_elastic_scattering(projectile, target, &w->params, rng);
       } else if (rng.uniform() > w->params.prob_of_annihilation) {
         if (!w->high_energy_inter) {
-          w->report.refused = FtfRefusal::kAdjustNucleons;
-          return false;
+          const bool ok = ftf_adjust_nucleons(
+              projectile, proj_nucleon, target, targ_nucleon, /*annihilation=*/false,
+              w->has_projectile_nucleus, &w->params, proj_res, targ_res, &w->adjust, rng);
+          if (w->adjust.refused != FtfRefusal::kNone) {
+            w->report.refused = w->adjust.refused;
+            return false;
+          }
+          if (!ok) { continue; }
         }
         // THE DIVISION IS INTEGER. `GetSoftCollisionCount()` returns `G4int` and
         // `MaxNumOfInelCollisions` is a `G4int`, so `n / Nmax` truncates: the factor is EXACTLY
@@ -982,10 +1015,19 @@ __host__ __device__ inline bool ftf_model_excite_participants(
           inner_success = ftf_elastic_scattering(projectile, target, &w->params, rng);
         }
       } else {
-        // Annihilation.
+        // Annihilation. This is the ONE call site that passes `Annihilation = true`, and the
+        // flag changes AdjustNucleons completely: instead of refusing when the c.m.s. energy
+        // cannot cover the masses, it takes the struck nucleon OFF its mass shell to make room,
+        // because at rest an anti-proton annihilates whatever the budget says.
         if (!w->high_energy_inter) {
-          w->report.refused = FtfRefusal::kAdjustNucleons;
-          return false;
+          const bool ok = ftf_adjust_nucleons(
+              projectile, proj_nucleon, target, targ_nucleon, /*annihilation=*/true,
+              w->has_projectile_nucleus, &w->params, proj_res, targ_res, &w->adjust, rng);
+          if (w->adjust.refused != FtfRefusal::kNone) {
+            w->report.refused = w->adjust.refused;
+            return false;
+          }
+          if (!ok) { continue; }
         }
         const int add_slot =
             FtfParticipants<FtfModelWorkspace<kA, kP, kI, kS>::kScratchA, kI>::kAdditionalBase +
@@ -1372,9 +1414,54 @@ __host__ __device__ inline void ftf_get_residuals(FtfModelWorkspace<kA, kP, kI, 
     return;
   }
 
-  // The low-energy arm is reached only through AdjustNucleons, which is refused before any
-  // collision runs, so nothing can arrive here. Reported rather than silently skipped.
-  w->report.refused = FtfRefusal::kAdjustNucleons;
+  // THE LOW-ENERGY ARM, and it is a different algorithm and not a special case of the one
+  // above. There is no boost to the residual's c.m.s. and no per-nucleon momentum rebuild:
+  // AdjustNucleons has already given every participating nucleon and both residuals their
+  // kinematics, one collision at a time. All this does is share the residual's four-momentum
+  // and excitation equally over the nucleons that ACTUALLY COLLIDED - `GetSoftCollisionCount()
+  // != 0` - and un-hit the ones that did not, deleting their splitable hadrons.
+  //
+  // A nucleon that was marked involved and never collided therefore leaves the wounded nucleus
+  // entirely: P6's `Propagate` will not count it as a hole, and its binding energy is set to
+  // zero rather than left at the value `StoreInvolvedNucleon` gave it.
+  for (int side = 0; side < 2; ++side) {
+    if (side == 1 && !w->has_projectile_nucleus) { return; }
+    bic::Nucleus3D* nucleus = (side == 0) ? &w->target : &w->projectile;
+    const int* involved = (side == 0) ? w->involved_target : w->involved_projectile;
+    const int n_involved = (side == 0) ? w->n_involved_target : w->n_involved_projectile;
+    const Vec4& residual_p4 = (side == 0) ? w->target_residual_p4 : w->projectile_residual_p4;
+    const double residual_exc =
+        (side == 0) ? w->target_residual_exc : w->projectile_residual_exc;
+
+    int n_participant = 0;
+    for (int i = 0; i < n_involved; ++i) {
+      const SplitableHadron* s = w->splitable(nucleus->nucleons[involved[i]].hit_by);
+      if (s != nullptr && s->collision_count != 0) { ++n_participant; }
+    }
+
+    double delta_exc = 0.0;
+    Vec4 delta_p(0.0, 0.0, 0.0, 0.0);
+    if (n_participant != 0) {
+      delta_exc = residual_exc / static_cast<double>(n_participant);
+      const double inv_n = 1.0 / static_cast<double>(n_participant);
+      delta_p = Vec4(residual_p4.v.x * inv_n, residual_p4.v.y * inv_n, residual_p4.v.z * inv_n,
+                     residual_p4.e * inv_n);
+    }
+
+    for (int i = 0; i < n_involved; ++i) {
+      bic::Nucleon* a = &nucleus->nucleons[involved[i]];
+      SplitableHadron* s = w->splitable(a->hit_by);
+      if (s != nullptr && s->collision_count != 0) {
+        a->momentum = Vec4(-delta_p.v.x, -delta_p.v.y, -delta_p.v.z, -delta_p.e);
+        a->binding_energy = delta_exc;
+      } else {
+        if (s != nullptr) { s->alive = false; }
+        a->hit = false;
+        a->hit_by = kNullSplitable;
+        a->binding_energy = 0.0;
+      }
+    }
+  }
 }
 
 /// G4FTFModel::Init.

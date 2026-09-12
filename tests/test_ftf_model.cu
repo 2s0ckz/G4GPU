@@ -2007,6 +2007,127 @@ int main(int argc, char** argv) {
     }
     delete ws;
   }
+
+  // -------------------------------------------------------------------------------------------
+  // 10. The sub-GeV/c arm: G4FTFModel::AdjustNucleons on the path
+  //
+  // Below 1 GeV/c per nucleon `GetStrings` skips ReggeonCascade and PutOnMassShell entirely and
+  // calls AdjustNucleons before every collision instead, which rebuilds the two-body kinematics
+  // against the residual nucleus one collision at a time. QBBC reaches it through one door only:
+  // `BuildFTFP_BERT(..., bert=false)` gives FTFP every energy for anti-nucleons, so an
+  // anti-proton at 1 MeV is an FTFP event and nothing else down here is.
+  //
+  // The checks are the ones that need no oracle row and that an error in AdjustNucleons cannot
+  // avoid: baryon number and charge exactly, and the energy balance loosely. The energy is loose
+  // on purpose - Geant4 does not conserve it exactly across this hand-over either, because the
+  // residual carries a table mass and an excitation that are not the sum of what went in - and
+  // the measured bound is 2 MeV of bias on a 12 GeV total for the worst case. A gross error
+  // moves it by GeV.
+  // -------------------------------------------------------------------------------------------
+  {
+    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+    WS* ws = new WS();
+    static physics::hadronic::HadFinalState<double, 128> out2;
+    const int beams[] = {-2212, -2112};
+    struct T { int a, z; };
+    const T targets[] = {{1, 1}, {12, 6}, {16, 8}, {27, 13}, {56, 26}, {207, 82}};
+    const double kins[] = {1.0, 10.0, 50.0, 100.0, 200.0, 400.0};
+    const int n_events = quick ? 100 : 500;
+    long long points = 0, ran = 0, refused = 0, bad_b = 0, bad_q = 0, silent = 0;
+    long long n_adjust_refused = 0;
+    double worst_de = 0.0;
+    std::string worst_where;
+    for (int pdg : beams) {
+      const data::FtfHadron* d = data::ftf_find_hadron(pdg);
+      for (const T& t : targets) {
+        for (double kin : kins) {
+          ++points;
+          physics::hadronic::HadProjectile<double> hp;
+          hp.pdg = pdg;
+          hp.mass = d->mass;
+          hp.charge = d->charge;
+          hp.baryon_number = d->baryon;
+          hp.kin_energy = kin;
+          physics::hadronic::HadNucleus nuc;
+          nuc.a = t.a;
+          nuc.z = t.z;
+          double sum_de = 0.0;
+          long long n_here = 0;
+          for (int ev = 0; ev < n_events; ++ev) {
+            out2 = physics::hadronic::HadFinalState<double, 128>();
+            Philox<double> rng(static_cast<uint32_t>(ev), 71u);
+            ftf::apply_yourself(hp, nuc, out2, ws, lund, rng);
+            if (ws->report.refused == ftf::FtfRefusal::kAdjustNucleons ||
+                ws->report.model.refused == ftf::FtfRefusal::kAdjustNucleons) {
+              ++n_adjust_refused;
+            }
+            if (out2.n_secondaries == 0 && !ws->report.any()) {
+              ++silent;
+              continue;
+            }
+            if (out2.n_secondaries == 0 || ws->report.any()) {
+              ++refused;
+              continue;
+            }
+            ++ran;
+            ++n_here;
+            int bsum = 0, qsum = 0;
+            double e_out = 0.0;
+            for (int k = 0; k < out2.n_secondaries; ++k) {
+              const auto& s = out2.secondaries[k];
+              e_out += s.kin_energy + s.mass;
+              if (s.a > 0) {
+                bsum += s.a;
+                qsum += s.z;
+              } else {
+                const data::FtfHadron* h = data::ftf_find_hadron(s.pdg);
+                if (h != nullptr) {
+                  bsum += h->baryon;
+                  qsum += static_cast<int>(h->charge);
+                } else if (s.pdg == 1000010020) {
+                  bsum += 2;
+                  qsum += 1;
+                }
+              }
+            }
+            if (bsum != d->baryon + t.a) { ++bad_b; }
+            if (qsum != static_cast<int>(d->charge) + t.z) { ++bad_q; }
+            sum_de += e_out - (kin + d->mass + deex::nuclear_mass(t.a, t.z));
+          }
+          if (n_here > 0) {
+            const double mde = sum_de / static_cast<double>(n_here);
+            if (std::fabs(mde) > std::fabs(worst_de)) {
+              worst_de = mde;
+              worst_where = std::to_string(pdg) + " on A=" + std::to_string(t.a) + " at " +
+                            std::to_string(static_cast<int>(kin)) + " MeV";
+            }
+          }
+        }
+      }
+    }
+    std::printf("\nsub-GeV arm: %lld (beam, target, energy) points x %d events - %lld ran, "
+                "%lld refused by name, %lld silent\n", points, n_events, ran, refused, silent);
+    std::printf("    %lld events refused at AdjustNucleons, baryon number wrong in %lld, "
+                "charge in %lld\n", n_adjust_refused, bad_b, bad_q);
+    std::printf("    worst mean energy imbalance %.3f MeV at %s\n", worst_de,
+                worst_where.c_str());
+    if (ran == 0) {
+      std::printf("FAIL: the sub-GeV arm produced no final state at any of the %lld points\n",
+                  points);
+      ++fails;
+    }
+    if (bad_b != 0 || bad_q != 0 || silent != 0 || n_adjust_refused != 0) {
+      std::printf("FAIL: sub-GeV arm - %lld baryon, %lld charge, %lld silent, %lld refused at "
+                  "AdjustNucleons\n", bad_b, bad_q, silent, n_adjust_refused);
+      ++fails;
+    }
+    if (std::fabs(worst_de) > 10.0) {
+      std::printf("FAIL: sub-GeV arm energy imbalance %.3f MeV at %s exceeds 10 MeV\n",
+                  worst_de, worst_where.c_str());
+      ++fails;
+    }
+    delete ws;
+  }
   // -------------------------------------------------------------------------------------------
   // Report
   // -------------------------------------------------------------------------------------------
