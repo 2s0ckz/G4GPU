@@ -67,6 +67,13 @@
 //   bic_imr_species      the isospin, spin, mass, width and IsShortLived flag of every species
 //                        those families put in or out, from Geant4's own definitions - which is
 //                        what makes the port's isospin list a checked table and not a copy.
+//   bic_imr_nnbuffer     the 32 nodes of every resonance component's cross-section buffer, and
+//                        the grid they sit on. Separate from the interpolated value because the
+//                        interpolation amplifies a grid error by (y2-y1)/(x2-x1), which for the
+//                        N-Delta channel above threshold is 0.18 mb per MeV.
+//   bic_imr_nnpartial    G4CollisionNN's eight partial cross sections, the ones FinalState
+//                        selects on, with the input four-momenta so nothing has to be rebuilt.
+//   bic_imr_nnselect     which component one prescribed uniform lands in, 8 phases per energy.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -83,6 +90,7 @@
 #include <vector>
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
+#include "physics/hadronic/bic/im_r/channels.cuh"
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
@@ -972,6 +980,150 @@ int main() {
         continue;
       }
       cmp_scaled(b_resx, got / imr::millibarn(), dv(r, 8), 1e-9, where);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3h. The eight partial cross sections G4CollisionComposite::FinalState selects on, and the
+  //     selection. 306 concrete channels, nine middle-layer buffers twice over, and the 0.01 mb
+  //     floor applied once per buffer.
+  // -------------------------------------------------------------------------------------------
+  const int b_chancount = new_bucket("ConcreteChannelEnumeration", 0.0);
+  const int b_partial = new_bucket("NNPartialCrossSections", 1e-14);
+  const int b_select = new_bucket("NNChannelSelection", 0.0);
+  {
+    static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
+    const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
+    cmp_int(b_chancount, n_chan, imr::kConcreteChannelCount, "306 concrete channels");
+    // Charge and baryon number balance on every one of them - the check
+    // G4CollisionComposite::Resolve does at construction time and prints to G4cerr.
+    imr::ResonanceTableRefusal cref;
+    for (int i = 0; i < n_chan; ++i) {
+      const imr::ConcreteChannel& c = chans[i];
+      auto charge = [](int pdg) -> int {
+        // The charge of a nucleon or a non-strange baryon resonance, from its PDG code: the
+        // three quark digits, with u = +2/3 and d = -1/3, times three.
+        int q = (pdg < 0) ? -pdg : pdg;
+        q /= 10;
+        const int d3 = q % 10, d2 = (q / 10) % 10, d1 = (q / 100) % 10;
+        auto qc = [](int d) { return (d == 2) ? 2 : -1; };
+        return (qc(d1) + qc(d2) + qc(d3)) / 3;
+      };
+      cmp_int(b_chancount, charge(c.in1) + charge(c.in2), charge(c.out1) + charge(c.out2),
+              "channel " + std::to_string(i) + " charge balance");
+      // Every entrance is a nucleon pair and every exit two baryons.
+      cmp_int(b_chancount,
+              ((c.in1 == 2212 || c.in1 == 2112) && (c.in2 == 2212 || c.in2 == 2112)) ? 1 : 0, 1,
+              "channel " + std::to_string(i) + " entrance is two nucleons");
+      imr::resonance_iso(c.out1, cref);
+      imr::resonance_iso(c.out2, cref);
+    }
+    if (cref.no_cross_section) {
+      std::printf("REFUSED isospin for an outgoing species in the channel list\n");
+      ++fails;
+    }
+
+    // The buffer's own 32 nodes, before anything interpolates between them. The grid is checked
+    // separately from the values because the interpolation amplifies an error in the grid by
+    // `(y2-y1)/(x2-x1)`, which for the N-Delta channel just above threshold is 0.18 per MeV - so
+    // one ulp of a 2.1 GeV node comes out as 4e-14 of the answer, and a test that compared only
+    // the interpolated value could not tell that from a wrong cross section.
+    const int b_grid = new_bucket("NNBufferGrid", 1e-15);
+    const int b_node = new_bucket("NNBufferNodes", 1e-14);
+
+    // The partials, per pair, with the buffers built once as Geant4 builds them once.
+    static imr::NNChannelBuffers buffers[4];
+    const auto rows = read_csv("bic_imr_nnpartial.csv");
+    std::map<std::string, int> pair_index;
+    pair_index["pp"] = 0; pair_index["nn"] = 1; pair_index["np"] = 2; pair_index["pn"] = 3;
+    for (int k = 0; k < 4; ++k) {
+      int pdg1 = 0, pdg2 = 0;
+      double m1 = 0.0, m2 = 0.0;
+      if (k == 0) { pdg1 = pdg2 = 2212; m1 = m2 = mp; }
+      else if (k == 1) { pdg1 = pdg2 = 2112; m1 = m2 = mn; }
+      else if (k == 2) { pdg1 = 2112; pdg2 = 2212; m1 = mn; m2 = mp; }
+      else { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; }
+      imr::ResonanceTableRefusal bref;
+      imr::build_nn_channel_buffers(chans, n_chan, pdg1, pdg2, m1, m2, buffers[k], bref);
+      if (bref.no_column || bref.no_cross_section) {
+        std::printf("REFUSED while building the buffers for pair %d\n", k);
+        ++fails;
+      }
+    }
+    {
+      const auto brows = read_csv("bic_imr_nnbuffer.csv");
+      for (const auto& r : brows) {
+        const auto it = pair_index.find(sv(r, 0));
+        if (it == pair_index.end()) { continue; }
+        const int k = it->second;
+        const int point = iv(r, 1);
+        const int comp = iv(r, 4);
+        const std::string where = sv(r, 0) + " node " + sv(r, 1) + " comp " + sv(r, 4);
+        cmp_scaled(b_grid, buffers[k].grid[point], dv(r, 3), 1.0, where + " grid");
+        if (comp >= imr::kNNToNDelta) {
+          // The oracle's value at a node is what `comps[i]->CrossSection` returns there, which
+          // for these six is the BUFFERED value - so it carries the 0.01 mb floor and, at the
+          // LAST node, the fall-through that makes the buffer return zero above its own grid.
+          // Comparing the raw node sum against it would be comparing two different things: the
+          // first version of this block did, and reported 2.0e9 at node 31 where Geant4 returns
+          // exactly zero and the sum is 2.018 mb.
+          const double got = imr::buffered_cross_section(
+              buffers[k].grid, buffers[k].top[comp], imr::kBufferPoints, buffers[k].grid[point]);
+          cmp_scaled(b_node, got / imr::millibarn(), dv(r, 5), 1e-9, where + " node");
+        }
+      }
+    }
+    for (const auto& r : rows) {
+      const std::string pair = sv(r, 0);
+      const auto it = pair_index.find(pair);
+      if (it == pair_index.end()) { continue; }
+      const int k = it->second;
+      int pdg1 = 0, pdg2 = 0;
+      double m1 = 0.0, m2 = 0.0;
+      if (k == 0) { pdg1 = pdg2 = 2212; m1 = m2 = mp; }
+      else if (k == 1) { pdg1 = pdg2 = 2112; m1 = m2 = mn; }
+      else if (k == 2) { pdg1 = 2112; pdg2 = 2212; m1 = mn; m2 = mp; }
+      else { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; }
+      const double sqrt_s = dv(r, 1);
+      const int comp = iv(r, 5);
+      // The pair comes from the oracle, not from inverting sqrt(s): see the note in
+      // ref/dump/dump_bic.cc. The buffer's slope for the N-Delta channel just above threshold is
+      // 0.18 mb per MeV, so an ulp of reconstruction is 4e-14 of the answer - which is exactly
+      // what the first version of this block reported.
+      const imr::LorentzVector p1v(deex::Vec3d{0.0, 0.0, dv(r, 2)}, dv(r, 3));
+      const imr::LorentzVector p2v(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 4));
+      double partial[imr::kNNChannelCount];
+      imr::XsecRefusal xref;
+      imr::nn_partial_cross_sections(pdg1, pdg2, p1v, p2v, m1, m2, buffers[k], partial, xref);
+      cmp_scaled(b_partial, partial[comp] / imr::millibarn(), dv(r, 6), 1e-9,
+                 pair + " comp " + std::to_string(comp) + " sqrt(s)=" + std::to_string(sqrt_s));
+    }
+    {
+      const auto srows = read_csv("bic_imr_nnselect.csv");
+      for (const auto& r : srows) {
+        const std::string pair = sv(r, 0);
+        const auto it = pair_index.find(pair);
+        if (it == pair_index.end()) { continue; }
+        const int k = it->second;
+        int pdg1 = 0, pdg2 = 0;
+        double m1 = 0.0, m2 = 0.0;
+        if (k == 0) { pdg1 = pdg2 = 2212; m1 = m2 = mp; }
+        else if (k == 1) { pdg1 = pdg2 = 2112; m1 = m2 = mn; }
+        else if (k == 2) { pdg1 = 2112; pdg2 = 2212; m1 = mn; m2 = mp; }
+        else { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; }
+        const double sqrt_s = dv(r, 1);
+        const imr::LorentzVector p1v(deex::Vec3d{0.0, 0.0, dv(r, 2)}, dv(r, 3));
+        const imr::LorentzVector p2v(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 4));
+        double partial[imr::kNNChannelCount];
+        imr::XsecRefusal xref;
+        imr::nn_partial_cross_sections(pdg1, pdg2, p1v, p2v, m1, m2, buffers[k], partial, xref);
+        CycleRng rng;
+        rng.reset(iv(r, 5));
+        const int got = imr::nn_select_channel(partial, rng);
+        cmp_int(b_select, got, iv(r, 6),
+                pair + " sqrt(s)=" + std::to_string(sqrt_s) + " phase=" + sv(r, 5));
+        cmp_int(b_select, rng.n, iv(r, 7), pair + " draws");
+      }
     }
   }
 

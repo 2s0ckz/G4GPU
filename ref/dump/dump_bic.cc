@@ -66,6 +66,13 @@
 #include "G4CollisionMesonBaryonElastic.hh"
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
+#include "G4CollisionNNToDeltaDelta.hh"
+#include "G4CollisionNNToDeltaDeltastar.hh"
+#include "G4CollisionNNToDeltaNstar.hh"
+#include "G4CollisionNNToNDelta.hh"
+#include "G4CollisionNNToNDeltastar.hh"
+#include "G4CollisionNNToNNstar.hh"
+#include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
 #include "G4Clebsch.hh"
 #include "G4ConcreteNNToDeltaDelta.hh"
@@ -1727,6 +1734,130 @@ void write_imr_resonance_xsec() {
   std::fclose(g);
 }
 
+/// The eight partial cross sections `G4CollisionComposite::FinalState` selects on, straight out
+/// of `G4CollisionNN`'s own components, and the selection itself.
+///
+/// `G4CollisionNN::GetComponents()` returns a null pointer (see collision_nn.cuh), so the
+/// components cannot be reached through the composite - they are rebuilt here in the same order
+/// its `GROUP8` registers them, which is also the order `FinalState` accumulates in. The two
+/// elastic ones answer directly and the six resonance ones from their 32-point buffers, so what
+/// is compared is the whole nesting: 306 concrete channels, nine middle-layer buffers twice over,
+/// and the 0.01 mb floor applied once per buffer.
+void write_imr_nnchannels() {
+  FILE* f = std::fopen("bic_imr_nnpartial.csv", "w");
+  // The input four-momenta, not just sqrt(s). Particle 1 is along +z and particle 2 at rest, so
+  // three numbers are enough - and they are needed, because rebuilding the pair by inverting
+  // `s = m1^2 + m2^2 + 2 m2 E1` lands an ulp or two away, and the buffer's interpolation slope
+  // for the N-Delta channel just above threshold is 0.18 mb per MeV, which turns that ulp into
+  // 4e-14 of the answer. The same mistake in the same shape as the first bic_imr_collision dump.
+  std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_nnselect.csv", "w");
+  std::fprintf(g, "pair,sqrt_s_MeV,in1z,in1e,in2e,phase,selected,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {{"pp", p, p}, {"nn", n, n}, {"np", n, p}, {"pn", p, n}};
+
+  // The eight components, rebuilt in G4CollisionNN's GROUP8 order.
+  std::vector<G4VCollision*> comps;
+  comps.push_back(new G4CollisionnpElastic());
+  comps.push_back(new G4CollisionNNElastic());
+  comps.push_back(new G4CollisionNNToNDelta());
+  comps.push_back(new G4CollisionNNToDeltaDelta());
+  comps.push_back(new G4CollisionNNToNDeltastar());
+  comps.push_back(new G4CollisionNNToDeltaDeltastar());
+  comps.push_back(new G4CollisionNNToNNstar());
+  comps.push_back(new G4CollisionNNToDeltaNstar());
+
+  // The buffer's own 32-point grid, rebuilt exactly as G4CollisionComposite::BufferCrossSection
+  // builds it - the kinetic energy on the lighter of the two definitions - together with each
+  // component's cross section AT those tracks. `theBuffer` is private and there is no accessor,
+  // so this is the only way to see the nodes; and the nodes are what the interpolation between
+  // them amplifies, so a disagreement in the interpolated value has to be separable from a
+  // disagreement in the grid.
+  FILE* h = std::fopen("bic_imr_nnbuffer.csv", "w");
+  std::fprintf(h, "pair,point,T_GeV,sqrt_s_MeV,component,sigma_mb\n");
+  {
+    const G4double kT32[32] = {.01, .03, .05, .1,  .15, .2,  .3,  .4,  .5,  .6, .7,
+                               .8,  .9,  1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 3.0,
+                               3.5, 4.0, 5.0, 6.0, 8.0, 10., 15,  20,  50,  100};
+    for (const Pair& pr : pairs) {
+      for (int tt = 0; tt < 32; ++tt) {
+        const G4double aT = kT32[tt] * CLHEP::GeV;
+        const G4double aM = pr.a->GetPDGMass();
+        const G4double bM = pr.b->GetPDGMass();
+        G4double aE = aM;
+        G4double bE = bM;
+        G4ThreeVector aMom(0, 0, 0);
+        G4ThreeVector bMom(0, 0, 0);
+        if (aM <= bM) {
+          aE += aT;
+          aMom = G4ThreeVector(0, 0, std::sqrt(aE * aE - aM * aM));
+        } else {
+          bE += aT;
+          bMom = G4ThreeVector(0, 0, std::sqrt(bE * bE - bM * bM));
+        }
+        const G4LorentzVector a4(aE, aMom);
+        const G4LorentzVector b4(bE, bMom);
+        G4KineticTrack a(pr.a, 0.0, G4ThreeVector(0, 0, 0), const_cast<G4LorentzVector&>(a4));
+        G4KineticTrack b(pr.b, 0.0, G4ThreeVector(0, 0, 0), const_cast<G4LorentzVector&>(b4));
+        const G4double sqrts = (a4 + b4).mag();
+        for (int i = 0; i < 8; ++i) {
+          const double x = comps[i]->IsInCharge(a, b) ? comps[i]->CrossSection(a, b) : 0.0;
+          std::fprintf(h, "%s,%d,%.17g,%.17g,%d,%.17g\n", pr.name, tt, kT32[tt], sqrts, i,
+                       x / millibarn);
+        }
+      }
+    }
+  }
+  std::fclose(h);
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const Pair& pr : pairs) {
+    for (double want = 1880.0; want <= 6000.0; want += 20.0) {
+      G4LorentzVector q1, q2;
+      imr_make_pair(pr.a, pr.b, want, q1, q2);
+      G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      double partial[8];
+      for (int i = 0; i < 8; ++i) {
+        partial[i] = comps[i]->IsInCharge(t1, t2) ? comps[i]->CrossSection(t1, t2) : 0.0;
+        std::fprintf(f, "%s,%.17g,%.17g,%.17g,%.17g,%d,%.17g\n", pr.name, s, q1.z(), q1.t(),
+                     q2.t(), i, partial[i] / millibarn);
+      }
+      // The selection, under the prescribed cycle. One uniform, the running sum, and the index
+      // of the component it lands in - which is what decides whether a collision is elastic or
+      // makes a resonance.
+      CLHEP::HepRandom::setTheEngine(eng);
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        double sum = 0.0;
+        for (int i = 0; i < 8; ++i) { sum += partial[i]; }
+        const double random = G4UniformRand() * sum;
+        double running = 0.0;
+        int selected = -1;
+        for (int i = 0; i < 8; ++i) {
+          running += partial[i];
+          if (running > random) { selected = i; break; }
+        }
+        std::fprintf(g, "%s,%.17g,%.17g,%.17g,%.17g,%d,%d,%d\n", pr.name, s, q1.z(), q1.t(),
+                     q2.t(), phase, selected, eng->draws());
+      }
+      CLHEP::HepRandom::setTheEngine(saved);
+    }
+  }
+  for (auto* c : comps) { delete c; }
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1745,6 +1876,7 @@ void dump_bic(const DumpContext&) {
   write_imr_clebsch();
   write_imr_meson();
   write_imr_resonance_xsec();
+  write_imr_nnchannels();
 }
 
 }  // namespace
@@ -1759,5 +1891,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_scatterer.csv bic_imr_manager.csv "
                     "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv "
                     "bic_imr_meson.csv bic_imr_meson_fs.csv "
-                    "bic_imr_resxsec.csv bic_imr_species.csv",
+                    "bic_imr_resxsec.csv bic_imr_species.csv "
+                    "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv",
                     dump_bic);

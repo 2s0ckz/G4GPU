@@ -8555,3 +8555,58 @@ checked bitwise against Geant4, because they are one `AddComponent` away from be
 because a reader who found them missing would have to re-derive why. What is NOT kept is
 `GenerateIso3`'s sampling branch, which is refused for its own reasons in V106 - and this entry is
 the second, independent reason nothing needs it.
+
+### V109: the collision tree's channel totals come from a 32-point cache, and the nesting changes them
+
+`G4CollisionNN`'s eight components decide which channel a nucleon-nucleon collision takes:
+`G4CollisionComposite::FinalState` evaluates all eight partial cross sections, throws one uniform
+against their sum, and hands the collision to the first component the running sum passes. Two of
+the eight - the elastic ones - answer directly. The other six do not.
+
+**None of the six resonance composites has a cross-section source**, so
+`G4CollisionComposite::CrossSection` takes its other branch and answers from a BUFFER: the sum of
+its components evaluated once on the fixed 32-point kinetic-energy grid
+`G4CollisionComposite::theT`, cached against the pair of particle definitions, and linearly
+interpolated forever after. So a resonance-production cross section in the binary cascade is never
+evaluated at the collision's own energy. It is read off a 32-point piecewise-linear cache built
+from 0.01 GeV to 100 GeV.
+
+**And two of the six have a middle layer, which is not a detail.** `G4CollisionNNToNDeltastar` and
+`G4CollisionNNToDeltaDeltastar` each hold nine `G4CollisionNNToNDelta1600`-style children, one per
+Delta* multiplet, and each child is itself a bufferless composite - so those two totals are a
+buffer of a sum of buffers. That matters because `G4CrossSectionBuffer::CrossSection` ends with
+
+    if(y1<0.01*CLHEP::millibarn) result = 0;
+
+a floor on the LEFT NODE, applied once per buffer. A Delta* multiplet whose own buffered node is
+below 0.01 mb contributes exactly zero to its parent, where the same channels summed in one
+buffer would have contributed their sum. MEASURED: flattening the middle layer - summing the
+children's raw nodes instead of their buffered values - changes the N Delta* and Delta Delta*
+partials by up to 5.4e+07 relative and moves the selected channel at 2.9 GeV. Removing the floor
+alone changes them by 6.7e+08.
+
+Three more things in `G4CrossSectionBuffer::CrossSection` that are not interpolation, all
+reproduced and all measured:
+
+  * **Above the whole grid the cross section is ZERO**, not the last node. The search breaks on
+    the first node past `sqrts`; with none, `x1, y1, x2, y2` stay at their declaration values
+    `(1, 0, 2, 0)` and the result is `0 + (sqrts-1)*0/1`. At the last node itself - where `>` is
+    false for every entry - the same thing happens, so a collision at exactly the top grid point
+    has no resonance cross section at all. Clamping to the last node instead changes the node
+    values by 2.0e+09 relative.
+  * **Below the grid it extrapolates BACKWARDS** along the line through nodes 0 and 1.
+  * **The kinetic energy goes on the LIGHTER particle**, in either track order - Geant4's own
+    comment says why ("A.R. 28-Sep-2012 Fix reproducibility problem"). For an np pair that is the
+    proton. Putting it on the first track instead moves the grid by 6.8e-4 and the partials by
+    4.8e-2.
+
+The port builds the same three grids (pp, nn, np) and the same nesting, into a caller-owned
+`NNChannelBuffers` - 6.9 kB, which is cascade state and does not belong in a frame.
+
+**One composite is not built by the template its five siblings use.**
+`G4CollisionNNToDeltaDelta`'s constructor lists an explicit `GROUP6` of Delta(1232) x Delta(1232)
+pairs - a different set, and a different order, from `MakeNNToDeltaDelta`'s `GROUP10`. Building it
+from the template gives 310 concrete channels instead of 306 and moves the selected channel. The
+port lists the six out, and `tests/test_bic_imr.cu` asserts the total is exactly 306 and that
+every one of them balances charge - the check `G4CollisionComposite::Resolve` does at construction
+time and prints to `G4cerr`.
