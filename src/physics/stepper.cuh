@@ -741,18 +741,74 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
                                                                 : ProcessId::fIonisation;
     }
 
-    real_t e_after = s.range_table->energy_from_range(mat, is_positron, range - step_len);
-    // Second guard: the step must strictly reduce the energy. If the inverse range lookup
-    // returns no decrease (rounding at small residual range), drop straight to zero rather
-    // than requeueing a track that will make no progress next iteration either.
-    if (e_after >= p.ekin) { e_after = real_t(0); }
+    // The energy the MSC model scatters at, and it is a TABLE LOOKUP and not `e_before - loss`.
+    //
+    // `G4UrbanMscModel::SampleScattering` (standard/src/G4UrbanMscModel.cc:786-792) opens with
+    //
+    //     G4double kinEnergy = currentKinEnergy;
+    //     if (tPathLength > currentRange*dtrl) {
+    //       kinEnergy = GetEnergy(particle,currentRange-tPathLength,couple);
+    //     } else if(tPathLength > currentRange*0.01) {
+    //       kinEnergy -= tPathLength*GetDEDX(particle,currentKinEnergy,couple,...);
+    //     }
+    //
+    // - the inverse range table, read fresh. It has to be: `G4PhysicsListHelper` gives msc an
+    // AlongStep order of 1 and ionisation 2, so `G4VMultipleScattering::AlongStepDoIt` runs
+    // BEFORE `G4VEnergyLossProcess::AlongStepDoIt` and there is no `eloss` in existence yet for
+    // it to read. Keeping it a lookup is also what makes the restructuring below a change to
+    // the ENERGY LOSS and to nothing about the scattering: `em::urban_scatter_energy` is handed
+    // exactly the number it was handed before, so every uniform this function draws is unmoved.
+    const real_t e_after_mean =
+        s.range_table->energy_from_range(mat, is_positron, range - step_len);
+
+    // ---- THE CONTINUOUS LOSS, `G4VEnergyLossProcess::AlongStepDoIt`
+    //      (utils/src/G4VEnergyLossProcess.cc:811-835), AND IT USED TO BE AN INVERSION ALONE.
+    //
+    // What stood here was `loss = p.ekin - energy_from_range(range - step_len)` with a guard
+    // underneath it - "the step must strictly reduce the energy" - that took the WHOLE kinetic
+    // energy whenever the inversion came back unchanged. Geant4 does not compute the loss that
+    // way and never did:
+    //
+    //     if (length >= fRange || preStepKinEnergy <= lowestKinEnergy) {   // :812  "stopping"
+    //       eloss = preStepKinEnergy; ... SetProposedKineticEnergy(0.0); return;
+    //     }
+    //     eloss = length*GetDEDXForScaledEnergy(preStepScaledEnergy, ...); // :825  "Short step"
+    //     if(eloss > preStepKinEnergy*linLossLimit) {                      // :830  "Long step"
+    //       G4double x = (fRange - length)/reduceFactor;
+    //       eloss = preStepKinEnergy - ScaledKinEnergyForLoss(x)/massRatio;
+    //     }
+    //
+    // The linear form FIRST, and the range inversion only when the linear answer is more than
+    // `linLossLimit` of the energy. `G4EmParameters::LinearLossLimit` is 0.01 and `G4eIonisation`
+    // does not override it (`G4ionIonisation` sets 0.02, which is why `step_hadron` carries a
+    // per-species constant and this does not). For an e+- `massRatio` and `chargeSqRatio` are 1
+    // and so is `reduceFactor` (G4VEnergyLossProcess.cc:198), so `x` is `fRange - length` and the
+    // long branch is exactly the expression this port always used. `lowestKinEnergy` for e+- is
+    // `G4EmParameters::LowestElectronEnergy()` = 1 keV, which is `em::kElectronTrackingCut`.
+    //
+    // WHAT THE INVERSION-ONLY FORM DID, AND IT IS docs/RISK.md V84. `G4_Galactic` is hydrogen at
+    // 1e-25 g/cm3, so a 20 MeV electron's range in it is 6.61e26 mm and `range - step_len` for a
+    // 1 mm step IS `range` in double - the subtraction is below the last bit. The inversion then
+    // returned the pre-step energy, the guard fired, and the entire kinetic energy was taken as
+    // the loss of a 1 mm vacuum step. Every lepton fired through the depth-dose harness's world
+    // died before reaching the phantom: a 20 MeV electron deposited 0.0000% of a 4 m water
+    // phantom and a positron 1.03%, which was its two annihilation photons and nothing else. The
+    // linear form gives `1e-26 MeV/mm * 1 mm` there, which is the right answer; no epsilon on the
+    // inversion could, because the information is not in the difference of two equal doubles.
+    // It is also the more accurate of the two for the short steps a boundary produces, for the
+    // same reason: it does not difference two large nearly-equal ranges.
     const real_t e_before = p.ekin;
-    real_t loss = p.ekin - e_after;
-    // The mean, kept because multiple scattering must not see the fluctuated value. Geant4
-    // samples scattering in G4VMultipleScattering::AlongStepDoIt, which runs before the
-    // ionisation process's AlongStepDoIt and derives its post-step energy from the range
-    // table - the mean - not from whatever the fluctuation later drew.
-    const real_t e_after_mean = e_after;
+    real_t loss;
+    if (step_len >= range || e_before <= em::kElectronTrackingCut<real_t>()) {
+      loss = e_before;
+    } else {
+      loss = step_len * s.range_table->dedx_at(mat, is_positron, e_before);
+      if (loss > e_before * em::kLinearLossLimit<real_t>()) {
+        loss = e_before - s.range_table->energy_from_range(mat, is_positron, range - step_len);
+      }
+      loss = fmin(fmax(loss, real_t(0)), e_before);
+    }
+    real_t e_after = e_before - loss;
 
     // ---- energy-loss fluctuations, G4UniversalFluctuation.
     //
@@ -774,6 +830,27 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
                                     real_t(1), rng);
       loss = fmin(fmax(loss, real_t(0)), e_before);
       e_after = e_before - loss;
+    }
+
+    // `G4VEnergyLossProcess::AlongStepDoIt`'s own energy balance, G4VEnergyLossProcess.cc:913-919:
+    //
+    //     G4double finalT = preStepKinEnergy - eloss - esec;
+    //     if (finalT <= lowestKinEnergy) { eloss += finalT; finalT = 0.0; }
+    //
+    // `esec` is zero here - it collects atomic de-excitation, which option0 has off, and the
+    // sub-cutoff secondary producer, which is null unless a region asks for one - so this is
+    // `loss = e_before` and `e_after = 0`, written out.
+    //
+    // THIS IS ALSO THE REPLACEMENT FOR THE GUARD THE OLD INVERSION NEEDED, and it is the reason
+    // the guard could go rather than merely being moved. What the guard was protecting against
+    // is a step that makes no progress and requeues a track for ever - in FP32 that stalled
+    // every batch until it was added. The linear branch above cannot produce one, because
+    // `step_len * dedx` is strictly positive wherever there is any stopping power at all; the
+    // long branch is only entered when the loss is already over 1% of the energy; and this line
+    // is Geant4's own answer for the end of a range, at the same 1 keV the tracking cut uses.
+    if (e_after <= em::kElectronTrackingCut<real_t>()) {
+      loss = e_before;
+      e_after = real_t(0);
     }
 
     // The collision and restricted-radiative halves of the continuous stopping power. Urban's

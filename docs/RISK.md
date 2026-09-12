@@ -7965,3 +7965,180 @@ not on the lepton path at all: the sweep's photon rows carry -0.27% at 100 MeV a
 6 MeV on their own, and most of a 1 GeV electron's dose in that trapezoid arrives as a shower
 photon. Both are directions to look, not attributions, and the way to settle either is the way
 this entry settled V62.
+
+---
+
+### V96: the loss was an inversion where Geant4 has a line, and it annihilated every lepton in a vacuum
+
+V84's defect, closed. `step_lepton`'s continuous loss is
+`G4VEnergyLossProcess::AlongStepDoIt`'s shape now (utils/src/G4VEnergyLossProcess.cc:811-835):
+
+```
+  if (length >= fRange || preStepKinEnergy <= lowestKinEnergy) {          // :812  "stopping"
+    eloss = preStepKinEnergy; ... SetProposedKineticEnergy(0.0); return;
+  }
+  eloss = length*GetDEDXForScaledEnergy(preStepScaledEnergy, ...);        // :825  "Short step"
+  if(eloss > preStepKinEnergy*linLossLimit) {                             // :830  "Long step"
+    G4double x = (fRange - length)/reduceFactor;
+    eloss = preStepKinEnergy - ScaledKinEnergyForLoss(x)/massRatio;
+  }
+```
+
+then, after the fluctuation, `finalT = preStepKinEnergy - eloss; if (finalT <= lowestKinEnergy)
+{ eloss += finalT; finalT = 0.0; }` at :913-917. What stood there was the long branch alone,
+with a guard beneath it that took the WHOLE kinetic energy whenever the inversion came back
+unchanged. For an e+- `massRatio` and `chargeSqRatio` are 1 and so is `reduceFactor` (:198), so
+the long branch is exactly the expression the port already had; what was missing was the linear
+one in front of it and `linLossLimit` = 0.01 deciding between them. `em::kLinearLossLimit` is a
+lepton constant and not a global, because `G4ionIonisation` sets 0.02 - which is why
+`step_hadron` computes its own.
+
+#### The hadron branch did not have this defect and the proton proves it
+
+`step_hadron` has had the linear-first structure since it was written, with the per-species
+`kLinLossLimit` P8c added, and it has no "strictly reduce the energy" guard at all. The comment
+above it says why in the first person: "That is exactly what the first run of this stepper did:
+2000 protons, 100 MeV each, zero deposited." So the fix that went into the hadron stepper on
+day one never reached the lepton one, and no harness fired a lepton through a vacuum until P14c
+gave `ref/proton/proton_depth.cc` a particle name. Measured through the same `G4_Galactic` world
+that kills the electron, before and after this change: **100 MeV proton 100.0000% both times**,
+and the 6,000-event depth-dose gate identical in every printed column (plateau 1.00158, R80
++0.012 mm, 80-20 width +0.014 mm).
+
+What `step_hadron` does NOT have is AlongStepDoIt's :914 balance - it lets a track fall below
+`kHadronTrackingCut` and catches it on the NEXT step's entry guard rather than zeroing it here.
+That is a real difference from Geant4 and it is left alone by name: it moves the proton gate, so
+it is a package with its own before-and-after and not a side effect of this one.
+
+#### What the vacuum did, and the two faces of one defect
+
+`G4_Galactic` is hydrogen at 1e-25 g/cm3. A 20 MeV electron's range in it is **9.42e26 mm**, so
+`range - step_len` for any step a geometry can produce IS `range` in double - the subtraction is
+below the last bit - and `energy_from_range` then returns the pre-step energy to within the
+inverse-range spline's own round-trip error. Which side of that error a run lands on decides
+which face of the defect it gets, and both are wrong:
+
+* **round-trip just OVER the pre-step energy**: the guard fires, the whole kinetic energy is
+  taken as the loss of a step through a vacuum, and the track dies in a volume nothing scores.
+  This is what the depth-dose harness's `G4_Galactic` does.
+* **round-trip just UNDER**: the track survives, poorer by the round-trip error.
+  `tests/test_lepton_transport.cu`'s hand-built vacuum does this, and it is worth **3.58e-10** of
+  a 20 MeV track where the right answer is **4.14e-24** - fourteen orders of magnitude, arriving
+  as a deposit because a step in a vacuum has nothing else in it.
+
+The linear form gives `1e-26 MeV/mm * length` in both cases, which is right; no epsilon on the
+inversion could be, because the information is not in the difference of two doubles that are
+equal. **The second face is why that test's tolerance is 1e-15 and not 1e-9**: 1e-9 was written
+first, it passes the benign face, and it would have passed the code the block exists to fail.
+
+Measured through the harness, before and after, one engine and one source change:
+
+| 20,000 events through the `G4_Galactic` world into a 4 m water phantom | before | after |
+|---|--:|--:|
+| 20 MeV e- | **0.0000%** | **99.2390%** |
+| 20 MeV e+ | 1.9463% | 102.0987% |
+| 1 GeV e- (100,000 events) | **0.0000%** | **97.8498%** |
+| 100 MeV proton | 100.0000% | 100.0000% |
+
+The positron's 102% is not an error: `G4eplusAnnihilation`'s two 511 keV photons are rest mass
+and not beam energy, 1.022 MeV on a 20 MeV track being 5.11%, and its "before" 1.9463% was those
+photons alone, emitted where the positron was killed.
+
+#### The gate is the judge, and it moved by 0.0166%
+
+B1's 6 MeV gamma gate at 2,000,000 events, five seeds, the same tree with one source change:
+
+| seed | before (pGy) | after (pGy) | change | track-steps, before -> after |
+|---|--:|--:|--:|---|
+| default | 425.945 | **425.860** | -0.085 | 25,993,577 -> 26,061,108 |
+| 1 | 426.266 | 426.191 | -0.075 | 25,960,428 -> 26,028,632 |
+| 2 | 426.980 | 426.908 | -0.072 | 25,969,166 -> 26,037,076 |
+| 3 | 427.548 | 427.485 | -0.063 | 25,974,297 -> 26,039,317 |
+| 4 | 427.347 | 427.287 | -0.060 | 25,985,464 -> 26,050,907 |
+| **mean of five** | **426.8172** | **426.7462** | **-0.0710 +/- 0.0045** | |
+
+Against Geant4's 427.385 +/- 0.87 the gate's own seed reads **1.24145 sigma** after and 1.17179
+before. So this IS resolved - every seed moves the same way and the spread of the five changes is
+0.010 pGy, seven times smaller than the shift - and it is 0.0166% of the dose, 0.082 of one
+run's standard error, and it leaves the gate at a quarter of its 3-sigma limit. It is not a
+tolerance that was widened: the number in README and docs/RESULT.md is replaced by this one.
+
+**The direction is the arithmetic and not a surprise.** The two forms differ at second order:
+the inversion is `L*dedx(E) + (L^2/2)*d(dedx)/dx + ...`, and a restricted electron stopping power
+RISES as the track slows, so it returns slightly more than `L*dedx(E_pre)`. Dropping to the
+linear form on every step whose loss is under 1% of the energy therefore takes slightly less per
+step, which is why the track-step count rises 0.26% and the dose falls 0.017%. Geant4 makes
+exactly this approximation, and `linLossLimit` is where it stops making it.
+
+**What does NOT move is the msc arm.** `G4UrbanMscModel::SampleScattering` (G4UrbanMscModel.cc:
+786-792) takes its own post-step energy from `GetEnergy(particle, currentRange-tPathLength,
+couple)` - the inverse range table, read fresh - because `G4VMultipleScattering::AlongStepDoIt`
+runs BEFORE the ionisation process's and has no `eloss` to read. `e_after_mean` is now that
+lookup explicitly rather than a by-product of the loss, so every uniform `step_lepton` draws is
+where it was.
+
+#### The electron depth-dose, which is the curve P14c prepared and could not run
+
+100,000 e- of 1 GeV into 4 m of water, 20 mm slabs, 400 mm half-width, 0.7 mm cut - one source
+file, two builds, as the proton curve is:
+
+| | Geant4 11.1.1 | port | diff |
+|---|--:|--:|--:|
+| contained in the phantom | 97.6448% | 97.8498% | +0.205 pp, **+0.21%** |
+| entrance half, 0-2,390 mm | - | 0.99989 of G4 | **-0.011%** |
+| R80, the distal 80% of the peak | 1,079.258 mm | 1,081.695 mm | **+2.437 mm, +0.23%** |
+| 80%-to-20% distal falloff | 1,152.746 mm | 1,172.994 mm | +20.248 mm, +1.76% |
+| shower maximum, parabolic | 683.6 mm = 1.90 X0 | 652.9 mm = 1.81 X0 | -30.7 mm |
+
+**The shower maximum is the weakest number in that table and it should not be read as the
+strongest.** The curve is flat to 0.4% over +/- 80 mm around it - the Geant4 bins from 610 to
+770 mm run 1.2838e6, 1.2912e6, 1.2949e6, 1.2990e6, 1.2994e6, 1.2973e6, 1.2906e6, 1.2844e6,
+1.2773e6 MeV - so a parabola through three 20 mm bins at 100,000 events is fitting noise, and bin
+for bin through that whole region the two curves agree to between 0.2% and 0.6%. The numbers that
+are well determined are the integral (+0.21%), the entrance half (-0.011%) and R80 (+0.23%), and
+they say the same thing: the port puts the same energy in the same place to about two parts in a
+thousand, and keeps a little more of it, which is consistent with its 1.76%-longer distal tail.
+
+#### One thing the harness needed, and it had never been reached
+
+`ref/proton/proton_depth.cc` left the engine's live-track pool at its default 4.0 per event,
+which is right for a proton and not for anything that showers. With the leptons transporting,
+both the 1 GeV and the 20 MeV electron runs stopped at once with
+
+    FATAL: no track can be stepped without overrunning the pool.
+           19997 tracks are live and the pool holds 20000 slots a side.
+
+A showering beam now gets `max(32, E/10)` per event and a hadron keeps 4.0, so no run that
+existed before is changed. Two things are worth keeping: the engine REFUSES rather than
+truncating a shower, which is how both failures announced themselves in one line; and the reason
+nobody had hit it is the defect this entry closes - every lepton had died in the vacuum before it
+could make a second track.
+
+---
+
+### V97: a positron that leaves the world is annihilated on the way out
+
+Found by V96's new vacuum block in `tests/test_lepton_transport.cu`, and pinned there rather
+than fixed.
+
+`step_lepton`'s dying block is reached by two different tracks - one that fell below its cut and
+one whose `p.volume` became `geom::kOutsideWorld` - and it ends
+
+    if (is_positron) { ... push(kGamma, a.dir1, ...); push(kGamma, a.dir2, ...); }
+
+unconditionally. So a positron that simply LEAVES emits two 511 keV photons it never stopped to
+make, from rest mass that is still on the track. Measured: a 20 MeV positron crossing 4 m of
+`G4_Galactic` escapes with **100.000000%** of its energy and hands **5.109989%** of it to
+secondaries at the same time, which is 1.022/20 exactly.
+
+Geant4 does not do this. `G4eplusAnnihilation`'s at-rest branch is an AtRest process, and a track
+that reaches the world boundary is killed by transportation with `fWorldBoundary`; nothing
+invokes an AtRest DoIt on it.
+
+**It costs no dose anywhere and it is still worth an entry.** The photons are pushed at a
+position outside the world, so the gamma kernel kills them on their first step and nothing scores
+there - which is exactly why it has survived every gate this project has. What it costs is work,
+and what it breaks is a books claim: 1.022 MeV per escaping positron appears in the port that was
+not in the beam. It is not fixed here because it is not this package's change and it would move
+the same gate V96's continuous loss is being judged on; the number is asserted in the test
+instead, so that fixing it has to come through that line.

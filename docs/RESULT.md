@@ -48,19 +48,30 @@ bisecting a multiple-scattering model that was correct. The reference is now 2,0
 from `ref/run/runb1.bat`, and both sides print their own uncertainty. See docs/RISK.md S1.
 
 **Update, 2026-09-11.** The same 2,000,000-event run on main gives 425.847 +/- 0.870 pGy against
-the same reference, 1.25 sigma, and has since before the hadronic port began - build_all.bat
-prints it as its gate on every run. The run quoted above is older than that shift; the README's
-"Where it stands" table carries the current figure and the spread over four more seeds (+1.44,
--0.26, +0.37, +0.32 sigma), which is what a single-sample comparison between two Monte Carlos can
-mean.
+the same reference, 1.25 sigma, and had since before the hadronic port began - build_all.bat
+prints it as its gate on every run. The run quoted at the top of this section is older than that
+shift.
 
 **Still 425.847 after P8e, and that is a measurement rather than an absence of one.** P8e split
 the transport translation unit and turned on the two switches it had been holding shut - the
 ion's `G4UrbanMscModel` and the electron's `extremesmallstep` branch. The gate was re-taken on
 five seeds after each: 425.847 +/- 0.86768 pGy, **1.25195 sigma**, against 1.25138 before, with
-426.195 / 426.917 / 427.487 / 427.288 on the other four. The figure this document and the README
-record survives to every digit they record it to; what moved is the seventh. docs/RISK.md V65 and
-V66.
+426.195 / 426.917 / 427.489 / 427.288 on the other four. docs/RISK.md V65 and V66.
+
+**425.860 since P14d, and this is the number that ships.** Two figures above it are now history
+and are kept because the history is the point. P14c's rebuilt e+- tables moved the gate to
+425.945 without this document being told, which is how it and the README came to disagree with
+what `build_all.bat` printed; P14d then put the continuous loss into
+`G4VEnergyLossProcess::AlongStepDoIt`'s shape - `length*dE/dx` first, the range inversion only
+above `linLossLimit` - and moved it to **425.860 +/- 0.867731 pGy, 1.24145 sigma**. The other
+four seeds are **426.191 / 426.908 / 427.485 / 427.287**, mean of five **426.7462** against
+426.8172 before, so the change is **-0.0710 +/- 0.0045 pGy**: resolved, since every seed moves
+the same way and the spread of the five differences is 0.010 pGy, and worth 0.0166% of the dose
+and 0.082 of one run's standard error. The direction is second-order arithmetic - a restricted
+electron stopping power rises as the track slows, so the inversion it replaces returned slightly
+more than `L*dE/dx(E_pre)` - and the gate sits at a quarter of its 3-sigma limit either way.
+docs/RISK.md V96 has the five-seed table, the depth-dose curves and the vacuum defect this
+closed; V95 has the msc switch that shipped with it and did not move this gate at all.
 
 ## Geometry against Geant4's own G4VSolid
 
@@ -159,6 +170,16 @@ measure that absence rather than the stepper.
 | plateau, 0-60 mm | - | +0.052% | per proton |
 | R80 (distal 80%) | 77.798 mm | 77.783 mm | -0.014 mm, -0.018% |
 | distal 80-20 width | 1.126 mm | 1.130 mm | +0.004 mm, +0.4% |
+
+**That table is a different experiment from the gate `build_all.bat` runs today**, and the
+paragraph above it says which: `G4EmStandardPhysics` and nothing else, taken when the premise
+"this port has no hadronic physics" was true. It is QBBC on both sides since P8c, with only what
+the port lacks inactivated on Geant4's, and the reference CSV was regenerated for it - which
+moved Geant4's own R80 by 0.068 mm. The current numbers are in docs/PORTED.md 2.1.7 and in the
+README's table: G4 77.730, port 77.742, +0.012 mm; plateau +0.158%; width 1.152 against 1.166.
+P14d re-took them before and after putting the lepton's continuous loss into
+`G4VEnergyLossProcess::AlongStepDoIt`'s shape and they are identical in every printed column,
+which is the check that the change reached no hadron (docs/RISK.md V96).
 
 The width is the interesting column. It is range straggling and nothing else, so it is a test of
 `G4UniversalFluctuation` on its own: before that model was transcribed the port's protons all

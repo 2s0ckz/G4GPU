@@ -297,6 +297,36 @@ int main(int argc, char** argv) {
   // The port allocates n_scorers * batch doubles for per-event scores. With 200 scorers the
   // million-event default batch would be 1.6 GB, so the batch is sized to the run.
   rm->SetBatchSize((n_events < 5000) ? n_events : 5000);
+
+  // AND THE LIVE-TRACK POOL IS SIZED TO THE BEAM, because a 1 GeV electron is a SHOWER and a
+  // 100 MeV proton is a track.
+  //
+  // The engine's default is 4.0 live tracks per event, which is right for a proton: its delta
+  // rays are short and few and nothing else branches. An electron at the same energy makes
+  // roughly E/E_c secondaries on the way down - E_c is about 78 MeV in water - and each of those
+  // photons pair-produces two more, so a 1 GeV shower has of order a hundred tracks alive at
+  // once. With the default this harness stopped before it started:
+  //
+  //     FATAL: no track can be stepped without overrunning the pool.
+  //            19997 tracks are live and the pool holds 20000 slots a side.
+  //
+  // THE RULE IS PER SPECIES AND NOT PER ENERGY ALONE, and that was measured rather than guessed.
+  // `max(4.0, E/10)` was the first version and it is still 4.0 at 20 MeV, where a 20 MeV
+  // ELECTRON overran the pool just as the 1 GeV one did: an electron branches at every energy,
+  // because each bremsstrahlung photon it makes goes on to Compton-scatter or pair-produce. So a
+  // showering beam gets a floor of 32 and E/10 above it - 32 per event at 20 MeV, 100 at 1 GeV,
+  // which is 0.25 GB of pool at a 5,000-event batch - and a proton or an ion keeps the engine's
+  // own 4.0, so no run that existed before this line is changed by it.
+  //
+  // It is a RESOURCE knob and not a physics one: the engine refuses loudly rather than
+  // truncating a shower, which is how both of those failures were found. Nothing had reached it
+  // because until docs/RISK.md V84 was closed every lepton fired into this harness died on its
+  // first step in the vacuum world and no shower was ever built.
+  {
+    const bool showers = (particle == "e-" || particle == "e+" || particle == "gamma");
+    const double live = showers ? std::max(32.0, energy / 10.0) : 4.0;
+    rm->GetEngine().SetLiveTracksPerEvent(live);
+  }
 #endif
 
   rm->Initialize();

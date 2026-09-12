@@ -31,15 +31,25 @@ what is not.
 
 | | Geant4 11.1.1 | G4GPU | |
 |---|---|---|---|
-| **Example B1**, 2M gammas of 6 MeV, dose in the scoring volume | 427.385 ± 0.87 pGy | 425.847 ± 0.87 pGy | **1.25 σ** |
-| **Bragg peak**, 100 MeV protons in water, R80 | 77.798 mm | 77.783 mm | **−0.015 mm** |
-| plateau dose, 0–60 mm | — | +0.075% | per proton |
-| distal 80–20 width | 1.126 mm | 1.115 mm | −0.011 mm |
+| **Example B1**, 2M gammas of 6 MeV, dose in the scoring volume | 427.385 ± 0.87 pGy | 425.860 ± 0.87 pGy | **1.24 σ** |
+| **Bragg peak**, 100 MeV protons in water, R80 | 77.730 mm | 77.742 mm | **+0.012 mm** |
+| plateau dose, 0–59.8 mm | — | +0.158% | per proton |
+| distal 80–20 width | 1.152 mm | 1.166 mm | +0.014 mm |
+| **Electron shower**, 100k e− of 1 GeV in 4 m of water, R80 | 1,079.26 mm | 1,081.70 mm | **+2.44 mm** |
+| energy contained in the phantom | 97.6448% | 97.8498% | +0.21% |
 
 The B1 figure is **one sample**, and reading it as a constant is the mistake it invites. Four
-other seeds give +1.44, −0.26, +0.37 and +0.32 σ: the spread is about 1 σ and straddles zero,
-which is what agreement between two Monte Carlos looks like and is the only thing a single
-number here can mean. The gate is 3 σ.
+other seeds give 426.191, 426.908, 427.485 and 427.287 pGy — 0.97, 0.39, 0.08 and 0.08 σ, a
+spread of about 1 σ that straddles zero, which is what agreement between two Monte Carlos looks
+like and is the only thing a single number here can mean. The gate is 3 σ.
+
+Every figure in that table was re-taken by P14d on the engine this README describes — WentzelVI
+dispatched for e± above 100 MeV and the continuous loss in `G4VEnergyLossProcess::AlongStepDoIt`'s
+shape (RISK V95, V96). The B1 row is the one that moved: −0.071 ± 0.0045 pGy on the mean of
+five seeds, 0.0166% of the dose, which the loss restructuring accounts for to the sign and the
+order. The proton rows did not move at all and are quoted from that run rather than from the
+older one they used to carry; the electron shower row is new, and is the curve
+[`RISK V96`](docs/RISK.md) records in full.
 
 A twelve-beam sweep of the same geometry - photons at 1, 6 and 100 MeV, electrons at 20, 100 and
 1000 MeV, protons at 210, 400 and 1000 MeV, alphas at 840, 1600 and 4000 MeV, the port against
@@ -182,7 +192,7 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4WentzelVIModel` | multiple scattering above 100 MeV, where Geant4 hands over from Urban; the transport mean free path table `G4VMscModel::xSectionTable` holds. **Live in transport since P14d**: `em::kWentzelLeptonMscWired` is `true`, and what held it `false` for a package was the one-unit `transport_run.cu` and not the physics (RISK V83, V95) | `test_electron_hi`, `test_lepton_transport` | **5.1e-16** at the table's 602 nodes; 0.20% between them; +448 B of kernel stack frame, and the gamma gate identical to the track-step |
 | `G4LossTableBuilder` | the e+- dE/dx, range and inverse-range tables the transport reads - 100 eV to 100 TeV, 7 bins per decade, one per species | `test_electron_hi` | **3e-9** above 0.1 MeV (6,174 pts); exact at the nodes above 1 MeV; 0.0068% in the bottom decade |
 | `G4EmModelManager` | the `1 + del/E` continuity factor across G4eBremsstrahlung's 1 GeV model boundary, which is why the tabulated cross section is not the model's | `test_electron_hi` | exactly 1 at and below 1 GeV; 2.0% at 1.06 GeV in water |
-| `G4VEnergyLossProcess::AlongStepDoIt` | a lepton's energy balance on the device: deposited + secondaries + escaped + refused against the primary energy, per track | `test_lepton_transport` | **1.8e-15** over 2,048 tracks, 1 MeV to 10 GeV, e- and e+ |
+| `G4VEnergyLossProcess::AlongStepDoIt` | the lepton's continuous loss in Geant4's own shape — `length × dE/dx` first, the range inversion only above `linLossLimit` = 0.01 — and the energy balance on the device: deposited + secondaries + escaped + refused against the primary energy, per track | `test_lepton_transport` | **1.8e-15** over 2,048 tracks, 1 MeV to 10 GeV, e± ; a 20 MeV e− through 4 m of vacuum loses **4.1e-24** of its energy, against **1.0** before (RISK V96) |
 | `G4UniversalFluctuation` | energy-loss fluctuations | `test_fluctuation` | mean preserved to < 0.1% |
 | `G4VRangeToEnergyConverter` | production cuts | `test_cuts` | 0.018% |
 
@@ -425,10 +435,16 @@ send every one of them somewhere else.
    one part in 240,000 of the same row (RISK V95). And the 100,000-event statistics the sweep
    uses for this beam are not enough for either side: Geant4's own reference moves 2.3 sigma of
    its own quoted rms between 100,000 and 1,000,000 events, because the dose a 1 GeV shower puts
-   in that trapezoid is heavy-tailed. Also still open: a lepton fired through a VACUUM, which is
-   killed on its first step because the range there is so long that `range - step_len` is a
-   no-op in double arithmetic (RISK V84, pre-existing, found by giving the depth-dose harness a
-   particle name).
+   in that trapezoid is heavy-tailed. **Closed by P14d**: a lepton fired through a VACUUM used to
+   be killed on its first step, because the range there is so long that `range - step_len` is a
+   no-op in double and the port computed its continuous loss by inverting that difference
+   (RISK V84). It is `G4VEnergyLossProcess::AlongStepDoIt`'s own shape now — `length × dE/dx`
+   first, the inversion only above `linLossLimit` — so a 20 MeV electron fired through the
+   depth-dose harness's vacuum world reaches the water with its energy (0.0000% → 99.2390%
+   contained) and the electron shower curve in the table above exists at all. It cost the gamma
+   gate −0.071 ± 0.0045 pGy, 0.0166% (RISK V96). What that opened instead is RISK V97, small
+   and pinned: a positron that LEAVES the world is annihilated on the way out, emitting
+   1.022 MeV of photons outside it that nothing scores.
 
 
 ---

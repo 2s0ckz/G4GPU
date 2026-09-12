@@ -23,7 +23,7 @@
 // about the whole shower: a delta ray or a bremsstrahlung photon leaves the balance at the
 // energy `step_lepton` gave it, and if that energy is wrong the sum does not close.
 //
-// WHAT THE FOUR BLOCKS BELOW ARE FOR, AND WHY NONE OF THEM IS THE BALANCE ALONE
+// WHAT THE FIVE BLOCKS BELOW ARE FOR, AND WHY NONE OF THEM IS THE BALANCE ALONE
 //
 //  1. The balance itself, at 1 MeV, 50 MeV, 1 GeV and 10 GeV, for e- and e+. This is the
 //     assertion V64 asked for.
@@ -46,7 +46,14 @@
 //     table sets: with the V64 ceiling restored a 1 GeV track takes 309 of 7,722 steps above
 //     100 MeV instead of 9,585 of 15,933, because it is a 100 MeV electron after its first
 //     step. Which model answers at the boundary is `tests/test_electron_hi.cu`'s question and
-//     whether it is dispatched at all is `em::kWentzelLeptonMscWired`.
+//     whether it is dispatched at all is `em::kWentzelLeptonMscWired` - TRUE since P14d, so the
+//     column this block prints is the WentzelVI one and the numbers above are both recorded.
+//  5. A 20 MeV e- and e+ through 4 m of `G4_Galactic`, which is the world every depth-dose
+//     harness in this repository fires its beam through. Blocks 1-4 all run in water, where the
+//     range is centimetres and every arithmetic in the continuous loss is well conditioned; the
+//     range in a vacuum is 9.4e26 mm and `range - step_len` is a no-op in double, which is
+//     docs/RISK.md V84 - the defect that killed every lepton on its first step and that nothing
+//     here could see, because nothing here had ever left the water.
 //
 // THE TOLERANCE IS FLOATING POINT AND NOT PHYSICS. Everything in the balance is added in
 // double; the only rounding is the accumulation order, so the limit is 1e-12 of the primary
@@ -489,6 +496,149 @@ int main() {
              double(em::kMscEnergyLimit<real_t>()));
       }
     }
+  }
+
+  // ============================================ 5. a lepton fired through a vacuum, docs/RISK V84
+  //
+  // The same world with `G4_Galactic` in place of the water, which is the world every depth-dose
+  // harness in this repository launches its beam through. A 20 MeV electron crossing 4 m of
+  // hydrogen at 1e-25 g/cm3 must arrive with its energy: the stopping power is about 2e-26
+  // MeV/mm, so the whole crossing is worth 1e-22 MeV, and nothing else in `step_lepton` has a
+  // cross section that survives a density that small.
+  //
+  // WHAT THIS FAILS AGAINST, and it is why the block is here rather than in the depth-dose
+  // harness alone. `step_lepton` computed its continuous loss by inverting the range table -
+  // `loss = ekin - energy_from_range(range - step_len)` - with a guard that took the WHOLE
+  // kinetic energy whenever the inversion came back unchanged. The range here is 6.6e26 mm, so
+  // `range - step_len` for any step a geometry can produce IS `range` in double: the subtraction
+  // is below the last bit, the guard fires, and the electron is annihilated on its first step
+  // with 20 MeV deposited in a volume nothing scores. Measured before the fix: 0.0000% of the
+  // beam energy reached a 4 m water phantom behind such a world. The loss is
+  // `G4VEnergyLossProcess::AlongStepDoIt`'s now - `length*dE/dx` first, the inversion only above
+  // `linLossLimit` - and the linear form is exact here where no inversion could be.
+  //
+  // THE TOLERANCE IS 1e-15 OF THE PRIMARY ENERGY AND IT WAS CHOSEN BY MEASURING THE DEFECT, not
+  // by picking a small number. The right answer here is `4000 mm * 2e-26 MeV/mm` = 8e-23 MeV,
+  // 4e-24 of a 20 MeV track. With the inversion-only form restored this block reports
+  // **3.58e-10** for the electron and 3.56e-10 for the positron - fourteen orders of magnitude
+  // too much, and it is the inverse-range spline's own round-trip error, `E - invrange(range(E))`,
+  // arriving as a deposit because a step in a vacuum has nothing else in it. So this material and
+  // this energy land on the BENIGN side of the defect: the round-trip came back just under the
+  // pre-step energy, the "strictly reduce the energy" guard did not fire, and the track survived
+  // its crossing 3.6e-10 poorer. The depth-dose harness's own `G4_Galactic` lands on the other
+  // side, where the round-trip comes back just OVER, the guard fires and the whole 20 MeV is
+  // taken (docs/RISK.md V84). One defect, two faces, and which one a run gets is the last bit of
+  // a spline: a tolerance loose enough to pass the benign face - 1e-9, the first one written here -
+  // would have passed the code this block exists to fail.
+  std::printf("\n-- 5. a 20 MeV lepton through 4 m of G4_Galactic (docs/RISK.md V84) --\n");
+  {
+    static data::Material<real_t> vmats[data::kNumMaterials];
+    data::build_b1_materials<real_t>(vmats);
+    {  // G4_Galactic, from src/data/nist_materials.hh: hydrogen, 1e-25 g/cm3, I = 21.8 eV, gas.
+      const int zs[1] = {1};
+      const real_t w[1] = {real_t(1)};
+      vmats[data::kWater] =
+          data::from_weight_fractions<real_t>(real_t(1e-25), 1, zs, w, real_t(21.8));
+      data::set_state<real_t>(vmats[data::kWater], data::MaterialState::kGas);
+      data::set_cuts<real_t>(vmats[data::kWater], real_t(0.00099), real_t(0.00099),
+                             real_t(0.00099));
+    }
+    static em::RangeTable<real_t> vrt;
+    em::build_range_table<real_t>(vmats, vrt, &sb);
+    static data::BremsTable<real_t> vbt;
+    data::build_brems_tables<real_t>(vmats, sb, vbt);
+    auto* h_vurban = new em::UrbanTable<real_t>();
+    em::build_urban_table<real_t>(vmats, data::kNumMaterials, *h_vurban);
+    auto* h_vwv = new em::WentzelLeptonTable<real_t>();
+    em::build_wentzel_lepton_table<real_t>(vmats, data::kNumMaterials, *h_vwv);
+
+    data::Material<real_t>* d_vmats = nullptr;
+    em::RangeTable<real_t>* d_vrt = nullptr;
+    data::BremsTable<real_t>* d_vbt = nullptr;
+    em::UrbanTable<real_t>* d_vurban = nullptr;
+    em::WentzelLeptonTable<real_t>* d_vwv = nullptr;
+    cudaMalloc(&d_vmats, sizeof(vmats));
+    cudaMalloc(&d_vrt, sizeof(vrt));
+    cudaMalloc(&d_vbt, sizeof(vbt));
+    cudaMalloc(&d_vurban, sizeof(*h_vurban));
+    cudaMalloc(&d_vwv, sizeof(*h_vwv));
+    cudaMemcpy(d_vmats, vmats, sizeof(vmats), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vrt, &vrt, sizeof(vrt), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vbt, &vbt, sizeof(vbt), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vurban, h_vurban, sizeof(*h_vurban), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vwv, h_vwv, sizeof(*h_vwv), cudaMemcpyHostToDevice);
+
+    Scene<real_t> vscene = scene;
+    vscene.materials = d_vmats;
+    vscene.range_table = d_vrt;
+    vscene.brems = d_vbt;
+    vscene.msc = d_vurban;
+    vscene.wv_lepton = d_vwv;
+
+    const real_t r20 = vrt.lookup(data::kWater, false, real_t(20));
+    std::printf("  the range of a 20 MeV e- in G4_Galactic is %.6g mm, and `range - 8000 mm` is "
+                "%s in double\n", double(r20),
+                (double(r20) - 8000.0 == double(r20)) ? "range itself" : "representable");
+
+    for (int p = 0; p < 2; ++p) {
+      const bool pos = (p == 1);
+      cudaMemset(books.refused_by_type, 0, sizeof(int) * kNT);
+      cudaMemset(books.refused_energy, 0, sizeof(double) * kNT);
+      cudaMemset(d_books, 0, sizeof(Books) * kTracks);
+      Follow<<<(kTracks + 63) / 64, 64>>>(vscene, pos, real_t(20), kTracks, 0x51ED0000u + 7u,
+                                          d_books, books);
+      if (cudaDeviceSynchronize() != cudaSuccess) {
+        fail("vacuum kernel: %s", cudaGetErrorString(cudaGetLastError()));
+        continue;
+      }
+      cudaMemcpy(got.data(), d_books, sizeof(Books) * kTracks, cudaMemcpyDeviceToHost);
+      double edep = 0, esc = 0, sec = 0;
+      int steps = 0;
+      for (int i = 0; i < kTracks; ++i) {
+        edep += got[i].edep;
+        esc += got[i].escaped;
+        sec += got[i].secondary;
+        steps += got[i].steps;
+      }
+      const double e0 = kTracks * 20.0;
+      std::printf("  %s 20 MeV: escaped %.6f%%  deposited %.6e of E0  secondaries %.6f%%  "
+                  "%.1f steps per track\n", pos ? "e+" : "e-", 100.0 * esc / e0,
+                  edep / e0, 100.0 * sec / e0, double(steps) / kTracks);
+      // THE POSITRON'S 5.11% OF SECONDARIES IS A SECOND DEFECT, AND IT IS PINNED RATHER THAN
+      // TOLERATED: docs/RISK.md V97. `step_lepton`'s dying block is reached both by a track
+      // that fell below its cut and by one that LEFT THE WORLD, and it annihilates a positron
+      // in either case - so a positron that escapes emits two 511 keV photons it did not
+      // stop to make, outside the world, from rest mass that is still on the track. 1.022 MeV
+      // on a 20 MeV positron is exactly the 5.109989% printed above. It is not fixed here
+      // because it is not this package's change and it would move the same gate the continuous
+      // loss is being judged on; the number is asserted so that fixing it has to come through
+      // this line. Nothing scores outside the world, so it costs dose nowhere and work
+      // everywhere.
+      const double want_sec = pos ? kTracks * 2.0 * double(em::units_me<real_t>()) : 0.0;
+      if (std::fabs(sec - want_sec) > 1e-9 * e0) {
+        fail("%s through a vacuum made %.10g MeV of secondaries, expected %.10g - see "
+             "docs/RISK.md V97 for what the positron's 1.022 MeV per track is",
+             pos ? "e+" : "e-", sec, want_sec);
+      }
+      // A positron that reaches the boundary carries its energy out exactly as an electron
+      // does; it only annihilates if it STOPS, which in a vacuum it must not.
+      if (esc / e0 < 1.0 - 1e-15) {
+        fail("%s left only %.10g%% of its energy through 4 m of vacuum - a lepton in a vacuum "
+             "is being stopped by it (docs/RISK.md V84)", pos ? "e+" : "e-", 100.0 * esc / e0);
+      }
+      if (edep / e0 > 1e-15) {
+        fail("%s deposited %.10g%% of its energy in 4 m of vacuum", pos ? "e+" : "e-",
+             100.0 * edep / e0);
+      }
+    }
+
+    cudaFree(d_vmats);
+    cudaFree(d_vrt);
+    cudaFree(d_vbt);
+    cudaFree(d_vurban);
+    cudaFree(d_vwv);
+    delete h_vurban;
+    delete h_vwv;
   }
 
   cudaFree(d_vols);

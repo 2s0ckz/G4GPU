@@ -39,8 +39,26 @@ template <typename real_t> __host__ __device__ constexpr real_t units_me() {
 }
 
 /// Electrons below this deposit their remaining energy on the spot and stop.
+///
+/// This is `G4VEnergyLossProcess::lowestKinEnergy`, which for an e+- is
+/// `G4EmParameters::LowestElectronEnergy()` = 1 keV (G4VEnergyLossProcess.cc:101). It is read in
+/// TWO places of `AlongStepDoIt` and `step_lepton` now uses it in both: the "stopping" test at
+/// :812 that takes the whole kinetic energy, and the energy balance at :914 that does the same to
+/// whatever a fluctuated step left behind.
 template <typename real_t> __host__ __device__ constexpr real_t kElectronTrackingCut() {
   return real_t(1e-3);  // 1 keV
+}
+
+/// `G4EmParameters::LinearLossLimit`, the fraction of the kinetic energy above which
+/// `G4VEnergyLossProcess::AlongStepDoIt` stops trusting `length * dE/dx` and inverts the range
+/// table instead (G4VEnergyLossProcess.cc:830).
+///
+/// 0.01 for a lepton, and NOT a global: `G4ionIonisation`'s constructor calls
+/// `SetLinearLossLimit(0.02)`, so every species that process is registered for uses twice this -
+/// which is why `step_hadron` computes its own per-species constant rather than calling here.
+/// `G4eIonisation` does not override the parameter, so an e+- gets `G4EmParameters`' own value.
+template <typename real_t> __host__ __device__ constexpr real_t kLinearLossLimit() {
+  return real_t(0.01);
 }
 
 /// 2*pi*m_e*c^2*r_e^2 in MeV*mm^2, the Berger-Seltzer and Bethe-Bloch ionisation prefactor.
