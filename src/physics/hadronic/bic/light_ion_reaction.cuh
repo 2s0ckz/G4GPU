@@ -20,7 +20,7 @@
 // ZERO holes, and the whole reaction is `G4PreCompoundModel::DeExcite` on that - which is P6's
 // `preco::deexcite`, which is on main.
 //
-// That arm is complete, and `tests/test_bic_ion.cu` is where it is checked against
+// That arm is complete, and `tests/test_bic_apply.cu` is where it is checked against
 // `G4BinaryLightIonReaction::ApplyYourself` itself - 20 cases of {d, alpha, C12} on
 // {C, O, Al, Fe, Pb, H} at 1 to 45 MeV/nucleon, 5,000 events each. The fusion gate's verdict
 // and the compound's (Z, A) come out exact in 100,000 events, the energy balance is exact to
@@ -85,7 +85,7 @@
 //
 // So the block is a no-op, and the port does not carry it. It is written out here because the
 // only way to know that is to read `G4HadProjectile`, and because a caller that hands this
-// model a projectile NOT along +z would need it. docs/RISK.md V75.
+// model a projectile NOT along +z would need it. docs/RISK.md V72.
 //
 // ## REFUSED, by name
 //
@@ -387,7 +387,7 @@ using BlirFinalState = physics::hadronic::HadFinalState<double, kBlirMaxSecondar
 /// `projectile` and `target` are P5's shapes. The projectile's four-momentum is reconstructed as
 /// `(0, 0, sqrt(T(T+2m)), T+m)` because that is what `G4HadProjectile::Get4Momentum()` returns -
 /// already rotated into +z, which is what makes this model's rotate-to-lab block the identity
-/// (see the file header and docs/RISK.md V75).
+/// (see the file header and docs/RISK.md V72).
 ///
 /// Three outcomes, and they are not interchangeable:
 ///
@@ -472,7 +472,7 @@ __host__ __device__ inline preco::PrecoStatus blir_apply_yourself(
     // Passing 0 here still produced 0.511 MeV, because `set_four_momentum`'s middle branch
     // takes `|PDGmass^2 - mass2| > EnergyMRA2` and recovers `sqrt(mass2)` from the
     // four-momentum - which for P3's electron is exactly `m_e`, since it builds the momentum as
-    // `sqrt((E-m_e)(E+m_e))`. Measured: `tests/test_bic_ion.cu` is byte-identical either way.
+    // `sqrt((E-m_e)(E+m_e))`. Measured: `tests/test_bic_apply.cu` is byte-identical either way.
     // So this is not a fix; it is the same rule `deex::deex_kinetic_energy` has had since P3,
     // written where a reader looks, so that a product whose four-momentum is ever off shell
     // does not silently change species mass.

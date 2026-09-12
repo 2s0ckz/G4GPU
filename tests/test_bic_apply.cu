@@ -1,13 +1,27 @@
-// G4BinaryLightIonReaction's fusion arm - the model QBBC gives every ion below 6 GeV/nucleon -
-// against ref/oracle/bic_blir*.csv.
+// The two binary-cascade entry points, where each of them is complete, against
+// ref/oracle/bic_blir*.csv and ref/oracle/bic_apply*.csv.
 //
-// `tests/test_bic_nucleus.cu` covers the machinery UNDER the two binary-cascade models: the
-// nucleus, the densities, the fields and the Runge-Kutta propagator, all of it exact against a
-// replayed configuration. This file covers the one place a whole MODEL is called the way the
-// framework calls it, and it is the piece that matters for a galactic-cosmic-ray shielding
-// calculation: below 50 MeV per nucleon `G4BinaryLightIonReaction::ApplyYourself` runs no
-// cascade at all - it fuses the two nuclei into one compound of (pZ+tZ, pA+tA) with pA particle
-// excitons of which pZ are charged and no holes, and hands it to `G4PreCompoundModel::DeExcite`.
+// `tests/test_bic_nucleus.cu` covers the machinery UNDER the two models: the nucleus, the
+// densities, the fields and the Runge-Kutta propagator, all of it exact against a replayed
+// configuration. This file covers the two places a whole MODEL is called the way the framework
+// calls it. Both end in the same place for the same reason - a compound nucleus handed to
+// `G4PreCompoundModel::DeExcite` - so one comparison serves both:
+//
+//   * `bic::blir_apply_yourself`, `G4BinaryLightIonReaction::ApplyYourself` below 50 MeV per
+//     nucleon, where the model fuses the two nuclei into a compound of (pZ+tZ, pA+tA) with pA
+//     particle excitons of which pZ are charged and no holes. This is the piece that matters for
+//     a galactic-cosmic-ray shielding calculation: 20 cases of {d, alpha, C12} on
+//     {C, O, Al, Fe, Pb, H}.
+//   * `bic::apply_yourself`, `G4BinaryCascade::ApplyYourself` below `theBCminP` = 45 MeV, where
+//     a NUCLEON - and only a nucleon, the species test is an `&&` - never enters the cascade at
+//     all and the whole reaction is `G4PreCompoundModel::ApplyYourself`. 18 cases of {p, n} on
+//     {C, O, Al, Fe, Pb} at 5 to 46 MeV.
+//
+// The 44 and 46 MeV rows on carbon are the point of the second set. They straddle `theBCminP`,
+// the port answers one and REFUSES the other, and the refusal is asserted against what Geant4
+// did instead - 4.17 secondaries per event at 46 MeV against 3.96 at 44, which is the cascade
+// turning on. A port with the threshold at 40 or 50 MeV would hand back a compound nucleus where
+// a cascade belongs, and every other assertion here would still pass.
 //
 // **Why this file had to exist.** `light_ion_reaction.cuh`'s header said the fusion arm was
 // "complete here and validated end to end" while nothing whatsoever included the header. It
@@ -45,7 +59,7 @@
 //     compound emits 0.26 conversion electrons per event and its product list comes out
 //     +0.13286 MeV heavy, against `0.26 * m_e = 0.13286 MeV`; a C12-on-Pb208 compound, 0.4198
 //     per event and +0.214539 against 0.214517; and the two cases with no conversion electron
-//     at all balance to 1.1e-13 MeV. docs/RISK.md V76.
+//     at all balance to 1.1e-13 MeV. docs/RISK.md V73.
 //
 //     It is Geant4's arithmetic and the port reproduces it, so the comparison subtracts
 //     `n_electrons * m_e` from BOTH sides - the oracle's count is the `pdg = 11` row of
@@ -73,6 +87,7 @@
 #include "core/rng.cuh"
 #include "data/level_data.cuh"
 #include "host/g4data.cuh"
+#include "physics/hadronic/bic/binary_cascade.cuh"
 #include "physics/hadronic/bic/light_ion_reaction.cuh"
 
 using namespace g4gpu;
@@ -87,6 +102,16 @@ __global__ void bic_blir_probe(physics::hadronic::HadProjectile<double> proj,
                                bic::BlirFinalState* fs, bic::BlirRefusal* ref) {
   Philox<double> rng(1u, 2u, 3u);
   bic::blir_apply_yourself(proj, tgt, *lt, *pool, ws, rng, *fs, *ref);
+}
+
+/// The nucleon entry point, likewise never launched.
+__global__ void bic_apply_probe(physics::hadronic::HadProjectile<double> proj,
+                                physics::hadronic::HadNucleus tgt, const data::LevelTable* lt,
+                                const deex::FermiPool* pool, preco::PrecoWorkspace ws,
+                                bic::BicFinalState* fs, bic::BicRefusal* ref,
+                                bic::BicReport* rep) {
+  Philox<double> rng(1u, 2u, 3u);
+  bic::apply_yourself(proj, tgt, *lt, *pool, ws, rng, *fs, *ref, *rep);
 }
 
 namespace {
@@ -241,6 +266,7 @@ struct Buffers {
 
 /// One oracle case, from bic_blir_status.csv.
 struct OracleCase {
+  std::string model;   ///< "bic_blir" or "bic_apply"; which entry point answers it
   std::string name;
   int pz = 0, pa = 0, tz = 0, ta = 0;
   double ekin_per_a = 0.0;
@@ -273,33 +299,44 @@ int main() {
   // -------------------------------------------------------------------------------------------
   // The oracle
   // -------------------------------------------------------------------------------------------
+  // Two models, one reader. `bic_apply*.csv` and `bic_blir*.csv` have identical columns on
+  // purpose: `G4BinaryCascade::ApplyYourself` below `theBCminP` and
+  // `G4BinaryLightIonReaction::ApplyYourself` below its fusion threshold both end in
+  // `G4PreCompoundModel::DeExcite` on a compound nucleus, so everything the comparison does -
+  // the status, the compound's (Z, A), the balance, the species - is the same arithmetic. The
+  // two differ in which entry point is called and in what the compound is made of.
   std::vector<OracleCase> cases;
-  for (const auto& row : read_csv("bic_blir_status.csv")) {
-    OracleCase c;
-    c.name = sv(row, 0);
-    c.pz = iv(row, 1);
-    c.pa = iv(row, 2);
-    c.ekin_per_a = dv(row, 3);
-    c.tz = iv(row, 4);
-    c.ta = iv(row, 5);
-    c.n = lv(row, 6);
-    c.status = sv(row, 7);
-    c.n_secondaries = lv(row, 8);
-    c.sum_z = lv(row, 9);
-    c.sum_a = lv(row, 10);
-    c.mean_e = dv(row, 11);
-    c.mean_pz = dv(row, 12);
-    c.mean_mult = dv(row, 13);
-    cases.push_back(c);
+  for (const char* stem : {"bic_blir", "bic_apply"}) {
+    for (const auto& row : read_csv(std::string(stem) + "_status.csv")) {
+      OracleCase c;
+      c.model = stem;
+      c.name = sv(row, 0);
+      c.pz = iv(row, 1);
+      c.pa = iv(row, 2);
+      c.ekin_per_a = dv(row, 3);
+      c.tz = iv(row, 4);
+      c.ta = iv(row, 5);
+      c.n = lv(row, 6);
+      c.status = sv(row, 7);
+      c.n_secondaries = lv(row, 8);
+      c.sum_z = lv(row, 9);
+      c.sum_a = lv(row, 10);
+      c.mean_e = dv(row, 11);
+      c.mean_pz = dv(row, 12);
+      c.mean_mult = dv(row, 13);
+      cases.push_back(c);
+    }
   }
   if (cases.empty()) {
-    std::printf("no cases in bic_blir_status.csv\n");
+    std::printf("no cases in bic_blir_status.csv or bic_apply_status.csv\n");
     return 1;
   }
 
   // (case, (Z, A)) -> tally, folded off the per-PDG oracle rows.
   std::map<std::string, std::map<int, Tally>> g4;
-  for (const auto& row : read_csv("bic_blir.csv")) {
+  std::vector<std::vector<std::string>> species_rows = read_csv("bic_blir.csv");
+  for (const auto& r : read_csv("bic_apply.csv")) { species_rows.push_back(r); }
+  for (const auto& row : species_rows) {
     const std::string name = sv(row, 0);
     int z = 0, a = 0;
     if (!pdg_to_za(iv(row, 7), z, a)) {
@@ -354,16 +391,27 @@ int main() {
   std::string worst_e_at, worst_pz_at, worst_ev_exact_at, worst_ev_ic_at;
 
   for (const OracleCase& c : cases) {
+    const bool is_ion = (c.model == "bic_blir");
     physics::hadronic::HadProjectile<double> proj;
-    proj.pdg = physics::hadronic::pdg_nuclear_code(c.pz, c.pa);
     proj.baryon_number = c.pa;
     proj.charge = static_cast<double>(c.pz);
-    // `G4HadProjectile::Get4Momentum()` is built from the dynamic particle's mass, which for an
-    // ion is `G4IonTable::GetIonMass(Z, A)`. light_ion_reaction.cuh's header argues that equals
-    // `G4NucleiProperties::GetNuclearMass(A, Z)` for every (Z <= A, A >= 1); the energy balance
-    // below is what tests that claim, because a wrong projectile mass moves mean_e by its error.
-    proj.mass = deex::nuclear_mass(c.pa, c.pz);
     proj.kin_energy = c.ekin_per_a * c.pa;
+    if (is_ion) {
+      proj.pdg = physics::hadronic::pdg_nuclear_code(c.pz, c.pa);
+      // `G4HadProjectile::Get4Momentum()` is built from the dynamic particle's mass, which for
+      // an ion is `G4IonTable::GetIonMass(Z, A)`. light_ion_reaction.cuh's header argues that
+      // equals `G4NucleiProperties::GetNuclearMass(A, Z)` for every (Z <= A, A >= 1); the energy
+      // balance below is what tests that claim, because a wrong projectile mass moves mean_e by
+      // its error.
+      proj.mass = deex::nuclear_mass(c.pa, c.pz);
+    } else {
+      proj.pdg = (c.pz == 1) ? 2212 : 2112;
+      // A nucleon's mass is the PDG mass and NOT `nuclear_mass(1, Z)` - those agree for (1,1)
+      // and (1,0) by G4NucleiProperties' own special cases, which is why this is written out
+      // rather than shared with the ion branch: the agreement is a fact about Geant4's table,
+      // not about this test.
+      proj.mass = (c.pz == 1) ? deex::pdg_mass_proton() : deex::pdg_mass_neutron();
+    }
 
     physics::hadronic::HadNucleus tgt;
     tgt.z = c.tz;
@@ -383,13 +431,28 @@ int main() {
 
     Philox<double> rng(0x51ed270bu, static_cast<unsigned>(c.pa * 1000 + c.ta),
                        static_cast<unsigned>(c.ekin_per_a * 10.0) + 1u);
+    bool refused_cascade = false;
     for (long long ev = 0; ev < c.n; ++ev) {
-      bic::BlirRefusal ref;
+      bic::BlirRefusal bref;
+      bic::BicRefusal nref;
+      bic::BicReport nrep;
       preco::PrecoWorkspace ws = bufs.view();
-      const preco::PrecoStatus st =
-          bic::blir_apply_yourself(proj, tgt, lt, pool, ws, rng, result, ref);
-      if (ref.cascade || ref.anti_or_hyper) { ++n_refused; continue; }
-      if (ref.capacity || result.secondary_overflow > 0) { ++n_overflow; }
+      preco::PrecoStatus st;
+      if (is_ion) {
+        st = bic::blir_apply_yourself(proj, tgt, lt, pool, ws, rng, result, bref);
+      } else {
+        st = bic::apply_yourself(proj, tgt, lt, pool, ws, rng, result, nref, nrep);
+      }
+      const bool cascade = is_ion ? bref.cascade : nref.cascade;
+      const bool other = is_ion ? bref.anti_or_hyper : (nref.species || nref.preco_projectile);
+      if (cascade || other) {
+        ++n_refused;
+        refused_cascade = cascade;
+        continue;
+      }
+      if ((is_ion ? bref.capacity : nref.capacity) || result.secondary_overflow > 0) {
+        ++n_overflow;
+      }
       if (st.ref.any()) { ++n_refused; }
       if (result.status == physics::hadronic::HadFinalStateStatus::kIsAlive) {
         ++n_alive;
@@ -450,6 +513,31 @@ int main() {
         if (de / n_ev_electrons > worst_per_electron) {
           worst_per_electron = de / n_ev_electrons;
         }
+      }
+    }
+
+    // ---- the refusal boundary, for the nucleon entry point only.
+    //
+    // `theBCminP` is 45 MeV and the oracle has a 44 and a 46 MeV row on carbon for each nucleon.
+    // The port answers the 44 and MUST refuse the 46 - Geant4 runs a cascade there, and the
+    // difference is visible in the oracle itself (4.17 secondaries per event against 3.96). This
+    // is the only assertion in the port that checks a refusal against what Geant4 did instead:
+    // a threshold set at 40 or 50 MeV would produce a compound nucleus where a cascade belongs
+    // and both halves of this test would still pass.
+    if (!is_ion) {
+      const bool should_refuse = !(c.ekin_per_a < 45.0);
+      if (should_refuse != refused_cascade || (should_refuse && n_refused < c.n)) {
+        std::printf("THRESHOLD %s at %g MeV: port %s, theBCminP is 45 MeV and Geant4 answered "
+                    "with %g secondaries per event\n",
+                    c.name.c_str(), c.ekin_per_a, refused_cascade ? "refused" : "answered",
+                    c.mean_mult);
+        ++fails;
+      }
+      if (should_refuse) {
+        std::printf("  refused by name: %s, %g MeV - above theBCminP, so Geant4 runs the "
+                    "cascade (%g secondaries/event) and this package has none\n",
+                    c.name.c_str(), c.ekin_per_a, c.mean_mult);
+        continue;
       }
     }
 
@@ -633,6 +721,6 @@ int main() {
     std::printf("    %6.2f  %s\n", top_ekin[i].first, top_ekin[i].second.c_str());
   }
   (void)n_balance_bad;
-  std::printf("\ntest_bic_ion: %s\n", (fails == 0) ? "PASS" : "FAIL");
+  std::printf("\ntest_bic_apply: %s\n", (fails == 0) ? "PASS" : "FAIL");
   return (fails == 0) ? 0 : 1;
 }

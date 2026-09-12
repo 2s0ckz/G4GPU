@@ -585,6 +585,128 @@ void write_blir() {
   std::fclose(g);
 }
 
+/// bic_apply.csv and bic_apply_status.csv - `G4BinaryCascade::ApplyYourself` BELOW `theBCminP`,
+/// the only part of that model this package has.
+///
+/// The first statement of `ApplyYourself` is
+///
+///     if (initial4Momentum.e()-initial4Momentum.m() < theBCminP &&
+///         (definition==neutron || definition==proton))
+///       return theDeExcitation->ApplyYourself(aTrack, aNucleus);
+///
+/// so a nucleon below 45 MeV never enters the cascade: the whole reaction is
+/// `G4PreCompoundModel::ApplyYourself`, which is P6's `apply_yourself_initial_fragment` plus
+/// `preco::deexcite`. That branch is complete in the port and this is what checks it, in the
+/// shape the framework actually calls - not P6's helper called directly, which is what
+/// `preco_apply.csv` already covers.
+///
+/// The 44 and 46 MeV rows are the point of the file. They straddle `theBCminP` by 2 MeV, the
+/// model answers them from two entirely different code paths, and the port answers one and
+/// refuses the other. A port that had the threshold at 40 or 50 would produce a cascade's
+/// multiplicity where a compound nucleus belongs, and the 46 MeV rows are here so that the
+/// refusal is compared against something rather than assumed.
+///
+/// Columns match bic_blir.csv exactly so that tests/test_bic_apply.cu reads both with one reader.
+/// `pz`/`pa` are the projectile's charge and baryon number, which for a nucleon are (0 or 1, 1).
+void write_bic_apply() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  auto* bic = new G4BinaryCascade(preco);
+  bic->SetMaxEnergy(1.5 * CLHEP::GeV);
+
+  struct NCase { int pdg; double ekin; int tz, ta; const char* name; };
+  const NCase kCases[] = {
+    {2212,  5.0,  6,  12, "p5_C12"},     {2112,  5.0,  6,  12, "n5_C12"},
+    {2212, 20.0,  6,  12, "p20_C12"},    {2112, 20.0,  6,  12, "n20_C12"},
+    {2212, 44.0,  6,  12, "p44_C12"},    {2112, 44.0,  6,  12, "n44_C12"},
+    {2212, 46.0,  6,  12, "p46_C12"},    {2112, 46.0,  6,  12, "n46_C12"},
+    {2212, 20.0,  8,  16, "p20_O16"},    {2112, 20.0,  8,  16, "n20_O16"},
+    {2212, 20.0, 13,  27, "p20_Al27"},   {2112, 20.0, 13,  27, "n20_Al27"},
+    {2212, 44.0, 26,  56, "p44_Fe56"},   {2112, 44.0, 26,  56, "n44_Fe56"},
+    {2212, 20.0, 82, 208, "p20_Pb208"},  {2112, 20.0, 82, 208, "n20_Pb208"},
+    {2212, 44.0, 82, 208, "p44_Pb208"},  {2112, 44.0, 82, 208, "n44_Pb208"},
+  };
+  const int kN = 5000;
+
+  FILE* f = std::fopen("bic_apply.csv", "w");
+  std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
+                  "mean_mult2\n");
+  FILE* g = std::fopen("bic_apply_status.csv", "w");
+  std::fprintf(g, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,status,n_secondaries,sum_z,sum_a,"
+                  "mean_e_MeV,mean_pz_MeV,mean_mult\n");
+
+  for (const NCase& c : kCases) {
+    const G4ParticleDefinition* part =
+        (c.pdg == 2212) ? static_cast<const G4ParticleDefinition*>(G4Proton::Proton())
+                        : static_cast<const G4ParticleDefinition*>(G4Neutron::Neutron());
+    const int pz = (c.pdg == 2212) ? 1 : 0;
+    CLHEP::HepRandom::setTheSeed(666000L + c.ta * 100 + G4int(c.ekin) + pz);
+
+    std::map<int, long long> count;
+    std::map<int, double> sum_e, sum_e2, sum_k2;
+    std::map<int, int> per_event;
+    long long n_alive = 0, n_kill = 0, n_sec = 0;
+    long long sum_z = -1, sum_a = -1;
+    bool za_varies = false;
+    double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+
+    for (int n = 0; n < kN; ++n) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+      if (r == nullptr) { continue; }
+      if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
+      ++n_kill;
+      per_event.clear();
+      long long ez = 0, ea = 0;
+      G4LorentzVector tot(0., 0., 0., 0.);
+      const std::size_t ns = r->GetNumberOfSecondaries();
+      n_sec += static_cast<long long>(ns);
+      for (std::size_t i = 0; i < ns; ++i) {
+        const G4HadSecondary* s = r->GetSecondary(i);
+        const G4DynamicParticle* p = s->GetParticle();
+        const int pdg = p->GetDefinition()->GetPDGEncoding();
+        const double ekin = p->GetKineticEnergy() / MeV;
+        ++count[pdg];
+        sum_e[pdg] += ekin;
+        sum_e2[pdg] += ekin * ekin;
+        ++per_event[pdg];
+        tot += p->Get4Momentum();
+        if (pdg > 1000000000) {
+          ea += (pdg / 10) % 1000;
+          ez += (pdg / 10000) % 1000;
+        } else if (pdg == 2112) { ea += 1; }
+        else if (pdg == 2212) { ea += 1; ez += 1; }
+        else if (pdg == 211) { ez += 1; }
+        else if (pdg == -211) { ez -= 1; }
+      }
+      for (const auto& kv : per_event) {
+        sum_k2[kv.first] += double(kv.second) * kv.second;
+      }
+      if (sum_z < 0) { sum_z = ez; sum_a = ea; }
+      else if (ez != sum_z || ea != sum_a) { za_varies = true; }
+      sum_tot_e += tot.e() / MeV;
+      sum_tot_pz += tot.z() / MeV;
+    }
+
+    const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
+    std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g\n", c.name,
+                 pz, 1, c.ekin, c.tz, c.ta, kN,
+                 (n_alive == kN) ? "isAlive" : ((n_kill == kN) ? "stopAndKill" : "MIXED"),
+                 n_sec, za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
+                 sum_tot_pz / nk, double(n_sec) / nk);
+    for (const auto& kv : count) {
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, 1,
+                   c.ekin, c.tz, c.ta, kN, kv.first, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second),
+                   sum_k2[kv.first] / nk);
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -593,6 +715,7 @@ void dump_bic(const DumpContext&) {
   write_field_and_rk();
   write_nucleus_stats();
   write_blir();
+  write_bic_apply();
 }
 
 }  // namespace
@@ -601,5 +724,5 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_limits.csv bic_density.csv bic_density_radius.csv bic_fermi.csv "
                     "bic_nucleus.csv bic_nucleons.csv bic_field.csv bic_rk.csv "
                     "bic_nucleus_stats.csv bic_nucleus_moments.csv bic_blir.csv "
-                    "bic_blir_status.csv",
+                    "bic_blir_status.csv bic_apply.csv bic_apply_status.csv",
                     dump_bic);

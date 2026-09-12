@@ -6867,3 +6867,231 @@ to be - `kLeptonExtremeSmallStep` is read at exactly one place in the tree and i
 `step_lepton` - but "has to be" is the sentence this project does not accept on its own.
 
 
+
+### V67: a square formed by two multiplications is not the square G4Pow forms
+
+`G4NuclearShellModelDensity`'s constructor is `theRsquare = r0sq*G4Pow::GetInstance()->Z23(theA)`,
+and `Z23(Z)` is `{ G4double x = Z13(Z); return x*x; }` - the square is formed FIRST and the product
+with `r0sq` second. Transcribed as `r0sq * z13 * z13` it groups left to right, and the two differ by
+one ulp of `theRsquare`.
+
+One ulp, amplified: `GetRelativeDensity` is `G4Exp(-r^2/theRsquare)` and the exponent reaches -439
+at 30 fm on He4, so a relative error of 1.1e-16 in `theRsquare` arrives as 4.8e-14 in the exponent
+and 1.1e-13 in the density. Measured by making exactly that mistake and running
+`tests/test_bic_nucleus.cu`: 1.137e-13 relative on He4 at 30 fm, against a bucket tolerance of
+1e-15, on all three of `DensityRelative`, `DensityAbsolute` and `DensityDeriv`.
+
+The lesson is the one docs/HADRONIC_PLAN.md section 8 gives for tables and this gives for
+expressions: Geant4 does not evaluate the formula, it evaluates the code, and where an exponential
+is downstream the association order is part of the answer. The port writes the square first.
+
+### V68: two things about C12 that are not corners, because C12 is the target
+
+`G4Fancy3DNucleus::ChoosePositions` has a branch for A = 12 alone - three alpha clusters on the
+corners of an equilateral triangle (Bozek et al., Phys. Rev. C90, 064902) - and for a space-shielding
+calculation carbon is the main line, not an edge case. Two things in it are recorded rather than
+corrected, because porting Geant4 and improving it are different jobs.
+
+**The cluster spread is a variance used as a standard deviation.** The code is
+
+    const G4double Disp=0.552;        // 0.91^2*2/3 fermi^2
+    R1=G4ThreeVector(G4RandGauss::shoot(0.,Disp), ... )*fermi + Corner1;
+
+and the comment's `fermi^2` says the number is a dispersion - 0.91^2*2/3 = 0.5521, so it is. CLHEP's
+second argument is a STANDARD DEVIATION (RandGauss.icc:25, `shoot()*stdDev + mean`). The sampled
+displacement therefore has sigma = 0.552 fm where the cited parametrisation gives sqrt(0.552) =
+0.743 fm, and the clusters come out 26% tighter than the paper's.
+
+**The random stream depends on a process-wide latch.** CLHEP's `RandGauss::shoot` generates two
+deviates per polar-method trial and caches the second in a `CLHEP_THREAD_LOCAL` static. Whether the
+FIRST Gaussian of a C12 `Init` consumes two uniforms or none therefore depends on how many Gaussians
+the process drew earlier, anywhere, in any model. The port keeps the latch in `Nucleus3DScratch`, so
+a caller that reuses one scratch reproduces a sequence and a caller that does not gets a fresh one;
+which of the two matches a given Geant4 run depends on what else that run did. It is not a bug in
+either program, and it is why the C12 configuration is compared through the replay set rather than
+by seeding.
+
+### V69: a member assigned in an initialiser list and discarded two lines later
+
+`G4KineticTrack`'s `(G4Nucleon*, position, 4momentum)` constructor - the one the binary cascade
+builds every target nucleon with - initialises `theFermi3Momentum(nucleon->GetMomentum())` and then
+its body is
+
+    theFermi3Momentum.setE(0);
+    Set4Momentum(a4Momentum);
+
+where `Set4Momentum` ends with `theFermi3Momentum = G4LorentzVector(0)`. No other code in the class
+writes the member. So `theFermi3Momentum` is zero for every kinetic track in every event, and
+`Get4Momentum()` and `GetTrackingMomentum()` - which `SetTrackingMomentum` ties together through
+`theTotal4Momentum = the4Momentum + theFermi3Momentum` - return the same four-vector up to the
+`sqrt(m^2+p^2)` round trip.
+
+The nucleon's Fermi motion is loaded into the track and thrown away. Both members are kept in the
+port with the round trip, because BIC reads one in `Capture` and the other in
+`G4RKPropagation::Transport` and the ulp between them is real, and because a release that removes
+the `Set4Momentum` call would bring the Fermi momentum to life inside the propagator without
+touching a line of the propagator. `tools/extract_bic_constants.pl` pins all three lines.
+
+### V70: two sign errors in the nuclear fields, one of them with the wrong units
+
+**The nucleon field table's tail returns a momentum where a field belongs.** `G4ProtonField` and
+`G4NeutronField` precompute the local Fermi momentum at r = 0, 0.3, 0.6, ... out to
+`2*GetOuterRadius()`, then push `fermiMom(2R)`, then `0`, then `0`. `GetField`'s out-of-range branch
+is `if ((index+2) > size) return theFermiMomBuffer.back()` - it returns that trailing zero AS A
+FIELD, not as a momentum to be turned into one. So beyond r = 2R + 0.6 fm a proton's field is exactly
+0, where just inside it is `+theBarrier` (p_F has already fallen to zero), and the potential steps
+DOWN by the Coulomb barrier - 5.1 MeV for lead - at the edge of the table. The two
+`G4ThreeVector aPosition(0,0,...)` locals that are constructed and never read in those last two
+blocks are what shows the zeros were meant to be evaluated.
+
+**The pion fields build a nucleus mass by ADDING the binding energy.** All three of
+`G4PionPlusField`, `G4PionMinusField` and `G4PionZeroField`, and `G4KM_OpticalEqRhs::SetFactor` as
+well, compute
+
+    nucleusMass = Z*proton_mass_c2 + (A-Z)*neutron_mass_c2 + bindingEnergy;
+
+where a nuclear mass subtracts it - which is how `G4Fancy3DNucleus::GetMass()` writes the same
+expression, twenty lines of Geant4 away. It enters only through `reducedMass = m_pi M/(m_pi + M)`,
+so the error is diluted by m_pi/M: 2e-4 relative on carbon, 1.2e-5 on lead.
+
+Both are reproduced as written and pinned by `tools/extract_bic_constants.pl`, which asserts the
+`+` in all four files, so a release that fixes any of them fails the extractor rather than changing
+four answers quietly.
+
+### V71: an integrator whose position tolerance is a time compared to a length
+
+`G4RKPropagation` steps the cascade in TIME and drives it with Geant4's magnetic-field integrator,
+which steps in curve length. It gets away with it because `dydx[0..2] = c p/E` is a velocity, so the
+driver's "curve length" parameter advances by a time while the position advances by a distance.
+Every place the driver compares a length to its step therefore compares a length in mm to a time in
+ns, and two of those comparisons are live:
+
+  * `G4MagInt_Driver::OneGoodStep`'s position tolerance is `eps_pos = eps_rel_max * max(h,
+    fMinimumStep)`, with `h` a time. At eps = 0.01 and a cascade step of 0.01 ns that is 1e-4 -
+    read as mm, one hundred million fermi. The position error can never fail a trial step, and the
+    adaptive step size is set entirely by the momentum error `|dp|^2/|p|^2/eps^2`.
+  * `AccurateAdvance`'s `endPointDist >= hdid*(1.+perMillion)` compares a chord in mm against a step
+    in ns with c = 299.79 mm/ns between them, so it is true on essentially every step and
+    `fNoBadSteps` counts every step. The warning it guards is inside `#ifdef G4DEBUG_FIELD`, so
+    nothing is printed and no value changes; the statistic is meaningless.
+
+Neither changes an answer, and the port reproduces both - the first because it decides the step
+sizes and therefore the trajectory, the second by omitting a counter nothing reads. Recorded because
+a reader who assumes the position error is controlled will not understand the step sizes
+`tests/test_bic_nucleus.cu` reproduces.
+
+### V72: theCutOnP's three mass-number thresholds are compared against a mass in MeV
+
+`G4BinaryCascade::Propagate` sets the momentum cut that decides which nucleons `Capture()` moves
+into `theCapturedList`:
+
+    theCutOnP = 90*MeV;
+    if (the3DNucleus->GetMass() >  30) theCutOnP = 70*MeV;
+    if (the3DNucleus->GetMass() >  60) theCutOnP = 50*MeV;
+    if (the3DNucleus->GetMass() > 120) theCutOnP = 45*MeV;
+
+The 30, 60 and 120 read as mass numbers and would give 90, 70, 50 and 45 MeV for A <= 30, A <= 60,
+A <= 120 and heavier. `GetMass()` is `Z m_p + (A-Z) m_n - BE` in MeV, which is 939.6 for a single
+neutron and 193,687 for Pb208. Every nucleus that exists is above 120, so the first three
+assignments are dead and `theCutOnP` is always 45 MeV.
+
+Reproduced as written in `bic_params.cuh`'s `cut_on_p(nucleus_mass_mev)`, with the mass-number
+reading beside it as `cut_on_p_by_mass_number` and called by nothing. Both the thresholds and the
+accessor are pinned by `tools/extract_bic_constants.pl`, because a release that corrects the
+accessor would change the capture rate on every light target at once, and the extractor is the only
+thing that can see it: `theCutOnP` is private, and the captured list is not exposed.
+
+### V73: the port's own A13 is 1.5e-15 away from G4Pow's, and two hadronic packages inherit it
+
+`src/data/g4pow.hh`'s `g4pow_a13_high` - the above-table branch - is written `exp(log(a)/3.0)` where
+`G4Pow::A13` writes `G4Exp(G4Log(a)*onethird)` with `onethird = 1.0/3.0`. A division by three and a
+multiplication by one third are not the same double. Measured: A13(4e32) is 73680629972.807739 here
+and 73680629972.807632 in Geant4, 1.5e-15 relative.
+
+Two of this package's quantities are built on it and cannot be compared at 1e-15 because of it:
+
+  * `G4FermiMomentum::GetFermiMomentum` is `constofpmax * A13(density*A)`, and every density above
+    about 1.9e2 in these units takes the above-table branch. `tests/test_bic_nucleus.cu`'s
+    `FermiMomentum` bucket measures 3.8e-15 and is set at 1e-14.
+  * the nucleon nuclear field is `-p_F^2/(2m) + barrier`, which squares that error and then nearly
+    cancels the two terms. Measured at 2.4e-14 on Al27 at 5.4 fm; the bucket is set at 1e-13.
+
+Not fixed here. `g4pow.hh` is shared with the EM port, whose tests sit near their own tolerances,
+and changing the last bit of A13 under them from a hadronic branch is how an integration goes wrong.
+It belongs in a package that owns `src/data/` and can run the whole suite after the change.
+
+### V74: G4Fancy3DNucleus discards ReduceSum's verdict, and one nucleus in twenty thousand needs it
+
+`ChooseFermiMomenta`'s retry loop is
+
+    for (G4int ntry=0; ntry<1 ; ntry ++ )
+    {
+        ... sample a momentum for every nucleon ...
+        if ( ReduceSum() ) break;
+    }
+
+- one iteration, so the `break` is not loop control and `ReduceSum`'s return value is read by
+nothing. A configuration whose momenta cannot be balanced is used anyway, with a non-zero total
+three-momentum and no message. The port returns it as `NucleusReport::reduce_sum_failed` instead,
+because the only other way to find out is to add the momenta up.
+
+How often it matters is measurable and small when the method is transcribed correctly: zero of
+20,000 nuclei for each of C12, O16, Al27, Fe56 and Pb208. What the flag is worth is what it catches
+when something else is wrong - see the commit that introduced it, where a one-index error in
+`ReduceSum`'s Fermi-momentum budget produced 1,402 unbalanced nuclei out of 100,000 with up to
+876 MeV of net momentum, and one O16 that never left the method at all.
+
+### V75: a rotation to the lab frame that has already been applied
+
+`G4BinaryLightIonReaction::ApplyYourself` ends by building
+
+    G4LorentzRotation toZ;
+    toZ.rotateZ(-1*mom.phi());
+    toZ.rotateY(-1*mom.theta());
+    G4LorentzRotation toLab(toZ.inverse());
+
+and applying `toLab` to every secondary. Those are the same five lines as
+`G4HadProjectile::InitialiseLocal` (G4HadProjectile.cc:72-76) - and that method has already run
+them: it stores `theMom.set(0, 0, sqrt(T(T+2m)), T+m)`, a four-momentum along +z, and keeps the
+inverse in `toLabFrame` for `G4HadronicProcess::FillResult` to apply at the end. So
+`aTrack.Get4Momentum()` has `phi() == 0` and `theta() == 0`, both rotations are the identity, and so
+is `toLab`. The swapped case is the same: `toBreit * G4LorentzVector(m1, (0,0,0))` boosts an at-rest
+nucleus along the original projectile's velocity, which is +z.
+
+The port does not carry the block. It is recorded because the only way to know it is a no-op is to
+read `G4HadProjectile`, and because a caller that hands the model a projectile NOT along +z - which
+nothing in 11.1.1 does - would need it. `G4BinaryCascade::ApplyYourself` has the same block, with
+the same reasoning.
+
+### V76: G4PhotonEvaporation creates 511 keV out of nothing, once per conversion electron
+
+**This entry belongs to P3, not to P9, and is filed here because P9's oracle is what found it.**
+
+`G4PhotonEvaporation::GenerateGamma` computes the emitting system's invariant mass as
+`ecm = lv.mag()` and then, for an internal-conversion transition,
+
+    if (!isGamma) { ecm += (electron_mass_c2 - bond_energy); }
+
+with `bond_energy` a local initialised to 0 and never assigned - it is the atomic binding energy
+that was meant to pay for the electron's rest mass. The emission then splits `ecm` between the
+electron and the residual, so the whole four-momentum is rescaled by `(1 + m_e/M)` and 511 keV
+appears that was not there before.
+
+Measured on `preco::deexcite` alone, one compound nucleus in, its product list out, 5,000 events:
+
+  compound          conversion electrons/event   product list heavy by   n_e * m_e
+  d + Pb208                              0.26          +0.13286 MeV      0.13286 MeV
+  C12 + Pb208                            0.4198        +0.214539 MeV     0.214517 MeV
+  d + Al27                               0             -1.1e-13 MeV      0
+  alpha + C12                            0             -4.5e-14 MeV      0
+
+It is Geant4 11.1.1's arithmetic and this port reproduces it; `tests/test_bic_apply.cu` pays for it on
+both sides and then asserts the balance exactly. What it costs a user is a dose: a calculation that
+sums secondary kinetic energies plus rest masses against the primary's will find more energy out
+than in, by 511 keV per conversion electron, and for a heavy compound that is a quarter of an MeV
+per event on top of totals of a few hundred MeV. Small, real, and in a direction that cannot be
+blamed on sampling.
+
+The check that catches it costs nothing and is not in this port anywhere else: after a
+de-excitation, `sum(product four-momenta) - n_conversion_electrons * m_e` must equal the fragment
+that went in. `tests/test_bic_apply.cu` asserts it at 2e-10 MeV per event on a 205 GeV total.

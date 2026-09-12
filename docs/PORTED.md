@@ -902,6 +902,58 @@ either way. The kernel costs nothing for it: 3024 bytes of stack frame, 84/32 sp
 registers and cmem[0] 1464 in both instantiations, which is V65's flag-off column to the byte.
 docs/RISK.md V66.
 
+#### 2.1.10 binary_cascade - the nucleus model, the fields, the propagator and both entry points (P9)
+
+**The number to read first: `G4BinaryCascade`'s cascade proper is NOT here.** Everything below is
+the machinery the two binary models are built on, plus the two branches of them that reach a
+compound nucleus without a cascade. What is missing is `Propagate` and the whole `im_r_matrix`
+collision tree under it - `G4Scatterer`, `G4CollisionManager`, the `G4Collision*` channels, the
+`G4X*` cross sections, the angular distributions and the resonance widths - and with it the ion
+arm above 50 MeV/nucleon, which is where a galactic cosmic ray actually is. Section 2.2's row for
+`G4HadronInelasticQBBC` still says "the cascades and the strings: none", and it is still right.
+
+What is here is refused BY NAME at the point it would have been needed - `BicRefusal::cascade`,
+`BlirRefusal::cascade`, `RkPropagation::is_refused_field_species` - and never approximated.
+
+The nucleus model under `bic/nucleus/` is **shared with P11 (FTF)**. `nucleus_model.cuh` is the
+contract header: include that one, not the four it pulls in. It states what `Init` guarantees (A
+nucleons, the hard-core exclusion, zero total three-momentum) and the two things it does not -
+every nucleon is off its mass shell downwards, which selects the QGS arm of
+`preco::propagate_residual` (docs/RISK.md V50), and the total energy is `Nucleus3D::mass()` and
+not `G4NucleiProperties::GetNuclearMass` nor `G4IonTable::GetIonMass`, three answers 11.1.1 uses
+in three places.
+
+| Geant4 class | QBBC | | Where |
+|---|:--:|:--:|---|
+| **G4Fancy3DNucleus** (`Init`, `ChooseNucleons`, `ChoosePositions` incl. the A=12 alpha-cluster branch, `ChooseFermiMomenta`, `ReduceSum`, `CenterNucleons`, `GetNuclearRadius`, `GetOuterRadius`, `GetMass`, `CoulombBarrier`, `StartLoop`/`GetNextNucleon`, both `DoLorentzBoost`/`DoLorentzContraction` overloads, both sorts) | y | **V** | `bic/nucleus/fancy_3d_nucleus.cuh`. Radii, mass, barrier and binding energy exact on 12 nuclides; 5 replayed configurations checked for the hard core, the proton count, the per-nucleon binding energy, the off-shell invariant and the outer radius, all exact; the SAMPLING checked at 20,000 nuclei x 5 nuclides against radial and momentum histograms and five moments, worst 3.20 sigma of 400 bins and 2.15 of 25 moments. C12's cluster spread is a variance used as a sigma and its stream depends on a CLHEP thread-local latch: docs/RISK.md V68. `ReduceSum`'s verdict is returned rather than discarded: V74 |
+| G4NuclearFermiDensity, G4NuclearShellModelDensity, G4VNuclearDensity | y | **V** | `bic/nucleus/nuclear_density.cuh`; 360 points of rho0, `GetRelativeDensity`, `GetDensity`, `GetDeriv` and 120 of `GetRadius` including both ends of its guard, all at 3.2e-16 against a 1e-15 bucket. The A < 17 dispatch is asserted per nuclide, not assumed. `theRsquare`'s association order is load-bearing: V67 |
+| G4FermiMomentum | y | **V** | `bic/nucleus/fermi_momentum.cuh`; 130 points, 3.8e-15. Not 1e-15, and the reason is `src/data/g4pow.hh`'s A13, not this file: V73 |
+| G4Nucleon | y | **V** | `bic/nucleus/nucleon.cuh`. The two `Boost` overloads boost in OPPOSITE directions - the `G4LorentzVector` one is CERNLIB's U101 form and transforms INTO the argument's rest frame - and `G4Fancy3DNucleus::DoLorentzBoost` forwards each to the matching one |
+| G4KineticTrack (the two constructors BIC uses, both momentum pairs, `GetActualMass`, the four `Update*Momentum`, `CascadeState`) | y | **P** | `bic/kinetic_track.cuh`. `theFermi3Momentum` is loaded from the nucleon and discarded two lines later, in every event: V69. **Refused by name:** the resonance-width machinery (`G4SampleResonance`, `G4Integrator`, `IntegrateCMMomentum`) and the K0 -> K0S/K0L coin flip, both of which belong with `G4BCDecay` |
+| G4ProtonField, G4NeutronField, G4PionPlus/Minus/ZeroField, G4VNuclearField | y | **P** | `bic/nuclear_field.cuh`; 750 field points at 2.4e-14 and 750 barriers exact, on the replayed nuclei. The nucleon fields are a 0.3 fm TABLE and not a formula, and its tail returns a Fermi momentum where a field belongs; the pion fields build a nucleus mass by ADDING the binding energy. Both reproduced, both pinned by the extractor: V70. **Refused by name:** G4AntiProtonField, the three kaon and the three sigma fields - their optical coefficients are recorded as named constants and no channel this package reaches produces one |
+| G4RKPropagation (`Init`, `Transport`, `FieldTransport`, `FreeTransport`, both `GetSphereIntersectionTimes`), G4KM_NucleonEqRhs, G4KM_OpticalEqRhs, and the field machinery they drive - G4ClassicalRK4, G4MagErrorStepper, G4MagInt_Driver (`AccurateAdvance`, `OneGoodStep`, `QuickAdvance`, `ComputeNewStepSize`) | y | **P** | `bic/rk_propagation.cuh`; 11 initial states x 5 nuclei x 12 steps = 7,260 position and momentum comparisons at 2.8e-13, 660 cascade states exact, and the per-step momentum transfer at 1.3e-11 MeV absolute. The exit test's short circuit is load-bearing - hoisting the intersection call out of the `||` moves the C12 neutron 2.807 relative in x. The position-error tolerance compares a time to a length and is never binding: V71. `QuickAdvance` is reached on 17 of the 55 trajectories. **Refused by name:** `G4RKFieldIntegrator`, `G4Absorber`, and the spin terms, which are dead for `nvar = 6` |
+| **G4BinaryCascade::ApplyYourself**, the `theBCminP` branch | y | **P** | `bic/binary_cascade.cuh`, entry point `bic::apply_yourself()`. A nucleon below 45 MeV never enters the cascade: the whole reaction is `G4PreCompoundModel::ApplyYourself`, which is P6's. 18 cases of {p, n} on {C, O, Al, Fe, Pb} at 5-46 MeV x 5,000 events: compound (Z, A) exact, energy balance 2e-10 MeV/event, species yields worst 3.44 sigma. The 44/46 MeV pair straddles the threshold and the REFUSAL at 46 is asserted against what Geant4 did instead. **Refused by name:** the cascade proper, every pion at every energy (the species test is an `&&`), any projectile that is not a nucleon or a charged pion, and the per-secondary creator model id, which P3's product does not carry |
+| **G4BinaryLightIonReaction::ApplyYourself**, the fusion arm | y | **P** | `bic/light_ion_reaction.cuh`, entry point `bic::blir_apply_yourself()`, with `SetLighterAsProjectile`, `FuseNucleiAndPrompound` and `EnergyAndMomentumCorrector`. 20 cases of {d, alpha, C12} on {C, O, Al, Fe, Pb, H} at 1-45 MeV/nucleon x 5,000 events: the fusion gate's verdict exact in all 20 including the one that returns the primary ALIVE (alpha on H at 1 MeV/nucleon - Li5 is unbound), compound (Z, A) exact in 100,000 events, energy balance 2e-10 MeV/event, species yields 3.01 sigma and kinetic energies 3.19. The rotate-to-lab block is the identity and is not carried: V75. **Refused by name:** `Interact` and everything under it, and with it every ion at or above 50 MeV/nucleon; `GetProjectileExcitation`, `SortResult` and `DeExciteSpectatorNucleus`, whose arithmetic is recorded in comments and runs nowhere |
+| The `im_r_matrix` collision tree: G4Scatterer, G4CollisionManager, every `G4Collision*` and `G4X*`, G4AngularDistribution and its tables, G4ResonanceNames, G4ResonanceWidth, G4PartialWidthTable, G4BaryonWidth, G4BaryonPartialWidth | y | **-** | not ported. This is the cascade, and it is what P9 did not reach |
+| G4BCDecay, G4BCLateParticle, G4BCAction, G4RKFieldIntegrator, G4Absorber, G4MesonAbsorption | y | **-** | not ported; they are reached only from `Propagate` |
+
+Constants no run can be asked for - `theBCminP`, the four `theCutOnP` assignments and the mass
+thresholds they are compared against, `theCutOnPAbsorb`, the ten optical coefficients, the field
+table's 0.3 fm step, the driver's safety factor and step budget, the C12 cluster geometry - are
+checked by `tools/extract_bic_constants.pl`, which asserts the Geant4 SOURCE still says exactly
+them. 93 checks. A test that compared the port's copy against a literal in the test would be
+comparing a copy with itself, which is docs/RISK.md V52; this is V41's form instead.
+
+Tests: `test_bic_nucleus.cu` (8.6 s) and `test_bic_apply.cu` (11 s). Device probes, never
+launched, `-arch=sm_86`: `bic_nucleus_probe` 82 registers / 168 bytes stack, `bic_rk_probe` 156 /
+720, `bic_apply_probe` 255 / 10,080, `bic_blir_probe` 255 / 10,112. The last two are P6's
+`preco::deexcite` inlined whole - it alone reports 10,812 bytes of spill stores - and are the
+first time the full de-excitation chain has been compiled for a device.
+
+One finding here belongs to P3 and is filed where P9's oracle found it: `G4PhotonEvaporation`
+creates one electron rest mass out of nothing per conversion electron, 511 keV, because the
+atomic binding energy that should pay for it is a local initialised to zero. docs/RISK.md V76.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |
