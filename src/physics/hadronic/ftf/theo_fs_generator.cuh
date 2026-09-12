@@ -78,6 +78,15 @@ struct FtfApplyReport {
   preco::GeneratorRefusal generator;    ///< P6's
   int attempts = 0;                     ///< G4VPartonStringModel::Scatter's `attempts`
   int fragment_retries = 0;             ///< attempts FragmentStrings answered with a null list
+  /// WHY the retry loop turned round, one counter per `Success = false`. These are here for the
+  /// same reason G4FTFModel's three public counters are (docs/RISK.md V99): `attempts` says
+  /// that a case retries and says nothing about which of the four conditions did it, and the
+  /// four are in completely different parts of the model.
+  int retries_no_strings = 0;           ///< GetStrings produced none
+  int retries_residual = 0;             ///< the unphysical-residual table rejected the collision
+  int retries_residual_target = 0;      ///< ...because of the TARGET residual
+  int retries_residual_projectile = 0;  ///< ...because of the PROJECTILE residual (ion beams)
+  int retries_summass = 0;              ///< SumMass > InvMass, or SumMass == 0
   /// A refusal the SUCCESSFUL fragmentation reported and that Geant4 keeps the result for -
   /// `kFragmentLoopExhausted` or `kEnergyCorrectorFailed` on a string that still produced
   /// hadrons. Carried separately from `refused`, which aborts.
@@ -149,10 +158,13 @@ __host__ __device__ inline preco::CascadeTrack ftf_track_from_hadron(const FragH
 /// count this function is given rather than on what the caller happens to support.
 __host__ __device__ inline bool ftf_unphysical_residual(int n_proton_t, int n_neutron_t,
                                                         int n_proton_p, int n_neutron_p,
-                                                        int n_lambda_p, bool has_projectile) {
+                                                        int n_lambda_p, bool has_projectile,
+                                                        bool* by_target = nullptr,
+                                                        bool* by_projectile = nullptr) {
   bool unphysical = false;
   if ((n_proton_t > 3 && n_neutron_t == 0) || (n_proton_t == 0 && n_neutron_t > 1)) {
     unphysical = true;
+    if (by_target != nullptr) { *by_target = true; }
   }
   if (!has_projectile) { return unphysical; }
   if ((n_proton_p > 3 && n_neutron_p == 0) ||
@@ -162,6 +174,7 @@ __host__ __device__ inline bool ftf_unphysical_residual(int n_proton_t, int n_ne
       (n_proton_p > 0 && n_neutron_p == 0 && n_lambda_p > 0) ||
       (n_proton_p > 1 && n_neutron_p > 1 && n_lambda_p > 1)) {
     unphysical = true;
+    if (by_projectile != nullptr) { *by_projectile = true; }
   }
   return unphysical;
 }
@@ -233,6 +246,7 @@ __host__ __device__ inline bool ftf_scatter(FtfWorkspace<kA, kP, kI, kS, kT, kPS
       return false;
     }
     if (ws->model.n_strings == 0) {
+      ++ws->report.retries_no_strings;
       success = false;
       continue;
     }
@@ -294,8 +308,13 @@ __host__ __device__ inline bool ftf_scatter(FtfWorkspace<kA, kP, kI, kS, kT, kPS
     const int n_proton_t = target_z - n_proton_target_hits;
     const int n_neutron_t = target_a - target_z - n_neutron_target_hits;
 
+    bool residual_by_target = false, residual_by_projectile = false;
     if (ftf_unphysical_residual(n_proton_t, n_neutron_t, n_proton_p, n_neutron_p, n_lambda_p,
-                                ws->model.has_projectile_nucleus)) {
+                                ws->model.has_projectile_nucleus, &residual_by_target,
+                                &residual_by_projectile)) {
+      ++ws->report.retries_residual;
+      if (residual_by_target) { ++ws->report.retries_residual_target; }
+      if (residual_by_projectile) { ++ws->report.retries_residual_projectile; }
       success = false;
       continue;
     }
@@ -334,7 +353,10 @@ __host__ __device__ inline bool ftf_scatter(FtfWorkspace<kA, kP, kI, kS, kT, kPS
     for (int i = 0; i < ws->strings.n_out; ++i) {
       sum_mass += ws->strings.out[i].momentum.mag();
     }
-    if ((sum_mass > inv_mass) || (sum_mass == 0.0)) { success = false; }
+    if ((sum_mass > inv_mass) || (sum_mass == 0.0)) {
+      ++ws->report.retries_summass;
+      success = false;
+    }
 
   } while (!success);
 

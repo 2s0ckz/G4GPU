@@ -32,7 +32,7 @@
 //   ftf_modelcases.csv the INPUTS of those cases - the projectile's PDG mass and lab momentum
 //                      as Geant4 computed them - so that the statistical half does not have to
 //                      copy a table and cannot disagree with the dump about what was run.
-//   ftf_modelbig_*     three of those cases again at 200,000 events, which is docs/RISK.md
+//   ftf_modelbig_*     four of those cases again at 200,000 events, which is docs/RISK.md
 //                      V88's rule applied to the rows that sat at 3 sigma.
 //
 // WHY TWO CASE TABLES ARE STILL DUPLICATED HERE. The twelve constructed collisions and the five
@@ -1113,12 +1113,28 @@ int main(int argc, char** argv) {
           proj = projectile_of(c.pdg);
         }
         const ftf::Vec4 primary(0.0, 0.0, c.plab, c.kin + c.pmass);
+
+        // PASS 1, AND IT MUST NOT GO THROUGH `ftf_scatter`. The dump's two passes measure two
+        // different things and `ref/dump/dump_ftf.cc` says so above `dump_modelstat`: the
+        // string-level counters come from `Init` + `GetStrings` with NO
+        // `G4VPartonStringModel::Scatter` around them, and only the hadron-level ones come from
+        // `Scatter`. Scatter's unphysical-residual table RE-SAMPLES the whole event, and that is
+        // a conditioning: it throws away the attempts with the most hit nucleons. For a proton
+        // beam it fires on 1.6% of attempts and the difference hides; for C12 on carbon it fires
+        // on 7.2%, and measuring the port's string counters through `ftf_scatter` while the
+        // oracle measured them without it read as a 12.8-sigma disagreement in the participant
+        // count that was in neither model. docs/RISK.md V105.
         for (int ev = 0; ev < n_events; ++ev) {
           Philox<double> rng(static_cast<uint32_t>(ev), 7u);
-          const bool ok = ftf::ftf_scatter(ws, proj, primary, c.a, c.z, lund, rng);
-          if (!ok) { continue; }
+          ws->model.report = ftf::FtfModelReport();
+          ftf::ftf_model_init(&ws->model, proj, primary, c.a, c.z, lund, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone ||
+              ws->model.report.nucleus_failed) {
+            continue;
+          }
+          ftf::ftf_get_strings(&ws->model, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone) { continue; }
           ev_mass.clear();
-          ev_species.clear();
           ev_exc.clear();
           ++got_nstrings[ws->model.n_strings];
           for (int i = 0; i < ws->model.n_strings; ++i) {
@@ -1143,6 +1159,21 @@ int main(int argc, char** argv) {
             ++got_nn[ws->model.n_nn_collisions];
             ++got_part[c.a - ws->model.n_target_spectators];
           }
+          for (const auto& kv : ev_mass) { sq_mass[kv.first] += kv.second * kv.second; }
+          for (const auto& kv : ev_exc) { sq_exc[kv.first] += kv.second * kv.second; }
+        }
+
+        // PASS 2: the hadrons and the wounded nucleus, through the whole of `ftf_scatter` -
+        // rejection, retries and all - because that is what the dump's second pass calls. A
+        // DIFFERENT Philox key, because the dump's two passes are different events under
+        // different seeds and sharing them here would put the hadrons and the strings on the
+        // same nucleus when the oracle does not.
+        for (int ev = 0; ev < n_events; ++ev) {
+          Philox<double> rng(static_cast<uint32_t>(ev), 13u);
+          ws->report = ftf::FtfApplyReport();
+          const bool ok = ftf::ftf_scatter(ws, proj, primary, c.a, c.z, lund, rng);
+          if (!ok) { continue; }
+          ev_species.clear();
           ++n_ok;
           sum_attempts += ws->report.attempts;
           ++got_mult[ws->strings.n_out];
@@ -1168,9 +1199,7 @@ int main(int argc, char** argv) {
             if (ws->model.target.nucleons[i].hit) { ++nh; }
           }
           ++got_holes[nh];
-          for (const auto& kv : ev_mass) { sq_mass[kv.first] += kv.second * kv.second; }
           for (const auto& kv : ev_species) { sq_species[kv.first] += kv.second * kv.second; }
-          for (const auto& kv : ev_exc) { sq_exc[kv.first] += kv.second * kv.second; }
         }
 
         // The two sides ran different numbers of events; the z-test compares proportions, so
@@ -1327,13 +1356,19 @@ int main(int argc, char** argv) {
         }
         if (ref_n == 0) { continue; }
 
-        const int n_events = quick ? 2000 : 20000;
+        // The oracle row says how many configurations it measured, and the port matches it.
+        // `C12big` is C12 at 200,000, and it is here because a 20,000-configuration row at
+        // 2.8 sigma is what docs/RISK.md V88 says must be re-asked at ten times the statistics
+        // before it is called a difference. It draws from a DIFFERENT Philox key so that the
+        // two C12 rows are independent samples rather than one nested in the other.
+        const bool big = ref_n > 20000;
+        const int n_events = quick ? 2000 : static_cast<int>(ref_n);
         std::map<int, long long> got_outer, got_rt, got_rr;
         bic::Nucleus3D nuc;
         nuc.nucleons = nucleons;
         nuc.capacity = 250;
         for (int ev = 0; ev < n_events; ++ev) {
-          Philox<double> rng(static_cast<uint32_t>(ev), 31u);
+          Philox<double> rng(static_cast<uint32_t>(ev), big ? 61u : 31u);
           const bic::NucleusReport rep = bic::nucleus_init(nuc, sc, a, z, rng);
           if (rep.fatal()) { continue; }
           nuc.sort_nucleons_inc_z();
@@ -1392,7 +1427,231 @@ int main(int argc, char** argv) {
   }
 
   // -------------------------------------------------------------------------------------------
-  // 7. ftf_modelbig_*.csv - docs/RISK.md V88's rule, applied to the three worst rows
+  // 6c. ftf_aaradius.csv - the impact-parameter range of a NUCLEUS-NUCLEUS collision
+  //
+  // `GetList`'s AA arm samples in a disc of radius `projOuter + targOuter + 2 fm`, and the
+  // projectile's outer radius is measured AFTER `G4FTFModel::Init` has boosted the projectile
+  // nucleus and LORENTZ-CONTRACTED it. Nothing else measures that number: `ftf_nucstat.csv` is
+  // the nucleus before the boost, and `ftf_getlist_aa.csv` replays a given configuration and so
+  // tests the arithmetic rather than the distribution. It is here because C12 on carbon
+  // disagreed and this was the only geometric input that had not been checked (it agreed).
+  // -------------------------------------------------------------------------------------------
+  const int z_aa_pr = new_z("AA projectile outer radius");
+  const int z_aa_tr = new_z("AA target outer radius");
+  const int z_aa_xy = new_z("AA impact-parameter range");
+  {
+    Csv ca, cc3;
+    if (ca.load(dir + "/ftf_aaradius.csv") && cc3.load(dir + "/ftf_modelcases.csv")) {
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      WS* ws = new WS();
+      const int n_events = quick ? 2000 : 20000;
+      std::map<std::string, int> seen;
+      for (size_t r = 0; r < ca.rows.size(); ++r) { seen[ca.s(r, "case")] = 1; }
+      for (const auto& nk : seen) {
+        const std::string& cname = nk.first;
+        int ci3 = -1;
+        for (size_t r = 0; r < cc3.rows.size(); ++r) {
+          if (cc3.s(r, "case") == cname) { ci3 = static_cast<int>(r); }
+        }
+        if (ci3 < 0) { continue; }
+        long long ref_n = 0;
+        std::map<int, long long> ref_pr, ref_tr, ref_xy;
+        for (size_t r = 0; r < ca.rows.size(); ++r) {
+          if (ca.s(r, "case") != cname) { continue; }
+          ref_n = ca.i(r, "n_events");
+          const std::string& q = ca.s(r, "quantity");
+          const int bin = static_cast<int>(ca.i(r, "bin"));
+          if (q == "proj_outer_twfm") { ref_pr[bin] = ca.i(r, "count"); }
+          else if (q == "targ_outer_qfm") { ref_tr[bin] = ca.i(r, "count"); }
+          else if (q == "xyradius_qfm") { ref_xy[bin] = ca.i(r, "count"); }
+        }
+        if (ref_n == 0) { continue; }
+        const int a = static_cast<int>(cc3.i(ci3, "a")), z = static_cast<int>(cc3.i(ci3, "z"));
+        const int pa = static_cast<int>(cc3.i(ci3, "proj_a"));
+        const int pz = static_cast<int>(cc3.i(ci3, "proj_z"));
+        hadronic::xs::Projectile<double> proj;
+        proj.pdg = static_cast<int>(cc3.i(ci3, "pdg"));
+        proj.mass = cc3.d(ci3, "pmass");
+        proj.charge = pz;
+        proj.baryon_number = pa;
+        proj.n_lambdas = 0;
+        const ftf::Vec4 primary(0.0, 0.0, cc3.d(ci3, "plab"),
+                                cc3.d(ci3, "kin") + cc3.d(ci3, "pmass"));
+        std::map<int, long long> got_pr, got_tr, got_xy;
+        for (int ev = 0; ev < n_events; ++ev) {
+          Philox<double> rng(static_cast<uint32_t>(ev), 23u);
+          ws->model.report = ftf::FtfModelReport();
+          ftf::ftf_model_init(&ws->model, proj, primary, a, z, lund, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone ||
+              ws->model.report.nucleus_failed || !ws->model.has_projectile_nucleus) {
+            continue;
+          }
+          const double pr = ws->model.projectile.outer_radius() / 1e-12;
+          const double tr = ws->model.target.outer_radius() / 1e-12;
+          const double xy = pr + tr + 2.0;
+          int b = static_cast<int>(20.0 * pr);
+          if (b < 0) { b = 0; }
+          if (b > 499) { b = 499; }
+          ++got_pr[b];
+          b = static_cast<int>(4.0 * tr);
+          if (b < 0) { b = 0; }
+          if (b > 199) { b = 199; }
+          ++got_tr[b];
+          b = static_cast<int>(4.0 * xy);
+          if (b < 0) { b = 0; }
+          if (b > 199) { b = 199; }
+          ++got_xy[b];
+        }
+        const long long n_min = (ref_n < n_events) ? ref_n : n_events;
+        auto scale = [&](long long v, long long from) {
+          return static_cast<long long>(static_cast<double>(v) * n_min / from + 0.5);
+        };
+        for (const auto& kv : ref_pr) {
+          z_compare(zstats[z_aa_pr], scale(got_pr[kv.first], n_events), scale(kv.second, ref_n),
+                    n_min, cname + " projR " + std::to_string(kv.first));
+        }
+        for (const auto& kv : ref_tr) {
+          z_compare(zstats[z_aa_tr], scale(got_tr[kv.first], n_events), scale(kv.second, ref_n),
+                    n_min, cname + " targR " + std::to_string(kv.first));
+        }
+        for (const auto& kv : ref_xy) {
+          z_compare(zstats[z_aa_xy], scale(got_xy[kv.first], n_events), scale(kv.second, ref_n),
+                    n_min, cname + " xyR " + std::to_string(kv.first));
+        }
+      }
+      delete ws;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 6d. ftf_prescatter.csv - the model WITHOUT the rejection loop around it
+  //
+  // docs/RISK.md V105. `G4VPartonStringModel::Scatter` re-samples a whole event whose nuclear
+  // residual is unphysical, and that rejection is a conditioning: it removes the attempts with
+  // the most hit nucleons. This table is `Init` + `GetStrings` with none of that, and it carries
+  // the rejection's OWN inputs - the proton and neutron hit counts of both nuclei - and the
+  // four-way outcome of the residual clauses, so that a difference in the model and a difference
+  // in the loop around it cannot be mistaken for each other again.
+  // -------------------------------------------------------------------------------------------
+  const int z_ps_hits = new_z("pre-scatter nucleon hits");
+  const int z_ps_dist = new_z("pre-scatter b/strings/participants");
+  const int z_ps_rej = new_z("pre-scatter residual rejection");
+  {
+    Csv cp, cc4;
+    if (cp.load(dir + "/ftf_prescatter.csv") && cc4.load(dir + "/ftf_modelcases.csv")) {
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      WS* ws = new WS();
+      const int n_events = quick ? 2000 : 20000;
+      std::map<std::string, int> seen;
+      for (size_t r = 0; r < cp.rows.size(); ++r) { seen[cp.s(r, "case")] = 1; }
+      for (const auto& nk : seen) {
+        const std::string& cname = nk.first;
+        int ci4 = -1;
+        for (size_t r = 0; r < cc4.rows.size(); ++r) {
+          if (cc4.s(r, "case") == cname) { ci4 = static_cast<int>(r); }
+        }
+        if (ci4 < 0) { continue; }
+        long long ref_n = 0;
+        std::map<std::string, std::map<int, long long>> ref;
+        for (size_t r = 0; r < cp.rows.size(); ++r) {
+          if (cp.s(r, "case") != cname) { continue; }
+          ref_n = cp.i(r, "n_events");
+          ref[cp.s(r, "quantity")][static_cast<int>(cp.i(r, "bin"))] = cp.i(r, "count");
+        }
+        if (ref_n == 0) { continue; }
+        const int a = static_cast<int>(cc4.i(ci4, "a")), z = static_cast<int>(cc4.i(ci4, "z"));
+        const int pa = static_cast<int>(cc4.i(ci4, "proj_a"));
+        const int pz = static_cast<int>(cc4.i(ci4, "proj_z"));
+        hadronic::xs::Projectile<double> proj;
+        if (pa > 0) {
+          proj.pdg = static_cast<int>(cc4.i(ci4, "pdg"));
+          proj.mass = cc4.d(ci4, "pmass");
+          proj.charge = pz;
+          proj.baryon_number = pa;
+          proj.n_lambdas = 0;
+        } else {
+          proj = projectile_of(static_cast<int>(cc4.i(ci4, "pdg")));
+        }
+        const ftf::Vec4 primary(0.0, 0.0, cc4.d(ci4, "plab"),
+                                cc4.d(ci4, "kin") + cc4.d(ci4, "pmass"));
+        std::map<std::string, std::map<int, long long>> got;
+        for (int ev = 0; ev < n_events; ++ev) {
+          Philox<double> rng(static_cast<uint32_t>(ev), 29u);
+          ws->model.report = ftf::FtfModelReport();
+          ftf::ftf_model_init(&ws->model, proj, primary, a, z, lund, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone ||
+              ws->model.report.nucleus_failed) {
+            continue;
+          }
+          ftf::ftf_get_strings(&ws->model, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone) { continue; }
+          int ntp = 0, ntn = 0, npp = 0, npn = 0;
+          for (int i = 0; i < ws->model.target.my_a; ++i) {
+            const bic::Nucleon& n = ws->model.target.nucleons[i];
+            if (!n.hit) { continue; }
+            if (n.type == bic::kProton) { ++ntp; }
+            if (n.type == bic::kNeutron) { ++ntn; }
+          }
+          if (ws->model.has_projectile_nucleus) {
+            for (int i = 0; i < ws->model.projectile.my_a; ++i) {
+              const bic::Nucleon& n = ws->model.projectile.nucleons[i];
+              if (!n.hit) { continue; }
+              if (n.type == bic::kProton) { ++npp; }
+              if (n.type == bic::kNeutron) { ++npn; }
+            }
+          }
+          ++got["targ_p_hits"][ntp];
+          ++got["targ_n_hits"][ntn];
+          ++got["proj_p_hits"][npp];
+          ++got["proj_n_hits"][npn];
+          int bb = static_cast<int>(2.0 * ws->model.participants.b_impact / 1e-12);
+          if (bb < 0) { bb = 0; }
+          if (bb > 79) { bb = 79; }
+          ++got["b_halffm"][bb];
+          ++got["nstrings"][ws->model.n_strings];
+          ++got["nncoll"][ws->model.n_nn_collisions];
+          ++got["participants"][a - ws->model.n_target_spectators];
+          // G4VPartonStringModel::Scatter's residual clauses, as the dump applies them.
+          const int zT = z - ntp, nT = a - z - ntn;
+          const int zP = (pa > 0) ? pz - npp : 0;
+          const int nP = (pa > 0) ? pa - pz - npn : 0;
+          int why = 0;
+          if ((zT > 3 && nT == 0) || (zT == 0 && nT > 1)) { why |= 1; }
+          if ((zP > 3 && nP == 0) || (zP == 0 && nP > 1)) { why |= 2; }
+          ++got["rejected"][why];
+        }
+        const long long n_min = (ref_n < n_events) ? ref_n : n_events;
+        auto scale = [&](long long v, long long from) {
+          return static_cast<long long>(static_cast<double>(v) * n_min / from + 0.5);
+        };
+        const char* hits[] = {"targ_p_hits", "targ_n_hits", "proj_p_hits", "proj_n_hits"};
+        for (const char* q : hits) {
+          for (const auto& kv : ref[q]) {
+            z_compare(zstats[z_ps_hits], scale(got[q][kv.first], n_events),
+                      scale(kv.second, ref_n), n_min,
+                      cname + " " + q + " " + std::to_string(kv.first));
+          }
+        }
+        const char* dists[] = {"b_halffm", "nstrings", "nncoll", "participants"};
+        for (const char* q : dists) {
+          for (const auto& kv : ref[q]) {
+            z_compare(zstats[z_ps_dist], scale(got[q][kv.first], n_events),
+                      scale(kv.second, ref_n), n_min,
+                      cname + " " + q + " " + std::to_string(kv.first));
+          }
+        }
+        for (const auto& kv : ref["rejected"]) {
+          z_compare(zstats[z_ps_rej], scale(got["rejected"][kv.first], n_events),
+                    scale(kv.second, ref_n), n_min,
+                    cname + " rejected " + std::to_string(kv.first));
+        }
+      }
+      delete ws;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 7. ftf_modelbig_*.csv - docs/RISK.md V88's rule, applied to the four worst rows
   //
   // V88: 20,000 events is the oracle's limit, and a row at 3 sigma there is either a
   // fluctuation or a real sub-percent difference - the two are not distinguishable from one
@@ -1405,21 +1664,40 @@ int main(int argc, char** argv) {
   const int z_big_nn = new_z("200k NN collisions");
   const int z_big_mult = new_z("200k multiplicity");
   {
-    struct BigCase {
-      const char* name;
-      int pdg;
-      double kin;
-      int a, z;
-    };
-    const BigCase kBig[] = {{"n_Fe_10", 2112, 10000.0, 56, 26},
-                            {"pip_Al_10", 211, 10000.0, 27, 13},
-                            {"pim_C_10", -211, 10000.0, 12, 6}};
-    Csv cs, cm;
-    if (cs.load(dir + "/ftf_modelbig_strings.csv") && cm.load(dir + "/ftf_modelbig_mult.csv")) {
+    // The 200,000-event cases are named here and their INPUTS come from ftf_modelcases.csv,
+    // the same file the 20,000-event section reads - C12_C_8 is an ion and its projectile mass
+    // is `G4IonTable::GetIonMass(Z, A)`, which is exactly the number the file header warns
+    // against writing twice.
+    const char* kBig[] = {"n_Fe_10", "pip_Al_10", "pim_C_10", "C12_C_8"};
+    Csv cs, cm, cc2;
+    if (cs.load(dir + "/ftf_modelbig_strings.csv") && cm.load(dir + "/ftf_modelbig_mult.csv") &&
+        cc2.load(dir + "/ftf_modelcases.csv")) {
       using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
       WS* ws = new WS();
       const int n_events = quick ? 20000 : 200000;
-      for (const BigCase& c : kBig) {
+      for (const char* cname : kBig) {
+        int ci2 = -1;
+        for (size_t r = 0; r < cc2.rows.size(); ++r) {
+          if (cc2.s(r, "case") == cname) { ci2 = static_cast<int>(r); }
+        }
+        if (ci2 < 0) {
+          std::printf("FAIL: no ftf_modelcases row for 200k case %s\n", cname);
+          ++fails;
+          continue;
+        }
+        struct BigCase {
+          const char* name;
+          int pdg, a, z, proj_a, proj_z;
+          double kin, pmass, plab;
+        } c{cname,
+            static_cast<int>(cc2.i(ci2, "pdg")),
+            static_cast<int>(cc2.i(ci2, "a")),
+            static_cast<int>(cc2.i(ci2, "z")),
+            static_cast<int>(cc2.i(ci2, "proj_a")),
+            static_cast<int>(cc2.i(ci2, "proj_z")),
+            cc2.d(ci2, "kin"),
+            cc2.d(ci2, "pmass"),
+            cc2.d(ci2, "plab")};
         std::map<int, long long> ref_nstr, ref_part, ref_nn, ref_mult;
         long long ref_n = 0;
         for (size_t r = 0; r < cs.rows.size(); ++r) {
@@ -1441,16 +1719,38 @@ int main(int argc, char** argv) {
           continue;
         }
         std::map<int, long long> got_nstr, got_part, got_nn, got_mult;
-        const hadronic::xs::Projectile<double> proj = projectile_of(c.pdg);
-        const data::FtfHadron* pd = data::ftf_find_hadron(c.pdg);
-        const double p = std::sqrt(c.kin * (c.kin + 2.0 * pd->mass));
-        const ftf::Vec4 primary(0.0, 0.0, p, c.kin + pd->mass);
+        hadronic::xs::Projectile<double> proj;
+        if (c.proj_a > 0) {
+          proj.pdg = c.pdg;
+          proj.mass = c.pmass;
+          proj.charge = c.proj_z;
+          proj.baryon_number = c.proj_a;
+          proj.n_lambdas = 0;
+        } else {
+          proj = projectile_of(c.pdg);
+        }
+        const ftf::Vec4 primary(0.0, 0.0, c.plab, c.kin + c.pmass);
+        // The same two passes as the 20,000-event section, for the same reason: `dump_modelbig`
+        // measures the string counters from `Init` + `GetStrings` and the multiplicity from
+        // `Scatter`, under two different seeds. docs/RISK.md V105.
         for (int ev = 0; ev < n_events; ++ev) {
           Philox<double> rng(static_cast<uint32_t>(ev), 11u);
-          if (!ftf::ftf_scatter(ws, proj, primary, c.a, c.z, lund, rng)) { continue; }
+          ws->model.report = ftf::FtfModelReport();
+          ftf::ftf_model_init(&ws->model, proj, primary, c.a, c.z, lund, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone ||
+              ws->model.report.nucleus_failed) {
+            continue;
+          }
+          ftf::ftf_get_strings(&ws->model, rng);
+          if (ws->model.report.refused != ftf::FtfRefusal::kNone) { continue; }
           ++got_nstr[ws->model.n_strings];
           ++got_nn[ws->model.n_nn_collisions];
           ++got_part[c.a - ws->model.n_target_spectators];
+        }
+        for (int ev = 0; ev < n_events; ++ev) {
+          Philox<double> rng(static_cast<uint32_t>(ev), 17u);
+          ws->report = ftf::FtfApplyReport();
+          if (!ftf::ftf_scatter(ws, proj, primary, c.a, c.z, lund, rng)) { continue; }
           ++got_mult[ws->strings.n_out];
         }
         const long long n_min = (ref_n < n_events) ? ref_n : n_events;

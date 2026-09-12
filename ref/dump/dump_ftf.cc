@@ -53,6 +53,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -1951,6 +1952,16 @@ const ModelCase kModelCases[] = {
     {"C12_C_8",  0, 96000.0,  12,  6,  12, 6},
     {"C12_Pb_8", 0, 96000.0,  207, 82, 12, 6},
     {"C12_C_20", 0, 240000.0, 12,  6,  12, 6},
+    // The ANTI-NUCLEON arm. `G4HadronicBuilder::BuildFTFP_BERT(..., bert=false)` gives FTFP
+    // every energy for anti-nucleons, so this is the only beam that reaches G4FTFAnnihilation
+    // at all - and the only one for which `theAdditionalString` is ever non-empty, which is
+    // what makes `CreateStrings`' HadronIsString arm reachable. Both are above
+    // `LowEnergyLimit` = 1 GeV/c (5 GeV of kinetic energy is 5.86 GeV/c for a proton mass), so
+    // `HighEnergyInter` is true and `AdjustNucleons` - which this port refuses - is not on the
+    // path; a slower anti-proton is a REFUSAL and not a statistical row.
+    {"pbar_C_5",  -2212, 5000.0,  12,  6},
+    {"pbar_Pb_5", -2212, 5000.0,  207, 82},
+    {"nbar_C_5",  -2112, 5000.0,  12,  6},
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -2123,16 +2134,25 @@ void dump_getlist_aa() {
 /// because it is the one nuclide `G4Fancy3DNucleus::ChoosePositions` builds from three alpha
 /// clusters rather than from the density (docs/RISK.md V68).
 void dump_nucstat() {
-  struct NucStatCase { const char* name; int a, z; };
-  const NucStatCase kCases[] = {{"He4", 4, 2},    {"C12", 12, 6},   {"O16", 16, 8},
-                                {"Al27", 27, 13}, {"Fe56", 56, 26}, {"Pb207", 207, 82}};
+  // `C12big` is the same nuclide as `C12` at ten times the statistics, and it is here for
+  // docs/RISK.md V88: C12's outer radius sits at 2.8 sigma over 20,000 configurations, C12 on
+  // carbon is the one model case that fails, and the same nuclide is that case's projectile AND
+  // its target - so the question "is the C12 configuration itself biased" has to be asked at a
+  // sample size where the answer is not a fluctuation. It samples from its own engine seed, so
+  // the two rows are independent draws and not the first 20,000 of the 200,000.
+  struct NucStatCase { const char* name; int a, z; int n; };
+  const NucStatCase kCases[] = {{"He4", 4, 2, 20000},    {"C12", 12, 6, 20000},
+                                {"O16", 16, 8, 20000},   {"Al27", 27, 13, 20000},
+                                {"Fe56", 56, 26, 20000}, {"Pb207", 207, 82, 20000},
+                                {"C12big", 12, 6, 200000}};
   FILE* f = std::fopen("ftf_nucstat.csv", "w");
   std::fprintf(f, "nucleus,a,z,n_events,quantity,bin,count\n");
-  const int N = 20000;
   CLHEP::HepJamesRandom eng(20260914);
   CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
   CLHEP::HepRandom::setTheEngine(&eng);
   for (const NucStatCase& c : kCases) {
+    const int N = c.n;
+    if (N > 20000) { eng.setSeed(20260916, 0); }
     std::map<int, long long> outer, rms_t, rms_r;
     G4Fancy3DNucleus* nuc = new G4Fancy3DNucleus();
     for (int ev = 0; ev < N; ++ev) {
@@ -2172,6 +2192,170 @@ void dump_nucstat() {
     for (const auto& kv : rms_r) {
       std::fprintf(f, "%s,%d,%d,%d,rms_r_dfm,%d,%lld\n", c.name, c.a, c.z, N, kv.first,
                    kv.second);
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ftf_aaradius.csv - the ONE geometric number a nucleus-nucleus collision has that a
+// hadron-nucleus one does not
+//
+// `G4FTFParticipants::GetList`'s AA arm samples the impact parameter in a disc of radius
+//
+//     xyradius = theProjectileNucleus->GetOuterRadius() + theNucleus->GetOuterRadius() + 2 fm
+//
+// and the projectile's outer radius is measured AFTER `G4FTFModel::Init` has boosted the
+// projectile nucleus and Lorentz-CONTRACTED it, so it is not the radius `ftf_nucstat.csv`
+// measures. That makes it the one input to the AA geometry that no other table constrains:
+// ftf_getlist_aa.csv replays both nuclei and therefore tests the arithmetic on a GIVEN
+// configuration, ftf_nucstat.csv measures the nucleus before the boost, and nothing measured
+// the contracted one. This file does, as a distribution, for every ion case.
+//
+// It exists because C12 on carbon disagreed - 3.7% fewer participants and 2.3% larger impact
+// parameter - while the nucleus, the FTF parameters and the replayed GetList all agreed
+// exactly. That is the same shape of question docs/RISK.md V99 answered by adding three
+// counters that localise rather than detect.
+void dump_aaradius() {
+  FILE* f = std::fopen("ftf_aaradius.csv", "w");
+  std::fprintf(f, "case,n_events,quantity,bin,count\n");
+  const int N = 20000;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  for (const ModelCase& c : kModelCases) {
+    if (c.proj_a <= 0) { continue; }  // The projectile is a hadron: there is no second radius
+    CLHEP::HepJamesRandom eng(20260917);
+    CLHEP::HepRandom::setTheEngine(&eng);
+    FtfModelProbe* model = new FtfModelProbe("FTFP");
+    const G4ParticleDefinition* d = projectile_def(c);
+    std::map<int, long long> projr, targr, xyr;
+    for (int ev = 0; ev < N; ++ev) {
+      G4Nucleus nucleus(c.a, c.z);
+      const double p = std::sqrt(c.kin * (c.kin + 2.0 * d->GetPDGMass()));
+      G4DynamicParticle dp(d, G4ThreeVector(0.0, 0.0, p));
+      model->Init(nucleus, dp);
+      const double pr = model->GetProjectileNucleus()->GetOuterRadius() / fermi;
+      const double tr = model->GetWoundedNucleus()->GetOuterRadius() / fermi;
+      const double xy = pr + tr + 2.0;
+      int b = (G4int)(20.0 * pr);  // twentieth-fermi bins: the contracted radius is small
+      if (b < 0) { b = 0; }
+      if (b > 499) { b = 499; }
+      ++projr[b];
+      b = (G4int)(4.0 * tr);
+      if (b < 0) { b = 0; }
+      if (b > 199) { b = 199; }
+      ++targr[b];
+      b = (G4int)(4.0 * xy);
+      if (b < 0) { b = 0; }
+      if (b > 199) { b = 199; }
+      ++xyr[b];
+    }
+    delete model;
+    for (const auto& kv : projr) {
+      std::fprintf(f, "%s,%d,proj_outer_twfm,%d,%lld\n", c.name, N, kv.first, kv.second);
+    }
+    for (const auto& kv : targr) {
+      std::fprintf(f, "%s,%d,targ_outer_qfm,%d,%lld\n", c.name, N, kv.first, kv.second);
+    }
+    for (const auto& kv : xyr) {
+      std::fprintf(f, "%s,%d,xyradius_qfm,%d,%lld\n", c.name, N, kv.first, kv.second);
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// ftf_prescatter.csv - what G4FTFModel produces BEFORE G4VPartonStringModel::Scatter throws any
+// of it away
+//
+// `Scatter` runs `Init` + `GetStrings` and then rejects the whole attempt if the nuclear
+// residual is unphysical, re-sampling everything. For a C12 beam on carbon that rejection fires
+// on about one attempt in thirteen, and it is a CONDITIONING: it removes the events with the
+// most hit nucleons, so every distribution measured after `Scatter` - `ftf_modelstat_*.csv` -
+// is a conditional one. Two implementations that agree perfectly on the model can then
+// disagree on those tables if they disagree on the rejection, and the tables cannot tell the
+// two apart.
+//
+// This file is the same quantities measured with the rejection NOT applied: one `Init` plus one
+// `GetStrings` per event, and the hit counts read straight off the two nuclei. The residual
+// clauses are pure integer logic on those counts, so a port that reproduces these histograms
+// reproduces the rejection rate as well, and one that does not has a difference in the model
+// rather than in the loop around it.
+void dump_prescatter() {
+  FILE* f = std::fopen("ftf_prescatter.csv", "w");
+  std::fprintf(f, "case,n_events,quantity,bin,count\n");
+  const int N = 20000;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  for (const ModelCase& c : kModelCases) {
+    // The six ion cases and two hadron controls. The rest are covered by ftf_modelstat_*.csv,
+    // where the rejection almost never fires.
+    const bool wanted = c.proj_a > 0 || std::strcmp(c.name, "p_C_10") == 0 ||
+                        std::strcmp(c.name, "p_Pb_10") == 0;
+    if (!wanted) { continue; }
+    CLHEP::HepJamesRandom eng(20260918);
+    CLHEP::HepRandom::setTheEngine(&eng);
+    FtfModelProbe* model = new FtfModelProbe("FTFP");
+    const G4ParticleDefinition* d = projectile_def(c);
+    std::map<int, long long> tp, tn, pp, pn, bimp, nstr, nncoll, tused, rejected;
+    for (int ev = 0; ev < N; ++ev) {
+      G4Nucleus nucleus(c.a, c.z);
+      const double p = std::sqrt(c.kin * (c.kin + 2.0 * d->GetPDGMass()));
+      G4DynamicParticle dp(d, G4ThreeVector(0.0, 0.0, p));
+      model->Init(nucleus, dp);
+      G4ExcitedStringVector* v = model->GetStrings();
+      int ntp = 0, ntn = 0, npp = 0, npn = 0;
+      const std::vector<G4Nucleon>& tt = model->GetWoundedNucleus()->GetNucleons();
+      for (const auto& nuc : tt) {
+        if (!nuc.AreYouHit()) { continue; }
+        if (nuc.GetDefinition() == G4Proton::Proton()) { ++ntp; }
+        if (nuc.GetDefinition() == G4Neutron::Neutron()) { ++ntn; }
+      }
+      if (model->GetProjectileNucleus() != nullptr) {
+        const std::vector<G4Nucleon>& ppn = model->GetProjectileNucleus()->GetNucleons();
+        for (const auto& nuc : ppn) {
+          if (!nuc.AreYouHit()) { continue; }
+          if (nuc.GetDefinition() == G4Proton::Proton() ||
+              nuc.GetDefinition() == G4AntiProton::AntiProton()) { ++npp; }
+          if (nuc.GetDefinition() == G4Neutron::Neutron() ||
+              nuc.GetDefinition() == G4AntiNeutron::AntiNeutron()) { ++npn; }
+        }
+      }
+      ++tp[ntp]; ++tn[ntn]; ++pp[npp]; ++pn[npn];
+      const double b = model->GetImpactParameter() / fermi;
+      int bb = (G4int)(2.0 * b);
+      if (bb < 0) { bb = 0; }
+      if (bb > 79) { bb = 79; }
+      ++bimp[bb];
+      ++nstr[v ? (G4int)v->size() : 0];
+      ++nncoll[model->GetNumberOfNNcollisions()];
+      ++tused[c.a - model->GetNumberOfTargetSpectatorNucleons()];
+
+      // G4VPartonStringModel::Scatter's residual clauses, literally, on the counts above.
+      const G4int zT = c.z - ntp;
+      const G4int nT = c.a - c.z - ntn;
+      const G4int zP = (c.proj_a > 0) ? c.proj_z - npp : 0;
+      const G4int nP = (c.proj_a > 0) ? c.proj_a - c.proj_z - npn : 0;
+      G4int why = 0;
+      if ( ( zT > 3 && nT == 0 ) || ( zT == 0 && nT > 1 ) ) why |= 1;
+      if ( ( zP > 3 && nP == 0 ) || ( zP == 0 && nP > 1 ) ) why |= 2;
+      ++rejected[why];
+
+      if (v) {
+        for (size_t i = 0; i < v->size(); ++i) { delete (*v)[i]; }
+        delete v;
+      }
+    }
+    delete model;
+    struct Out { const char* q; std::map<int, long long>* m; };
+    const Out outs[] = {{"targ_p_hits", &tp}, {"targ_n_hits", &tn},  {"proj_p_hits", &pp},
+                        {"proj_n_hits", &pn}, {"b_halffm", &bimp},   {"nstrings", &nstr},
+                        {"nncoll", &nncoll},  {"participants", &tused}, {"rejected", &rejected}};
+    for (const Out& o : outs) {
+      for (const auto& kv : *o.m) {
+        std::fprintf(f, "%s,%d,%s,%d,%lld\n", c.name, N, o.q, kv.first, kv.second);
+      }
     }
   }
   CLHEP::HepRandom::setTheEngine(saved);
@@ -2398,6 +2582,12 @@ const ModelCase kBigCases[] = {
     {"n_Fe_10", 2112, 10000.0, 56, 26},
     {"pip_Al_10", 211, 10000.0, 27, 13},
     {"pim_C_10", -211, 10000.0, 12, 6},
+    // docs/RISK.md V88: a row that sits above 3 sigma at 20,000 events is re-run at 200,000 on
+    // BOTH sides before it is called a difference. C12 on carbon at 8 GeV/nucleon is the only
+    // case that does - participants at 5.34 sigma, excited/not-excited at 6.32 - and it is the
+    // one case in the table where the same nuclide is the projectile AND the target, so a bias
+    // in one nuclide's sampled radius would enter it twice.
+    {"C12_C_8", 0, 96000.0, 12, 6, 12, 6},
 };
 
 void dump_modelbig() {
@@ -2493,6 +2683,8 @@ void dump_ftf(const DumpContext&) {
   dump_getlist();
   dump_getlist_aa();
   dump_nucstat();
+  dump_aaradius();
+  dump_prescatter();
   dump_modelcases();
   dump_modelstat();
   dump_modelbig();
@@ -2510,7 +2702,8 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_hnelastic.csv ftf_excite.csv ftf_cstrings.csv ftf_nucleus.csv "
                     "ftf_getlist.csv ftf_getlist_aa.csv ftf_aanucleus.csv ftf_annih.csv "
                     "ftf_modelstat_strings.csv ftf_modelstat_species.csv "
-                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelcases.csv ftf_nucstat.csv "
+                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelcases.csv "
+                    "ftf_nucstat.csv ftf_aaradius.csv ftf_prescatter.csv "
                     "ftf_modelbig_strings.csv "
                     "ftf_modelbig_mult.csv",
                     dump_ftf);
