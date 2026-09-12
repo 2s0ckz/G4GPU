@@ -437,6 +437,23 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 
 /// Advances one electron or positron by a single step. A positron that falls below the
 /// tracking cut emits its two annihilation photons before dying.
+///
+/// MULTIPLE SCATTERING IS TWO MODELS HERE, SPLIT BY ENERGY AT `em::kMscEnergyLimit()`.
+/// `G4EmStandardPhysics::ConstructProcess` (11.1.1, lines 179-183 and 199-203) builds one
+/// `G4UrbanMscModel` and one `G4WentzelVIModel` per lepton, calls
+/// `msc1->SetHighEnergyLimit(MscEnergyLimit())` and `msc2->SetLowEnergyLimit(MscEnergyLimit())`
+/// and hands both to `G4EmBuilder::ConstructElectronMscProcess`, which registers them on one
+/// `G4eMultipleScattering` in that order. `G4EmModelManager::SelectModel` then resolves an
+/// energy through `G4RegionModels::SelectIndex`:
+///
+///     G4int idx = nModelsForRegion;
+///     do {--idx;} while (idx > 0 && e <= lowKineticEnergy[idx]);
+///
+/// - a `<=` against the second model's low edge, so **at exactly 100 MeV the model is Urban**
+/// and WentzelVI starts strictly above it. The same `SelectIndex` decides the Seltzer-Berger /
+/// relativistic bremsstrahlung split at 1 GeV, which is why `use_rel` below is also a strict
+/// `>`. The model is chosen once per step from the PRE-step energy and both halves of the step
+/// - the limit and the sampling - belong to it, which is what `wv_msc` is.
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p, bool is_positron,
                                    Rng& rng, Emitter& em, real_t& edep, StepReport<real_t>& rep,
@@ -445,6 +462,33 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
   if (p.volume == geom::kOutsideWorld) { return false; }
+
+  const ParticleType lepton_type =
+      is_positron ? ParticleType::kPositron : ParticleType::kElectron;
+
+  // ---- A KINETIC ENERGY PAST THE TOP OF GEANT4'S OWN TABLES IS REFUSED, NOT CLAMPED.
+  //
+  // This is the shape of docs/RISK.md V64 and the reason it went unseen for so long. The old
+  // e+- table stopped at 100 MeV and `lookup` returned its last bin above that, so every
+  // electron above 100 MeV was transported as a 100 MeV electron and the difference was
+  // deposited nowhere: not locally, not in a secondary, and not in any counter. The table now
+  // runs to `G4EmParameters::MaxKinEnergy` - 100 TeV - which is as far as Geant4 goes, and
+  // above that there is no Geant4 answer to reproduce. So the track is killed and its energy
+  // is BOOKED under its own species, where the refusal ledger already reports the recoil ions
+  // `step_hadron` cannot transport. A number in a ledger is a hole in the answer with a size
+  // attached; a clamp is a hole with a plausible number in front of it.
+  if (s.range_table->above_table(p.ekin)) {
+    if (em.books.refused_by_type != nullptr) {
+      atomicAdd(&em.books.refused_by_type[static_cast<int>(lepton_type)], 1);
+    }
+    if (em.books.refused_energy != nullptr) {
+      atomicAdd(&em.books.refused_energy[static_cast<int>(lepton_type)],
+                static_cast<double>(p.ekin));
+    }
+    rep.status = StepStatus::fStopAndKill;
+    rep.process = ProcessId::fNotDefined;
+    return false;
+  }
 
   // Termination guards. Without these a lepton can stop making progress near the end of
   // its range and never fall below the tracking cut - the drain loop then never empties.
@@ -457,12 +501,13 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
   const real_t kMinUsefulRange = real_t(1e-2);  // mm
   const int mat0 = geom::material_at(s.geometry, p.volume, p.pos);
   rep.material = mat0;
-  const bool no_range_left = (s.range_table->lookup(mat0, p.ekin) < kMinUsefulRange);
+  const bool no_range_left =
+      (s.range_table->lookup(mat0, is_positron, p.ekin) < kMinUsefulRange);
 
   const bool below_cut = (p.ekin < em::kElectronTrackingCut<real_t>()) || no_range_left;
   if (!below_cut) {
     const int mat = mat0;
-    const real_t range = s.range_table->lookup(mat, p.ekin);
+    const real_t range = s.range_table->lookup(mat, is_positron, p.ekin);
 
     int next_volume = geom::kOutsideWorld;
     const real_t d_boundary =
@@ -525,13 +570,80 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
                                    * (real_t(2) - finR / range)
                        : range;
 
-    // Multiple-scattering step limit, and the true -> geometric conversion it defines.
+    // ---- MULTIPLE SCATTERING: URBAN AT OR BELOW 100 MeV, WENTZELVI ABOVE IT.
+    //
+    // See the header above this function for the `SelectIndex` semantics that make the split a
+    // strict `>`. What the two branches share is the SHAPE - a limit on the true path, a
+    // true -> geometric conversion, geometry, the conversion back, then the sampling - and
+    // nothing else: Urban fits one deflection to a distribution and WentzelVI walks the step
+    // alternating small multiple-scattering sub-steps with explicit single Coulomb scatters.
+    //
+    // THE BRANCH IS ON ENERGY AND THEREFORE CONSUMES NO UNIFORM BELOW 100 MeV. That is the
+    // same claim P8b made for the `G4CoulombScattering` draw above and it matters for the same
+    // reason: B1's gate is a 6 MeV gamma beam whose secondaries never reach 100 MeV, so no
+    // uniform this branch draws can reach it and the only thing that can move the gate is the
+    // dE/dx and range table itself. The Urban side of this function is untouched.
+    //
+    // Urban's coefficients are read either way, because `uc.doverra` is also the lateral
+    // displacement test below.
     const em::UrbanCoeffs<real_t>& uc = s.msc->coeffs[mat];
-    const real_t lambda0 = s.msc->lambda_at(mat, is_positron, p.ekin);
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
-    const real_t t_msc = em::urban_step_limit(uc, lambda0, p.ekin, range, safety, is_positron,
-                                             rng, p.msc_tlimit, p.msc_tlimitmin);
+    const bool wv_msc = (p.ekin > em::kMscEnergyLimit<real_t>());
+
+    // `currentMinimalStep` as Geant4 hands it to the msc model: `G4PhysicsListHelper`'s
+    // ordering table gives Msc an AlongStep order of 1 and Ionisation 2, so msc's
+    // AlongStepGPIL runs FIRST and what it sees is the minimum over the POST-step interaction
+    // lengths only - not the continuous-loss limit. It cannot change `t_step`, which is the
+    // minimum of everything below regardless, but it is what `wv_step_limit`'s two early
+    // returns test and those decide whether lateral displacement happens at all.
+    const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
+
+    const ParticleDef<real_t> lpd = particle_def<real_t>(lepton_type);
+    constexpr real_t kCosThetaLim = real_t(-1);  // G4EmParameters::MscThetaLimit() = pi
+    // The cut the msc model is handed is the material's ELECTRON production threshold, which
+    // is what `G4WentzelVIModel::ComputeTransportXSectionPerVolume` reads out of
+    // `(*currentCuts)[currentMaterialIndex]`. It is NOT the cut the transport mean free path
+    // table is built with - that one is zero - and `em/wentzel_msc.cuh`'s header block has
+    // why the same model uses two.
+    const real_t msc_cut = s.materials[mat].cut_electron;
+
+    real_t lambda0 = real_t(0);         // Urban's transport mfp at the pre-step energy
+    real_t t_msc = geom::kInfinity<real_t>();
+    bool wv_lat_off = false;
+    em::WentzelMscState<real_t> st{};
+    em::WentzelElementXs<real_t> els{};
+    if (!wv_msc) {
+      lambda0 = s.msc->lambda_at(mat, is_positron, p.ekin);
+      t_msc = em::urban_step_limit(uc, lambda0, p.ekin, range, safety, is_positron, rng,
+                                   p.msc_tlimit, p.msc_tlimitmin);
+    } else {
+      st.range = range;
+      st.pre_kin_energy = p.ekin;
+      st.eff_kin_energy = p.ekin;
+      st.single_scattering_mode = false;
+      {
+        const auto s0 = em::wentzel_setup(lpd, lepton_type, p.ekin, s.materials[mat].inv_a23,
+                                          static_cast<int>(s.materials[mat].z[0] + real_t(0.5)),
+                                          msc_cut, kCosThetaLim);
+        st.cos_tet_max_nuc = s0.cos_tet_max_nuc;
+      }
+      // Called for its OUT-PARAMETER and its side effect, not its return value: see the long
+      // note at the same call in `step_hadron`. `xtsec` is the total single-scattering rate
+      // the sampler draws its intervals from, and `els` is the per-element table it picks a
+      // target atom out of; the return value at cos_theta = 1 is identically zero.
+      em::wv_transport_xs(s.materials[mat], lpd, lepton_type, p.ekin, msc_cut, kCosThetaLim,
+                          real_t(1), st.cos_tet_max_nuc, els, st.xtsec);
+      // lambda_eff FROM THE TABLE. `G4VMscModel::GetTransportMeanFreePath` reads
+      // `xSectionTable` when one exists, and for a particle lighter than 1 GeV that is not
+      // GenericIon one always does - which is e- and e+. docs/PORTED.md 4.4 is the general
+      // rule and this is the case of it; evaluating the cross section here instead would be
+      // 4.3's defect over again, in the quantity that sets the step length.
+      st.lambda_eff = s.wv_lepton->lambda_at(mat, is_positron, p.ekin);
+      t_msc = em::wv_step_limit(s.materials[mat], lpd, lepton_type, p.ekin, range,
+                                st.lambda_eff, st.cos_tet_max_nuc, kCosThetaLim, safety,
+                                s.range_cut, d_post, em::kFacRange<real_t>(), &wv_lat_off);
+    }
     // With MSC off, the step is not limited by scattering and no deflection is applied. The
     // track then travels in a straight line, losing energy continuously - which is what a
     // "no multiple scattering" study means.
@@ -541,23 +653,57 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     real_t t_step = fmin(fmin(max_step, t_msc_eff), fmin(fmin(d_delta, d_brem), d_annih));
     t_step = fmin(fmin(t_step, d_coul), range);
 
-    // lambda at the energy left after the whole true step, for the general geometric branch.
-    real_t lambda1 = real_t(-1);
-    {
-      const real_t rfin = fmax(range - t_step, real_t(0.01) * range);
-      const real_t e_rfin = s.range_table->energy_from_range(mat, rfin);
-      if (e_rfin > real_t(0)) { lambda1 = s.msc->lambda_at(mat, is_positron, e_rfin); }
-    }
+    // The energy left after the whole true step, and the transport mfp that goes with it -
+    // both models need one and they ask for different ones. Urban's `ComputeGeomPathLength`
+    // wants lambda at the energy of the RESIDUAL RANGE; WentzelVI's wants it at the MEAN of
+    // the pre- and post-step energies, and also the nuclear cut-off angle there.
     em::MscStep<real_t> msc_state;
-    const real_t z_step = em::urban_geom_path(t_step, lambda0, range, lambda1, p.ekin,
-                                              units::electron_mass_c2<real_t>(), msc_state);
+    real_t e_end = real_t(0);
+    real_t wv_lambda_end = real_t(0);
+    real_t wv_cos_max_end = real_t(0);
+    real_t z_step = t_step;
+    if (!wv_msc) {
+      real_t lambda1 = real_t(-1);
+      const real_t rfin = fmax(range - t_step, real_t(0.01) * range);
+      const real_t e_rfin = s.range_table->energy_from_range(mat, is_positron, rfin);
+      if (e_rfin > real_t(0)) { lambda1 = s.msc->lambda_at(mat, is_positron, e_rfin); }
+      z_step = em::urban_geom_path(t_step, lambda0, range, lambda1, p.ekin,
+                                   units::electron_mass_c2<real_t>(), msc_state);
+    } else {
+      wv_lambda_end = st.lambda_eff;
+      wv_cos_max_end = st.cos_tet_max_nuc;
+      e_end = s.range_table->energy_from_range(mat, is_positron,
+                                               fmax(range - t_step, real_t(0)));
+      const real_t e_mid = real_t(0.5) * (e_end + p.ekin);
+      if (e_mid > real_t(0)) {
+        const auto sm =
+            em::wentzel_setup(lpd, lepton_type, e_mid, s.materials[mat].inv_a23,
+                              static_cast<int>(s.materials[mat].z[0] + real_t(0.5)), msc_cut,
+                              kCosThetaLim);
+        wv_cos_max_end = sm.cos_tet_max_nuc;
+        wv_lambda_end = s.wv_lepton->lambda_at(mat, is_positron, e_mid);
+      }
+      if (s.processes.multiple_scattering) {
+        z_step = em::wv_geom_path(st, t_step, e_end, wv_lambda_end, wv_cos_max_end);
+      }
+    }
 
     // Geometry acts on the *geometric* length; a boundary can cut the step short.
     const bool hits_boundary = (d_boundary < z_step);
     const real_t geom_step = hits_boundary ? d_boundary : z_step;
 
     // ...and the energy loss and scattering act on the true length that corresponds to it.
-    const real_t step_len = em::urban_true_path(geom_step, t_step, msc_state);
+    real_t step_len = geom_step;
+    if (!wv_msc) {
+      step_len = em::urban_true_path(geom_step, t_step, msc_state);
+    } else if (s.processes.multiple_scattering) {
+      auto recompute = [&](real_t cos_min, real_t& xt) {
+        return em::wv_transport_xs(s.materials[mat], lpd, lepton_type, st.eff_kin_energy,
+                                   msc_cut, kCosThetaLim, cos_min, st.cos_tet_max_nuc, els, xt);
+      };
+      step_len =
+          em::wv_true_path(st, geom_step, e_end, wv_lambda_end, wv_cos_max_end, recompute);
+    }
     // The true path, not the chord: MSC deflects within the step, so the displacement
     // |pos_after - pos_before| is shorter than the distance the electron actually ran and a
     // LET computed from it would be biased high. This is what G4Step::GetStepLength returns.
@@ -604,7 +750,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
                                                                 : ProcessId::fIonisation;
     }
 
-    real_t e_after = s.range_table->energy_from_range(mat, range - step_len);
+    real_t e_after = s.range_table->energy_from_range(mat, is_positron, range - step_len);
     // Second guard: the step must strictly reduce the energy. If the inverse range lookup
     // returns no decrease (rounding at small residual range), drop straight to zero rather
     // than requeueing a track that will make no progress next iteration either.
@@ -631,8 +777,6 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // The electron always takes the Glandz branch: sample_fluctuation's Gaussian branch
     // requires mass > electron_mass_c2, which is Geant4's own condition for it.
     if (loss < e_before && step_len > real_t(0)) {
-      const ParticleDef<real_t> lpd = particle_def<real_t>(
-          is_positron ? ParticleType::kPositron : ParticleType::kElectron);
       const real_t tmax = em::max_secondary_energy(e_before, is_positron);
       const real_t tcut = fmin(s.materials[mat].cut_electron, tmax);
       loss = em::sample_fluctuation(s.materials[mat], lpd, e_before, tcut, tmax, step_len, loss,
@@ -661,29 +805,53 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       p.msc_tlimit = real_t(0);  // stepStatus == fGeomBoundary: refresh rangeinit and fr
     }
     // Multiple scattering: deflection plus the correlated lateral displacement.
-    // Geant4 skips the displacement when the step ends at the range limit, when it is
-    // shorter than geomMin, or when the track is far enough from any boundary that a
-    // sideways shift cannot change which volume it is in (the doverra test in
-    // ComputeTruePathLengthLimit).
-    const bool lat_disp = (step_len < range) && (step_len > em::kGeomMin<real_t>())
-                          && !(range * uc.doverra < safety);
-    const real_t e_scat =
-        em::urban_scatter_energy(e_before, step_len, range, e_after_mean, col + rad);
-    const auto msc_out = em::urban_sample_scattering(
-        s.materials[mat], uc, lambda0, p.dir, step_len, geom_step, e_scat, e_before, lat_disp,
-        is_positron, rng,
-        (e_scat > real_t(0)) ? s.msc->lambda_at(mat, is_positron, e_scat) : real_t(-1),
-        // `tsmall`, from the tlimitmin `urban_step_limit` FROZE above and not from this step's
-        // energy - see kLeptonExtremeSmallStep, where that distinction is the whole
-        // correctness of the branch.
-        kLeptonExtremeSmallStep ? em::urban_t_small(p.msc_tlimitmin) : real_t(0));
-    if (s.processes.multiple_scattering) { p.dir = msc_out.dir; }
+    //
+    // `G4VMultipleScattering::AlongStepDoIt` samples scattering under
+    // `if(tPathLength < range && tPathLength > geomMin)` for BOTH models - the first two terms
+    // below - and the third is the model's own: Urban's `ComputeTruePathLengthLimit` sets
+    // `latDisplasment = false` and returns early when the track is far enough from any
+    // boundary that a sideways shift cannot change which volume it is in (the `doverra` test),
+    // and WentzelVI's does the same on its own two early returns, which is what `wv_lat_off`
+    // carries out of `wv_step_limit`. `G4EmParameters::LateralDisplacement` is TRUE for e+-
+    // (`G4VMscModel::InitialiseParameters`, the `abs(PDGEncoding) == 11` branch), where
+    // `MuHadLateralDisplacement` is false for everything `step_hadron` steps - so this is the
+    // one path in this transport where a WentzelVI displacement is non-zero.
+    // `AlongStepDoIt`'s guard on calling SampleScattering at all. Written out for the
+    // WentzelVI branch and folded into `lat_disp` for the Urban one, which is where it has
+    // always been - `urban_sample_scattering` carries the rest of Geant4's guards inside it.
+    const bool do_scatter = (step_len < range) && (step_len > em::kGeomMin<real_t>());
+    const bool lat_disp =
+        do_scatter && (wv_msc ? !wv_lat_off : !(range * uc.doverra < safety));
+    Vec3<real_t> msc_dir = p.dir;
+    Vec3<real_t> msc_disp{real_t(0), real_t(0), real_t(0)};
+    if (!wv_msc) {
+      const real_t e_scat =
+          em::urban_scatter_energy(e_before, step_len, range, e_after_mean, col + rad);
+      const auto msc_out = em::urban_sample_scattering(
+          s.materials[mat], uc, lambda0, p.dir, step_len, geom_step, e_scat, e_before, lat_disp,
+          is_positron, rng,
+          (e_scat > real_t(0)) ? s.msc->lambda_at(mat, is_positron, e_scat) : real_t(-1),
+          // `tsmall` from the tlimitmin `urban_step_limit` FROZE above, not from this step's energy -
+          // see kLeptonExtremeSmallStep, where that distinction is the whole correctness of the branch.
+          kLeptonExtremeSmallStep ? em::urban_t_small(p.msc_tlimitmin) : real_t(0));
+      msc_dir = msc_out.dir;
+      msc_disp = msc_out.displacement;
+    } else if (s.processes.multiple_scattering && do_scatter) {
+      // The DEFLECTION happens whenever `do_scatter` holds; `lat_disp` only decides whether
+      // the sampler accumulates a sideways shift, which is exactly the split Geant4 has
+      // between `AlongStepDoIt`'s guard and the model's `latDisplasment` member.
+      const auto sc = em::wv_sample_scattering(s.materials[mat], lpd, lepton_type, st, els,
+                                               msc_cut, kCosThetaLim, p.dir, lat_disp, rng);
+      msc_dir = sc.dir;
+      msc_disp = sc.displacement;
+    }
+    if (s.processes.multiple_scattering) { p.dir = msc_dir; }
 
     // Apply the displacement only as far as the post-step safety allows, exactly as
     // G4VMultipleScattering::AlongStepDoIt does: shift fully if it fits, scale it down to
     // the safety if it does not, and drop it if there is no room at all.
     {
-      const Vec3<real_t>& d = msc_out.displacement;
+      const Vec3<real_t>& d = msc_disp;
       const real_t r2 = d.x * d.x + d.y * d.y + d.z * d.z;
       if (r2 > em::kGeomMin<real_t>() * em::kGeomMin<real_t>()) {
         const real_t disp_r = sqrt(r2);

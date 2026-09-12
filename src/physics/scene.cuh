@@ -12,6 +12,7 @@
 #include "physics/em/electron_processes.cuh"
 #include "physics/em/hadron_range.cuh"
 #include "physics/em/urban_msc.cuh"
+#include "physics/em/wentzel_msc.cuh"
 
 namespace g4gpu {
 
@@ -55,6 +56,12 @@ struct Scene {
   const data::SBTableSet<real_t>* sb;   ///< differential tables, for sampling the photon
   const data::RayleighTable<real_t>* rayleigh;
   const em::UrbanTable<real_t>* msc;    ///< transport mfp and Urban coefficients
+  /// `G4VMscModel::xSectionTable` for the e+- WentzelVI model - the transport mean free path
+  /// from 100 MeV to 100 TeV, which is the half of the lepton msc range Urban does not cover.
+  /// NOT nullable in a run that can produce an electron above `em::kMscEnergyLimit()`:
+  /// `step_lepton` refuses such a track by name rather than scattering it with Urban's table
+  /// read past its ceiling, which is how docs/RISK.md V64 happened.
+  const em::WentzelLeptonTable<real_t>* wv_lepton;
   /// Range table for protons and alphas. Null when no hadron can appear in the run, which is
   /// every gamma- or electron-driven run; step_hadron is then never reached.
   const em::HadronRangeTable<real_t>* hadron_range;

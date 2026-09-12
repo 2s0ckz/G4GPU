@@ -13,6 +13,7 @@
 #include "host/g4data.cuh"
 #include "physics/em/electron_processes.cuh"
 #include "physics/em/urban_msc.cuh"
+#include "physics/em/wentzel_msc.cuh"
 
 namespace g4gpu::host {
 
@@ -31,6 +32,19 @@ namespace g4gpu::host {
 [[noreturn]] inline void fatal_upload(const char* what) {
   std::printf("\nFATAL: could not upload %s tables to the device.\n", what);
   std::exit(2);
+}
+
+/// What the e+- energy-loss tables cost, reported like every other table's line.
+///
+/// Worth a line of its own because the object grew by a factor of eight when the ceiling came
+/// off: it was one species on 128 bins to 100 MeV and is now two species on Geant4's 85-node
+/// grid to 100 TeV with five arrays each (dE/dx, range, and three sets of spline second
+/// derivatives). docs/RISK.md V64.
+template <typename real_t>
+inline void print_electron_table_cost(int n_materials) {
+  std::printf("e+- tables: dE/dx, range and inverse range for e- and e+, %d materials,\n"
+              "  %d bins (100 eV to 100 TeV, 7 per decade, cubic spline), %.1f KiB\n",
+              n_materials, em::kRangeBins, sizeof(em::RangeTable<real_t>) / 1024.0);
 }
 
 /// EPICS2017 photoelectric cross sections, inside whichever G4EMLOW g4data.cuh located.
@@ -123,8 +137,13 @@ inline BremsUpload<real_t> upload_brems(const std::string& dir,
   static data::BremsTable<real_t> h_bt;
   data::build_brems_tables<real_t>(h_mats, h_sb, h_bt);
 
-  // Range must be re-integrated with the real radiative term.
-  em::build_range_table<real_t>(h_mats, h_rt, &h_bt);
+  // The e+- dE/dx table is the sum over G4eIonisation AND G4eBremsstrahlung, so it can only
+  // be built once the Seltzer-Berger tables are loaded - which is why it is built here and
+  // not beside the materials. It takes the SB tables and not `h_bt`: see
+  // `em::brems_restricted_dedx`, which evaluates the models at this table's own 85 nodes
+  // because 6 of every 7 of them fall between `h_bt`'s.
+  em::build_range_table<real_t>(h_mats, h_rt, &h_sb);
+  print_electron_table_cost<real_t>(data::kNumMaterials);
 
   if (cudaMalloc(&out.table, sizeof(h_bt)) != cudaSuccess
       || cudaMalloc(&out.sb, sizeof(h_sb)) != cudaSuccess) {
@@ -181,8 +200,33 @@ inline em::UrbanTable<real_t>* upload_msc(const data::Material<real_t>* mats, in
   em::UrbanTable<real_t>* d = nullptr;
   cudaMalloc(&d, sizeof(em::UrbanTable<real_t>));
   cudaMemcpy(d, h, sizeof(em::UrbanTable<real_t>), cudaMemcpyHostToDevice);
-  std::printf("msc: Urban transport mfp for %d materials, %d energy bins\n", n_materials,
-              em::kMscBins);
+  std::printf("msc: Urban transport mfp for %d materials, %d energy bins, %.1f KiB\n",
+              n_materials, em::kMscBins, sizeof(em::UrbanTable<real_t>) / 1024.0);
+  delete h;
+  return d;
+}
+
+/// Builds and uploads `G4VMscModel::xSectionTable` for the e+- WentzelVI model - the transport
+/// mean free path from `G4EmParameters::MscEnergyLimit()` to `MaxKinEnergy`.
+///
+/// A second msc table and not an extension of the first, because Geant4 has two: one per
+/// MODEL, each over that model's own energy window (`G4LossTableBuilder::BuildTableForModel`).
+/// `em/wentzel_msc.cuh`'s header block has the grid, the stored quantity and the cut.
+template <typename real_t>
+inline em::WentzelLeptonTable<real_t>* upload_wv_lepton(const data::Material<real_t>* mats,
+                                                        int n_materials) {
+  auto* h = new em::WentzelLeptonTable<real_t>();
+  em::build_wentzel_lepton_table<real_t>(mats, n_materials, *h);
+  em::WentzelLeptonTable<real_t>* d = nullptr;
+  if (cudaMalloc(&d, sizeof(em::WentzelLeptonTable<real_t>)) != cudaSuccess) {
+    delete h;
+    fatal_upload("e+- WentzelVI transport mfp");
+  }
+  cudaMemcpy(d, h, sizeof(em::WentzelLeptonTable<real_t>), cudaMemcpyHostToDevice);
+  std::printf("msc: WentzelVI transport mfp for e+- above %g MeV, %d materials, %d bins, "
+              "%.1f KiB\n",
+              em::kWvLeptonEMin, n_materials, em::kWvLeptonBins,
+              sizeof(em::WentzelLeptonTable<real_t>) / 1024.0);
   delete h;
   return d;
 }
@@ -237,8 +281,10 @@ inline BremsUpload<real_t> upload_brems_for(const std::string& dir,
   }
   static data::BremsTable<real_t> h_bt;
   data::build_brems_tables<real_t>(h_mats, h_sb, h_bt, n_materials);
-  // Range must be re-integrated with the real radiative term.
-  em::build_range_table<real_t>(h_mats, h_rt, &h_bt, n_materials);
+  // See the note in `upload_brems`: the e+- dE/dx table needs the radiative term, and it
+  // takes the SB tables rather than `h_bt` so that it samples the models on its own grid.
+  em::build_range_table<real_t>(h_mats, h_rt, &h_sb, n_materials);
+  print_electron_table_cost<real_t>(n_materials);
 
   if (cudaMalloc(&out.table, sizeof(h_bt)) != cudaSuccess
       || cudaMalloc(&out.sb, sizeof(h_sb)) != cudaSuccess) {

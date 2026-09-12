@@ -876,7 +876,10 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                                 sizeof(data::Material<real_t>) * n_materials_,
                                 cudaMemcpyHostToDevice));
 
-    em::build_range_table<real_t>(h_mats_.data(), h_rt_, nullptr, n_materials_);
+    // The allocation only, here: the e+- dE/dx table is the sum over G4eIonisation AND
+    // G4eBremsstrahlung, so it cannot be built until the Seltzer-Berger data is loaded, which
+    // happens below in `upload_brems_for`. This used to build it with a crude radiative-yield
+    // scaling and then throw that away - a table nothing could read, built twice.
     G4GPU_CUDA_CHECK(cudaMalloc(&d_rt_, sizeof(h_rt_)));
 
     geom::Geometry<real_t> g{};
@@ -966,6 +969,12 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     auto* d_ray = upload_rayleigh<real_t>(default_rayl_dir(), zs.data(),
                                           static_cast<int>(zs.size()));
     auto* d_msc = upload_msc<real_t>(h_mats_.data(), n_materials_);
+    // The other half of the lepton's multiple scattering. Urban's table above stops at
+    // `G4EmParameters::MscEnergyLimit()` because that is where Geant4's Urban model stops;
+    // this one starts there and runs to 100 TeV. Unconditional: a run that makes any lepton
+    // can make one above 100 MeV, and `step_lepton` reads it without a null check for the
+    // reason Scene's field says.
+    d_wv_ = upload_wv_lepton<real_t>(h_mats_.data(), n_materials_);
 
     // hadElastic's device tables, beside the hadron range table and for the same reason: a run
     // that will carry a charged hadron needs them before the first primary is seeded. The
@@ -998,8 +1007,9 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
 
     // The hadron range table. Built here rather than on demand because a run that will carry
     // a proton needs it before the first primary is seeded, and the engine cannot know what
-    // species the generator will produce until it has produced one. Two megabytes in double
-    // precision, which is not worth a conditional - the electron table beside it is larger.
+    // species the generator will produce until it has produced one. A megabyte in double
+    // precision - ten species against the electron table's two - which is not worth a
+    // conditional beside the geometry and the photon data.
     {
       auto* h = new em::HadronRangeTable<real_t>();
       std::vector<real_t> cuts(n_materials_);
@@ -1015,7 +1025,8 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
 
     scene_ = Scene<real_t>{geom_,      d_mats_,  d_rt_,  d_pe,
                            brem.table, brem.sb,  d_ray,  d_msc,
-                           d_hrt_,     static_cast<real_t>(scene.range_cut_mm),
+                           d_wv_,      d_hrt_,
+                           static_cast<real_t>(scene.range_cut_mm),
                            -1,         processes_};
 
     // ---- how big a batch, and who decided.
@@ -2055,6 +2066,7 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);
+    cudaFree(d_wv_);
     cudaFree(d_score_);
     cudaFree(d_status_warn_);
     d_status_warn_ = nullptr;

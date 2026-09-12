@@ -4,20 +4,32 @@
 //             RESTRICTED to the material production cut - transfers above it produce an
 //             explicit delta ray instead of depositing locally.
 // Delta rays: G4MollerBhabhaModel cross section and sampler, transcribed verbatim.
-// Range     : integrated on the host from the restricted stopping power, matching what
-//             Geant4 builds its range table from.
-// MSC       : Highland approximation, NOT Geant4 Urban MSC. See docs/RISK.md.
-// Brems     : treated as an addition to the continuous loss via a radiative-yield
-//             approximation; no explicit bremsstrahlung photons are generated.
+// Range     : the dE/dx, range and inverse-range tables Geant4 transports on, built by
+//             G4LossTableBuilder's own algorithm on G4EmParameters' own grid - 100 eV to
+//             100 TeV at 7 bins per decade, cubic spline, 100 midpoint sub-steps per bin.
+//             See `RangeTable` below and docs/RISK.md V64 for the ceiling this replaced.
+// MSC       : `em/urban_msc.cuh` below 100 MeV and `em/wentzel_msc.cuh` above it, which is
+//             where G4EmStandardPhysics switches models. The Highland form at the bottom of
+//             this file is used by nothing in the transport.
+// Brems     : G4SeltzerBergerModel below 1 GeV and G4eBremsstrahlungRelModel above, both
+//             through `data/brems_data.cuh`; explicit photons, plus the sub-cut radiative
+//             loss which is part of the dE/dx table below.
 // Annihil.  : positrons at rest emit two back-to-back 511 keV photons.
 #pragma once
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
 #include "core/particle.cuh"
 #include "core/rng.cuh"
 #include "core/units.cuh"
 #include "core/vec3.cuh"
 #include "data/brems_data.cuh"
+#include "data/g4spline.hh"
 #include "data/materials.cuh"
+#include "physics/em/brems_rel.cuh"
 
 namespace g4gpu::em {
 
@@ -106,17 +118,48 @@ __host__ __device__ inline real_t collision_dedx(const data::Material<real_t>& m
   dedx *= twopi_mc2_rcl2<real_t>() * m.electron_density / beta2;
   if (dedx < real_t(0)) { dedx = real_t(0); }
 
-  // Geant4 low-energy extrapolation below the threshold.
+  // Geant4 low-energy extrapolation below the threshold, verbatim from
+  // G4MollerBhabhaModel::ComputeDEDXPerVolume's last four lines:
+  //
+  //     if (kineticEnergy < th) {
+  //       x = kineticEnergy/th;
+  //       if(x > 0.25) { dedx /= sqrt(x); }
+  //       else         { dedx *= 1.4*sqrt(x)/(0.1 + x); }
+  //     }
+  //
+  // THE SECOND BRANCH WAS A CONSTANT 2 AND IS NOT ONE. It read
+  // `real_t(1)/sqrt(real_t(0.25))`, which is the first branch frozen at the breakpoint - the
+  // two forms do agree there (1.4*0.5/0.35 = 2.0 exactly, which is why the substitution looks
+  // harmless) and they diverge below it: the correct form falls off as sqrt(x)/0.1 towards
+  // zero while a constant 2 keeps the full stopping power. At 100 eV in water x is 0.149 and
+  // the two differ by 8.5%; at 100 eV in `CustomSiGe` by 9.6%.
+  //
+  // IT COULD NOT BE SEEN UNTIL THE TABLE REACHED 100 eV. `x <= 0.25` means
+  // `E <= 0.0625*sqrt(Zeff) keV`, which is 168 eV in water and 306 eV in lead - below the
+  // 1 keV floor the old e+- table started at, below the lowest row of
+  // `ref/oracle/electron_tables.csv`, and below `G4EmParameters::LowestElectronEnergy`, so no
+  // electron is ever TRACKED there. What is there is the first two or three nodes of the range
+  // table, and the range at 1 keV is the integral from 100 eV upwards: the error showed up
+  // four decades higher as a 1.95% range residual with no visible cause, and
+  // `ref/dump/dump_electron_hi.cc`'s node grid is what made it visible.
   if (kinetic < th) {
     const real_t x = kinetic / th;
-    dedx *= (x > real_t(0.25)) ? real_t(1) / sqrt(x) : real_t(1) / sqrt(real_t(0.25));
+    if (x > real_t(0.25)) {
+      dedx /= sqrt(x);
+    } else {
+      dedx *= real_t(1.4) * sqrt(x) / (real_t(0.1) + x);
+    }
   }
   return dedx;
 }
 
 /// Radiative stopping power, MeV/mm, from an approximate radiation-yield scaling.
-/// Crude next to G4SeltzerBergerModel; at a few MeV in these materials the radiative
-/// fraction is only a few percent. See docs/RISK.md entry E2.
+///
+/// NOT REACHED BY THE TRANSPORT AND NOT REACHED BY THE TABLES. It survives because
+/// `step_lepton`'s collision/radiative split falls back to it when a Scene carries no
+/// bremsstrahlung table at all (a study configuration), and because two old tests call it.
+/// The dE/dx table below uses `brems_restricted_dedx`, which is the real Seltzer-Berger and
+/// relativistic integrals. See docs/RISK.md entry E2.
 template <typename real_t>
 __host__ __device__ inline real_t radiative_dedx(const data::Material<real_t>& m, real_t kinetic) {
   // (dE/dx)_rad / (dE/dx)_col ~ E * Z_eff / 800 MeV  (Evans, order-of-magnitude form)
@@ -261,89 +304,276 @@ __host__ __device__ inline DeltaRay<real_t> sample_delta_ray(
   return out;
 }
 
-// ---------------------------------------------------------------- CSDA range table
+// ------------------------------------------------------- the e+- energy-loss tables
+//
+// EVERY ELECTRON ABOVE 100 MeV WAS A 100 MeV ELECTRON, AND THIS IS THE TABLE THAT MADE IT SO.
+// Read docs/RISK.md V64 before changing anything here.
+//
+// What was here: a flat log grid of 128 points from 1 keV to **100 MeV**, linearly
+// interpolated, ONE species, `lookup` returning the last bin for any energy at or above its
+// ceiling and `energy_from_range` returning that ceiling for any range past the table. A 1 GeV
+// electron's first step read a 100 MeV range, took its step, inverted the remaining range and
+// came out at or below 100 MeV; the other 900 MeV was not deposited, not carried off by a
+// secondary and not counted. The twelve-beam B1 sweep of 2026-09-11 found it at 46% of Geant4's
+// dose (docs/B1_SWEEP.md), and nothing before that had ever run an electron above 100 MeV.
+//
+// Three things are different now, and each of them is Geant4's and not a choice made here.
+//
+//   1. **The grid is G4EmParameters'.** `MinKinEnergy` 100 eV, `MaxKinEnergy` 100 TeV,
+//      `NumberOfBinsPerDecade` 7 - so `nBins = 84` and 85 points over twelve decades, cubic
+//      spline (`G4LossTableBuilder::splineFlag` is true by default). This is the same grid and
+//      the same construction `em/hadron_range.cuh` already uses, for the reason
+//      docs/PORTED.md 4.3 gives at length: `G4VEnergyLossProcess` never evaluates a model
+//      during transport, so reproducing the transport means reproducing the VECTOR and not
+//      the model it was sampled from.
+//
+//   2. **e- and e+ have separate tables**, because Geant4 builds one per particle and the
+//      restricted collision stopping power is Moller for one and Bhabha for the other. The
+//      old table was built with `is_positron = false` throughout and every positron in this
+//      port read the electron's range - a second defect the ceiling was hiding.
+//
+//   3. **Nothing clamps at the top.** `data::spline_value` returns the end value outside the
+//      table, which is `G4PhysicsVector::Interpolation`'s own behaviour at 100 TeV and
+//      therefore right; above 100 TeV there is no Geant4 answer to reproduce, so
+//      `step_lepton` refuses such a track by name and books its energy rather than
+//      transporting it as a 100 TeV electron. `above_table` is that test.
+//
+// The restricted dE/dx summed here is `G4LossTableManager::BuildTables`' sum over the energy
+// loss processes on the particle: `G4eIonisation` (`collision_dedx`, restricted to the
+// electron production cut) plus `G4eBremsstrahlung` (`brems_restricted_dedx`, restricted to
+// the GAMMA production cut). `ref/oracle/electron_tables.csv`'s `dedx_total_MeV_per_mm` is
+// `G4EmCalculator::GetDEDX`, which is exactly that sum read off Geant4's own table.
 
-constexpr int kRangeBins = 128;
+constexpr int kRangeBins = 85;
+/// G4EmParameters::MinKinEnergy / MaxKinEnergy, MeV.
+constexpr double kRangeEMin = 1e-4;
+constexpr double kRangeEMax = 1e8;
+constexpr int kRangeBinsPerDecade = 7;
+/// The four above are not independent, and `build_range_table` builds the grid from THREE of
+/// them - `kRangeEMax` only ever reaches `t.e_max`, which is what `above_table` and the sqrt
+/// taper read. So lowering `kRangeEMax` alone moves the refusal threshold and leaves the table
+/// where it was, and raising `kRangeBins` alone extends the table past the energy the refusal
+/// names. Both were tried while inverting the ceiling check in `tests/test_electron_hi.cu` and
+/// both produced a table that passed some of it; this is the assertion that stops either.
+static_assert(kRangeBins == kRangeBinsPerDecade * 12 + 1,
+              "kRangeBins must be kRangeBinsPerDecade per decade over the twelve decades from "
+              "kRangeEMin = 100 eV to kRangeEMax = 100 TeV, plus one for the closing node");
 
-/// Flat log-spaced CSDA range table, one row per material. Built on the host, read on device.
+/// Restricted radiative stopping power, MeV/mm - the `G4eBremsstrahlung` half of the e+-
+/// dE/dx table.
+///
+/// EVALUATED RATHER THAN READ OUT OF `data::BremsTable`, and the reason is arithmetic: that
+/// table is 40 bins per decade and this one is 7, and `10^(b/7)` coincides with `10^(c/40)`
+/// only when b is a multiple of 7 - so 6 of every 7 nodes of the dE/dx table would carry the
+/// brems table's interpolation error instead of the model's value. Geant4 samples the models at
+/// its own 85 nodes; so does this.
+///
+/// `data::brems_dedx_xs` is the composition - the two models, the 1 GeV split and
+/// `G4EmModelManager`'s boundary factor - and it is called rather than repeated, because the
+/// other caller is `data::build_brems_tables` and two copies of one composition is the
+/// arrangement `twopi_mc2_rcl2`'s header above describes going wrong. `tests/test_electron_hi.cu`
+/// still checks the two agree at the brems table's own nodes, because that is cheap and because
+/// the next person to need a third grid should find the check already there.
+template <typename real_t>
+__host__ inline real_t brems_restricted_dedx(const data::Material<real_t>& mat,
+                                             const data::SBTableSet<real_t>& sb,
+                                             const data::BremsBoundary<real_t>& bnd,
+                                             real_t kinetic, bool is_positron) {
+  real_t dedx = real_t(0), xs = real_t(0);
+  data::brems_dedx_xs(mat, sb, bnd, kinetic, is_positron, dedx, xs);
+  return dedx;
+}
+
+/// The restricted dE/dx, range and inverse-range tables for e- and e+, on Geant4's grid.
+///
+/// Indexed `[is_positron][material][bin]`. One row per (species, material) because that is one
+/// `G4PhysicsVector` per material cuts couple per particle, which is what Geant4 holds.
 template <typename real_t>
 struct RangeTable {
-  real_t e_min, e_max;                                  ///< MeV
-  real_t range[data::kMaxMaterials][kRangeBins];        ///< mm
+  real_t e_min, e_max;  ///< MeV, G4EmParameters' MinKinEnergy and MaxKinEnergy
   int n_materials = data::kNumMaterials;
-  real_t log_e_min, inv_dlog_e;
 
-  /// Inverse lookup: kinetic energy whose CSDA range is @p r, by binary search on the
-  /// (monotonic) range row. Used to find the residual energy after a step of known length.
-  __host__ __device__ real_t energy_from_range(int material, real_t r) const {
-    const real_t* row = range[material];
-    if (r <= row[0]) { return e_min * r / row[0]; }
-    if (r >= row[kRangeBins - 1]) { return e_max; }
-    int lo = 0, hi = kRangeBins - 1;
-    while (hi - lo > 1) {
-      const int mid = (lo + hi) / 2;
-      if (row[mid] <= r) { lo = mid; } else { hi = mid; }
-    }
-    const real_t frac = (r - row[lo]) / (row[hi] - row[lo]);
-    const real_t dlog = real_t(1) / inv_dlog_e;
-    return exp(log_e_min + dlog * (real_t(lo) + frac));
+  /// The shared log grid. Held rather than recomputed because the spline needs the abscissae
+  /// as an array, and because the inverse lookup uses it as the *ordinate*.
+  real_t energy[kRangeBins];
+
+  real_t dedx[2][data::kMaxMaterials][kRangeBins];     ///< MeV/mm, restricted
+  real_t dedx_d2[2][data::kMaxMaterials][kRangeBins];
+  real_t range[2][data::kMaxMaterials][kRangeBins];    ///< mm
+  real_t range_d2[2][data::kMaxMaterials][kRangeBins];
+  /// Second derivatives of the *inverse* range table. `G4LossTableBuilder::
+  /// BuildInverseRangeTable` stores the same points with range as the abscissa and energy as
+  /// the ordinate and splines that; the abscissae are the range row itself, so only the
+  /// derivatives need their own array.
+  real_t inv_d2[2][data::kMaxMaterials][kRangeBins];
+
+  /// True for a kinetic energy Geant4 has no table for. `step_lepton` refuses such a track by
+  /// name; see the block at the top of this section.
+  __host__ __device__ bool above_table(real_t kinetic) const { return kinetic > e_max; }
+
+  /// Restricted dE/dx, MeV/mm.
+  ///
+  /// `G4VEnergyLossProcess::GetDEDXForScaledEnergy`: the spline, then a sqrt taper below
+  /// MinKinEnergy. The taper is Geant4's and is why nothing clamps to the first bin.
+  __host__ __device__ real_t dedx_at(int material, bool pos, real_t kinetic) const {
+    const int p = pos ? 1 : 0;
+    real_t x = data::spline_value<real_t>(energy, dedx[p][material], dedx_d2[p][material],
+                                          kRangeBins, kinetic);
+    if (kinetic < e_min) { x *= sqrt(kinetic / e_min); }
+    return fmax(x, real_t(0));
   }
 
-  __host__ __device__ real_t lookup(int material, real_t kinetic) const {
-    if (kinetic <= e_min) {
-      // dE/dx is finite, so range goes linearly to zero below the first bin.
-      return range[material][0] * kinetic / e_min;
+  /// Range, mm. `G4VEnergyLossProcess::GetScaledRangeForScaledEnergy`, same taper.
+  __host__ __device__ real_t lookup(int material, bool pos, real_t kinetic) const {
+    const int p = pos ? 1 : 0;
+    real_t r = data::spline_value<real_t>(energy, range[p][material], range_d2[p][material],
+                                          kRangeBins, kinetic);
+    if (kinetic < e_min) { r *= sqrt(kinetic / e_min); }
+    return fmax(r, real_t(0));
+  }
+
+  /// The kinetic energy whose range is @p r, MeV.
+  ///
+  /// `G4VEnergyLossProcess::ScaledKinEnergyForLoss`: the inverse table's spline above its
+  /// first point, and `minKinEnergy * (r/rmin)^2` below it - the exact inverse of the sqrt
+  /// taper the two lookups above apply, which is why they have to be the same taper.
+  __host__ __device__ real_t energy_from_range(int material, bool pos, real_t r) const {
+    const int p = pos ? 1 : 0;
+    const real_t* row = range[p][material];
+    const real_t rmin = row[0];
+    if (r < rmin) {
+      if (r <= real_t(0)) { return real_t(0); }
+      const real_t x = r / rmin;
+      return e_min * x * x;
     }
-    if (kinetic >= e_max) { return range[material][kRangeBins - 1]; }
-    const real_t f = (log(kinetic) - log_e_min) * inv_dlog_e;
-    const int i = static_cast<int>(f);
-    const real_t frac = f - real_t(i);
-    return range[material][i] * (real_t(1) - frac) + range[material][i + 1] * frac;
+    return data::spline_value<real_t>(row, energy, inv_d2[p][material], kRangeBins, r);
   }
 };
 
-/// Total restricted stopping power used for the range integral: restricted collision loss
-/// plus, when @p bt is supplied, the real restricted Seltzer-Berger radiative loss instead
-/// of the crude yield scaling.
-template <typename real_t>
-__host__ inline real_t range_dedx(const data::Material<real_t>* mats, int m, real_t e,
-                                  const data::BremsTable<real_t>* bt) {
-  const real_t col = collision_dedx(mats[m], e, false);
-  const real_t rad = (bt != nullptr) ? bt->dedx_at(m, false, e) : radiative_dedx(mats[m], e);
-  return col + rad;
-}
-
-/// Integrates 1/(dE/dx) from e_min up, trapezoid rule on a fine sub-grid.
+/// Builds the e+- dE/dx, range and inverse-range tables by G4LossTableBuilder's algorithm.
+///
+/// Not "integrate 1/(dE/dx)". Geant4 integrates its *own interpolated table*, and the
+/// difference is not academic - 7 points per decade across a Seltzer-Berger radiative term
+/// that turns on at the gamma cut is a function the models do not describe between nodes.
+///
+///   G4LossTableBuilder::BuildRangeTable, verbatim:
+///     range(0) = 2 * E(0) / dedx(0)
+///     range(j) = range(j-1) + sum over n=100 midpoint sub-steps of de / dedx_spline(e)
+///
+/// The seed's factor of two is the boundary condition for a stopping power that goes as
+/// sqrt(E) below the table's first node: the integral of 1/sqrt from zero to E is 2E/dedx(E).
+/// Getting it wrong made the proton range 50.008% short at 1 keV in every material
+/// (em/hadron_range.cuh says so at length) and the same arithmetic applies here.
+///
+/// @param sb the Seltzer-Berger differential tables. REQUIRED: Geant4's e+- dE/dx table is
+///           the sum over `G4eIonisation` AND `G4eBremsstrahlung`, so a table built without
+///           the radiative term is a different quantity from the one the transport reads, and
+///           building one silently would be exactly the defect V64 records. Refused loudly.
 template <typename real_t>
 __host__ inline void build_range_table(const data::Material<real_t>* mats, RangeTable<real_t>& t,
-                                       const data::BremsTable<real_t>* bt = nullptr,
-                                       int n_materials = data::kNumMaterials,
-                                       real_t e_min = real_t(1e-3), real_t e_max = real_t(100)) {
-  t.e_min = e_min;
-  t.e_max = e_max;
-  t.log_e_min = std::log(e_min);
-  const real_t dlog = (std::log(e_max) - t.log_e_min) / real_t(kRangeBins - 1);
-  t.inv_dlog_e = real_t(1) / dlog;
-
+                                       const data::SBTableSet<real_t>* sb = nullptr,
+                                       int n_materials = data::kNumMaterials) {
+  if (sb == nullptr) {
+    std::printf("\nFATAL: build_range_table was called with no Seltzer-Berger tables.\n"
+                "  Geant4's e+- dE/dx table is the sum over G4eIonisation and\n"
+                "  G4eBremsstrahlung (G4LossTableManager::BuildTables); without the second\n"
+                "  term this is not the table the transport reads. See docs/RISK.md V64.\n");
+    std::exit(2);
+  }
+  t.e_min = real_t(kRangeEMin);
+  t.e_max = real_t(kRangeEMax);
   t.n_materials = n_materials;
-  for (int m = 0; m < n_materials; ++m) {
-    // Seed: below e_min assume constant dE/dx, so R(e_min) = e_min / (dE/dx)(e_min).
-    real_t r = e_min / range_dedx(mats, m, e_min, bt);
-    t.range[m][0] = r;
-    for (int i = 1; i < kRangeBins; ++i) {
-      const real_t e0 = std::exp(t.log_e_min + dlog * real_t(i - 1));
-      const real_t e1 = std::exp(t.log_e_min + dlog * real_t(i));
-      // sub-integrate this bin for accuracy
-      constexpr int kSub = 16;
-      const real_t de = (e1 - e0) / real_t(kSub);
-      for (int k = 0; k < kSub; ++k) {
-        const real_t ea = e0 + de * real_t(k);
-        const real_t eb = ea + de;
-        const real_t inv_a = real_t(1) / range_dedx(mats, m, ea, bt);
-        const real_t inv_b = real_t(1) / range_dedx(mats, m, eb, bt);
-        r += real_t(0.5) * (inv_a + inv_b) * de;
+
+  for (int b = 0; b < kRangeBins; ++b) {
+    t.energy[b] =
+        static_cast<real_t>(kRangeEMin * std::pow(10.0, double(b) / kRangeBinsPerDecade));
+  }
+  // The grid's top node IS `e_max`, and `above_table` promises that nothing past it is
+  // transported. See the static_assert on the constants: this is its run-time half, for the
+  // case where `std::pow` and the exponent arithmetic do not land where the integers say.
+  if (!(std::fabs(static_cast<double>(t.energy[kRangeBins - 1]) / kRangeEMax - 1.0) < 1e-9)) {
+    std::printf("\nFATAL: the e+- table's top node is %g MeV and e_max is %g MeV.\n"
+                "  `above_table` refuses a track past e_max, so the two must be the same\n"
+                "  energy or there is a band the table clamps in and nothing refuses.\n"
+                "  See build_range_table.\n",
+                static_cast<double>(t.energy[kRangeBins - 1]), kRangeEMax);
+    std::exit(2);
+  }
+
+  std::vector<double> x(kRangeBins), y(kRangeBins), d2(kRangeBins), r(kRangeBins);
+  std::vector<double> rd2(kRangeBins), id2(kRangeBins);
+  for (int b = 0; b < kRangeBins; ++b) { x[b] = static_cast<double>(t.energy[b]); }
+
+  for (int p = 0; p < 2; ++p) {
+    const bool pos = (p == 1);
+    for (int m = 0; m < n_materials; ++m) {
+      // `G4EmModelManager`'s continuity factor across G4eBremsstrahlung's 1 GeV model
+      // boundary, fixed once per (material, species) exactly as it is there.
+      const data::BremsBoundary<real_t> bnd = data::brems_boundary(mats[m], *sb, pos);
+      // ---- restricted dE/dx on Geant4's grid, and its spline.
+      for (int b = 0; b < kRangeBins; ++b) {
+        const real_t e = t.energy[b];
+        y[b] = static_cast<double>(collision_dedx(mats[m], e, pos)
+                                   + brems_restricted_dedx(mats[m], *sb, bnd, e, pos));
       }
-      t.range[m][i] = r;
+      // Geant4 skips leading zero bins and rebuilds the vector on a shorter grid, which would
+      // be a different table from this one - so a zero is refused rather than worked around.
+      // The same refusal, for the same reason, as build_hadron_range_table's.
+      if (!(y[0] > 0.0)) {
+        std::printf("\nFATAL: e+- dE/dx is zero at %g MeV for %s in material %d.\n"
+                    "  G4LossTableBuilder::BuildRangeTable drops leading zero bins and builds\n"
+                    "  the range on a shorter grid; this table has a fixed grid and would\n"
+                    "  silently be a different table. See build_range_table.\n",
+                    kRangeEMin, pos ? "e+" : "e-", m);
+        std::exit(2);
+      }
+      // SPLINED, for both species. `G4LossTableBuilder::BuildDEDXTable` copies
+      // `t_list[0]`'s vector and inherits its `useSpline`; `t_list[0]` is `G4eIonisation` for
+      // both e- and e+ because `G4EmStandardPhysics::ConstructProcess` registers eIoni before
+      // eBrem for each of them, and `G4eBremsstrahlung`'s constructor does NOT call
+      // `SetSpline(false)` the way `G4MuBremsstrahlung`'s does. So the charge-odd
+      // interpolation split that costs the negative hadrons 4-9% of their dose
+      // (docs/RISK.md V44/V46, `em::hadron_table_uses_spline`) has no counterpart here: e+
+      // and e- are separate process objects, not two members of one shared-process pair.
+      data::fill_second_derivatives(x.data(), y.data(), kRangeBins, d2.data());
+      for (int b = 0; b < kRangeBins; ++b) {
+        t.dedx[p][m][b] = static_cast<real_t>(y[b]);
+        t.dedx_d2[p][m][b] = static_cast<real_t>(d2[b]);
+      }
+
+      // ---- range, by integrating that table as it will be read.
+      constexpr int kSub = 100;  // G4LossTableBuilder's n
+      const double del = 1.0 / kSub;
+      double e1 = x[0];
+      double range = 2.0 * e1 / y[0];
+      r[0] = range;
+      for (int j = 1; j < kRangeBins; ++j) {
+        const double e2 = x[j];
+        const double de = (e2 - e1) * del;
+        double e = e2 + de * 0.5;
+        double sum = 0.0;
+        for (int k = 0; k < kSub; ++k) {
+          e -= de;
+          const double d =
+              data::spline_value<double>(x.data(), y.data(), d2.data(), kRangeBins, e);
+          if (d > 0.0) { sum += de / d; }
+        }
+        range += sum;
+        r[j] = range;
+        e1 = e2;
+      }
+
+      data::fill_second_derivatives(x.data(), r.data(), kRangeBins, rd2.data());
+      // The inverse table: the same points, range as abscissa, energy as ordinate, and a
+      // fresh spline. `G4LossTableBuilder::BuildInverseRangeTable` makes a new
+      // `G4PhysicsFreeVector(npoints, splineFlag)` rather than copying the range vector.
+      data::fill_second_derivatives(r.data(), x.data(), kRangeBins, id2.data());
+
+      for (int b = 0; b < kRangeBins; ++b) {
+        t.range[p][m][b] = static_cast<real_t>(r[b]);
+        t.range_d2[p][m][b] = static_cast<real_t>(rd2[b]);
+        t.inv_d2[p][m][b] = static_cast<real_t>(id2[b]);
+      }
     }
   }
 }

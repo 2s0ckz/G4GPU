@@ -74,8 +74,15 @@ int main() {
       "D:\\Documents\\Geant4\\Windows\\geant4-v11.1.1-install\\share\\Geant4\\data"
       "\\G4EMLOW8.2\\brem_SB", zs_sb, 10, sb);
   if (sb_ok) { data::build_brems_tables<real_t>(mats, sb, bt); }
-  em::RangeTable<real_t> rt;
-  em::build_range_table<real_t>(mats, rt, sb_ok ? &bt : nullptr);
+  if (!sb_ok) {
+    printf("  cannot read the Seltzer-Berger tables - the e+- dE/dx table is the sum over\n"
+           "  G4eIonisation AND G4eBremsstrahlung and cannot be built without them.\n");
+    return 1;
+  }
+  // Static: 212 KiB of table is not a stack object. `false` is e-; the table now carries a
+  // species dimension because Geant4 builds one per particle and Bhabha is not Moller.
+  static em::RangeTable<real_t> rt;
+  em::build_range_table<real_t>(mats, rt, &sb);
   // The table now integrates the RESTRICTED stopping power, matching what Geant4 builds its
   // range table from, so the reference is Geant4's own range - not ESTAR's CSDA range.
   // Values from ref/oracle/electron_tables.csv, Geant4 11.1.1, default 1 mm cut.
@@ -91,7 +98,7 @@ int main() {
       {data::kBoneCompact, "bone", real_t(5.0119), real_t(16.1889)},
       {data::kBoneCompact, "bone", real_t(5.9566), real_t(19.4051)}};
   for (const auto& rr : rrefs) {
-    const real_t ours = rt.lookup(rr.mat, rr.e);
+    const real_t ours = rt.lookup(rr.mat, false, rr.e);
     printf("  %-7s E = %6.4f MeV : ours %8.4f mm, Geant4 %8.4f mm, ratio %.4f\n", rr.name,
            rr.e, ours, rr.g4_mm, ours / rr.g4_mm);
     check(std::fabs(ours / rr.g4_mm - 1.0) < 0.05, "range within 5% of Geant4");
@@ -99,18 +106,18 @@ int main() {
 
   printf("== ranges in the B1 materials at 5 MeV ==\n");
   for (int i = 0; i < data::kNumMaterials; ++i) {
-    printf("  %-13s range = %8.3f mm\n", names[i], rt.lookup(i, 5.0));
+    printf("  %-13s range = %8.3f mm\n", names[i], rt.lookup(i, false, 5.0));
   }
   // Shape2 is 60 mm thick; a 5 MeV electron in bone must stop well inside it.
-  const real_t r_bone = rt.lookup(data::kBoneCompact, 5.0);
+  const real_t r_bone = rt.lookup(data::kBoneCompact, false, 5.0);
   check(r_bone > 5.0 && r_bone < 30.0, "5 MeV electron range in bone is well under 60 mm");
-  check(rt.lookup(data::kWater, 5.0) > r_bone, "range in water exceeds range in denser bone");
+  check(rt.lookup(data::kWater, false, 5.0) > r_bone, "range in water exceeds range in denser bone");
 
   printf("== range table monotonic and continuous ==\n");
   bool r_mono = true;
   real_t prev = 0;
   for (real_t e = 0.01; e < 50.0; e *= 1.05) {
-    const real_t r = rt.lookup(data::kWater, e);
+    const real_t r = rt.lookup(data::kWater, false, e);
     if (r < prev) { r_mono = false; }
     prev = r;
   }

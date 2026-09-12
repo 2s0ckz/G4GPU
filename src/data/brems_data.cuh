@@ -277,8 +277,101 @@ struct BremsTable {
   }
 };
 
-/// Evaluates the integrals on the host and fills the tables, assembling over elements the
-/// way ComputeDEDXPerVolume and ComputeCrossSectionPerAtom do (Z^2 * n_atoms * gBremFactor).
+/// `G4EmModelManager`'s `del` for the two `G4eBremsstrahlung` models, one per quantity.
+///
+/// Fixed once per (material, species) from the ratio of the two models AT the 1 GeV boundary,
+/// and the `1 + del/E` factor it drives is what makes Geant4's tabulated dE/dx and cross
+/// section continuous across it. `em/brems_rel.cuh`'s block above `model_boundary_del` has the
+/// four lines this transcribes and what they are worth.
+template <typename real_t>
+struct BremsBoundary {
+  real_t del_dedx = 0;
+  real_t del_xs = 0;
+};
+
+/// The restricted radiative dE/dx (MeV/mm) and photon-production cross section (1/mm) at one
+/// energy: `G4eBremsstrahlung`'s two models, split at 1 GeV, assembled over the material's
+/// elements the way `ComputeDEDXPerVolume` and `ComputeCrossSectionPerAtom` do, with
+/// `G4EmModelManager`'s boundary factor applied above the split.
+///
+/// ONE FUNCTION, TWO CALLERS: `build_brems_tables` below fills its 441-point grid from it and
+/// `em::brems_restricted_dedx` evaluates it on the e+- dE/dx table's 85 Geant4 nodes. It used
+/// to be two copies of the same twelve lines, which is the arrangement `em::twopi_mc2_rcl2`'s
+/// header describes going wrong.
+///
+/// @param bnd the boundary correction; pass `brems_boundary(mat, sb, pos)`. A defaulted
+///        all-zero value would be the RAW models, which is not what any Geant4 table holds,
+///        so it is a required argument.
+template <typename real_t>
+__host__ inline void brems_dedx_xs(const Material<real_t>& mat, const SBTableSet<real_t>& sb,
+                                   const BremsBoundary<real_t>& bnd, real_t T, bool pos,
+                                   real_t& dedx_out, real_t& xs_out) {
+  dedx_out = real_t(0);
+  xs_out = real_t(0);
+  if (!(T > real_t(0))) { return; }
+  const real_t cut = mat.cut_gamma;  // photon production cut, for both species
+  const real_t total = T + units::electron_mass_c2<real_t>();
+  const real_t density_corr = migdal_constant<real_t>() * mat.electron_density * total * total;
+  const real_t tmax_loss = std::min(cut, T);
+  real_t dedx = real_t(0), xs = real_t(0);
+
+  // G4eBremsstrahlung uses G4SeltzerBergerModel below 1 GeV (LPM off) and
+  // G4eBremsstrahlungRelModel above it (LPM on). A strict `>`, because
+  // G4RegionModels::SelectIndex tests `e <= lowKineticEnergy[idx]`.
+  if (T > kSeltzerBergerLimit<real_t>()) {
+    for (int ie = 0; ie < mat.n_elements; ++ie) {
+      const int z = static_cast<int>(mat.z[ie] + real_t(0.5));
+      const real_t n = mat.n_atoms[ie];
+      // The relativistic model carries its own Z^2 and gBremFactor.
+      if (tmax_loss > real_t(0)) { dedx += n * em::rel_brem_loss_per_atom(mat, z, T, tmax_loss); }
+      if (cut < T) { xs += n * em::rel_brem_xs_per_atom(mat, z, T, cut, T); }
+    }
+    const real_t elow = kSeltzerBergerLimit<real_t>();
+    dedx_out = fmax(dedx * em::model_boundary_factor(bnd.del_dedx, T, elow), real_t(0));
+    xs_out = fmax(xs * em::model_boundary_factor(bnd.del_xs, T, elow), real_t(0));
+    return;
+  }
+  for (int ie = 0; ie < mat.n_elements; ++ie) {
+    const int z = static_cast<int>(mat.z[ie] + real_t(0.5));
+    const int zi = sb.z_to_index[z];
+    if (zi < 0) { continue; }
+    const SBElement<real_t>& el = sb.elements[zi];
+    const real_t z2n = real_t(z) * real_t(z) * mat.n_atoms[ie];
+    if (tmax_loss > real_t(0)) { dedx += z2n * sb_brem_loss(el, T, tmax_loss, density_corr, pos); }
+    if (cut < T) { xs += z2n * sb_xsection(el, T, cut, density_corr, pos); }
+  }
+  dedx_out = fmax(dedx * brem_factor<real_t>(), real_t(0));
+  xs_out = fmax(xs * brem_factor<real_t>(), real_t(0));
+}
+
+/// `del` for both quantities, from the two models evaluated at the boundary with the same cut.
+template <typename real_t>
+__host__ inline BremsBoundary<real_t> brems_boundary(const Material<real_t>& mat,
+                                                     const SBTableSet<real_t>& sb, bool pos) {
+  const real_t elow = kSeltzerBergerLimit<real_t>();
+  const BremsBoundary<real_t> none{};
+  // Below: the SB model at elow, which is what `brems_dedx_xs` returns there (the split is a
+  // strict `>`). Above: the relativistic model at the same energy, which needs the branch
+  // forced, so it is evaluated here rather than through the function.
+  real_t d_below = real_t(0), x_below = real_t(0);
+  brems_dedx_xs(mat, sb, none, elow, pos, d_below, x_below);
+
+  const real_t cut = mat.cut_gamma;
+  const real_t tmax_loss = std::min(cut, elow);
+  real_t d_above = real_t(0), x_above = real_t(0);
+  for (int ie = 0; ie < mat.n_elements; ++ie) {
+    const int z = static_cast<int>(mat.z[ie] + real_t(0.5));
+    const real_t n = mat.n_atoms[ie];
+    if (tmax_loss > real_t(0)) { d_above += n * em::rel_brem_loss_per_atom(mat, z, elow, tmax_loss); }
+    if (cut < elow) { x_above += n * em::rel_brem_xs_per_atom(mat, z, elow, cut, elow); }
+  }
+  BremsBoundary<real_t> out;
+  out.del_dedx = em::model_boundary_del(d_below, d_above, elow);
+  out.del_xs = em::model_boundary_del(x_below, x_above, elow);
+  return out;
+}
+
+/// Evaluates the integrals on the host and fills the tables.
 template <typename real_t>
 __host__ inline void build_brems_tables(const Material<real_t>* mats,
                                         const SBTableSet<real_t>& sb, BremsTable<real_t>& out,
@@ -293,49 +386,15 @@ __host__ inline void build_brems_tables(const Material<real_t>* mats,
 
   out.n_materials = n_materials;
   for (int m = 0; m < n_materials; ++m) {
-    const Material<real_t>& mat = mats[m];
-    // fDensityFactor = gMigdalConstant * electron density; corr uses the total energy.
-    const real_t density_factor = migdal_constant<real_t>() * mat.electron_density;
     for (int p = 0; p < 2; ++p) {
       const bool pos = (p == 1);
-      const real_t cut = pos ? mat.cut_gamma : mat.cut_gamma;  // photon production cut
+      const BremsBoundary<real_t> bnd = brems_boundary(mats[m], sb, pos);
       for (int b = 0; b < kBremsBins; ++b) {
         const real_t T = std::exp(out.log_e_min + dlog * real_t(b));
-        const real_t total = T + units::electron_mass_c2<real_t>();
-        const real_t density_corr = density_factor * total * total;
-
         real_t dedx = real_t(0), xs = real_t(0);
-        const real_t tmax_loss = std::min(cut, T);
-        // G4eBremsstrahlung uses G4SeltzerBergerModel below 1 GeV (LPM off) and
-        // G4eBremsstrahlungRelModel above it (LPM on), so switch at the same energy.
-        if (T > kSeltzerBergerLimit<real_t>()) {
-          for (int ie = 0; ie < mat.n_elements; ++ie) {
-            const int z = static_cast<int>(mat.z[ie] + real_t(0.5));
-            const real_t n = mat.n_atoms[ie];
-            if (tmax_loss > real_t(0)) {
-              dedx += n * em::rel_brem_loss_per_atom(mat, z, T, tmax_loss);
-            }
-            if (cut < T) { xs += n * em::rel_brem_xs_per_atom(mat, z, T, cut, T); }
-          }
-          out.dedx[m][p][b] = fmax(dedx, real_t(0));
-          out.xs[m][p][b] = fmax(xs, real_t(0));
-          continue;
-        }
-        for (int ie = 0; ie < mat.n_elements; ++ie) {
-          const int z = static_cast<int>(mat.z[ie] + real_t(0.5));
-          const int zi = sb.z_to_index[z];
-          if (zi < 0) { continue; }
-          const SBElement<real_t>& el = sb.elements[zi];
-          const real_t z2n = real_t(z) * real_t(z) * mat.n_atoms[ie];
-          if (tmax_loss > real_t(0)) {
-            dedx += z2n * sb_brem_loss(el, T, tmax_loss, density_corr, pos);
-          }
-          if (cut < T) {
-            xs += z2n * sb_xsection(el, T, cut, density_corr, pos);
-          }
-        }
-        out.dedx[m][p][b] = fmax(dedx * brem_factor<real_t>(), real_t(0));
-        out.xs[m][p][b] = fmax(xs * brem_factor<real_t>(), real_t(0));
+        brems_dedx_xs(mats[m], sb, bnd, T, pos, dedx, xs);
+        out.dedx[m][p][b] = dedx;
+        out.xs[m][p][b] = xs;
       }
     }
   }

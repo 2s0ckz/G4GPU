@@ -138,8 +138,11 @@ int main() {
   std::printf("\n== electron dE/dx and range vs Geant4 ==\n");
   std::printf("  NOTE: Geant4 eIoni dE/dx is RESTRICTED to the production cut - energy above\n");
   std::printf("  the cut leaves as delta rays. Ours is unrestricted, so ours should read high.\n");
-  em::RangeTable<real_t> rt;
-  em::build_range_table<real_t>(mats, rt);
+  // No range table is built here: every comparison in this block calls the MODELS
+  // (`collision_dedx`, `delta_ray_xs`) at a point, and the table it used to build was never
+  // read. That distinction is the whole of docs/RISK.md V64 - an oracle that compares a model
+  // function at an energy is right for any energy the caller passes, and the ceiling was in
+  // the table the transport reads. `tests/test_electron_hi.cu` compares the TABLE.
   std::printf("\n  %-8s %-3s %9s %11s %11s %7s %11s %11s %7s %11s %11s %7s\n", "material",
               "p", "E (MeV)", "restr ours", "restr G4", "ratio", "unrest ours", "unrest G4",
               "ratio", "deltaXS ours", "deltaXS G4", "ratio");

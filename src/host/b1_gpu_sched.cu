@@ -237,8 +237,11 @@ int main(int argc, char** argv) {
   build_b1_volumes(h_vols);
   data::Material<real_t> h_mats[data::kNumMaterials];
   data::build_b1_materials<real_t>(h_mats);
-  em::RangeTable<real_t> h_rt;
-  em::build_range_table<real_t>(h_mats, h_rt);
+  // Static, not a local: the e+- tables are two species x every material x Geant4's 85-node
+  // grid x five arrays, which is 212 KiB and no longer a stack object. Built below, by
+  // `upload_brems`, because the dE/dx table is the sum over G4eIonisation and
+  // G4eBremsstrahlung and so needs the Seltzer-Berger data first.
+  static em::RangeTable<real_t> h_rt;
 
   geom::Volume<real_t>* d_vols = nullptr;
   data::Material<real_t>* d_mats = nullptr;
@@ -248,23 +251,23 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&d_rt, sizeof(h_rt)));
   CUDA_CHECK(cudaMemcpy(d_vols, h_vols, sizeof(h_vols), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_mats, h_mats, sizeof(h_mats), cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_rt, &h_rt, sizeof(h_rt), cudaMemcpyHostToDevice));
 
   geom::Geometry<real_t> d_geom{d_vols, kNumVols, kWorld};
   auto* d_pe = host::upload_photoelectric<real_t>(host::default_phot_dir());
   auto brem = host::upload_brems<real_t>(host::default_sb_dir(), h_mats, h_rt);
-  // upload_brems re-integrates the range table, so push the new one to the device.
+  // upload_brems builds the e+- tables, so push them to the device after it and not before.
   CUDA_CHECK(cudaMemcpy(d_rt, &h_rt, sizeof(h_rt), cudaMemcpyHostToDevice));
   int n_z_ = 0;
   const int* zs_ = host::b1_elements(n_z_);
   auto* d_ray = host::upload_rayleigh<real_t>(host::default_rayl_dir(), zs_, n_z_);
   auto* d_msc = host::upload_msc<real_t>(h_mats, data::kNumMaterials);
+  auto* d_wv = host::upload_wv_lepton<real_t>(h_mats, data::kNumMaterials);
   // No hadron range table and no hadron primaries: this driver runs the B1 gamma beam only,
   // so step_hadron is unreachable and a null table is the honest value rather than a
-  // two-megabyte one nothing reads. The range cut is B1's, for the MSC step limit.
+  // megabyte one nothing reads. The range cut is B1's, for the MSC step limit.
   Scene<real_t> scene{d_geom,     d_mats,   d_rt,  d_pe,
                      brem.table, brem.sb,  d_ray, d_msc,
-                     nullptr,    real_t(0.7),
+                     d_wv,       nullptr,  real_t(0.7),
                      kShape2};
 
   // Capacities are multiples of the batch; peak occupancy is reported so they can be tuned.

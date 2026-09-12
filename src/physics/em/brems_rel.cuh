@@ -343,6 +343,68 @@ __host__ __device__ inline real_t rel_brem_loss_per_atom(const data::Material<re
   return fmax(integ, real_t(0)) * real_t(z) * real_t(z) * rel_brem_factor<real_t>();
 }
 
+// ------------------------------------------------- the 1 GeV boundary is not a step
+//
+// WHAT GEANT4 DOES AT EXACTLY 1 GeV, AND WHAT IT DOES JUST ABOVE IT. Two different answers,
+// and the port had the first one right and the second one missing.
+//
+// **At exactly 1 GeV the model is Seltzer-Berger.** `G4eBremsstrahlung::
+// InitialiseEnergyLossProcess` sets `EmModel(0)->SetHighEnergyLimit(min(SB high, 1 GeV))` and
+// `EmModel(1)->SetLowEnergyLimit(energyLimit)`, and `G4RegionModels::SelectIndex` resolves an
+// energy with `do {--idx;} while (idx > 0 && e <= lowKineticEnergy[idx])` - a `<=` against the
+// second model's low edge. So `data::kSeltzerBergerLimit` is a strict `>` everywhere in this
+// port, which is right, and it is the easy half.
+//
+// **Above 1 GeV the TABLE is not the model.** `G4EmModelManager::FillDEDXVector` and
+// `::FillLambdaVector` both carry a continuity correction across a model boundary
+// (G4EmModelManager.cc:596-606 and :700-711), and it is the same four lines in each:
+//
+//     if(k > 0 && k != k0) {
+//       k0 = k;
+//       G4double elow = regModels->LowEdgeEnergy(k);
+//       G4double xs1  = mod1->CrossSection(couple, particle, elow, cut, tmax);   // model k-1
+//       G4double xs2  = mod ->CrossSection(couple, particle, elow, cut, tmax);   // model k
+//       del = (xs2 > 0.0) ? (xs1/xs2 - 1.0)*elow : 0.0;
+//     }
+//     G4double cross = (1.0 + del/e)*mod->CrossSection(couple, particle, e, cut, tmax);
+//
+// `del` is fixed once per material from the RATIO OF THE TWO MODELS AT THE BOUNDARY, and the
+// factor `1 + del/e` is exactly 1 + (xs1/xs2 - 1) at `e = elow` - so the tabulated vector is
+// continuous there - and falls off as 1/e above it. Geant4 is smoothing a discontinuity
+// between two models it does not otherwise reconcile.
+//
+// It is worth 1.8% of a 1 GeV electron's bremsstrahlung rate in water and a fifth of a per cent
+// at 10 GeV, which is the size of thing this package exists to stop being invisible: the raw
+// models differ by 2.1% at 1 GeV in water (`ref/oracle/electron_tables.csv`, e- at 1000 MeV on
+// Seltzer-Berger against 1059 MeV on the relativistic model), so without this the port draws a
+// 1 GeV electron's bremsstrahlung interaction length from a cross section 1.8% too small.
+//
+// IT CANNOT MOVE ANYTHING BELOW 1 GeV. `del` is zero for the model below the boundary -
+// Geant4's `k > 0` test - so every energy the Seltzer-Berger model covers is untouched, which
+// includes every secondary B1's 6 MeV gamma gate ever makes.
+//
+// NOT applied to the msc transport mean free path, and that is not an omission: an msc model's
+// table is built per MODEL by `G4LossTableBuilder::BuildTableForModel` over that model's own
+// energy window, not by `FillLambdaVector` over a process's, so there is no boundary inside it
+// to smooth. See `em/wentzel_msc.cuh`.
+
+/// `G4EmModelManager`'s `del` for a two-model process, MeV - the numerator of the `1 + del/e`
+/// continuity factor.
+///
+/// @param below the quantity from the model BELOW the boundary, evaluated AT the boundary
+/// @param above the same from the model above it, at the same energy and the same cut
+/// @param elow  the boundary energy, `regModels->LowEdgeEnergy(k)`
+template <typename real_t>
+__host__ __device__ inline real_t model_boundary_del(real_t below, real_t above, real_t elow) {
+  return (above > real_t(0)) ? (below / above - real_t(1)) * elow : real_t(0);
+}
+
+/// The factor itself, for an energy above the boundary. Exactly 1 at or below it.
+template <typename real_t>
+__host__ __device__ inline real_t model_boundary_factor(real_t del, real_t e, real_t elow) {
+  return (e > elow && e > real_t(0)) ? (real_t(1) + del / e) : real_t(1);
+}
+
 /// Samples the emitted photon energy. Verbatim from the rejection loop in
 /// G4eBremsstrahlungRelModel::SampleSecondaries: uniform in log(k^2 + densityCorr),
 /// rejected against the DCS with funcMax = zfactor1 + zfactor2.

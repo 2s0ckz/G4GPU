@@ -31,15 +31,133 @@
 // selects it and WentzelVI's default is fUseSafety.
 #pragma once
 #include <cmath>
+#include <vector>
+
 #include "core/particle.cuh"
 #include "core/units.cuh"
 #include "core/vec3.cuh"
+#include "data/g4spline.hh"
 #include "data/materials.cuh"
 #include "physics/em/urban_msc.cuh"   // urban_gauss, kFacRange, kFacSafety
 #include "data/mott.hh"
 #include "physics/em/wentzel_xs.cuh"
 
 namespace g4gpu::em {
+
+// ------------------------------------------------- the e+- transport mean free path table
+//
+// `G4VMscModel::GetTransportMeanFreePath` READS A TABLE FOR e- AND e+ AND EVALUATES THE MODEL
+// FOR AN ION, and the one line that decides is `G4VMscModel::GetParticleChangeForMSC`
+// (G4VMscModel.cc:94-95):
+//
+//     if(p->GetParticleName() != "GenericIon" &&
+//        (p->GetPDGMass() < CLHEP::GeV || ForceBuildTableFlag()) ) { ...build xSectionTable... }
+//
+// docs/PORTED.md 4.4 draws the same distinction for Urban. An electron is 0.511 MeV, so it
+// passes, and `xSectionTable` exists for its WentzelVI model as well as for its Urban one.
+//
+// THE TABLE'S GRID IS THE MODEL'S OWN ENERGY WINDOW AND NOT G4EmParameters' WHOLE RANGE.
+// `BuildTableForModel` (G4LossTableBuilder.cc) takes
+//
+//     emin = max(LowEnergyLimit(), LowEnergyActivationLimit()), then max(emin, MinKinEnergy)
+//     emax = min(HighEnergyLimit(), HighEnergyActivationLimit()), then min(emax, MaxKinEnergy)
+//     n    = NumberOfBinsPerDecade() * lrint(log10(emax/tmin))
+//
+// and `G4EmStandardPhysics::ConstructProcess` calls `msc2->SetLowEnergyLimit(MscEnergyLimit())`
+// on the WentzelVI model it hands `ConstructElectronMscProcess`. So emin is 100 MeV, emax is
+// G4VEmModel's default 100 TeV, and n is 7 * lrint(log10(1e6)) = 42 - forty-three nodes, from
+// exactly the energy the Urban model stops at. Splined: `G4VMscModel::useSpline` is true.
+//
+// WHAT IS STORED IS NOT THE CROSS SECTION AND NOT THE MEAN FREE PATH.
+// `BuildTableForModel` fills `model->Value(couple, part, E)`, which is
+// `G4VEmModel::Value` = `pFactor * E*E * CrossSectionPerVolume(mat, p, E, 0.0, DBL_MAX)`, and
+// `GetTransportMeanFreePath` divides by `E*E` again. Storing E^2 sigma rather than sigma is
+// what makes the spline behave: sigma falls as 1/E^2 at these energies, so the tabulated
+// quantity is nearly flat over six decades and a cubic through 43 points of it is nearly
+// exact. Tabulating sigma itself would be a different interpolation of a function that spans
+// twelve orders of magnitude.
+//
+// AND THE CUT IS ZERO, WHICH IS NOT THE CUT THE REST OF THE MODEL USES.
+// `G4VEmModel::CrossSectionPerVolume(mat, p, E, emin, emax)` passes its `emin` straight to
+// `ComputeCrossSectionPerAtom` as `cutEnergy`, and `Value` calls it with `0.0` - so
+// `G4WentzelVIModel::ComputeCrossSectionPerAtom` does `wokvi->SetupTarget(Z, 0.0)` and
+// `G4WentzelOKandVIxSection::ComputeMaxElectronScattering(0)` leaves `cosTetMaxElec` at 1.
+// The electron-scattering channel is therefore CLOSED in the tabulated transport cross
+// section, and open in `ComputeTransportXSectionPerVolume`, which reads
+// `(*currentCuts)[currentMaterialIndex]` - the material's electron production cut - for the
+// `xtsec` the single-scattering sampler is driven by. Two cross sections, two cuts, one model.
+// Passing the production cut here instead adds the electron term to lambda_eff and lengthens
+// every step limit; `tests/test_electron_hi.cu` measures what that is worth.
+//
+// The hadron path in `step_hadron` still calls `wentzel_lambda` directly with the production
+// cut, which is neither of these two things. That is left exactly as it is - the proton and
+// alpha B1 rows are checked to 0.25% and this package must not move them - and recorded in
+// docs/RISK.md V79.
+
+/// Forty-three nodes from `G4EmParameters::MscEnergyLimit()` to `MaxKinEnergy`.
+constexpr int kWvLeptonBins = 43;
+constexpr double kWvLeptonEMin = 1e2;   ///< MeV - MscEnergyLimit(), the Urban/WentzelVI split
+constexpr double kWvLeptonEMax = 1e8;   ///< MeV - G4EmParameters::MaxKinEnergy
+constexpr int kWvLeptonBinsPerDecade = 7;
+
+/// `G4VMscModel::xSectionTable` for the e+- WentzelVI model, one row per species and material.
+template <typename real_t>
+struct WentzelLeptonTable {
+  real_t e_min, e_max;  ///< MeV
+  int n_materials = data::kNumMaterials;
+  real_t energy[kWvLeptonBins];
+  /// E^2 * transport cross section per volume, MeV^2/mm. See the header block.
+  real_t e2xs[2][data::kMaxMaterials][kWvLeptonBins];
+  real_t e2xs_d2[2][data::kMaxMaterials][kWvLeptonBins];
+
+  /// `G4VMscModel::GetTransportMeanFreePath`, mm. Returns a huge length where the cross
+  /// section is zero, which is Geant4's `DBL_MAX`.
+  __host__ __device__ real_t lambda_at(int material, bool pos, real_t kinetic) const {
+    const int p = pos ? 1 : 0;
+    const real_t v = data::spline_value<real_t>(energy, e2xs[p][material],
+                                                e2xs_d2[p][material], kWvLeptonBins, kinetic);
+    const real_t x = v / (kinetic * kinetic);
+    return (x > real_t(0)) ? real_t(1) / x : real_t(1e30);
+  }
+};
+
+/// Fills the table. Host only, once, at start-up.
+template <typename real_t>
+__host__ inline void build_wentzel_lepton_table(const data::Material<real_t>* mats,
+                                                int n_materials,
+                                                WentzelLeptonTable<real_t>& t) {
+  t.e_min = real_t(kWvLeptonEMin);
+  t.e_max = real_t(kWvLeptonEMax);
+  t.n_materials = n_materials;
+  for (int b = 0; b < kWvLeptonBins; ++b) {
+    t.energy[b] =
+        static_cast<real_t>(kWvLeptonEMin * std::pow(10.0, double(b) / kWvLeptonBinsPerDecade));
+  }
+
+  std::vector<double> x(kWvLeptonBins), y(kWvLeptonBins), d2(kWvLeptonBins);
+  for (int b = 0; b < kWvLeptonBins; ++b) { x[b] = static_cast<double>(t.energy[b]); }
+
+  // MscThetaLimit() is pi in option0, so cosThetaLimit is -1 - the same constant
+  // `step_lepton` and `step_hadron` pass. The cut is zero; see the header block.
+  constexpr real_t kCosThetaLim = real_t(-1);
+  for (int p = 0; p < 2; ++p) {
+    const ParticleType type = (p == 1) ? ParticleType::kPositron : ParticleType::kElectron;
+    const ParticleDef<real_t> pd = particle_def<real_t>(type);
+    for (int m = 0; m < n_materials; ++m) {
+      for (int b = 0; b < kWvLeptonBins; ++b) {
+        const real_t e = t.energy[b];
+        const real_t xs =
+            wentzel_transport_xs(mats[m], type, pd, e, real_t(0), kCosThetaLim);
+        y[b] = static_cast<double>(e) * static_cast<double>(e) * static_cast<double>(xs);
+      }
+      data::fill_second_derivatives(x.data(), y.data(), kWvLeptonBins, d2.data());
+      for (int b = 0; b < kWvLeptonBins; ++b) {
+        t.e2xs[p][m][b] = static_cast<real_t>(y[b]);
+        t.e2xs_d2[p][m][b] = static_cast<real_t>(d2[b]);
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------- model constants
 
@@ -138,6 +256,12 @@ __host__ __device__ inline real_t wv_transport_xs(const data::Material<real_t>& 
 ///                  MscMuHadRangeFactor (0.2) for anything heavier. It is a parameter rather
 ///                  than kFacRange because getting it wrong is a factor of five on the step
 ///                  length of every proton, and a default here would let that happen quietly.
+/// @param lat_off   optional out-parameter, set true on either of the two early returns
+///                  below - and `ComputeTruePathLengthLimit` sets `latDisplasment = false` on
+///                  both of them, so a caller whose species HAS lateral displacement needs to
+///                  know which return it took. Defaulted to null so that `step_hadron`, for
+///                  which `MuHadLateralDisplacement` is false and the displacement is
+///                  identically zero, is bit-identical to before this parameter existed.
 template <typename real_t>
 __host__ __device__ inline real_t wv_step_limit(const data::Material<real_t>& m,
                                                 const ParticleDef<real_t>& pd,
@@ -145,10 +269,17 @@ __host__ __device__ inline real_t wv_step_limit(const data::Material<real_t>& m,
                                                 real_t range, real_t lambda_eff,
                                                 real_t cos_tet_max_nuc, real_t cos_theta_lim,
                                                 real_t safety, real_t range_cut,
-                                                real_t requested, real_t fac_range) {
+                                                real_t requested, real_t fac_range,
+                                                bool* lat_off = nullptr) {
   real_t tlimit = fmin(requested, range);
-  if (tlimit < kWvTlimitMinFix<real_t>()) { return tlimit; }
-  if (range < safety) { return tlimit; }
+  if (tlimit < kWvTlimitMinFix<real_t>()) {
+    if (lat_off != nullptr) { *lat_off = true; }
+    return tlimit;
+  }
+  if (range < safety) {
+    if (lat_off != nullptr) { *lat_off = true; }
+    return tlimit;
+  }
 
   real_t rlimit = fmax(fac_range * range,
                        (real_t(1) - cos_tet_max_nuc) * lambda_eff * kWvInvSsFactor<real_t>());

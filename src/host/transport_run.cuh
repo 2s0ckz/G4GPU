@@ -467,6 +467,10 @@ class TransportEngine {
   double* d_voxel_score_ = nullptr;
   int n_voxel_cells_ = 0;
   em::RangeTable<real_t> h_rt_{};
+  /// `G4VMscModel::xSectionTable` for the e+- WentzelVI model - the transport mean free path
+  /// above `em::kMscEnergyLimit()`. Always built, because any run that makes a lepton can make
+  /// one above 100 MeV: a 1 GeV photon beam's first pair does. See em/wentzel_msc.cuh.
+  em::WentzelLeptonTable<real_t>* d_wv_ = nullptr;
   /// Built only when the scene can actually see a hadron - it is 256 bins x 2 species x
   /// every material, and a photon run has no use for it. Null in Scene when not built.
   em::HadronRangeTable<real_t>* d_hrt_ = nullptr;
