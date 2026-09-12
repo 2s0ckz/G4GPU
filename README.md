@@ -381,7 +381,8 @@ send every one of them somewhere else.
    the inelastic final state itself, which is Phase 3's: in the final configuration it is
    selectable, refused by name, and the neutron is then killed with its energy deposited
    locally, which is not what Geant4 does.
- 5. **Electrons and positrons above 100 MeV: closed, and it is worth reading how.** The B1
+ 5. **Electrons and positrons above 100 MeV: the clamp is gone, the row is not yet within
+   statistics.** The B1
    sweep of 2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first
    time and the port deposited 46% of Geant4's dose: the e+- range table stopped at 100 MeV and
    clamped, so a higher-energy electron's excess vanished after its first step (RISK V64). P14c
