@@ -88,17 +88,51 @@ enum class FtfRefusal : int {
 
   // ---- parts of the model not finished ----
 
-  /// G4FTFModel::GetStrings and everything it drives - G4FTFParticipants' impact-parameter
-  /// sampling, ReggeonCascade, PutOnMassShell, ExciteParticipants,
-  /// G4DiffractiveExcitation::ExciteParticipants, G4ElasticHNScattering::ElasticScattering,
-  /// BuildStrings, AdjustNucleons and GetResiduals. NONE OF IT IS WRITTEN: there is no
-  /// ftf_model.cuh in this package yet, so nothing here PRODUCES the `ExcitedString` list that
-  /// string_fragmentation.cuh consumes, and this value is the whole of what the package says
-  /// when asked for one. docs/PORTED.md 2.1.11 has the row.
+  /// G4FTFModel::GetStrings failed to produce any string. Since P11b this is a RUN-TIME
+  /// outcome and no longer "not written": ftf_model.cuh has the impact-parameter sampling,
+  /// ReggeonCascade, PutOnMassShell, ExciteParticipants, BuildStrings and GetResiduals, and
+  /// `FtfModelReport` says WHICH of them gave up. The value is kept because
+  /// G4VPartonStringModel::Scatter treats an empty string vector as a retry request, and a
+  /// retry that can never succeed has to be distinguishable from one that can.
+  /// AdjustNucleons is the one method under GetStrings that is still not written; it has its
+  /// own value below.
   kFtfModelGetStrings,
 
   /// G4FTFAnnihilation - the five annihilation channels for an anti-baryon projectile.
   kFtfAnnihilation,
+
+  /// G4FTFModel::AdjustNucleons and its three algorithm methods
+  /// (`AdjustNucleonsAlgorithm_beforeSampling`, `_Sampling`, `_afterSampling`), which run
+  /// INSTEAD of ReggeonCascade and PutOnMassShell when `HighEnergyInter` is false - i.e. when
+  /// the projectile's lab momentum per nucleon is below `LowEnergyLimit` = 1 GeV/c. The only
+  /// projectile QBBC gives FTFP below that momentum is an anti-baryon, which
+  /// `G4HadronicBuilder::BuildFTFP_BERT(..., bert=false)` registers at every energy; every
+  /// other beam enters FTFP at 3 GeV kinetic energy and is far above it. So this refusal and
+  /// kFtfAnnihilation are the two halves of the same gap: the sub-GeV anti-nucleon arm.
+  kAdjustNucleons,
+
+  /// G4GeneratorPrecompoundInterface::PropagateNuclNucl, which G4TheoFSGenerator calls instead
+  /// of Propagate whenever the high-energy generator has a PROJECTILE nucleus. It builds a
+  /// second residual for the projectile remnant and runs MakeCoalescence over the secondaries.
+  /// P6 ported `Propagate` (docs/PORTED.md 2.1.4) and marked the nucleus-nucleus arm `P`; this
+  /// package therefore produces strings and a wounded target for an ion beam and refuses at the
+  /// hand-over rather than dropping the projectile remnant.
+  kPropagateNuclNucl,
+
+  /// G4DecayStrongResonances (`G4TheoFSGenerator::theDecay`), the path taken when EVERY nucleon
+  /// of the target was hit, i.e. when there is no residual nucleus left to de-excite. Reachable
+  /// for hydrogen and the lightest targets. It decays the strong resonances among the
+  /// secondaries instead of propagating them, and it is a different class in a different
+  /// module; approximating it with Propagate would hand a zero-nucleon nucleus to P6.
+  kDecayStrongResonances,
+
+  /// An anti-NUCLEUS projectile (baryon number < -1). G4FTFModel::Init builds an ordinary
+  /// G4Fancy3DNucleus and then calls `G4Nucleon::SetParticleType(G4AntiProton...)` on every
+  /// nucleon of it. P9's `bic::Nucleon` has no anti-nucleon types - and
+  /// bic/nucleus/nucleus_model.cuh refuses anti-nuclei by name for exactly this reason - so the
+  /// re-typing has nothing to write into. An anti-NUCLEON (baryon number -1) is NOT refused
+  /// here: it needs no projectile nucleus at all.
+  kAntiNucleusProjectile,
 
   /// G4Fancy3DNucleus / G4NuclearFermiDensity / G4FermiMomentum / G4Nucleon, the nucleus
   /// model this package shares with the binary cascade. P9 owns it (bic/nucleus/).
@@ -188,6 +222,12 @@ __host__ __device__ inline const char* ftf_refusal_name(FtfRefusal r) {
       return "G4FTFParameters::InitForInteraction's `Xtotal == 0` nucleon substitution";
     case FtfRefusal::kFtfModelGetStrings: return "G4FTFModel::GetStrings";
     case FtfRefusal::kFtfAnnihilation: return "G4FTFAnnihilation";
+    case FtfRefusal::kAdjustNucleons:
+      return "G4FTFModel::AdjustNucleons (Plab/nucleon below 1 GeV/c)";
+    case FtfRefusal::kAntiNucleusProjectile: return "an anti-nucleus projectile";
+    case FtfRefusal::kPropagateNuclNucl:
+      return "G4GeneratorPrecompoundInterface::PropagateNuclNucl";
+    case FtfRefusal::kDecayStrongResonances: return "G4DecayStrongResonances";
     case FtfRefusal::kNucleusModelNotBound:
       return "G4Fancy3DNucleus (P9's bic/nucleus/) is not bound";
     case FtfRefusal::kKinkyStrings: return "G4FTFParameters::Pt2Kink / a kinky string";

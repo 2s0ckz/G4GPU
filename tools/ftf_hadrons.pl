@@ -34,7 +34,7 @@ my @cols = split /,/, $hdr;
 my %ix;
 $ix{$cols[$_]} = $_ for 0 .. $#cols;
 for my $need (qw(pdg name subtype mass width charge baryon shortlived minmass
-                 nq4 naq4 nq5 naq5)) {
+                 nq4 naq4 nq5 naq5 iisospin iispin ptype)) {
   die "ftf_hadrons.pl: $csv has no column '$need'\n" unless exists $ix{$need};
 }
 
@@ -65,7 +65,10 @@ while (my $line = <$fh>) {
         nq4   => $f[$ix{nq4}] + 0,
         naq4  => $f[$ix{naq4}] + 0,
         nq5   => $f[$ix{nq5}] + 0,
-        naq5  => $f[$ix{naq5}] + 0 };
+        naq5  => $f[$ix{naq5}] + 0,
+        iiso  => $f[$ix{iisospin}] + 0,
+        ispin => $f[$ix{iispin}] + 0,
+        ptype => $f[$ix{ptype}] };
 }
 close $fh;
 
@@ -153,6 +156,13 @@ struct FtfHadron {
   FtfSubType subtype;
   bool shortlived;
   signed char nq4, naq4, nq5, naq5;  ///< charm / bottom (anti)quark content
+  /// GetPDGiIsospin(), i.e. twice the isospin. `== 3` is the "was this a Delta" test
+  /// G4DiffractiveExcitation::ExciteParticipants_doChargeExchange asks in four places.
+  signed char iisospin;
+  /// GetPDGiSpin(), i.e. twice the spin. It is a DRAW COUNT and not a label: `G4Parton`'s
+  /// constructor spends one uniform on the colour and a second on the spin projection only
+  /// when this is non-zero, so a quark costs two deviates and a spin-0 diquark one.
+  signed char iispin;
   const char* name;
 };
 
@@ -165,10 +175,10 @@ __host__ __device__ inline const FtfHadron* ftf_hadrons() {
 HEADER
 
 for my $r (@rows) {
-  printf("    {%d, %s, %s, %s, %d, %s, FtfSubType::%s, %s, %d, %d, %d, %d, \"%s\"},\n",
+  printf("    {%d, %s, %s, %s, %d, %s, FtfSubType::%s, %s, %d, %d, %d, %d, %d, %d, \"%s\"},\n",
          $r->{pdg}, $r->{mass}, $r->{width}, $r->{chg}, $r->{bar}, $r->{mmin},
          subtype_enum($r->{sub}), ($r->{sl} ? 'true' : 'false'), $r->{nq4}, $r->{naq4},
-         $r->{nq5}, $r->{naq5}, $r->{name});
+         $r->{nq5}, $r->{naq5}, $r->{iiso}, $r->{ispin}, $r->{name});
 }
 
 print <<'FOOTER';
