@@ -46,6 +46,7 @@
 // power 1% high and a range table 1% long cancel in the plateau and add in R80, so a single
 // aggregate agreement figure would pass a calculation that is wrong twice.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -99,8 +100,23 @@ constexpr int kMaxBins = 400;          ///< storage bound; the run picks how man
 /// What it changes about the curve is the same 1.1e-5, and in the direction of a standard
 /// integral depth dose: the energy that used to leave is now binned at the depth it was
 /// scattered from.
-constexpr double kHalfXY = 150.0;
-constexpr double kWorldHalf = 200.0;   ///< mm
+/// RUNTIME SINCE P14c, AND THE TWO REASONS ARE THE SAME NUMBER SEEN TWICE.
+///
+/// The file was a proton harness: 100 mm of water holds a 100 MeV proton's 77 mm range with
+/// room to spare, and 150 mm of half-width holds an elastically scattered one (the paragraph
+/// above). An ELECTRON asks both questions again and gets different answers. A 1 GeV electron
+/// in water is a shower, not a track: X0 is 360.8 mm, the shower maximum sits near 2 X0 and
+/// containment wants of order 20 X0 longitudinally, while the transverse scale is the Moliere
+/// radius, 21 MeV / Ec * X0, about 92 mm - so 95% of the energy is inside 2 R_M and a 150 mm
+/// half-width is marginal rather than generous.
+///
+/// So they are arguments now, and `depth_mm` with them, rather than a second copy of this file
+/// with three constants changed. The DEFAULTS are the proton's, exactly, so that
+/// `build_all.bat`'s existing gate runs the same phantom it has always run - a depth-dose
+/// comparison whose geometry moved is not a comparison.
+inline double& half_xy() { static double v = 150.0; return v; }
+inline double& world_half() { static double v = 200.0; return v; }
+inline double& depth() { static double v = 100.0; return v; }
 
 // Slab thickness and count are runtime, not compile-time, and that is worth the small
 // awkwardness: the phantom's own slab boundaries chop every step, so the binning is not just
@@ -126,8 +142,8 @@ class Phantom : public G4VUserDetectorConstruction {
     G4Material* vac = nist->FindOrBuildMaterial("G4_Galactic");
     G4Material* water = nist->FindOrBuildMaterial("G4_WATER");
 
-    auto* world_box =
-        new G4Box("World", cfg::kWorldHalf * mm, cfg::kWorldHalf * mm, cfg::kWorldHalf * mm);
+    auto* world_box = new G4Box("World", cfg::world_half() * mm, cfg::world_half() * mm,
+                                cfg::world_half() * mm);
     auto* world_lv = new G4LogicalVolume(world_box, vac, "World");
     auto* world = new G4PVPlacement(nullptr, G4ThreeVector(), world_lv, "World", nullptr, false,
                                     0, false);
@@ -135,7 +151,7 @@ class Phantom : public G4VUserDetectorConstruction {
     // One logical volume per slab rather than one replicated: the port keys its per-volume
     // aggregate step on the physical volume's own logical volume, and this way the stepping
     // action below can find the bin by pointer identity in both builds.
-    auto* slab_box = new G4Box("Slab", cfg::kHalfXY * mm, cfg::kHalfXY * mm,
+    auto* slab_box = new G4Box("Slab", cfg::half_xy() * mm, cfg::half_xy() * mm,
                                0.5 * cfg::slab() * mm);
     g_slab_lv.resize(cfg::bins());
     for (int i = 0; i < cfg::bins(); ++i) {
@@ -169,7 +185,17 @@ class Phantom : public G4VUserDetectorConstruction {
 class Gun : public G4VUserPrimaryGeneratorAction {
  public:
   Gun() : gun_(new G4ParticleGun(1)) {
-    gun_->SetParticleDefinition(G4ParticleTable::GetParticleTable()->FindParticle("proton"));
+    // THE NAME IS LOOKED UP AND THE LOOKUP IS CHECKED. `FindParticle` returns nullptr for a
+    // name the table does not carry and `SetParticleDefinition(nullptr)` is a G4Exception on
+    // the real Geant4 and a silent null on the port's shim, so a typo would otherwise be a
+    // crash on one side and a run with no primaries on the other. The two builds must fail the
+    // same way or the harness is not one harness.
+    auto* def = G4ParticleTable::GetParticleTable()->FindParticle(particle_);
+    if (def == nullptr) {
+      std::printf("FATAL: no particle named '%s'\n", particle_.c_str());
+      std::exit(2);
+    }
+    gun_->SetParticleDefinition(def);
     gun_->SetParticleEnergy(energy_ * MeV);
     gun_->SetParticleMomentumDirection(G4ThreeVector(0, 0, 1));
     // Just outside the first slab, in vacuum, so the full energy enters the water.
@@ -178,12 +204,16 @@ class Gun : public G4VUserPrimaryGeneratorAction {
   ~Gun() override { delete gun_; }
   void GeneratePrimaries(G4Event* evt) override { gun_->GeneratePrimaryVertex(evt); }
   static void SetEnergy(double e) { energy_ = e; }
+  static void SetParticle(const std::string& p) { particle_ = p; }
+  static const std::string& Particle() { return particle_; }
 
  private:
   G4ParticleGun* gun_;
   static double energy_;
+  static std::string particle_;
 };
 double Gun::energy_ = 100.0;
+std::string Gun::particle_ = "proton";
 
 // ---------------------------------------------------------------- the binning
 //
@@ -226,12 +256,29 @@ int main(int argc, char** argv) {
   // energy exceeds the maximum transfer and no proton can make a transportable
   // electron. That is how a discrepancy gets attributed to the delta rays or ruled out.
   const double range_cut = (argc > 4) ? std::atof(argv[4]) : 0.7;
-  // Slab thickness in mm; the count is chosen to keep the phantom 100 mm deep.
+  // Slab thickness in mm; the count is chosen to fill the phantom depth.
   const double slab = (argc > 5) ? std::atof(argv[5]) : 0.5;
+  // The species, by name, and the phantom it needs. See cfg::half_xy above for why an electron
+  // needs a different phantom from a proton and why that is an argument rather than a fork.
+  const std::string particle = (argc > 6) ? argv[6] : "proton";
+  const double depth_mm = (argc > 7) ? std::atof(argv[7]) : 100.0;
+  const double half_xy = (argc > 8) ? std::atof(argv[8]) : 150.0;
   cfg::slab() = slab;
-  cfg::bins() = static_cast<int>(100.0 / slab + 0.5);
-  if (cfg::bins() > cfg::kMaxBins) { cfg::bins() = cfg::kMaxBins; }
+  cfg::depth() = depth_mm;
+  cfg::half_xy() = half_xy;
+  // The world holds the phantom with the same 50 mm of clearance the proton geometry had.
+  cfg::world_half() = std::max(depth_mm, half_xy) + 50.0;
+  cfg::bins() = static_cast<int>(depth_mm / slab + 0.5);
+  if (cfg::bins() > cfg::kMaxBins) {
+    std::printf("FATAL: %g mm of phantom in %g mm slabs is %d bins and the bound is %d.\n"
+                "  A silently truncated phantom is a depth-dose curve that stops early and\n"
+                "  says nothing about it, and the total-energy line below would then read as\n"
+                "  a physics disagreement. Choose a coarser slab.\n",
+                depth_mm, slab, cfg::bins(), cfg::kMaxBins);
+    return 2;
+  }
   Gun::SetEnergy(energy);
+  Gun::SetParticle(particle);
 
   auto* rm = G4RunManagerFactory::CreateRunManager(G4RunManagerType::Serial);
 
@@ -307,6 +354,13 @@ int main(int argc, char** argv) {
         // photons are the bremsstrahlung of a delta ray whose own energy is capped by the
         // proton's maximum transfer), and `G4GammaNuclearXS` is a giant-resonance cross
         // section that starts near 10 MeV.
+        // For an ELECTRON beam these three are the whole of the like-for-like list that
+        // bites: `electronNuclear` and `positronNuclear` are on the primary itself, and the
+        // photo-nuclear reaction of its bremsstrahlung is inside `G4GammaGeneralProcess` and
+        // cannot be inactivated alone (the paragraph above). A 1 GeV electron's photons DO
+        // reach the giant resonance, unlike the proton configuration this list was written
+        // for, so that omission is no longer inert and is stated in the report rather than
+        // assumed away.
         "electronNuclear", "positronNuclear", "muonNuclear",
         // The at-rest captures: P12. Unreachable here (nothing negative is made) and listed so
         // that this list is the stage-1 one.
@@ -338,15 +392,19 @@ int main(int argc, char** argv) {
     std::printf("cannot write %s\n", out);
     return 1;
   }
-  std::fprintf(f, "# events=%d energy_MeV=%g bins=%d slab_mm=%g cut_mm=%g total_MeV=%.9g\n", n_events,
-               energy, cfg::bins(), cfg::slab(), range_cut, total);
+  std::fprintf(f,
+               "# events=%d energy_MeV=%g bins=%d slab_mm=%g cut_mm=%g total_MeV=%.9g "
+               "particle=%s depth_mm=%g half_xy_mm=%g\n",
+               n_events, energy, cfg::bins(), cfg::slab(), range_cut, total,
+               Gun::Particle().c_str(), cfg::depth(), cfg::half_xy());
   std::fprintf(f, "bin,z_lo_mm,z_hi_mm,edep_MeV\n");
   for (int i = 0; i < cfg::bins(); ++i) {
     std::fprintf(f, "%d,%.4f,%.4f,%.9g\n", i, cfg::depth_lo(i), cfg::depth_hi(i), g_edep[i]);
   }
   std::fclose(f);
 
-  std::printf("%d protons of %g MeV in water -> %s\n", n_events, energy, out);
+  std::printf("%d %s of %g MeV in %g mm of water (half-width %g mm) -> %s\n", n_events,
+              Gun::Particle().c_str(), energy, cfg::depth(), cfg::half_xy(), out);
   std::printf("  total deposited %.6g MeV of %.6g MeV in  (%.4f%%)\n", total, n_events * energy,
               100.0 * total / (n_events * energy));
   delete rm;

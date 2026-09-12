@@ -168,7 +168,11 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4SeltzerBergerModel` | bremsstrahlung below 1 GeV, from the G4EMLOW tables | `test_brems` | < 1e-6 (726 pts) |
 | `G4eBremsstrahlungRelModel` | bremsstrahlung above 1 GeV, with LPM | `test_brems_rel` | 0.108% (1,284 pts, 1 MeV–100 TeV) |
 | `G4eeToTwoGammaModel` | positron annihilation, at rest and in flight | `test_annihilation` | < 1e-6 (1,764 pts) |
-| `G4UrbanMscModel` | multiple scattering, cross section | `test_urban_general`, `test_msc` | **6.7e-16** |
+| `G4UrbanMscModel` | multiple scattering below 100 MeV, cross section | `test_urban_general`, `test_msc` | **6.7e-16** |
+| `G4WentzelVIModel` | multiple scattering above 100 MeV, where Geant4 hands over from Urban; the transport mean free path table `G4VMscModel::xSectionTable` holds. **Transcribed, oracled and dispatched behind `em::kWentzelLeptonMscWired`, which is `false`** - `transport_run.cu` does not survive ptxas with it on (RISK V83), so e± are stepped by Urban at every energy | `test_electron_hi`, `test_lepton_transport` | **5.1e-16** at the table's 602 nodes; 0.20% between them |
+| `G4LossTableBuilder` | the e+- dE/dx, range and inverse-range tables the transport reads - 100 eV to 100 TeV, 7 bins per decade, one per species | `test_electron_hi` | **3e-9** above 0.1 MeV (6,174 pts); exact at the nodes above 1 MeV; 0.0068% in the bottom decade |
+| `G4EmModelManager` | the `1 + del/E` continuity factor across G4eBremsstrahlung's 1 GeV model boundary, which is why the tabulated cross section is not the model's | `test_electron_hi` | exactly 1 at and below 1 GeV; 2.0% at 1.06 GeV in water |
+| `G4VEnergyLossProcess::AlongStepDoIt` | a lepton's energy balance on the device: deposited + secondaries + escaped + refused against the primary energy, per track | `test_lepton_transport` | **1.8e-15** over 2,048 tracks, 1 MeV to 10 GeV, e- and e+ |
 | `G4UniversalFluctuation` | energy-loss fluctuations | `test_fluctuation` | mean preserved to < 0.1% |
 | `G4VRangeToEnergyConverter` | production cuts | `test_cuts` | 0.018% |
 
@@ -374,20 +378,23 @@ send every one of them somewhere else.
    the inelastic final state itself, which is Phase 3's: in the final configuration it is
    selectable, refused by name, and the neutron is then killed with its energy deposited
    locally, which is not what Geant4 does.
- 5. **Electrons and positrons above 100 MeV are 100 MeV electrons.** The B1 sweep of
-   2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first time and the
-   port deposited 46% of Geant4's dose; at 150, 300, 600 and 1000 MeV it deposits exactly its
-   100 MeV dose. The e+- range table stops at 100 MeV and clamps, so the excess energy of a
-   higher-energy electron vanishes after its first step (RISK V64). Photons to 100 MeV, protons to
-   1 GeV and alphas to 4 GeV agreed with Geant4 within statistics in the same sweep. Fix in
-   progress (P14c); do not use the port for e+- above 100 MeV until it lands.
-5. **Electrons and positrons above 100 MeV are 100 MeV electrons.** The B1 sweep of
-   2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first time and the
-   port deposited 46% of Geant4's dose; at 150, 300, 600 and 1000 MeV it deposits exactly its
-   100 MeV dose. The e± range table stops at 100 MeV and clamps, so the excess energy of a
-   higher-energy electron vanishes after its first step (RISK V64). Photons to 100 MeV, protons to
-   1 GeV and alphas to 4 GeV agreed with Geant4 within statistics in the same sweep. Fix in
-   progress (P14c); do not use the port for e± above 100 MeV until it lands.
+ 5. **Electrons and positrons above 100 MeV: closed, and it is worth reading how.** The B1
+   sweep of 2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first
+   time and the port deposited 46% of Geant4's dose: the e+- range table stopped at 100 MeV and
+   clamped, so a higher-energy electron's excess vanished after its first step (RISK V64). P14c
+   rebuilt the table on Geant4's own grid - 100 eV to 100 TeV, one per species - and dispatched
+   `G4eBremsstrahlungRelModel` above 1 GeV (docs/B1_SWEEP.md). `G4WentzelVIModel` for e± above
+   100 MeV is transcribed, oracled and written into the dispatch but SWITCHED OFF, because
+   `transport_run.cu` does not survive ptxas with it instantiated - V63's wall on the other
+   stepper, RISK V83 - so an electron above 100 MeV is still stepped by Urban with a transport
+   mean free path clamped at 100 MeV. Two further defects were underneath the ceiling and
+   neither was reachable from above the old floor: `G4MollerBhabhaModel`'s low-energy
+   extrapolation was a constant where Geant4 has a function, and every positron in this port was
+   reading the electron's range table (RISK V77). A third, RISK V82, was found by the device
+   energy balance the fix came with: `step_lepton` was splitting the continuous loss and
+   depositing only the collision half. What remains open here is the DISCRETE rates, which this
+   port draws from the models rather than from `G4VEnergyLossProcess`'s lambda tables and its
+   integral approach - refused by name and measured, RISK V78.
 
 
 ---

@@ -589,7 +589,12 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const em::UrbanCoeffs<real_t>& uc = s.msc->coeffs[mat];
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
-    const bool wv_msc = (p.ekin > em::kMscEnergyLimit<real_t>());
+    // `em::kWentzelLeptonMscWired` is FALSE and its own comment says why: the model, its
+    // table and this dispatch are all transcribed and tested, and `transport_run.cu` does not
+    // survive ptxas with the branch instantiated. docs/RISK.md V63, V81 and V83. It has to be
+    // `if constexpr` below and not a runtime `false`, because a runtime false still leaves
+    // every arm in the translation unit and the translation unit is the thing that dies.
+    const bool wv_msc = em::kWentzelLeptonMscWired && (p.ekin > em::kMscEnergyLimit<real_t>());
 
     // `currentMinimalStep` as Geant4 hands it to the msc model: `G4PhysicsListHelper`'s
     // ordering table gives Msc an AlongStep order of 1 and Ionisation 2, so msc's
@@ -600,49 +605,40 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
 
     const ParticleDef<real_t> lpd = particle_def<real_t>(lepton_type);
-    constexpr real_t kCosThetaLim = real_t(-1);  // G4EmParameters::MscThetaLimit() = pi
+    // `[[maybe_unused]]` on this and the six below because `em::kWentzelLeptonMscWired` is
+    // false and `if constexpr` therefore discards every arm that reads them. They are declared
+    // here, out of the arms, because the two halves of a WentzelVI step share them - which is
+    // the shape the branch has to keep for the day the switch flips.
+    [[maybe_unused]] constexpr real_t kCosThetaLim = real_t(-1);  // MscThetaLimit() = pi
     // The cut the msc model is handed is the material's ELECTRON production threshold, which
     // is what `G4WentzelVIModel::ComputeTransportXSectionPerVolume` reads out of
     // `(*currentCuts)[currentMaterialIndex]`. It is NOT the cut the transport mean free path
     // table is built with - that one is zero - and `em/wentzel_msc.cuh`'s header block has
     // why the same model uses two.
-    const real_t msc_cut = s.materials[mat].cut_electron;
+    [[maybe_unused]] const real_t msc_cut = s.materials[mat].cut_electron;
 
     real_t lambda0 = real_t(0);         // Urban's transport mfp at the pre-step energy
     real_t t_msc = geom::kInfinity<real_t>();
     bool wv_lat_off = false;
-    em::WentzelMscState<real_t> st{};
-    em::WentzelElementXs<real_t> els{};
+    [[maybe_unused]] em::WentzelMscState<real_t> st{};
+    [[maybe_unused]] em::WentzelElementXs<real_t> els{};
     if (!wv_msc) {
       lambda0 = s.msc->lambda_at(mat, is_positron, p.ekin);
       t_msc = em::urban_step_limit(uc, lambda0, p.ekin, range, safety, is_positron, rng,
                                    p.msc_tlimit, p.msc_tlimitmin);
-    } else {
-      st.range = range;
-      st.pre_kin_energy = p.ekin;
-      st.eff_kin_energy = p.ekin;
-      st.single_scattering_mode = false;
-      {
-        const auto s0 = em::wentzel_setup(lpd, lepton_type, p.ekin, s.materials[mat].inv_a23,
-                                          static_cast<int>(s.materials[mat].z[0] + real_t(0.5)),
-                                          msc_cut, kCosThetaLim);
-        st.cos_tet_max_nuc = s0.cos_tet_max_nuc;
-      }
-      // Called for its OUT-PARAMETER and its side effect, not its return value: see the long
-      // note at the same call in `step_hadron`. `xtsec` is the total single-scattering rate
-      // the sampler draws its intervals from, and `els` is the per-element table it picks a
-      // target atom out of; the return value at cos_theta = 1 is identically zero.
-      em::wv_transport_xs(s.materials[mat], lpd, lepton_type, p.ekin, msc_cut, kCosThetaLim,
-                          real_t(1), st.cos_tet_max_nuc, els, st.xtsec);
+    } else if constexpr (em::kWentzelLeptonMscWired) {
+      // OUT OF LINE, and `em/wentzel_msc.cuh`'s block above `wv_lepton_limit` says why: four
+      // more inlined copies of this branch is what `transport_run.cu` does not survive.
+      //
       // lambda_eff FROM THE TABLE. `G4VMscModel::GetTransportMeanFreePath` reads
       // `xSectionTable` when one exists, and for a particle lighter than 1 GeV that is not
       // GenericIon one always does - which is e- and e+. docs/PORTED.md 4.4 is the general
       // rule and this is the case of it; evaluating the cross section here instead would be
       // 4.3's defect over again, in the quantity that sets the step length.
-      st.lambda_eff = s.wv_lepton->lambda_at(mat, is_positron, p.ekin);
-      t_msc = em::wv_step_limit(s.materials[mat], lpd, lepton_type, p.ekin, range,
-                                st.lambda_eff, st.cos_tet_max_nuc, kCosThetaLim, safety,
-                                s.range_cut, d_post, em::kFacRange<real_t>(), &wv_lat_off);
+      t_msc = em::wv_lepton_limit(s.materials[mat], lpd, lepton_type, p.ekin, range, msc_cut,
+                                  kCosThetaLim, safety, s.range_cut, d_post,
+                                  s.wv_lepton->lambda_at(mat, is_positron, p.ekin), st, els,
+                                  &wv_lat_off);
     }
     // With MSC off, the step is not limited by scattering and no deflection is applied. The
     // track then travels in a straight line, losing energy continuously - which is what a
@@ -658,9 +654,9 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // wants lambda at the energy of the RESIDUAL RANGE; WentzelVI's wants it at the MEAN of
     // the pre- and post-step energies, and also the nuclear cut-off angle there.
     em::MscStep<real_t> msc_state;
-    real_t e_end = real_t(0);
-    real_t wv_lambda_end = real_t(0);
-    real_t wv_cos_max_end = real_t(0);
+    [[maybe_unused]] real_t e_end = real_t(0);
+    [[maybe_unused]] real_t wv_lambda_end = real_t(0);
+    [[maybe_unused]] real_t wv_cos_max_end = real_t(0);
     real_t z_step = t_step;
     if (!wv_msc) {
       real_t lambda1 = real_t(-1);
@@ -669,23 +665,15 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       if (e_rfin > real_t(0)) { lambda1 = s.msc->lambda_at(mat, is_positron, e_rfin); }
       z_step = em::urban_geom_path(t_step, lambda0, range, lambda1, p.ekin,
                                    units::electron_mass_c2<real_t>(), msc_state);
-    } else {
-      wv_lambda_end = st.lambda_eff;
-      wv_cos_max_end = st.cos_tet_max_nuc;
+    } else if constexpr (em::kWentzelLeptonMscWired) {
       e_end = s.range_table->energy_from_range(mat, is_positron,
                                                fmax(range - t_step, real_t(0)));
       const real_t e_mid = real_t(0.5) * (e_end + p.ekin);
-      if (e_mid > real_t(0)) {
-        const auto sm =
-            em::wentzel_setup(lpd, lepton_type, e_mid, s.materials[mat].inv_a23,
-                              static_cast<int>(s.materials[mat].z[0] + real_t(0.5)), msc_cut,
-                              kCosThetaLim);
-        wv_cos_max_end = sm.cos_tet_max_nuc;
-        wv_lambda_end = s.wv_lepton->lambda_at(mat, is_positron, e_mid);
-      }
-      if (s.processes.multiple_scattering) {
-        z_step = em::wv_geom_path(st, t_step, e_end, wv_lambda_end, wv_cos_max_end);
-      }
+      z_step = em::wv_lepton_geom(
+          s.materials[mat], lpd, lepton_type, st, t_step, e_end, e_mid,
+          (e_mid > real_t(0)) ? s.wv_lepton->lambda_at(mat, is_positron, e_mid) : real_t(0),
+          msc_cut, kCosThetaLim, s.processes.multiple_scattering, wv_cos_max_end,
+          wv_lambda_end);
     }
 
     // Geometry acts on the *geometric* length; a boundary can cut the step short.
@@ -696,13 +684,12 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     real_t step_len = geom_step;
     if (!wv_msc) {
       step_len = em::urban_true_path(geom_step, t_step, msc_state);
-    } else if (s.processes.multiple_scattering) {
-      auto recompute = [&](real_t cos_min, real_t& xt) {
-        return em::wv_transport_xs(s.materials[mat], lpd, lepton_type, st.eff_kin_energy,
-                                   msc_cut, kCosThetaLim, cos_min, st.cos_tet_max_nuc, els, xt);
-      };
-      step_len =
-          em::wv_true_path(st, geom_step, e_end, wv_lambda_end, wv_cos_max_end, recompute);
+    } else if constexpr (em::kWentzelLeptonMscWired) {
+      if (s.processes.multiple_scattering) {
+        step_len = em::wv_lepton_true(s.materials[mat], lpd, lepton_type, st, els, geom_step,
+                                      e_end, wv_lambda_end, wv_cos_max_end, msc_cut,
+                                      kCosThetaLim);
+      }
     }
     // The true path, not the chord: MSC deflects within the step, so the displacement
     // |pos_after - pos_before| is shorter than the distance the electron actually ran and a
@@ -785,17 +772,32 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       e_after = e_before - loss;
     }
 
-    // Split the continuous loss between collision (deposited here) and the restricted
-    // radiative part. With the real Seltzer-Berger tables and a keV-scale gamma cut the
-    // radiative share of the *continuous* loss is tiny - essentially all bremsstrahlung
-    // leaves as explicit photons, emitted discretely below.
+    // The collision and restricted-radiative halves of the continuous stopping power. Urban's
+    // scattering energy needs their SUM (below); nothing else here does, and the reason is the
+    // whole of docs/RISK.md V82.
     const real_t col = em::collision_dedx(s.materials[mat], p.ekin, is_positron);
     const real_t rad = (s.brems != nullptr && s.processes.bremsstrahlung)
                            ? s.brems->dedx_at(mat, is_positron, p.ekin)
                                             : em::radiative_dedx(s.materials[mat], p.ekin);
-    const real_t col_frac = (col + rad > real_t(0)) ? col / (col + rad) : real_t(1);
 
-    if (s.geometry.volumes[p.volume].score_index >= 0) { edep = loss * col_frac; }
+    // THE WHOLE CONTINUOUS LOSS IS DEPOSITED, AND IT USED TO BE `loss * col/(col + rad)`.
+    //
+    // `G4VEnergyLossProcess::AlongStepDoIt` ends `fParticleChange.SetProposedKineticEnergy
+    // (finalT); fParticleChange.ProposeLocalEnergyDeposit(eloss);` (G4VEnergyLossProcess.cc
+    // :924-925) with no collision/radiative split anywhere in it - the only things subtracted
+    // from `eloss` before that line are atomic de-excitation, which option0 has off, and the
+    // sub-cutoff secondary producer, which is null unless a region asks for one. The
+    // RESTRICTED radiative term is already the part below the gamma production cut, so the
+    // photon that would have carried it does not exist and its energy is local by
+    // construction; everything above the cut leaves as an explicit photon from the discrete
+    // branch below and was never in `loss`.
+    //
+    // The split dropped that share: it was neither deposited nor handed to a secondary, and
+    // `tests/test_lepton_transport.cu`'s energy balance is what found it - 5.3e-5 of a 1 MeV
+    // electron in water, 2.1e-6 of a 1 GeV one, growing towards low energy because the gamma
+    // cut is a larger fraction of a smaller electron's spectrum. Small, and the wrong kind of
+    // small: an energy that no counter held. See docs/RISK.md V82 for what it moves.
+    if (s.geometry.volumes[p.volume].score_index >= 0) { edep = loss; }
     p.ekin = e_after;
 
     p.pos = p.pos + geom_step * p.dir;
@@ -836,14 +838,16 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
           kLeptonExtremeSmallStep ? em::urban_t_small(p.msc_tlimitmin) : real_t(0));
       msc_dir = msc_out.dir;
       msc_disp = msc_out.displacement;
-    } else if (s.processes.multiple_scattering && do_scatter) {
+    } else if constexpr (em::kWentzelLeptonMscWired) {
       // The DEFLECTION happens whenever `do_scatter` holds; `lat_disp` only decides whether
       // the sampler accumulates a sideways shift, which is exactly the split Geant4 has
       // between `AlongStepDoIt`'s guard and the model's `latDisplasment` member.
-      const auto sc = em::wv_sample_scattering(s.materials[mat], lpd, lepton_type, st, els,
-                                               msc_cut, kCosThetaLim, p.dir, lat_disp, rng);
-      msc_dir = sc.dir;
-      msc_disp = sc.displacement;
+      if (s.processes.multiple_scattering && do_scatter) {
+        const auto sc = em::wv_lepton_scatter(s.materials[mat], lpd, lepton_type, st, els,
+                                              msc_cut, kCosThetaLim, p.dir, lat_disp, rng);
+        msc_dir = sc.dir;
+        msc_disp = sc.displacement;
+      }
     }
     if (s.processes.multiple_scattering) { p.dir = msc_dir; }
 

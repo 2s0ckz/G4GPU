@@ -45,3 +45,16 @@ rem RELATIVE, not D:\g4gpu: these two lines were the last place a worktree regen
 rem oracle from MAIN's source. See the note in ref/proton/build.bat and docs/RISK.md V45.
 call "%~dp0..\proton\build.bat" || exit /b 1
 call "%~dp0..\proton\run.bat" 100000 100 "%~dp0proton_depth.csv" 0.7 0.5 || exit /b 1
+
+rem The same harness with an ELECTRON beam, added by P14c because nothing in this oracle had
+rem ever asked Geant4 what a lepton above 100 MeV does to a depth-dose curve - which is the
+rem question docs/RISK.md V64 turned out to be about. One source file, two builds, one
+rem geometry: see the header of ref/proton/proton_depth.cc.
+rem
+rem 1 GeV in water is a SHOWER and not a track, so the phantom is not the proton's. X0 in water
+rem is 360.8 mm, the shower maximum sits near 2 X0 and the tail runs for tens of radiation
+rem lengths, so the depth is 4,000 mm in 20 mm slabs - 200 bins, the same count the proton run
+rem uses - and the transverse half-width is 400 mm, which is 4.3 Moliere radii and holds the
+rem 95% containment radius of 2 R_M with room. Both numbers are arguments and both are on the
+rem CSV's header line, so a curve can never be read against the wrong phantom.
+call "%~dp0..\proton\run.bat" 100000 1000 "%~dp0electron_depth.csv" 0.7 20 e- 4000 400 || exit /b 1

@@ -29,6 +29,16 @@ set CUT=%4
 set SLAB=%5
 if "%SLAB%"=="" set SLAB=0.5
 if "%CUT%"=="" set CUT=0.7
+rem The species, by name, and the phantom it needs. Defaulted to the proton's so that every
+rem existing caller - build_all.bat's gate, ref/oracle/run.bat's proton line, tools/quick.ps1
+rem -Check proton - runs exactly the geometry it ran before P14c. See the block above
+rem cfg::half_xy in proton_depth.cc for why an electron needs a different phantom.
+set PART=%6
+if "%PART%"=="" set PART=proton
+set DEPTH=%7
+if "%DEPTH%"=="" set DEPTH=100
+set HALF=%8
+if "%HALF%"=="" set HALF=150
 rem Relative to this file, not D:\g4gpu - see the note in build.bat beside it. A worktree runs
 rem the binary ITS build.bat built, from ITS proton_depth.cc.
-"%~dp0..\protonbuild\Release\g4proton.exe" %EV% %EN% "%OUT%" %CUT% %SLAB%
+"%~dp0..\protonbuild\Release\g4proton.exe" %EV% %EN% "%OUT%" %CUT% %SLAB% %PART% %DEPTH% %HALF%

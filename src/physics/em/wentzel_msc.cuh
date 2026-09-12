@@ -602,4 +602,154 @@ __host__ __device__ inline WentzelScatterResult<real_t> wv_sample_scattering(
   return out;
 }
 
+/// Whether `step_lepton` dispatches `G4WentzelVIModel` above `em::kMscEnergyLimit()`.
+///
+/// **FALSE, AND THE REASON IS A COMPILER AND NOT THE PHYSICS.** This is docs/RISK.md V63's
+/// `kUrbanIonMscWired` a second time, on the other stepper: the model is transcribed, oracled
+/// and tested (`tests/test_wentzel_msc.cu`, `tests/test_electron_hi.cu`), the transport mean
+/// free path table it reads is built and compared against Geant4's at its own 43 nodes to
+/// 5.1e-16, the dispatch below is written and runs on the device in
+/// `tests/test_lepton_transport.cu` - and `src/host/transport_run.cu`, the one translation
+/// unit that holds all twenty kernels, dies in ptxas with it on:
+///
+///     Internal error
+///     nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+///
+/// V55's remedy was tried first and is the four `__noinline__` wrappers below, which are kept
+/// because they are right for the hot path anyway; they did not move the wall, exactly as V63
+/// found for the ion. V63's nine-build table is the evidence that there is no arrangement of
+/// `__noinline__` to find - "an arrangement either falls on the right side or it does not, for
+/// no reason visible in the source, and the only lever left with real headroom is to stop
+/// asking one translation unit to hold twenty kernels". That lever is P8e's.
+///
+/// **WHAT THE PORT DOES INSTEAD, AND WHAT IT COSTS.** With this false, `step_lepton` uses
+/// `G4UrbanMscModel` at every energy, which is what it did before P14c - and `em::UrbanTable`
+/// stops at 100 MeV, so above that the transport mean free path is the 100 MeV one. That is a
+/// clamp of the same family as docs/RISK.md V64 and it is named here rather than left to be
+/// found: it is a substitution in the msc STEP LENGTH of an electron above 100 MeV, not in its
+/// energy loss, and the energy-loss tables this package rebuilt are read correctly at every
+/// energy either way. docs/RISK.md V83 has the measurement.
+///
+/// Turning it on is this one word, once `transport_run.cu` is more than one translation unit.
+constexpr bool kWentzelLeptonMscWired = false;
+
+// ------------------------------------- the e+- branch, out of line, and it is not tidiness
+//
+// `step_lepton` CALLS THESE FOUR AND NOTHING ELSE OF WENTZELVI, AND THEY ARE `__noinline__`
+// BECAUSE `transport_run.cu` DOES NOT SURVIVE PTXAS OTHERWISE.
+//
+//     Internal error
+//     nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+//
+// with no file, no line and no symbol - docs/RISK.md V55's failure, exactly, and V63's. The
+// one-kernel reproducer compiles the same `step_lepton` in two minutes and reports 255
+// registers and a 3088 B frame, so the kernel is fine and the TRANSLATION UNIT is not: twenty
+// `__global__` instantiations in one file, each inlining the whole of whatever its stepper
+// reaches. Adding the WentzelVI branch to `step_lepton` put four more copies of
+// `wentzel_setup`, `wv_transport_xs` and `wv_sample_scattering` into it - once per lepton
+// kernel - and that is what tipped it. See docs/RISK.md V81.
+//
+// IT IS ALSO THE RIGHT ANSWER FOR THE HOT PATH, which is why it is not a workaround.
+// `G4EmParameters::MscEnergyLimit()` is 100 MeV, so this whole branch is dead for every
+// electron B1's 6 MeV gamma gate makes and for every delta ray any hadron in this port makes.
+// What was being inlined into every step of every lepton is a branch that almost never runs -
+// V55's argument for `had::elastic_apply`, in the same shape.
+//
+// THE WRAPPERS ARE LEPTON-ONLY AND THE INLINE FUNCTIONS ABOVE ARE UNTOUCHED, and that is
+// deliberate: `step_hadron` calls those directly, `__noinline__` moves a floating-point
+// contraction boundary, and P14b's claim that the proton and alpha kernels are byte-identical
+// is a claim this package must not spend. Measured: with these four in place the proton and
+// alpha B1 rows are unchanged.
+
+/// `G4WentzelVIModel::ComputeTruePathLengthLimit` for a lepton: the model's per-step setup,
+/// the transport cross section that fills @p els and `st.xtsec`, and the limit itself.
+///
+/// @param lambda_eff_table `G4VMscModel::GetTransportMeanFreePath` read out of
+///        `em::WentzelLeptonTable` at the pre-step energy - the table and not the model, for
+///        the reason docs/PORTED.md 4.4 gives. Passed in because the table lives on `Scene`.
+template <typename real_t>
+__device__ __noinline__ real_t wv_lepton_limit(const data::Material<real_t>& m,
+                                               const ParticleDef<real_t>& pd, ParticleType type,
+                                               real_t kinetic, real_t range, real_t cut,
+                                               real_t cos_theta_lim, real_t safety,
+                                               real_t range_cut, real_t requested,
+                                               real_t lambda_eff_table,
+                                               WentzelMscState<real_t>& st,
+                                               WentzelElementXs<real_t>& els, bool* lat_off) {
+  st.range = range;
+  st.pre_kin_energy = kinetic;
+  st.eff_kin_energy = kinetic;
+  st.single_scattering_mode = false;
+  {
+    const WentzelState<real_t> s0 = wentzel_setup(
+        pd, type, kinetic, m.inv_a23, static_cast<int>(m.z[0] + real_t(0.5)), cut,
+        cos_theta_lim);
+    st.cos_tet_max_nuc = s0.cos_tet_max_nuc;
+  }
+  // Called for its OUT-PARAMETER and its side effect, not its return value: see the long note
+  // at the same call in `step_hadron`. `xtsec` is the total single-scattering rate the sampler
+  // draws its intervals from and `els` is the per-element table it picks a target atom out of;
+  // the return value at cos_theta = 1 is identically zero.
+  wv_transport_xs(m, pd, type, kinetic, cut, cos_theta_lim, real_t(1), st.cos_tet_max_nuc, els,
+                  st.xtsec);
+  st.lambda_eff = lambda_eff_table;
+  return wv_step_limit(m, pd, type, kinetic, range, st.lambda_eff, st.cos_tet_max_nuc,
+                       cos_theta_lim, safety, range_cut, requested, kFacRange<real_t>(),
+                       lat_off);
+}
+
+/// `G4WentzelVIModel::ComputeGeomPathLength` for a lepton, with the cut-off angle at the MEAN
+/// of the pre- and post-step energies that its long-step branch switches to.
+///
+/// @param lambda_mid_table the transport mfp at @p e_mid, again from the table.
+/// @param do_msc false when multiple scattering is switched off as a study; the geometric
+///        length is then the true one and the state is left alone, which is what the Urban
+///        branch does with the same flag.
+template <typename real_t>
+__device__ __noinline__ real_t wv_lepton_geom(const data::Material<real_t>& m,
+                                              const ParticleDef<real_t>& pd, ParticleType type,
+                                              WentzelMscState<real_t>& st, real_t t_step,
+                                              real_t e_end, real_t e_mid,
+                                              real_t lambda_mid_table, real_t cut,
+                                              real_t cos_theta_lim, bool do_msc,
+                                              real_t& cos_max_end_out, real_t& lambda_end_out) {
+  real_t cos_max_end = st.cos_tet_max_nuc;
+  real_t lambda_end = st.lambda_eff;
+  if (e_mid > real_t(0)) {
+    const WentzelState<real_t> sm = wentzel_setup(
+        pd, type, e_mid, m.inv_a23, static_cast<int>(m.z[0] + real_t(0.5)), cut, cos_theta_lim);
+    cos_max_end = sm.cos_tet_max_nuc;
+    lambda_end = lambda_mid_table;
+  }
+  cos_max_end_out = cos_max_end;
+  lambda_end_out = lambda_end;
+  return do_msc ? wv_geom_path(st, t_step, e_end, lambda_end, cos_max_end) : t_step;
+}
+
+/// `G4WentzelVIModel::ComputeTrueStepLength` for a lepton, carrying its own `recompute`.
+template <typename real_t>
+__device__ __noinline__ real_t wv_lepton_true(const data::Material<real_t>& m,
+                                              const ParticleDef<real_t>& pd, ParticleType type,
+                                              WentzelMscState<real_t>& st,
+                                              WentzelElementXs<real_t>& els, real_t geom_step,
+                                              real_t e_end, real_t lambda_end,
+                                              real_t cos_max_end, real_t cut,
+                                              real_t cos_theta_lim) {
+  auto recompute = [&](real_t cos_min, real_t& xt) {
+    return wv_transport_xs(m, pd, type, st.eff_kin_energy, cut, cos_theta_lim, cos_min,
+                           st.cos_tet_max_nuc, els, xt);
+  };
+  return wv_true_path(st, geom_step, e_end, lambda_end, cos_max_end, recompute);
+}
+
+/// `G4WentzelVIModel::SampleScattering` for a lepton.
+template <typename real_t, typename Rng>
+__device__ __noinline__ WentzelScatterResult<real_t> wv_lepton_scatter(
+    const data::Material<real_t>& m, const ParticleDef<real_t>& pd, ParticleType type,
+    const WentzelMscState<real_t>& st, const WentzelElementXs<real_t>& els, real_t cut,
+    real_t cos_theta_lim, const Vec3<real_t>& old_dir, bool lat_displacement, Rng& rng) {
+  return wv_sample_scattering(m, pd, type, st, els, cut, cos_theta_lim, old_dir,
+                              lat_displacement, rng);
+}
+
 }  // namespace g4gpu::em

@@ -7227,3 +7227,266 @@ blamed on sampling.
 The check that catches it costs nothing and is not in this port anywhere else: after a
 de-excitation, `sum(product four-momenta) - n_conversion_electrons * m_e` must equal the fragment
 that went in. `tests/test_bic_apply.cu` asserts it at 2e-10 MeV per event on a 205 GeV total.
+
+### V77: the ceiling came off, and the bottom of the table was wrong too
+
+V64's fix, and what building it found. The e+- dE/dx, range and inverse-range table is now
+`G4LossTableBuilder`'s on `G4EmParameters`' own grid - `MinKinEnergy` 100 eV to `MaxKinEnergy`
+100 TeV, `NumberOfBinsPerDecade` 7, so 85 nodes - cubic-splined with
+`G4PhysicsVector::ComputeSecDerivative1`'s conditions and integrated with the seed `2*E0/dedx0`
+and 100 midpoint sub-steps per bin, which is the same transcription `em/hadron_range.cuh` has
+used since docs/PORTED.md 4.3. The e+- table was the last place in the port that 4.3's rule had
+not been applied. Above the top node there is no Geant4 answer to reproduce, so `above_table`
+refuses the track by name into the refusal ledger, energy and all, rather than clamping it.
+
+**Two defects were sitting under the old 1 keV floor, and neither could be seen from above it.**
+
+*The low-energy extrapolation was a constant.* `G4MollerBhabhaModel::ComputeDEDXPerVolume` ends
+
+    if (kineticEnergy < th) {
+      x = kineticEnergy/th;
+      if(x > 0.25) { dedx /= sqrt(x); }
+      else         { dedx *= 1.4*sqrt(x)/(0.1 + x); }
+    }
+
+with `th = 0.25*sqrt(Zeff)` keV. The port's second branch read `dedx *= 1/sqrt(0.25)`, which is
+the first branch frozen at the breakpoint. The two agree there exactly - 1.4*0.5/0.35 = 2.0 -
+which is why the substitution looks harmless, and they diverge below it: the correct form falls
+off as sqrt(x)/0.1 towards zero while a constant 2 keeps the full stopping power. `x <= 0.25`
+means `E <= 0.0625*sqrt(Zeff)` keV, 168 eV in water and 306 eV in lead, so no electron is ever
+TRACKED there - `G4EmParameters::LowestElectronEnergy` is 1 keV - and nothing in the port or in
+`ref/oracle/electron_tables.csv` reached it. What is there is the first two or three nodes of
+the range table, and the range at 1 keV is the integral from 100 eV upwards. Restored, it is
+worth 9.6% of the dE/dx and 10.6% of the range in the bottom decade, and it is still 3.8e-8 of
+the range at 10-100 MeV - four decades above where it was introduced, with nothing at that
+energy to point at.
+
+*Every positron read the electron's range.* The table was built once with `is_positron = false`
+and had no species dimension. The restricted collision stopping power is Moller for one and
+Bhabha for the other: in `CustomSiGe` the two ranges differ by 32.4% at 100 eV, 2.3% at
+1-10 MeV and 4.3e-4 at 1-10 GeV. The ceiling was hiding it because every test that could have
+seen it compared a MODEL - `collision_dedx(mat, E, is_positron)` takes the flag and was right
+all along - and nothing compared the TABLE, which is the same sentence V64 ends with.
+
+**The gamma gate never saw any of it, and could not.** B1's gate is a 6 MeV photon beam at
+2,000,000 events; its secondaries are Compton electrons and pair electrons of a few MeV, which
+is the middle of the table where the old grid was dense and correct. The 1 keV floor is below
+the tracking cut, the 100 MeV ceiling is sixteen times the beam energy, and the positron rows
+only matter where the pair channel is open at all. A gate is a measurement at one point; it
+cannot be a measurement of a function.
+
+**What a test of the TABLE costs and what it finds.** `tests/test_electron_hi.cu` is 6,174
+points of `G4EmCalculator::GetDEDX`/`GetRange` in seven materials from 1 keV to 100 TeV, banded
+by decade and by species, plus 1,190 nodes against a 17-digit dump from 100 eV
+(`ref/dump/dump_electron_hi.cc`) - which is where both defects above appeared. Above 100 eV the
+worst residual is 6.8e-5, which is the oracle's own `%.9g`; from 0.1 MeV up it is 3e-9; at the
+nodes above 1 MeV it is exactly zero, because on the same grid the port samples the same models
+at the same points.
+
+---
+
+### V78: the lambda tables are half of a pair, and this port has neither half
+
+Refused by name rather than approximated, and recorded because the size of it is measured and
+not small.
+
+`G4VEnergyLossProcess` does not evaluate a discrete cross section during transport and does not
+simply read one out of a table either. `PostStepGetPhysicalInteractionLength` uses the INTEGRAL
+APPROACH: it caches `preStepLambda` from `ComputeLambdaForScaledEnergy` at up to `1/lambdaFactor`
+= 1/0.8 of the current energy (the peak structure is per process - `G4eIonisation` is
+`fEmOnePeak`, `G4eBremsstrahlung` is `fEmTwoPeaks`), draws the interaction length from that, and
+then `PostStepDoIt` REJECTS the interaction with probability `1 - lambda(E_post)/preStepLambda`.
+The lambda vector itself is built on `G4EmParameters`' grid from `MinPrimaryEnergy` - `2*cut`
+for e-, `cut` for e+ - with `startFromNull` forcing the first node to zero.
+
+This port draws from the model's cross section at the pre-step energy with no rejection. That is
+neither of Geant4's two objects, and tabulating the vector without the rejection would not be
+closer: the table alone moves the rate the wrong way near threshold, where a 7-per-decade table
+of a function that rises from zero across one coarse bin disagrees with the model by tens of per
+cent. `tests/test_electron_hi.cu` prints that difference every run - 47.1% for the e- delta-ray
+cross section at 1 MeV in the lead-bearing material, 66.7% for e+ at 1 keV in air - as a
+measured refusal rather than a failure, because it is Geant4's answer and not an error in
+either. Closing it means transcribing `ComputeLambdaForScaledEnergy`, the cached
+`preStepLambda`, the two peak shapes and `PostStepDoIt`'s rejection together, and it belongs to
+whoever next needs the discrete rates to be Geant4's rather than the models'.
+
+---
+
+### V79: one msc model, three cuts, and the port uses a different one on each path
+
+`G4WentzelVIModel` asks `G4WentzelOKandVIxSection` for a cross section in three places and hands
+it a different cut each time. This is not a Geant4 defect and it is very easy to port as one.
+
+    G4VEmModel::Value, through G4LossTableBuilder::BuildTableForModel          cut = 0
+      -> xSectionTable, which is what GetTransportMeanFreePath reads
+    G4WentzelVIModel::ComputeTransportXSectionPerVolume                        cut = electron
+      -> xtsec, the single-scattering rate the sampler draws its intervals from    production cut
+    G4WentzelVIModel::ComputeCrossSectionPerAtom, called by the process         cut = the
+                                                                                   process's
+
+The first is the point: `G4VEmModel::Value` is `pFactor * E*E * CrossSectionPerVolume(mat, p, E,
+0.0, DBL_MAX)` and that `0.0` reaches `ComputeCrossSectionPerAtom` as its `cutEnergy`, so
+`SetupTarget(Z, 0.0)` leaves `cosTetMaxElec` at 1 and the electron-scattering channel is CLOSED
+in the tabulated transport cross section - while it is open in `xtsec`. Using one for the other
+is worth up to 8.75% of the transport cross section at the top of the range (measured,
+A-150 tissue, e- at 51.8 TeV) and lengthens every step limit.
+
+The e+- path added by P14c reads the table for `lambda_eff` and the production cut for `xtsec`,
+which is Geant4's arrangement, and `tests/test_electron_hi.cu` compares both columns against
+`ref/oracle/electron_hi_msc.csv`. (That path is written, tested and NOT dispatched: V83.) **The HADRON path in `step_hadron` still calls
+`wentzel_lambda` directly with the production cut, which is neither**, and it is left exactly as
+it is: the proton and alpha B1 rows agree with Geant4 to 0.25% today, so changing the
+quantity that sets a proton's step length is a package with its own before-and-after, not a
+side effect of the electron one. A proton is 1836 times heavier than an electron and its
+`cosTetMaxElec` sits far closer to 1, so the term this leaves out is much smaller there than
+the 8.75% above - but "much smaller" is an argument, not a measurement, and the measurement is
+what is owed.
+
+---
+
+### V80: the two lepton msc tables in this port are now built to different rules
+
+`em::UrbanTable` is 240 log-spaced points from 1 keV to 100 MeV, interpolated LINEARLY.
+Geant4's is `G4LossTableBuilder::BuildTableForModel`'s - the model's own energy window at
+`NumberOfBinsPerDecade` 7, cubic-splined. The MODEL underneath agrees to 6.7e-16 over 41,952
+points (`tests/test_urban_general.cu`), so anywhere between two nodes the two tables differ by
+their interpolation alone and by nothing physical.
+
+Two things make this worth an entry rather than a footnote. The first is that the e+- WentzelVI
+table P14c added IS on `BuildTableForModel`'s grid, with an oracle at its own nodes
+(`ref/oracle/electron_hi_msc.csv`, 602 points at 5.1e-16) - so the port now holds one lepton msc
+table built to Geant4's rule and one built to its own, and a reader comparing an msc number has
+to know which. The second is how easily this hides: at exactly 100 MeV, where
+`tests/test_electron_hi.cu` compares the Urban table against `G4EmCalculator` to confirm which
+model owns the boundary energy, the two agree to better than 5e-7 in all seven rows - because
+100 MeV is a node on BOTH grids (`1e-4 * 10^(84/7)` is exactly 100, and it is the port's
+`e_max`). An agreement measured only at a shared node says nothing about the twelve points
+between them.
+
+The ceiling itself is not a V64: `em::kMscEnergyLimit()` is 100 MeV and `step_lepton` takes the
+WentzelVI branch strictly above it, so the Urban table's last node is exactly where Geant4's
+Urban model stops and `lambda_at`'s clamp above it is unreachable from the transport. Whoever
+needs the sub-per-cent agreement of an Urban step should put that table on
+`BuildTableForModel`'s grid; until then an Urban msc number in this port carries an
+interpolation error that is not in the model.
+
+---
+
+### V81: ptxas died again, in the same place, for the same reason, on a different branch
+
+    Internal error
+    nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+
+V55's failure and V63's, now on the lepton. Adding `G4WentzelVIModel` to `step_lepton` for e+-
+above 100 MeV made `src/host/transport_run.cu` uncompilable: twenty `__global__` instantiations
+in one translation unit, each inlining the whole of whatever its stepper reaches, and this put
+four more copies of `wentzel_setup`, `wv_transport_xs`, `wv_step_limit`, `wv_geom_path`,
+`wv_true_path` and `wv_sample_scattering` into it - one per lepton kernel.
+
+V55's diagnostic worked unchanged and is worth repeating for that reason: the one-kernel
+reproducer, ten lines that instantiate `run_step_lepton<double, true/false, StepTap<double>>`
+and nothing else, compiles in two minutes against a TU that takes the better part of an hour,
+and it compiled FINE - 255 registers, 3,088 byte frame, 96/56 spill. A kernel that compiles
+alone and not in company is a translation-unit problem, which says the answer is to stop
+inlining rather than to simplify the physics.
+
+The fix is four `__device__ __noinline__` wrappers in `em/wentzel_msc.cuh` -
+`wv_lepton_limit`, `wv_lepton_geom`, `wv_lepton_true`, `wv_lepton_scatter` - called only by
+`step_lepton`. It is also the right answer for the hot path, which is why it is not a
+workaround: `G4EmParameters::MscEnergyLimit()` is 100 MeV, so the branch is dead for every
+electron B1's 6 MeV gate makes and for every delta ray any hadron in this port makes, and what
+was being inlined into every step of every lepton is a branch that almost never runs. That is
+V55's argument for `had::elastic_apply` in the same shape.
+
+**The wrappers are lepton-only and the inline functions are untouched**, deliberately:
+`step_hadron` calls those directly, `__noinline__` moves a floating-point contraction boundary,
+and P14b's byte-identical proton and alpha kernels are a claim this package must not spend.
+
+**It did not work.** The same message, from the same file, after a 34-minute build. V63's
+nine-build table said it would not and says why no further arrangement was tried: the thing
+that dies is the translation unit, it is a cliff and not a slope, and the lever with headroom
+is P8e's split. The wrappers are KEPT because they are right for the hot path independently of
+this, and the branch is switched off at compile time instead: `em::kWentzelLeptonMscWired`,
+docs/RISK.md V83.
+
+---
+
+### V82: the continuous loss was split in two and one half went nowhere
+
+Found by `tests/test_lepton_transport.cu`, the device energy balance V64's last paragraph asked
+for, on its first run.
+
+`step_lepton` deposited `loss * col/(col + rad)` - the collision share of the continuous loss -
+where `col` is `G4MollerBhabhaModel`'s restricted collision stopping power and `rad` is the
+restricted radiative one. The other share was neither deposited nor handed to a secondary. It
+simply left the arithmetic.
+
+`G4VEnergyLossProcess::AlongStepDoIt` has no such split. It ends
+
+    eloss = std::max(eloss, 0.0);
+    fParticleChange.SetProposedKineticEnergy(finalT);
+    fParticleChange.ProposeLocalEnergyDeposit(eloss);
+
+(G4VEnergyLossProcess.cc:922-925) and the only things subtracted from `eloss` above those lines
+are atomic de-excitation, which option0 has off, and `subcutProducer`, which is null unless a
+region asks for one. The reason there is no split is that the RESTRICTED radiative term is by
+construction the part of the bremsstrahlung spectrum below the gamma production cut: the photon
+that would have carried it is not produced, so its energy is local. Everything above the cut
+leaves as an explicit photon from the discrete branch and was never in `eloss` at all.
+
+What it was worth, per track, as the balance reports it: 5.3e-5 of a 1 MeV electron in water,
+3.2e-5 at 50 MeV, 2.1e-6 at 1 GeV and 2.1e-7 at 10 GeV. It grows towards low energy because the
+gamma cut is a larger fraction of a smaller electron's bremsstrahlung spectrum. With the split
+removed every track closes to floating point: worst residual 1.8e-15 of the primary energy over
+2,048 tracks at four energies and both species.
+
+**Two things about this are worth more than the number.** The first is that it is the shape of
+V64 again at a thousandth of the size - an energy that no counter held - and the same test
+catches both: with the old table in place the balance fails by 90% at 1 GeV. The second is what
+the balance had to be told before it could close at all: a positron's input side is
+`E0 + 2 m_e c^2`, because `G4eplusAnnihilation`'s two 511 keV photons are rest mass and not
+anything the track carried. Written down, that is a statement about the physics; left out, it
+reads as a 102% energy gain at 1 MeV.
+
+---
+
+### V83: the second model is written, tested and switched off, and the switch is a compiler
+
+`em::kWentzelLeptonMscWired` is `false`. `G4EmStandardPhysics::ConstructProcess` gives e+- a
+`G4UrbanMscModel` below `MscEnergyLimit()` = 100 MeV and a `G4WentzelVIModel` above it; this
+port dispatches Urban at every energy, and it is V63's situation on the other stepper.
+
+What IS done, and none of it is waiting on physics: `G4WentzelVIModel`'s electron path is
+transcribed; `G4VMscModel::xSectionTable` for it is built on `BuildTableForModel`'s own grid -
+43 nodes from 100 MeV to 100 TeV holding `E^2 * CrossSectionPerVolume(..., 0.0, DBL_MAX)` - and
+compared against `ref/oracle/electron_hi_msc.csv` at its nodes to **5.1e-16** over 602 points,
+with the interpolation between them at 0.20%; the dispatch is written in `step_lepton` behind
+`if constexpr`; and it runs on the device in `tests/test_lepton_transport.cu`, where a 1 GeV
+electron takes 9,585 of its 15,933 steps above the boundary and the energy balance closes to
+1.8e-15 with it on. The boundary itself is checked against Geant4's own answer at 100 MeV
+(`tests/test_electron_hi.cu`: `G4RegionModels::SelectIndex` tests `e <= lowKineticEnergy[idx]`,
+so 100 MeV belongs to Urban and the branch is a strict `>`).
+
+What is not done is `src/host/transport_run.cu` compiling with it on:
+
+    Internal error
+    nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+
+V55's remedy - `__noinline__` on the branch that almost never runs - is applied and kept
+(`wv_lepton_limit`, `wv_lepton_geom`, `wv_lepton_true`, `wv_lepton_scatter`, V81) because it is
+right for the hot path either way; it did not move the wall. V63's nine-build table is why no
+further arrangement was tried: the failure is the translation unit and not the kernel, it is a
+cliff rather than a slope, and "the only lever left with real headroom is to stop asking one
+translation unit to hold twenty kernels" - which is P8e's package. `if constexpr` and not a
+runtime `false`, because a runtime false leaves every arm in the TU.
+
+**WHAT THE SUBSTITUTION COSTS, STATED RATHER THAN ARGUED.** Above 100 MeV a lepton is stepped
+by Urban, and `em::UrbanTable` ends at 100 MeV - so its transport mean free path above that is
+the 100 MeV one, clamped. That is a clamp of V64's family and it is named here because it would
+otherwise be found the same way V64 was. It differs from V64 in what it touches: the msc STEP
+LENGTH and the deflection of an electron above 100 MeV, not its energy loss. The dE/dx, range
+and inverse-range tables this package rebuilt are read correctly at every energy with the
+switch in either position, which is why the 1 GeV B1 row moves by what it moves by
+(docs/B1_SWEEP.md) with the switch off. Extending the Urban table instead is not a smaller
+change than it looks: its 240 nodes are one log grid from 1 keV, so moving its ceiling moves
+every node below it, and B1's 6 MeV gamma gate reads those nodes.
