@@ -141,6 +141,10 @@ struct FtfModelWorkspace {
   int projectile_baryon = 0;
   int projectile_charge = 0;
   bool high_energy_inter = true;
+  /// An ANTI-nucleus beam. `G4FTFModel::Init` re-types every nucleon of the projectile nucleus
+  /// to its anti-species after building it; P9's `bic::Nucleon` has no anti types, so the flag
+  /// is carried here and the sign is applied where the splitable hadron is made.
+  bool projectile_is_anti = false;
 
   int involved_target[kMaxTargetA];      ///< TheInvolvedNucleonsOfTarget, as nucleon indices
   int n_involved_target = 0;
@@ -1530,24 +1534,29 @@ __host__ __device__ inline void ftf_model_init(FtfModelWorkspace<kA, kP, kI, kS>
     w->projectile_residual_p4 = proj_p4;
     w->high_energy_inter = (plab_per_particle >= ftf_low_energy_limit());
   } else {
-    if (proj.baryon_number < -1) {
-      // An anti-nucleus projectile: G4Fancy3DNucleus has no anti-nucleon type and Geant4
-      // re-types the nucleons after building the nucleus. P9's model refuses anti-nuclei by
-      // name; so does this.
-      w->report.refused = FtfRefusal::kAntiNucleusProjectile;
-      return;
-    }
+    // An ANTI-nucleus projectile. `Init` builds the nucleus from |B| and |Q| and then walks it
+    // re-typing every nucleon to its anti-species; the nucleus itself is the same object either
+    // way, so the flag is carried and the sign applied where the splitable hadrons are made.
+    // The strings come out of this arm; the HAND-OVER does not - P6's
+    // `propagate_nucl_nucl_residuals` refuses `primary_baryon_number < -1` by name
+    // (`GeneratorRefusal::anti_nucleus`), which is where an anti-alpha stops.
+    if (proj.baryon_number < -1) { w->projectile_is_anti = true; }
     if (proj.n_lambdas > 0) {
       w->report.refused = FtfRefusal::kHyperNucleus;
       return;
     }
-    if (proj.baryon_number > kP) {
+    // `std::abs` on both, as Geant4 writes them: an anti-nucleus is built from |B| and |Q| and
+    // only its NUCLEONS carry the sign. `PlabPerParticle` divides by the same |B|.
+    const int abs_b =
+        (proj.baryon_number < 0) ? -proj.baryon_number : proj.baryon_number;
+    const int q = static_cast<int>(proj.charge);
+    if (abs_b > kP) {
       w->report.involved_capacity = true;
-      w->report.refused_a = proj.baryon_number;
+      w->report.refused_a = abs_b;
       return;
     }
-    w->projectile_residual_a = proj.baryon_number;
-    w->projectile_residual_z = static_cast<int>(proj.charge);
+    w->projectile_residual_a = abs_b;
+    w->projectile_residual_z = (q < 0) ? -q : q;
     w->projectile_residual_lambda = proj.n_lambdas;
     plab_per_particle = proj_p4.v.z / w->projectile_residual_a;
     w->high_energy_inter = (plab_per_particle >= ftf_low_energy_limit());
@@ -1614,7 +1623,7 @@ __host__ __device__ inline void ftf_get_strings(FtfModelWorkspace<kA, kP, kI, kS
 
   if (w->has_projectile_nucleus) {
     ftf_participants_get_list_nucleus(&w->participants, &w->target, &w->projectile, &w->params,
-                                      w->projectile_p4, rng);
+                                      w->projectile_p4, rng, w->projectile_is_anti);
   } else {
     ftf_participants_get_list_hadron(&w->participants, &w->target, &w->params, w->projectile_pdg,
                                      w->projectile_p4, rng);

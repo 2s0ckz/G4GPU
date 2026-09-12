@@ -140,8 +140,13 @@ enum class FtfRefusal : int {
   /// G4Fancy3DNucleus and then calls `G4Nucleon::SetParticleType(G4AntiProton...)` on every
   /// nucleon of it. P9's `bic::Nucleon` has no anti-nucleon types - and
   /// bic/nucleus/nucleus_model.cuh refuses anti-nuclei by name for exactly this reason - so the
-  /// re-typing has nothing to write into. An anti-NUCLEON (baryon number -1) is NOT refused
-  /// here: it needs no projectile nucleus at all.
+  /// re-typing has nothing to write into. NO LONGER RAISED since P11c: the re-typing happens
+  /// after `Init`, so the nucleus is the same object either way and the only thing the
+  /// anti-species changes downstream is the PDG code the SPLITABLE carries. A flag on the model
+  /// workspace and a sign at the one place the splitable is made replace it, and the four
+  /// anti-nuclei QBBC constructs build their strings. They still stop at the hand-over, on P6's
+  /// own `GeneratorRefusal::anti_nucleus`. docs/RISK.md V117. An anti-NUCLEON (baryon number -1)
+  /// was never refused here: it needs no projectile nucleus at all.
   kAntiNucleusProjectile,
 
   /// G4Fancy3DNucleus / G4NuclearFermiDensity / G4FermiMomentum / G4Nucleon, the nucleus

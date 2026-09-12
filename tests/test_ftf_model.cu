@@ -41,6 +41,13 @@
 //                      inputs: the proton and neutron hit counts of both nuclei.
 //   ftf_windows.csv    which particles QBBC's constructed processes actually give FTFP and
 //                      between which energies, so the entry point can be run over all of them.
+//   had_hnxsc.csv      P2's, for the HYPERON rows P11c added to it - the lambda beam that
+//                      ftf_windows.csv found and that P5's cross sections had no branch for.
+//
+// Three sections have no oracle row at all and are ASSERTIONS: the ion arm, the sub-GeV arm and
+// the generality sweep. What they assert is what Geant4 asserts about itself in its own debug
+// blocks - baryon number and charge over the whole final state - plus "every point either runs
+// or refuses by name, and none is silent".
 //
 //   ftf_modelcases.csv the INPUTS of those cases - the projectile's PDG mass and lab momentum
 //                      as Geant4 computed them - so that the statistical half does not have to
@@ -66,6 +73,7 @@
 
 #include "core/rng.cuh"
 #include "physics/hadronic/ftf/theo_fs_generator.cuh"
+#include "physics/hadronic/xs/hadron_nucleon_xsc.cuh"
 
 using namespace g4gpu;
 using namespace g4gpu::hadronic;
@@ -2127,6 +2135,63 @@ int main(int argc, char** argv) {
       ++fails;
     }
     delete ws;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 11. ftf_hyperon_xsc.csv - P5's cross sections, extended for the FTFP beam that needed them
+  //
+  // `ftf_windows.csv` says QBBC gives FTFP a lambda beam from 3 GeV and an anti-lambda beam at
+  // every energy. `G4FTFParameters::InitForInteraction` asks `G4HadronNucleonXsc` for that
+  // projectile's cross sections on a proton and on a neutron, and P5's port had no hyperon
+  // branch - it reported `kHyperonNucleonXscNS`, so six points of the 96-point sweep could not
+  // run. `HyperonNucleonXscNS` is written now (P11c, in `xs/hadron_nucleon_xsc.cuh`).
+  //
+  // The oracle is in THIS package's dump and not in P2's `had_hnxsc.csv`, where the rows belong,
+  // because `tests/test_hadronic_xs.cu` maps that file's particle column through
+  // `projectile_by_name` and records a deviation of 1.0 for a name it does not know - so ten new
+  // particles there would have turned P2's test red for a reason that has nothing to do with P2.
+  // The energies are P2's: twelve per decade from 1 keV to 100 TeV plus every pLab branch point
+  // of `HadronNucleonXscNS` converted to a kinetic energy for that particle.
+  // -------------------------------------------------------------------------------------------
+  const int b_hyp_tot = new_bucket("hyperon-nucleon total", 1e-13);
+  const int b_hyp_el = new_bucket("hyperon-nucleon elastic", 1e-13);
+  const int b_hyp_inel = new_bucket("hyperon-nucleon inelastic", 1e-13);
+  {
+    Csv ch2;
+    if (ch2.load(dir + "/ftf_hyperon_xsc.csv")) {
+      for (size_t r = 0; r < ch2.rows.size(); ++r) {
+        const std::string& pname = ch2.s(r, "particle");
+        const int pdg = static_cast<int>(ch2.i(r, "pdg"));
+        const data::FtfHadron* h = data::ftf_find_hadron(pdg);
+        if (h == nullptr) {
+          std::printf("FAIL: no hadron-table row for %s (pdg %d)\n", pname.c_str(), pdg);
+          ++fails;
+          continue;
+        }
+        hadronic::xs::Projectile<double> p;
+        p.pdg = pdg;
+        p.mass = h->mass;
+        p.charge = h->charge;
+        p.baryon_number = h->baryon;
+        p.n_lambdas = 0;
+        const bool on_proton = (ch2.s(r, "nucleon") == "proton");
+        const hadronic::xs::Projectile<double> n =
+            on_proton ? hadronic::xs::proton<double>() : hadronic::xs::neutron<double>();
+        const double ekin = ch2.d(r, "energy_MeV");
+        const hadronic::xs::HadXs<double> got =
+            hadronic::xs::hadron_nucleon_xsc<double>(p, n, ekin);
+        const std::string w = pname + " on " + ch2.s(r, "nucleon") + " at " +
+                              std::to_string(ekin) + " MeV";
+        if (!got.ok()) {
+          std::printf("FAIL: %s refused (%d)\n", w.c_str(), static_cast<int>(got.refused));
+          ++fails;
+          continue;
+        }
+        cmp(b_hyp_tot, got.total, ch2.d(r, "total_mm2"), w);
+        cmp(b_hyp_el, got.elastic, ch2.d(r, "elastic_mm2"), w);
+        cmp(b_hyp_inel, got.inelastic, ch2.d(r, "inelastic_mm2"), w);
+      }
+    }
   }
   // -------------------------------------------------------------------------------------------
   // Report

@@ -8853,3 +8853,72 @@ nucleon meeting a target nucleon that already collided - Geant4 stores the PROJE
 the variables named `TResidual*`, and `_afterSampling` reads them back out of the same names into
 `ProjectileResidual*`. It is not a mistake and the port keeps the names, because renaming them to
 match their meaning in case 2 would make the three cases stop lining up with the source.
+
+### V116: QBBC gives FTFP a lambda beam, and no document said so
+
+`docs/PORTED.md` stated FTFP's energy windows by reading the builders, and the builders are easy
+to read as "p, n, pi+-, K+- above 3 GeV, anti-nucleons everywhere, ions above 3 GeV/nucleon".
+`ref/oracle/ftf_windows.csv` - one row per model each CONSTRUCTED `G4HadronicProcess` holds,
+with the energy range it is asked for - says something that reading them did not: `lambdaInelastic`
+carries FTFP from 3 GeV and `anti_lambdaInelastic` carries it at every energy. A hyperon beam is
+an FTFP beam.
+
+It could not run. `G4FTFParameters::InitForInteraction` asks `G4HadronNucleonXsc` for the
+projectile's cross sections on a proton and on a neutron, P5's port had no hyperon branch, and
+the whole event came back as `kHadronNucleonXscRefused` - six of the 96 points of the generality
+sweep, and the only six whose refusal was in a package below this one.
+
+`HyperonNucleonXscNS` turns out to be one coefficient table: 0.88 for a hyperon with one strange
+quark, 0.76 for two, 0.64 for the Omega, and six more for the charm and bottom hyperons, applied
+to the PROTON's `HadronNucleonXscNS` at the hyperon's kinetic energy. All THREE cross sections
+are scaled - `fTotalXsc = coeff * HadronNucleonXscNS(...)` and then two lines that multiply the
+`fInelasticXsc` and `fElasticXsc` that call just filled in - while production and diffraction are
+left as the proton's, unscaled, because nothing in the function touches them.
+
+Two things are worth recording beyond the fix. The first is that this is the second time
+`ftf_windows.csv` has corrected a document that was written by reading source: it also said the
+NEUTRON has no FTFP row at all (QBBC gives it `NeutronGeneralProc`, whose model list is empty
+because the models live inside the sub-processes it wraps) and that every ceiling is 100 TeV
+rather than the 50 GeV the statistical cases stop at. Reading a builder tells you what the
+builder intends; reading the constructed process tells you what the run will do.
+
+One coefficient in that table has no caller. `HadronNucleonXsc`'s dispatch names 3324 (Xi*0) and
+does NOT name 3334, so an Omega- goes to `HadronNucleonXscPDG` and the 0.64 is dead in 11.1.1.
+It is transcribed anyway, because a release that adds 3334 to the dispatch list would otherwise
+silently get 1.0; `had_hnxsc.csv` carries the Omega rows, so the day the dispatch changes the
+row moves and the test says so. The same dispatch list names 4122 and 5122 twice each, which
+changes nothing and is left as the set it describes.
+
+The second is the shape of the gap. A refusal in a package BELOW the one being tested is
+invisible from that package's own oracle tables - P11's `ftf_params.csv` has 22 named projectiles
+and no hyperon among them, so nothing there could have failed - and it took a sweep over the
+processes QBBC actually builds to find it. The sweep is now part of `test_ftf_model.cu` and it
+reports three outcomes per point: ran, refused by name, or silent, where silent fails.
+
+### V117: an anti-nucleus needs no anti-nucleon type, only an anti-nucleon PDG code
+
+`G4FTFModel::Init` builds an anti-nucleus projectile by calling `InitProjectileNucleus` with the
+ABSOLUTE mass number and charge - an ordinary `G4Fancy3DNucleus` - and then walking the result
+with `SetParticleType` to turn every proton into an anti-proton and every neutron into an
+anti-neutron. P9's `bic::Nucleon` has three types and no anti ones, so the port refused an
+anti-nucleus projectile before building anything (`kAntiNucleusProjectile`).
+
+That refusal was larger than the gap. The re-typing happens AFTER `Init`, so the nucleus is the
+same object either way: the same positions, the same Fermi momenta, the same deviates out of the
+same sampler. The only thing the anti-species changes downstream is the PDG CODE the splitable
+hadron carries - and every consumer below `GetList` reads the splitable, not the nucleon. One
+flag on the model workspace and one sign at the one place the splitable is made is the whole of
+it. P11c does that, with `std::abs` on the baryon number and the charge where `Init` has it.
+
+The four anti-nuclei QBBC's FTFP list constructs - anti-deuteron, anti-triton, anti-He3,
+anti-alpha - now build their nucleus, their participant list and their strings: 300 of 300
+events on carbon and on lead at 1 and 5 GeV per nucleon, 4.7 to 26.0 strings each. Every one of
+them then stops at `GeneratorRefusal::anti_nucleus` - P6's own refusal in
+`propagate_nucl_nucl_residuals`, which the P11c brief leaves refused - so no final state comes
+out and the generality sweep's count does not move.
+
+The value is where the refusal now IS. Before, an anti-alpha was refused before the nucleus
+existed and nothing about the anti-baryon string machinery was exercised by an anti-NUCLEUS beam
+at all; the annihilation channels, the quark-exchange arms and `PutOnMassShell` had only ever
+seen an anti-NUCLEON. Now they see four more beams, and the one thing that is missing is named
+in one place instead of two.

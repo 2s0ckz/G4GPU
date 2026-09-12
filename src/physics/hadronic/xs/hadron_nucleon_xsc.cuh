@@ -852,6 +852,63 @@ __host__ __device__ inline HadXs<real_t> hn_kaon_xsc_ns(const Projectile<real_t>
 
 /// G4HadronNucleonXsc::HadronNucleonXsc - the dispatcher, in its own order.
 ///
+/// G4HadronNucleonXsc::HyperonNucleonXscNS.
+///
+/// The whole function is a coefficient chosen by |PDG| and applied to the PROTON's
+/// `HadronNucleonXscNS` on the same nucleon at the same kinetic energy. All THREE cross sections
+/// are scaled: `fTotalXsc = coeff * HadronNucleonXscNS(proton, ...)` sets the total, and the two
+/// lines after it multiply `fInelasticXsc` and `fElasticXsc` - which the call just filled in -
+/// by the same coefficient. Production and diffraction are left as the proton's, unscaled,
+/// because nothing in `HyperonNucleonXscNS` touches them.
+///
+/// Written by P11c because QBBC gives FTFP a LAMBDA beam from 3 GeV and an ANTI-LAMBDA beam at
+/// every energy (`ftf_windows.csv`), and this was the one FTFP row the port could not run: the
+/// model asks `G4FTFParameters::InitForInteraction` for the hyperon's cross sections and got
+/// `kHyperonNucleonXscNS` back. The coefficients for the charm and bottom hyperons are in the
+/// same table and are transcribed with the strange ones rather than left as a second refusal
+/// inside one function; a charm baryon PROJECTILE is still refused above this, by FTF's
+/// `kHeavyFlavourProjectile`.
+template <typename real_t>
+__host__ __device__ inline HadXs<real_t> hn_hyperon_xsc_ns(const Projectile<real_t>& p,
+                                                           const Projectile<real_t>& nucleon,
+                                                           real_t ekin) {
+  const int apdg = (p.pdg < 0) ? -p.pdg : p.pdg;
+  real_t coeff = real_t(1.0);
+  if (apdg == 3122 || apdg == 3112 || apdg == 3212 || apdg == 3222) {
+    coeff = real_t(0.88);
+  } else if (apdg == 3312 || apdg == 3322) {
+    coeff = real_t(0.76);
+  } else if (apdg == 3334) {
+    // DEAD IN 11.1.1, and transcribed anyway. `HadronNucleonXsc`'s dispatch list - the `pdg >
+    // 3000` block - names 3324 (Xi*0) and does NOT name 3334, so an Omega- never reaches this
+    // function; it goes to `HadronNucleonXscPDG` instead. The 0.64 is the only coefficient in
+    // the table with no caller. It is kept because a release that adds 3334 to the dispatch
+    // list would otherwise silently get 1.0, and `had_hnxsc.csv` carries the Omega rows so the
+    // day the dispatch changes, the row moves and the test says so.
+    coeff = real_t(0.64);
+  } else if (apdg == 4122 || apdg == 4112 || apdg == 4212 || apdg == 4222) {
+    coeff = real_t(0.784378);
+  } else if (apdg == 4332) {
+    coeff = real_t(0.544378);
+  } else if (apdg == 4132 || apdg == 4232) {
+    coeff = real_t(0.664378);
+  } else if (apdg == 5122 || apdg == 5112 || apdg == 5212 || apdg == 5222) {
+    coeff = real_t(0.740659);
+  } else if (apdg == 5332) {
+    coeff = real_t(0.500659);
+  } else if (apdg == 5132 || apdg == 5232) {
+    coeff = real_t(0.620659);
+  }
+  // `theProton` is G4HadronNucleonXsc's own member, not the incident particle re-labelled: the
+  // kinetic energy is the HYPERON's and the mass used inside is the PROTON's.
+  HadXs<real_t> r = hn_xsc_ns<real_t>(proton<real_t>(), nucleon, ekin);
+  if (!r.ok()) { return r; }
+  r.total *= coeff;
+  r.elastic *= coeff;
+  r.inelastic *= coeff;
+  return r;
+}
+
 /// The order is load-bearing: `pdg > 3000` is tested before `pdg > 220`, and both are tested
 /// on |pdg|, so an anti-hyperon takes the hyperon branch. The two refused branches are the
 /// ones named in the file header.
@@ -876,11 +933,7 @@ __host__ __device__ inline HadXs<real_t> hadron_nucleon_xsc(const Projectile<rea
          apdg == 4222 || apdg == 4112 || apdg == 4232 || apdg == 4132 || apdg == 5122 ||
          apdg == 5332 || apdg == 5112 || apdg == 5222 || apdg == 5212 || apdg == 5132 ||
          apdg == 5232);
-    if (hyperon) {
-      HadXs<real_t> r;
-      r.refused = XsRefusal::kHyperonNucleonXscNS;
-      return r;
-    }
+    if (hyperon) { return hn_hyperon_xsc_ns<real_t>(p, nucleon, ekin); }
     return hn_xsc_pdg<real_t>(p, nucleon, ekin);
   }
   if (apdg > 220) {

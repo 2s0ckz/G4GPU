@@ -50,6 +50,7 @@
 // checked only through the Pt spectrum in ftf_fragment.csv, and its header says so.
 #include "dump_registry.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -88,7 +89,16 @@
 #include "G4HadronicInteraction.hh"
 #include "G4HadronicProcess.hh"
 #include "G4He3.hh"
+#include "G4AntiSigmaMinus.hh"
+#include "G4AntiSigmaPlus.hh"
+#include "G4HadronNucleonXsc.hh"
 #include "G4KaonMinus.hh"
+#include "G4OmegaMinus.hh"
+#include "G4SigmaMinus.hh"
+#include "G4SigmaPlus.hh"
+#include "G4SigmaZero.hh"
+#include "G4XiMinus.hh"
+#include "G4XiZero.hh"
 #include "G4ProcessManager.hh"
 #include "G4ProcessVector.hh"
 #include "G4Triton.hh"
@@ -2225,7 +2235,7 @@ void dump_nucstat() {
 //
 // It exists because C12 on carbon disagreed - 3.7% fewer participants and 2.3% larger impact
 // parameter - while the nucleus, the FTF parameters and the replayed GetList all agreed
-// exactly. That is the same shape of question docs/RISK.md V111 answered by adding three
+// exactly. That is the same shape of question docs/RISK.md V99 answered by adding three
 // counters that localise rather than detect.
 void dump_aaradius() {
   FILE* f = std::fopen("ftf_aaradius.csv", "w");
@@ -2670,6 +2680,77 @@ void dump_modelbig() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ftf_hyperon_xsc.csv - G4HadronNucleonXsc for the HYPERON beams QBBC gives FTFP
+//
+// `ftf_windows.csv` says `lambdaInelastic` carries FTFP from 3 GeV and `anti_lambdaInelastic`
+// carries it at every energy, so `G4FTFParameters::InitForInteraction` asks G4HadronNucleonXsc
+// for a hyperon's cross sections and P5's port had no branch for one. `HyperonNucleonXscNS` is
+// written now (P11c) and this is its oracle.
+//
+// WHY IT IS NOT IN P2'S `had_hnxsc.csv`, WHICH IS WHERE IT BELONGS. That file's reader in
+// `tests/test_hadronic_xs.cu` maps the particle column through `projectile_by_name` and, on an
+// unknown name, records a deviation of 1.0 - so adding ten hyperons to P2's `parts[]` would have
+// turned P2's test red for a reason that has nothing to do with P2, and teaching that reader the
+// hyperons would also have made it compare `HadronNucleonXscNS` and `HadronNucleonXscPDG` called
+// DIRECTLY on a hyperon, which no caller does and this port does not claim. The energies are
+// P2's: twelve per decade from 1 keV to 100 TeV plus every pLab branch point of
+// HadronNucleonXscNS converted to a kinetic energy for that particle.
+//
+// Only the dispatch entry point is dumped, because that is the only one a hyperon reaches.
+void dump_hyperon_xsc() {
+  FILE* f = std::fopen("ftf_hyperon_xsc.csv", "w");
+  std::fprintf(f, "particle,pdg,nucleon,energy_MeV,total_mm2,elastic_mm2,inelastic_mm2\n");
+  struct HypPart { const char* name; const G4ParticleDefinition* def; };
+  const HypPart parts[] = {
+      {"lambda", G4Lambda::Lambda()},
+      {"anti_lambda", G4AntiLambda::AntiLambda()},
+      {"sigma+", G4SigmaPlus::SigmaPlus()},
+      {"sigma-", G4SigmaMinus::SigmaMinus()},
+      {"sigma0", G4SigmaZero::SigmaZero()},
+      {"anti_sigma+", G4AntiSigmaPlus::AntiSigmaPlus()},
+      {"anti_sigma-", G4AntiSigmaMinus::AntiSigmaMinus()},
+      {"xi0", G4XiZero::XiZero()},
+      {"xi-", G4XiMinus::XiMinus()},
+      {"omega-", G4OmegaMinus::OmegaMinus()},
+  };
+  const HypPart nucleons[] = {{"proton", G4Proton::Proton()},
+                              {"neutron", G4Neutron::Neutron()}};
+  const double plabs[] = {0.02,  0.1,   0.28,  0.38,  0.395676, 0.4,  0.48, 0.5,
+                          0.631, 0.65,  0.68,  0.72,  0.73,     0.77, 0.78, 0.8,
+                          0.85,  0.88,  0.94,  0.95,  0.98,     1.01, 1.03, 1.05,
+                          1.15,  1.3,   1.4,   1.63,  2.0,      2.1,  3.5,  10.0,
+                          100.0, 373.0, 1000.0};
+  const double kMm2sq = mm * mm;
+  G4HadronNucleonXsc hn;
+  for (const HypPart& p : parts) {
+    std::vector<double> es;
+    const double step = std::pow(10.0, 1.0 / 12.0);
+    for (double e = 1e-3; e <= 1e8 * 1.0000000001; e *= step) { es.push_back(e); }
+    es.push_back(0.1);
+    es.push_back(100.0);
+    for (double pl : plabs) {
+      const double pp = pl * GeV;
+      const double m = p.def->GetPDGMass();
+      es.push_back(std::sqrt(pp * pp + m * m) - m);
+    }
+    std::sort(es.begin(), es.end());
+    es.erase(std::unique(es.begin(), es.end()), es.end());
+    for (const HypPart& n : nucleons) {
+      for (double e : es) {
+        if (e < 1e-3 || e > 1e8) { continue; }
+        hn.HadronNucleonXsc(p.def, n.def, e * MeV);
+        std::fprintf(f, "%s,%d,%s,%.17g,%.17g,%.17g,%.17g\n", p.name,
+                     p.def->GetPDGEncoding(), n.name, e,
+                     hn.GetTotalHadronNucleonXsc() / kMm2sq,
+                     hn.GetElasticHadronNucleonXsc() / kMm2sq,
+                     hn.GetInelasticHadronNucleonXsc() / kMm2sq);
+      }
+    }
+  }
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
 // ftf_windows.csv - which particles QBBC actually gives FTFP, and between which energies
 //
 // docs/PORTED.md 2.1.11b states the energy windows by reading the builders - 3 GeV upwards for
@@ -2750,6 +2831,7 @@ void dump_ftf(const DumpContext&) {
   dump_aaradius();
   dump_prescatter();
   dump_ftfwindows();
+  dump_hyperon_xsc();
   dump_modelcases();
   dump_modelstat();
   dump_modelbig();
@@ -2769,6 +2851,7 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_modelstat_strings.csv ftf_modelstat_species.csv "
                     "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelcases.csv "
                     "ftf_nucstat.csv ftf_aaradius.csv ftf_prescatter.csv ftf_windows.csv "
+                    "ftf_hyperon_xsc.csv "
                     "ftf_modelbig_strings.csv "
                     "ftf_modelbig_mult.csv",
                     dump_ftf);

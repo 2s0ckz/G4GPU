@@ -287,11 +287,19 @@ __host__ __device__ inline void ftf_participants_get_list_hadron(
 /// `DoTranslation( theBeamPosition )` moves the whole projectile nucleus to the impact point
 /// and is inside the loop, guarded by `theInteractions.size() != 0`: a pass that found nothing
 /// leaves the projectile where it was and re-samples, so the translation happens exactly once.
+///
+/// `projectile_is_anti` is how an ANTI-nucleus beam is carried. `G4FTFModel::Init` builds the
+/// projectile nucleus with `G4Fancy3DNucleus` and then walks it re-typing every nucleon to its
+/// anti-species; P9's `bic::Nucleon` has three types and no anti ones, so the sign is applied
+/// HERE instead, where the splitable hadron that carries the PDG code is made. The nucleus
+/// itself is identical either way - Geant4 re-types after Init, so the positions, the momenta
+/// and the sampler's deviates are the same - and every consumer downstream reads the splitable,
+/// not the nucleon.
 template <int kMaxA, int kMaxInteractions, int kMaxAdd, typename Rng>
 __host__ __device__ inline void ftf_participants_get_list_nucleus(
     FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p, bic::Nucleus3D* target,
     bic::Nucleus3D* projectile, const FtfParameters<double>* params, const Vec4& primary_p4,
-    Rng& rng) {
+    Rng& rng, bool projectile_is_anti = false) {
 
   double betta_z = primary_p4.v.z / primary_p4.e;
   if (betta_z < 1.0e-10) { betta_z = 1.0e-10; }
@@ -343,7 +351,8 @@ __host__ __device__ inline void ftf_participants_get_list_nucleus(
             projectile_slot =
                 FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kProjectileBase + ip;
             p->pool[projectile_slot] = splitable_from_nucleon(
-                proj_nucleon->pdg(), proj_nucleon->momentum, proj_nucleon->position);
+                projectile_is_anti ? -proj_nucleon->pdg() : proj_nucleon->pdg(),
+                proj_nucleon->momentum, proj_nucleon->position);
             proj_nucleon->hit = true;
             proj_nucleon->hit_by = projectile_slot;
             p->pool[projectile_slot].status = 1;

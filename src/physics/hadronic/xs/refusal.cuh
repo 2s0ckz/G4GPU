@@ -24,7 +24,10 @@ namespace g4gpu::hadronic::xs {
 /// 11.1.1, so a refusal message can be grepped for in the source tree.
 enum class XsRefusal : int {
   kNone = 0,
-  /// G4HadronNucleonXsc::HyperonNucleonXscNS - s/c/b hyperon on nucleon.
+  /// G4HadronNucleonXsc::HyperonNucleonXscNS - s/c/b hyperon on nucleon. WRITTEN since P11c,
+  /// because QBBC gives FTFP a lambda beam and the model asks this class for its cross
+  /// sections. The value is kept because an enumerator's number is what a refused oracle row
+  /// carries.
   kHyperonNucleonXscNS,
   /// G4HadronNucleonXsc::SCBMesonNucleonXscNS - s/c/b meson on nucleon.
   kSCBMesonNucleonXscNS,
