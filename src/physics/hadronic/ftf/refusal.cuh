@@ -91,17 +91,26 @@ enum class FtfRefusal : int {
   /// G4FTFModel::GetStrings and everything it drives - G4FTFParticipants' impact-parameter
   /// sampling, ReggeonCascade, PutOnMassShell, ExciteParticipants,
   /// G4DiffractiveExcitation::ExciteParticipants, G4ElasticHNScattering::ElasticScattering,
-  /// BuildStrings, AdjustNucleons and GetResiduals. See the file header of ftf_model.cuh for
-  /// what is and is not there.
+  /// BuildStrings, AdjustNucleons and GetResiduals. NONE OF IT IS WRITTEN: there is no
+  /// ftf_model.cuh in this package yet, so nothing here PRODUCES the `ExcitedString` list that
+  /// string_fragmentation.cuh consumes, and this value is the whole of what the package says
+  /// when asked for one. docs/PORTED.md 2.1.11 has the row.
   kFtfModelGetStrings,
 
   /// G4FTFAnnihilation - the five annihilation channels for an anti-baryon projectile.
   kFtfAnnihilation,
 
   /// G4Fancy3DNucleus / G4NuclearFermiDensity / G4FermiMomentum / G4Nucleon, the nucleus
-  /// model this package shares with the binary cascade. P9 owns it (bic/nucleus/); this
-  /// package is written against the thin contract in nucleus_interface.cuh and refuses when
-  /// no nucleus implementation is bound.
+  /// model this package shares with the binary cascade. P9 owns it (bic/nucleus/).
+  ///
+  /// NO CONTRACT HEADER IS WRITTEN HERE, deliberately: the only consumer of the nucleus in
+  /// FTFP is G4FTFModel::GetStrings, and that is not written either, so a
+  /// `nucleus_interface.cuh` in this package would be a declaration with no caller and no
+  /// test - and it would be the SECOND guess at P9's interface, to be reconciled with the
+  /// first at integration. When GetStrings is written it needs `GetNucleus`, `StartLoop`,
+  /// `GetNextNucleon`, `GetMassNumber`, `GetCharge`, `GetOuterRadius` and `DoLorentzBoost`
+  /// from `G4V3DNucleus`, plus `G4Nucleon`'s position, momentum, mass and hit state, and
+  /// those are the names to write the thin header against.
   kNucleusModelNotBound,
 
   /// G4DiffractiveSplitableHadron's kinky-string arm and G4FTFParameters' Pt2Kink. Pt2kink is
