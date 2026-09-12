@@ -8510,3 +8510,48 @@ Two smaller facts from the same three classes, both reproduced:
 `G4ConcreteMesonBaryonToResonance` channels inside a `/* ... */` block in 11.1.1. The brief's
 question - whether QBBC's species set reaches the kaon and hyperon channels - has the answer that
 nothing does, because the code that would is not compiled.
+
+### V108: the detailed-balance machinery is dead code in the binary cascade, and so is GenerateIso3
+
+`G4XResonance::CrossSection` is three statements:
+
+    sigma  = table->GetValue(sqrtS,dummy);
+    sigma *= IsospinCorrection(trk1,trk2,isoOut1,isoOut2,iSpinOut1,iSpinOut2);
+    if (trk1.GetDefinition()->IsShortLived() || trk2.GetDefinition()->IsShortLived())
+       sigma *= DetailedBalance(trk1,trk2, isoOut1,isoOut2, iSpinOut1,iSpinOut2, mOut1,mOut2);
+
+and the third never runs. `G4XResonance` is constructed in exactly ONE place -
+`G4ConcreteNNTwoBodyResonance`'s constructor - and that class's `IsInCharge` is
+
+    if (trk1.GetDefinition()==thePrimary1 && trk2.GetDefinition()==thePrimary2) return true;
+    if (trk1.GetDefinition()==thePrimary2 && trk2.GetDefinition()==thePrimary1) return true;
+
+with `thePrimary1` and `thePrimary2` always a proton or a neutron, because that is what all six
+`G4CollisionNNTo*` constructors pass. So both entrance tracks are stable, always, and:
+
+  * **`G4VXResonance::DetailedBalance` is never called**, and with it
+    `G4DetailedBalancePhaseSpaceIntegral`, whose only caller it is. That class's twenty-five
+    tables of 120 - 3,000 numbers - are dead code in the binary cascade.
+  * **`G4VXResonance::IsospinCorrection`'s short-lived branch is never taken**, and with it
+    `G4Clebsch::GenerateIso3` - the function docs/RISK.md V106 refuses for reading uninitialised
+    stack. Nothing in the cascade reaches it.
+  * **`G4VXResonance::DegeneracyFactor` is never called**, since only those two branches call it.
+
+What is left of the isospin correction is `weight / pWeight`, a ratio of two Clebsch-Gordan
+weights, and that IS live: measured, dropping it changes every one of 4,950 cross sections, and
+computing `pWeight` for a pn entrance instead of pp changes them too.
+
+**Could a resonance ever be an entrance track?** Only through the meson-baryon ELASTIC channel,
+whose `IsInCharge` is by parton count and accepts a pion on a Delta (docs/RISK.md V107) - and that
+channel goes through `G4XMesonBaryonElastic`, not `G4XResonance`. The three other ways in are all
+closed: `G4GeneralNNCollision::IsInCharge` demands two nucleons;
+`G4ConcreteMesonBaryonToResonance::IsInCharge` compares `G4ParticleTypeConverter` generic types,
+and a Delta's is `D1232` where a proton's is `NUCLEON`; and `G4CollisionNStarNToNN`, which exists
+precisely to put a resonance in the entrance channel, is registered by nothing - like
+`G4CollisionPN`, it is included only by itself.
+
+The port keeps all of it. `dbi_phase_space_integral` and its 25 columns are transcribed and
+checked bitwise against Geant4, because they are one `AddComponent` away from being live and
+because a reader who found them missing would have to re-derive why. What is NOT kept is
+`GenerateIso3`'s sampling branch, which is refused for its own reasons in V106 - and this entry is
+the second, independent reason nothing needs it.

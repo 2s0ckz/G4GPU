@@ -62,6 +62,11 @@
 //                        docs/RISK.md V107.
 //   bic_imr_meson_fs     the same channel's FinalState, 8 phases per point. The only place in the
 //                        cascade where the one-boson-exchange formula's asymmetric branch runs.
+//   bic_imr_resxsec      G4XResonance::CrossSection through 29 concrete channels from all six
+//                        families, built as their own constructors build them.
+//   bic_imr_species      the isospin, spin, mass, width and IsShortLived flag of every species
+//                        those families put in or out, from Geant4's own definitions - which is
+//                        what makes the port's isospin list a checked table and not a copy.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -890,6 +895,83 @@ int main() {
       cmp_scaled(b_mbfs, fs.p2.v.z, dv(r, 18), s2, where + " p2z");
       cmp_scaled(b_mbfs, fs.p2.e, dv(r, 19), s2, where + " p2e");
       (void)m_pip;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3g. G4XResonance::CrossSection through the concrete channels that construct it, and the
+  //     isospin quantum numbers it is scaled by.
+  //
+  //     `resonance_iso` is a list of PDG codes with an isospin attached, which is exactly the
+  //     kind of copy that could be wrong in a way nothing notices - so it is checked against what
+  //     Geant4's own particle definitions answer, species by species, and the `IsShortLived` flag
+  //     is checked with it, because that flag is what decides whether the dead detailed-balance
+  //     branch would run.
+  // -------------------------------------------------------------------------------------------
+  const int b_species = new_bucket("ResonanceSpeciesIsospin", 0.0);
+  const int b_resx = new_bucket("XResonanceCrossSection", 1e-14);
+  const int b_resinch = new_bucket("ConcreteChannelIsInCharge", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_species.csv");
+    for (const auto& r : rows) {
+      const int pdg = iv(r, 0);
+      if (sv(r, 1) == "MISSING") {
+        std::printf("MISSING species in the oracle: %d\n", pdg);
+        ++fails;
+        continue;
+      }
+      imr::ResonanceTableRefusal rref;
+      const int got = imr::resonance_iso(pdg, rref);
+      if (rref.no_cross_section) {
+        std::printf("REFUSED isospin for %d (%s)\n", pdg, sv(r, 1).c_str());
+        ++fails;
+        continue;
+      }
+      cmp_int(b_species, got, iv(r, 4), sv(r, 1) + " 2I");
+      // Every one of these except the proton and the neutron is short-lived, and that is what
+      // makes G4VXResonance::DetailedBalance dead: the only entrance pairs G4XResonance ever
+      // sees are two NUCLEONS, and neither of those is short-lived.
+      const bool expect_short = (pdg != 2212 && pdg != 2112);
+      cmp_int(b_species, expect_short ? 1 : 0, iv(r, 7), sv(r, 1) + " IsShortLived");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_resxsec.csv");
+    for (const auto& r : rows) {
+      const std::string family = sv(r, 0);
+      int which = -1;
+      if (family == "nd") { which = imr::kResNDelta; }
+      else if (family == "dd") { which = imr::kResDeltaDelta; }
+      else if (family == "ndstar") { which = imr::kResNDeltastar; }
+      else if (family == "ddstar") { which = imr::kResDeltaDeltastar; }
+      else if (family == "nnstar") { which = imr::kResNNstar; }
+      else if (family == "dnstar") { which = imr::kResDeltaNstar; }
+      else { continue; }
+      const int mass = iv(r, 1);
+      const int in1 = iv(r, 2), in2 = iv(r, 3), out1 = iv(r, 4), out2 = iv(r, 5);
+      const double sqrt_s = dv(r, 6);
+      const std::string where = family + " " + std::to_string(mass) + " " + sv(r, 2) + "+" +
+                                sv(r, 3) + "->" + sv(r, 4) + "+" + sv(r, 5) +
+                                " sqrt(s)=" + std::to_string(sqrt_s);
+      // Every entrance pair here is two nucleons, which is the only kind
+      // G4ConcreteNNTwoBodyResonance::IsInCharge accepts.
+      const bool in_charge = (in1 == 2212 || in1 == 2112) && (in2 == 2212 || in2 == 2112);
+      cmp_int(b_resinch, in_charge ? 1 : 0, iv(r, 7), where);
+      if (!in_charge) { continue; }
+      imr::ResonanceTableRefusal rref;
+      const int iso_out1 = imr::resonance_iso(out1, rref);
+      const int iso_out2 = imr::resonance_iso(out2, rref);
+      // 2I3 is +1 for a proton and -1 for a neutron; 2I is 1 for both.
+      const int iso3_1 = (in1 == 2212) ? 1 : -1;
+      const int iso3_2 = (in2 == 2212) ? 1 : -1;
+      const double got = imr::x_resonance_cross_section(which, mass, 1, iso3_1, 1, iso3_2,
+                                                        iso_out1, iso_out2, sqrt_s, rref);
+      if (rref.no_column || rref.no_cross_section) {
+        std::printf("REFUSED resonance cross section: %s\n", where.c_str());
+        ++fails;
+        continue;
+      }
+      cmp_scaled(b_resx, got / imr::millibarn(), dv(r, 8), 1e-9, where);
     }
   }
 

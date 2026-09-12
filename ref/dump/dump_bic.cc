@@ -68,6 +68,12 @@
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
 #include "G4Clebsch.hh"
+#include "G4ConcreteNNToDeltaDelta.hh"
+#include "G4ConcreteNNToDeltaDeltastar.hh"
+#include "G4ConcreteNNToDeltaNstar.hh"
+#include "G4ConcreteNNToNDelta.hh"
+#include "G4ConcreteNNToNDeltaStar.hh"
+#include "G4ConcreteNNToNNStar.hh"
 #include "G4DetailedBalancePhaseSpaceIntegral.hh"
 #include "G4Deuteron.hh"
 #include "G4DynamicParticle.hh"
@@ -1594,6 +1600,133 @@ void write_imr_meson() {
   std::fclose(g);
 }
 
+/// G4XResonance::CrossSection through the concrete channels that construct it, and the isospin
+/// quantum numbers every one of them is scaled by.
+///
+/// The channels are built exactly as the six `G4CollisionNNTo*` constructors build them -
+/// `G4ConcreteNNToNDelta(in1, in2, out1, out2)` and its five siblings - so what is dumped is the
+/// whole of `G4VCollision::CrossSection` over `G4XResonance`: the table lookup, the isospin
+/// correction, and the `IsShortLived` test that decides whether detailed balance is applied.
+/// Every entrance pair here is two nucleons, which is the only kind
+/// `G4ConcreteNNTwoBodyResonance::IsInCharge` accepts, so that test is always false - and this
+/// dump is the measurement that says so.
+void write_imr_resonance_xsec() {
+  FILE* f = std::fopen("bic_imr_resxsec.csv", "w");
+  std::fprintf(f, "family,mass,in1,in2,out1,out2,sqrt_s_MeV,in_charge,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_species.csv", "w");
+  std::fprintf(g, "pdg,name,mass,width,iso,iso3,ispin,shortlived,baryon,charge\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+
+  // Every species the six families put in or out, by the codes G4HadParticleCodes.hh declares.
+  const int kSpecies[] = {
+      2212, 2112,
+      1114, 2114, 2214, 2224,
+      31114, 32114, 32214, 32224,  1112, 1212, 2122, 2222,
+      11114, 12114, 12214, 12224,  11112, 11212, 12122, 12222,
+      1116, 1216, 2126, 2226,      21112, 21212, 22122, 22222,
+      21114, 22114, 22214, 22224,  11116, 11216, 12126, 12226,
+      1118, 2118, 2218, 2228,
+      12212, 12112, 2124, 1214, 22212, 22112, 32212, 32112, 2216, 2116,
+      12216, 12116, 22124, 21214, 42212, 42112, 32124, 31214, 42124, 41214,
+      12218, 12118, 52214, 52114, 2128, 1218, 100002210, 100002110,
+      100012210, 100012110};
+  for (int code : kSpecies) {
+    const G4ParticleDefinition* d = ptable->FindParticle(code);
+    if (d == nullptr) {
+      std::fprintf(g, "%d,MISSING,0,0,0,0,0,0,0,0\n", code);
+      continue;
+    }
+    std::fprintf(g, "%d,%s,%.17g,%.17g,%d,%d,%d,%d,%d,%.17g\n", code,
+                 d->GetParticleName().c_str(), d->GetPDGMass(), d->GetPDGWidth(),
+                 d->GetPDGiIsospin(), d->GetPDGiIsospin3(), d->GetPDGiSpin(),
+                 d->IsShortLived() ? 1 : 0, d->GetBaryonNumber(),
+                 d->GetPDGCharge() / CLHEP::eplus);
+  }
+
+  // One representative channel from each of the six families, in the exact form its own
+  // constructor builds: the entrance pair, the exit pair, and the table class that goes with it.
+  struct Chan {
+    const char* family;
+    int mass;
+    const G4ParticleDefinition* i1;
+    const G4ParticleDefinition* i2;
+    int o1;
+    int o2;
+    int kind;  // 0 NDelta, 1 DeltaDelta, 2 NDeltastar, 3 DeltaDeltastar, 4 NNstar, 5 DeltaNstar
+  };
+  std::vector<Chan> chans;
+  // MakeNNToNDelta's six, for Delta(1232).
+  chans.push_back({"nd", 1232, n, n, 2112, 2114, 0});
+  chans.push_back({"nd", 1232, n, n, 2212, 1114, 0});
+  chans.push_back({"nd", 1232, n, p, 2212, 2114, 0});
+  chans.push_back({"nd", 1232, n, p, 2112, 2214, 0});
+  chans.push_back({"nd", 1232, p, p, 2112, 2224, 0});
+  chans.push_back({"nd", 1232, p, p, 2212, 2214, 0});
+  // G4CollisionNNToDeltaDelta's explicit six.
+  chans.push_back({"dd", 1232, n, n, 2114, 2114, 1});
+  chans.push_back({"dd", 1232, n, n, 1114, 2214, 1});
+  chans.push_back({"dd", 1232, n, p, 2114, 2214, 1});
+  chans.push_back({"dd", 1232, n, p, 1114, 2224, 1});
+  chans.push_back({"dd", 1232, p, p, 2214, 2214, 1});
+  chans.push_back({"dd", 1232, p, p, 2114, 2224, 1});
+  // MakeNNToNDelta again, for two Delta* multiplets.
+  chans.push_back({"ndstar", 1600, n, n, 2112, 32114, 2});
+  chans.push_back({"ndstar", 1600, p, p, 2112, 32224, 2});
+  chans.push_back({"ndstar", 1950, n, p, 2212, 2118, 2});
+  chans.push_back({"ndstar", 1950, p, p, 2212, 2218, 2});
+  // MakeNNToDeltaDelta, for a Delta* multiplet - Delta(1232) x Delta*.
+  chans.push_back({"ddstar", 1600, n, n, 1114, 32214, 3});
+  chans.push_back({"ddstar", 1600, n, p, 2214, 32114, 3});
+  chans.push_back({"ddstar", 1950, p, p, 2224, 2118, 3});
+  // MakeNNToNNStar's four, for two N* multiplets.
+  chans.push_back({"nnstar", 1440, n, n, 2112, 12112, 4});
+  chans.push_back({"nnstar", 1440, p, p, 2212, 12212, 4});
+  chans.push_back({"nnstar", 1440, n, p, 2112, 12212, 4});
+  chans.push_back({"nnstar", 1440, n, p, 2212, 12112, 4});
+  chans.push_back({"nnstar", 2250, p, p, 2212, 100012210, 4});
+  // MakeNNToDeltaNstar's six, for one N* multiplet.
+  chans.push_back({"dnstar", 1440, n, n, 2114, 12112, 5});
+  chans.push_back({"dnstar", 1440, n, n, 1114, 12212, 5});
+  chans.push_back({"dnstar", 1440, p, p, 2214, 12212, 5});
+  chans.push_back({"dnstar", 1440, p, p, 2224, 12112, 5});
+  chans.push_back({"dnstar", 1440, n, p, 2114, 12212, 5});
+  chans.push_back({"dnstar", 1440, n, p, 2214, 12112, 5});
+
+  for (const Chan& c : chans) {
+    const G4ParticleDefinition* o1 = ptable->FindParticle(c.o1);
+    const G4ParticleDefinition* o2 = ptable->FindParticle(c.o2);
+    if (o1 == nullptr || o2 == nullptr) { continue; }
+    G4VCollision* ch = nullptr;
+    switch (c.kind) {
+      case 0: ch = new G4ConcreteNNToNDelta(c.i1, c.i2, o1, o2); break;
+      case 1: ch = new G4ConcreteNNToDeltaDelta(c.i1, c.i2, o1, o2); break;
+      case 2: ch = new G4ConcreteNNToNDeltaStar(c.i1, c.i2, o1, o2); break;
+      case 3: ch = new G4ConcreteNNToDeltaDeltastar(c.i1, c.i2, o1, o2); break;
+      case 4: ch = new G4ConcreteNNToNNStar(c.i1, c.i2, o1, o2); break;
+      default: ch = new G4ConcreteNNToDeltaNstar(c.i1, c.i2, o1, o2); break;
+    }
+    for (double want = 1900.0; want <= 6000.0; want += 25.0) {
+      G4LorentzVector q1, q2;
+      imr_make_pair(c.i1, c.i2, want, q1, q2);
+      G4KineticTrack t1(c.i1, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(c.i2, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      const bool inCharge = ch->IsInCharge(t1, t2);
+      std::fprintf(f, "%s,%d,%d,%d,%d,%d,%.17g,%d,%.17g\n", c.family, c.mass,
+                   c.i1->GetPDGEncoding(), c.i2->GetPDGEncoding(), c.o1, c.o2, s,
+                   inCharge ? 1 : 0, inCharge ? ch->CrossSection(t1, t2) / millibarn : 0.0);
+    }
+    delete ch;
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1611,6 +1744,7 @@ void dump_bic(const DumpContext&) {
   write_imr_resonance();
   write_imr_clebsch();
   write_imr_meson();
+  write_imr_resonance_xsec();
 }
 
 }  // namespace
@@ -1624,5 +1758,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_collision.csv bic_imr_elastic_fs.csv "
                     "bic_imr_scatterer.csv bic_imr_manager.csv "
                     "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv "
-                    "bic_imr_meson.csv bic_imr_meson_fs.csv",
+                    "bic_imr_meson.csv bic_imr_meson_fs.csv "
+                    "bic_imr_resxsec.csv bic_imr_species.csv",
                     dump_bic);

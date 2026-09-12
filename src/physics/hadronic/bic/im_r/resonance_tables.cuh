@@ -59,14 +59,47 @@
 // and is produced by nothing here - has no N Delta* cross section. The extractor asserts the
 // absence, so a release that adds the column is visible rather than silently widening the map.
 //
+// ## G4XResonance::CrossSection is here, and it is SHORTER than it looks
+//
+//     sigma = table->GetValue(sqrtS);
+//     sigma *= IsospinCorrection(trk1,trk2,isoOut1,isoOut2,iSpinOut1,iSpinOut2);
+//     if (trk1->IsShortLived() || trk2->IsShortLived())
+//        sigma *= DetailedBalance(...);
+//
+// The third line never runs, and the first branch of `IsospinCorrection` never runs either.
+// `G4XResonance` is constructed in exactly one place - `G4ConcreteNNTwoBodyResonance`'s
+// constructor - and `G4ConcreteNNTwoBodyResonance::IsInCharge` compares the two incoming
+// definitions against `thePrimary1` and `thePrimary2`, which are always a proton or a neutron.
+// So both incoming tracks are stable, always.
+//
+// That kills three things at once:
+//
+//   * `DetailedBalance` - and with it `G4DetailedBalancePhaseSpaceIntegral`, whose ONLY caller it
+//     is. The twenty-five tables of 120 this file carries are **dead code in the binary cascade**.
+//     They are kept and checked because they are one registration away from being live:
+//     `G4CollisionNStarNToNN` exists and would put a resonance in the entrance channel, and it is
+//     registered by nothing (like `G4CollisionPN`).
+//   * `IsospinCorrection`'s short-lived branch, and with it `G4Clebsch::GenerateIso3` - the
+//     function docs/RISK.md V106 refuses. Nothing reaches it.
+//   * `DegeneracyFactor`, which only those two branches call.
+//
+// What is left is `weight / pWeight`: the Clebsch-Gordan weight for the actual isospin pair over
+// the weight for a proton-proton pair, both into the same outgoing isospins. `pWeight` is zero
+// for an outgoing pair a pp entrance cannot make, and Geant4 throws a `G4HadronicException`
+// there; the port returns the refusal instead.
+//
 // ## REFUSED, by name
 //
-//   * **`G4XResonance::CrossSection` itself**, and with it `G4VXResonance::IsospinCorrection`,
-//     `DetailedBalance` and `DegeneracyFactor`. They need `G4Clebsch` - 643 lines of
-//     Clebsch-Gordan machinery - and the isospin, spin and quark content of some thirty baryon
-//     resonances, neither of which is in this package. `ResonanceTableRefusal::no_cross_section`
-//     is what a caller gets, at the point the correction would have been applied. The TABLE half
-//     of that cross section is here and is checked; the two factors are not.
+//   * **the outgoing particles' spins and masses** are arguments here, not a table: `isoOut1` and
+//     `isoOut2` are all `IsospinCorrection` reads, and `iSpinOut1`/`iSpinOut2` are literally
+//     commented out of its signature. The masses `mOut1`/`mOut2` are read only by
+//     `DetailedBalance`, which is dead. So this file needs no resonance quantum-number table at
+//     all; the one the CHANNEL enumeration needs is a separate piece.
+//   * **the six `G4CollisionNNTo*` composites** and the 306 `G4Concrete*` channels under them -
+//     which pair of nucleons makes which pair of resonances, and with it
+//     `G4CollisionComposite::BufferCrossSection`, the 32-point cache their totals are read from.
+//     `ResonanceTableRefusal::no_cross_section` is unused by this file now; the enumeration is
+//     what `collision_nn.cuh`'s `collision_nn_final_state` still refuses.
 //   * **the name-keyed maps**. Geant4 keys each table by `G4String` - "delta(1600)++" and the
 //     three other charge states onto one column - and a kernel has no strings, so the port keys
 //     by the resonance's nominal mass in MeV (1600, 1620, ...), which is what the column names
@@ -78,6 +111,7 @@
 #include <cmath>
 
 #include "core/units.cuh"
+#include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/imr_tables.hh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
 
@@ -252,6 +286,116 @@ __host__ __device__ inline double dbi_phase_space_integral(int column, double sq
   const double y1 = d[it];
   const double y2 = d[it + 1];
   return y1 + (sqs - x1) * (y2 - y1) / (x2 - x1);
+}
+
+// =============================================================================================
+// G4VXResonance::IsospinCorrection and G4XResonance::CrossSection.
+// =============================================================================================
+
+/// `G4VXResonance::IsospinCorrection`, in the branch that is the only one reachable - both
+/// incoming tracks stable. See the file header for why the other branch and `DegeneracyFactor`
+/// are dead.
+///
+///     pWeight = Weight(1, +1, 1, +1, isoOut1, isoOut2)      // a proton-proton entrance
+///     weight  = Weight(isoIn1, iso3In1, isoIn2, iso3In2, isoOut1, isoOut2)
+///     result  = weight / pWeight
+///
+/// `isoProton` and `iso3Proton` are `G4Proton::ProtonDefinition()->GetPDGiIsospin()` and
+/// `GetPDGiIsospin3()`, which are 1 and +1: twice the isospin and twice its third component, so
+/// a proton is (I = 1/2, I3 = +1/2) and a neutron is (1, -1).
+///
+/// A zero `pWeight` is a `G4HadronicException` in Geant4 - "no resonances - pWeight is zero" -
+/// and is returned as a refusal here. It means the outgoing isospin pair cannot be reached from a
+/// pp entrance at all, which for a channel that was registered is a construction error rather
+/// than a kinematic one.
+__host__ __device__ inline double resonance_isospin_correction(int iso_in1, int iso3_in1,
+                                                               int iso_in2, int iso3_in2,
+                                                               int iso_out1, int iso_out2,
+                                                               ResonanceTableRefusal& ref) {
+  ClebschRefusal cref;
+  const double p_weight = clebsch_weight(1, 1, 1, 1, iso_out1, iso_out2, cref);
+  if (p_weight == 0.0) {
+    ref.no_cross_section = true;
+    return 0.0;
+  }
+  const double weight =
+      clebsch_weight(iso_in1, iso3_in1, iso_in2, iso3_in2, iso_out1, iso_out2, cref);
+  return weight / p_weight;
+}
+
+/// `G4XResonance::CrossSection` - the table lookup times the isospin correction.
+///
+/// `which` and `mass_mev` select the column; `iso_in*`/`iso3_in*` are the two incoming nucleons'
+/// `GetPDGiIsospin()` and `GetPDGiIsospin3()`; `iso_out*` are the two outgoing particles'
+/// `GetPDGiIsospin()` - 1 for a nucleon or an N*, 3 for any Delta. Nothing else about the
+/// outgoing pair is read: `iSpinOut1` and `iSpinOut2` are commented out of `IsospinCorrection`'s
+/// signature and `mOut1`/`mOut2` are read only by the dead `DetailedBalance`.
+__host__ __device__ inline double x_resonance_cross_section(int which, int mass_mev,
+                                                            int iso_in1, int iso3_in1,
+                                                            int iso_in2, int iso3_in2,
+                                                            int iso_out1, int iso_out2,
+                                                            double sqrt_s,
+                                                            ResonanceTableRefusal& ref) {
+  const double sigma = resonance_cross_section_table(which, mass_mev, sqrt_s, ref);
+  if (ref.no_column) { return 0.0; }
+  const double correction =
+      resonance_isospin_correction(iso_in1, iso3_in1, iso_in2, iso3_in2, iso_out1, iso_out2, ref);
+  if (ref.no_cross_section) { return 0.0; }
+  return sigma * correction;
+}
+
+/// `GetPDGiIsospin()` for the species this file's channels produce: 3 for every Delta and Delta*,
+/// 1 for a nucleon and every N*. Derived from the PDG code rather than tabulated, by the rule the
+/// encodings follow - a Delta's three quark digits are all 1 or all 2 for the charge extremes and
+/// the middle two are the mixed states, which is not decidable from the digits alone - so this
+/// takes the isospin from the KNOWN code list instead and refuses anything else.
+///
+/// The list is `G4HadParticleCodes.hh`'s, which is the same list the six `G4CollisionNNTo*`
+/// constructors instantiate their channels from.
+__host__ __device__ inline int resonance_iso(int pdg, ResonanceTableRefusal& ref) {
+  switch (pdg) {
+    case 2212: case 2112:  // proton, neutron
+      return 1;
+    // Delta(1232): 1114, 2114, 2214, 2224
+    case 1114: case 2114: case 2214: case 2224:
+    // Delta(1600) 31114 32114 32214 32224; (1620) 1112 1212 2122 2222
+    case 31114: case 32114: case 32214: case 32224:
+    case 1112: case 1212: case 2122: case 2222:
+    // (1700) 11114 12114 12214 12224; (1900) 11112 11212 12122 12222
+    case 11114: case 12114: case 12214: case 12224:
+    case 11112: case 11212: case 12122: case 12222:
+    // (1905) 1116 1216 2126 2226; (1910) 21112 21212 22122 22222
+    case 1116: case 1216: case 2126: case 2226:
+    case 21112: case 21212: case 22122: case 22222:
+    // (1920) 21114 22114 22214 22224; (1930) 11116 11216 12126 12226
+    case 21114: case 22114: case 22214: case 22224:
+    case 11116: case 11216: case 12126: case 12226:
+    // (1950) 1118 2118 2218 2228
+    case 1118: case 2118: case 2218: case 2228:
+      return 3;
+    // The fifteen N*, two charge states each.
+    case 12212: case 12112:  // N(1440)
+    case 2124: case 1214:    // N(1520)
+    case 22212: case 22112:  // N(1535)
+    case 32212: case 32112:  // N(1650)
+    case 2216: case 2116:    // N(1675)
+    case 12216: case 12116:  // N(1680)
+    case 22124: case 21214:  // N(1700)
+    case 42212: case 42112:  // N(1710)
+    case 32124: case 31214:  // N(1720)
+    case 42124: case 41214:  // N(1900)
+    case 12218: case 12118:  // N(1990)
+    case 52214: case 52114:  // N(2090)
+    case 2128: case 1218:    // N(2190)
+    case 100002210: case 100002110:  // N(2220)
+    case 100012210: case 100012110:  // N(2250)
+      return 1;
+    default:
+      break;
+  }
+  ref.no_cross_section = true;
+  ref.mass = pdg;
+  return 0;
 }
 
 }  // namespace g4gpu::bic::imr
