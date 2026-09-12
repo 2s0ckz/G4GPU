@@ -15,9 +15,12 @@
 // TransportEngine<double, QualityFactorScoring>; the kernels mangle differently and coexist.
 //
 // So this file is built the way a real project would be built - its own translation unit, the
-// impl header included once, one explicit instantiation, linked against the same
-// out/transport_run.obj every other program here links - and if the arrangement is wrong it
-// fails at compile or link time rather than silently.
+// impl header included once, one explicit instantiation of the ENGINE, its kernels compiled
+// one per unit into out/hook_qfs.lib beside the stock engine's out/transport_run.lib - and if
+// the arrangement is wrong it fails at compile or link time rather than silently. Since P8e
+// that last clause has a gate behind it as well as a hope: build_all.bat runs cuobjdump over
+// this file's object and fails the build if a stepping kernel is in it, because a launch whose
+// declaration went missing would otherwise cost minutes of nvcc and say nothing.
 //
 // WHAT IT ALSO DEMONSTRATES
 //
@@ -32,104 +35,36 @@
 #include <cstdio>
 #include <vector>
 
-#include "g4/G4VUserDeviceSteppingAction.hh"
-
-// ---------------------------------------------------------------- the project's own action
-//
-// In a real project this is include/QualityFactorScoring.hh. It is an ordinary class: base
-// class, member data, a named method. The two differences from Geant4 are that the base takes
-// the derived type (CRTP - so the call inlines instead of going through a vtable, which at
-// 3e7 steps a second is worth the odd-looking declaration) and that the method is __device__.
-class QualityFactorScoring : public G4VUserDeviceSteppingAction<QualityFactorScoring> {
- public:
-  QualityFactorScoring() = default;
-  QualityFactorScoring(G4double* weighted, G4double* plain, G4double* sec_walked,
-                       int n_events, int slot)
-      : weighted_(weighted), plain_(plain), sec_walked_(sec_walked), n_events_(n_events),
-        slot_(slot) {}
-
-  /// Called once per real step of every track.
-  ///
-  /// Written in Geant4's spellings throughout - GetTotalEnergyDeposit, GetStepLength,
-  /// GetPreStepPoint()->GetKineticEnergy() - because the point of the exercise is that a
-  /// stepping action ported from a Geant4 project reads the way it did there. The two
-  /// differences are visible in the signature, not the body: the method is __device__, and the
-  /// step arrives by reference rather than as a G4Step*.
-  __device__ void UserSteppingAction(const G4DeviceStep& step) const {
-    if (weighted_ == nullptr) { return; }
-    if (step.GetScoreSlot() != slot_) { return; }
-    if (step.GetTotalEnergyDeposit() == 0) { return; }
-    if (step.GetEventID() < 0 || step.GetEventID() >= n_events_) { return; }
-
-    // The quantity that needs a real step: energy deposited per unit of the path actually
-    // travelled. A deliberately blocky Q(LET) so the expected answer can be checked by hand.
-    const G4double edep = step.GetTotalEnergyDeposit();
-    const G4double len = step.GetStepLength();
-    const G4double let = (len > 0) ? edep / len : 0.0;
-    const G4double q = (let < 1.0) ? 1.0 : (let < 10.0 ? 5.0 : 20.0);
-
-    // Nothing below is used by the arithmetic; it is here so that the test fails to compile if
-    // any of these stops being reachable the way a Geant4 stepping action reaches it.
-    const G4double ke_in = step.GetPreStepPoint()->GetKineticEnergy();
-    const G4double ke_out = step.GetPostStepPoint()->GetKineticEnergy();
-    const G4StepStatus st = step.GetPostStepPoint()->GetStepStatus();
-    const G4ProcessId pr = step.GetPostStepPoint()->GetProcessDefinedStep();
-    const G4double beta = step.GetPreStepPoint()->GetBeta();
-    const int mat = step.GetPreStepPoint()->GetMaterial();
-    const unsigned int tid = step.GetTrack()->GetTrackID();
-    (void)ke_in; (void)ke_out; (void)st; (void)pr; (void)beta; (void)mat; (void)tid;
-
-    // The secondaries this step made, walked as real tracks. Two things are asserted on the
-    // host afterwards from what this accumulates: that the chain is exactly as long as
-    // GetNumberOfSecondariesInCurrentStep() says, and that every secondary carries less
-    // energy than the step that made it had - which is the cheapest statement that would
-    // fail if the chain were walking into the wrong buffer or the wrong slot.
-    int walked = 0;
-    G4double worst_excess = 0;
-    for (auto it = step.GetSecondaryInCurrentStep().begin(); it.valid(); it.advance()) {
-      const auto sec = it.get();
-      ++walked;
-      // The most energy a secondary can carry is the parent's TOTAL energy plus one
-      // target electron's rest mass. Kinetic energy alone is the wrong bound and this test
-      // found that out: annihilation turns rest mass into two 511 keV photons, so a
-      // positron that has all but stopped produces secondaries far above its own kinetic
-      // energy. The bound below is exactly tight for that case - T + m_e + m_e - and holds
-      // for every other process here, where a secondary cannot exceed the parent's T.
-      const G4double ceiling = ke_in + step.GetPreStepPoint()->GetMass()
-                               + G4double(0.510998910);
-      const G4double excess = sec.GetKineticEnergy() - ceiling;
-      if (excess > worst_excess) { worst_excess = excess; }
-    }
-    atomicAdd(&sec_walked_[0], static_cast<G4double>(walked));
-    atomicAdd(&sec_walked_[1],
-              static_cast<G4double>(step.GetNumberOfSecondariesInCurrentStep()));
-    if (worst_excess > 0) { atomicAdd(&sec_walked_[2], worst_excess); }
-
-    // Two running sums per event. Their ratio is the dose-averaged Q. Bounded by the number of
-    // events, not by the number of steps - which is the whole discipline of core/step_hook.cuh.
-    atomicAdd(&weighted_[step.GetEventID()], q * edep);
-    atomicAdd(&plain_[step.GetEventID()], edep);
-  }
-
- private:
-  G4double* weighted_ = nullptr;
-  G4double* plain_ = nullptr;
-  /// [0] secondaries walked, [1] secondaries reported, [2] total energy excess.
-  G4double* sec_walked_ = nullptr;
-  int n_events_ = 0;
-  int slot_ = 0;
-};
+// The action itself is include/QualityFactorScoring.hh, and it is a header rather than a class
+// in this file because the kernels are no longer compiled here - see the engine block below.
+#include "QualityFactorScoring.hh"
 
 // ---------------------------------------------------------------- the project's engine
 //
-// Name the hook, then pull in the kernels and instantiate them for it. In a real project these
-// four lines are the whole of the ceremony, and they sit in one .cu.
+// Name the hook, pull in the engine, and instantiate it for the hook - and DECLARE the kernels
+// rather than defining them here, which is the one line that changed in P8e and the reason
+// this file compiles at all.
+//
+// It used to define them. `template class TransportEngine<double, QualityFactorScoring>` makes
+// the eighteen `<<<>>>` launches inside BeamOn instantiate eighteen stepping kernels for this
+// hook type, into this translation unit, and build_all.bat's comment called the three and a
+// half minutes that cost "the honest cost of the arrangement". It was honest and it was never
+// necessary, and with the Urban ion branch live (docs/RISK.md V66) it stopped being possible:
+// ptxas died with 0xC0000005 on run_step_hadron<double, ParticleType(13), QualityFactorScoring>
+// - the same crash, from the same cause, that V65 split the ENGINE'S translation unit to cure.
+// The hook is a template parameter like any other, so a project's kernels split exactly as the
+// engine's do: build_hook_engine.bat generates one unit per kernel for this class and archives
+// them into out\hook_qfs.lib, and hook_kernels.cuh below is what stops them being compiled
+// twice. The declarations must come after transport_run_impl.cuh, whose macros they are
+// written against; the header says so and fails the build if they do not.
 #define G4STEP_HOOK QualityFactorScoring
 #include "g4/G4RunManager.hh"
 #include "g4/G4SDManager.hh"
 #include "g4/G4SystemOfUnits.hh"
 #include "host/transport_run_impl.cuh"
 #include "scenes/scene_registry.hh"
+
+#include "hook_kernels.cuh"  // generated beside out\hook_qfs.lib by build_hook_engine.bat
 
 namespace g4gpu::host {
 template class TransportEngine<double, QualityFactorScoring>;

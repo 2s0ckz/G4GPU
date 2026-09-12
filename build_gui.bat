@@ -1,7 +1,7 @@
 @echo off
 rem Builds g4builder: the model-building GUI.
 rem
-rem Links the prebuilt engine archive rather than compiling the engine's eight translation
+rem Links the prebuilt engine archive rather than compiling the engine's seventeen translation
 rem units itself - minutes of nvcc for files that have not changed. build_engine.bat decides by
 rem timestamp whether they need rebuilding (tools/freshness.ps1).
 rem

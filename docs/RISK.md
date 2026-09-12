@@ -6654,6 +6654,119 @@ costing that file - and ran the gate's own command:
 With the declaration in place the same command matches nothing. Both halves measured on the real
 engine rather than on the ten-line pair, and the declaration put back afterwards.
 
+#### Appended: the same translation unit, arriving through a different door
+
+This entry split the ENGINE'S translation unit and stopped there, because the engine was the
+file that would not compile. It was not the only file of that shape, and the first `build_all`
+over V65 and V66 found the other one at the drivers stage.
+
+`tests/test_custom_hook.cu` is a PROJECT rather than a test of a function: it defines its own
+device stepping action and instantiates `TransportEngine<double, QualityFactorScoring>` in its
+own `.cu`, which is how a user gets a hook into the transport without rebuilding g4gpu. The
+eighteen `<<<>>>` launches inside `BeamOn` therefore instantiated eighteen stepping kernels
+into THAT file - and the engine's split bought it nothing, because a kernel templated on the
+hook type is a different specialisation and `out/transport_run.lib` holds none of them. With
+V66's two switches on it died exactly as the engine had:
+
+```
+ptxas warning : Stack size for entry function
+                'run_step_hadron<double, ParticleType(13), QualityFactorScoring>' ...
+Internal error
+nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+```
+
+Species 13 is `kGenericIon` - V63's named culprit again, in a file V63 never looked at.
+Everything ahead of it built: the seventeen-unit engine, all 76 tests, both GPU suites.
+`build_all.bat`'s own comment had called the three and a half minutes that unit cost "the
+honest cost of the arrangement", which it was; what it was not is necessary.
+
+**The fix generalises because the hook is a template parameter like any other.**
+`build_hook_engine.bat <header> <type> <tag>` writes one translation unit per stepping kernel
+for a project's hook type, compiles them six at a time through the same `build_engine_unit.bat`
+the engine uses, and archives them into `out\hook_<tag>.lib`. The project includes the generated
+`hook_kernels.cuh`, whose `extern template` declarations keep those kernels out of its own
+object, and links the archive. Two projects in this repository have their own hook and both get
+it: `test_custom_hook` (QualityFactorScoring) and `test_voxel_scoring` (CellTap).
+
+**The kernel list is READ OUT of `transport_run_impl.cuh`'s `extern template` block, not copied
+into the generator.** A copy would be right the day it was written and silently wrong the first
+time a species was added: the new kernel would have no unit and no declaration and would go back
+to being instantiated in the project's own object, which is the failure this exists to cure. The
+generator substitutes the hook type for `StepTap<double>` and refuses to run if a line it parsed
+does not name it.
+
+**What it costs and what it buys.** `QualityFactorScoring`'s eighteen kernels take **346.7 s**
+as eighteen units six at a time - against 366.4 s for the engine's own seventeen - and all
+eighteen compiled first time, `run_step_hadron<double, kGenericIon, QualityFactorScoring>`
+among them. The project's own translation unit now compiles in **18.4 s**, where the one-unit
+arrangement was 208 s when it still worked. `tests/test_custom_hook.exe` links and passes: the
+action's energy sum against the scorer's is **rel 0.00e+00**, dose-averaged Q 1.5134 over 3536
+scored events in [1, 5], 3421 secondaries walked against 3421 reported.
+
+`tests/test_voxel_scoring.cu` is the second project of that shape and it had been waiting its
+turn to die - build_all reached `test_custom_hook` first and stopped there. CellTap's eighteen
+units take **375.0 s**, its own unit 21.3 s, and it passes: 147,794 steps recorded over 2,000
+events with **0 dropped**, 4,205 depositing steps ending exactly at a cell boundary and **0**
+crossing one, worst overshoot 1.0e-07 mm against a 1.25 mm cell, 64 of 64 cells scoring, and the
+device total against the host's to **exactly 0**. `CellRec` came out of an anonymous namespace to
+reach the header, which is a fix rather than a move: in a header it would have been a different
+type in every unit, and `CellTap` - whose member is a `CellRec*` - would have had one definition
+per unit with a different member type in each, linking cleanly because nothing about `CellRec`
+reaches the kernels' mangled names.
+
+**A hook kernel costs almost exactly what the stock one costs**, which is the measurement that
+says the arrangement is carrying no hidden price. `-Xptxas -v`, the same species, one kernel per
+unit either way:
+
+| kernel | `StepTap<double>` | `QualityFactorScoring` |
+|---|---|---|
+| `run_step_gamma` | 3040 B frame, 52/20 spill, 255 reg, cmem[0] 1464 | 3024 B, 36/16, 255, **1456** |
+| `run_step_hadron` kAlpha | 3760 B, 148/208, 255, 1616 | 3760 B, 144/200, 255, **1608** |
+| `run_step_hadron` kGenericIon | 3760 B, 228/296, 255, 1616 | 3760 B, 224/296, 255, **1608** |
+
+The eight bytes of `cmem[0]` are the hook itself: it travels as a by-value kernel argument, and
+`StepTap<double>` is three pointers, two ints and a bool padded to 40 bytes where
+`QualityFactorScoring` is three pointers and two ints at 32. Everything else is within the
+allocation noise V65 already recorded for this compiler. There is no "before" column for a hook
+kernel in the one-unit arrangement and there cannot be one: ptxas does not reach a register
+report, it dies.
+
+**Inverted twice.**
+
+First, the one line is the whole mechanism, so it was taken out again. `test_custom_hook.cu`
+with `#include "hook_kernels.cuh"` commented out - everything else identical, the archive still
+on the link line - is the arrangement that failed, and it fails the same way:
+
+```
+ptxas warning : Stack size for entry function
+                'run_step_neutral<double, ParticleType(15), QualityFactorScoring>' ...
+ptxas warning : Stack size for entry function
+                'run_step_neutral<double, ParticleType(14), QualityFactorScoring>' ...
+ptxas warning : Stack size for entry function
+                'run_step_hadron<double, ParticleType(13), QualityFactorScoring>' ...
+Internal error
+nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+```
+
+**504.6 s to die**, on the same three kernels build_all named, which is also the measure of what
+that unit was costing when it worked. The declarations restored, the same file compiles in 18.4
+s. So the split is load-bearing rather than decorative, and the passing build is evidence about
+the code.
+
+Second, the generated header's ordering requirement is a `#error` rather than a convention, and
+it fires: a ten-line `.cu` that includes `hook_kernels.cuh` without `transport_run_impl.cuh`
+ahead of it stops at `fatal error C1189: #error: "include host/transport_run_impl.cuh before
+hook_kernels.cuh"`. Without the guard that mistake is a pile of "identifier not found" errors
+pointing at the generated file rather than at the include order that caused them.
+
+**The generated project needs none of this, and that was checked rather than assumed.**
+`src/builder/write_project.cc` writes a `SteppingAction` deriving from `G4UserSteppingAction`
+that takes a `const G4Step*` - a HOST action - and the project links `%G4GPU_ENGINE_OBJ%`, the
+stock `StepTap<double>` archive. `G4STEP_HOOK`, `G4VUserDeviceSteppingAction` and `SetStepHook`
+appear zero times in the generator, so a generated project instantiates no kernel of its own and
+compiles in seconds. Its template is left alone; if it ever gains a device hook, this mechanism
+is what it needs and the two call sites in `build_all.bat` are the pattern.
+
 
 ### V66: two switches that had been shut by a compiler and by a package boundary
 

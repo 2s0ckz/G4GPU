@@ -60,11 +60,18 @@ rem how that was found - the test would not compile until it was built like the 
 set TESTS_GPU=test_step_hook test_neutron test_step_hadron test_capture_device test_ion_transport test_neutron_general
 
 rem test_custom_hook is a *project*, not a test of a function: it defines its own stepping
-rem action, instantiates the engine for it in its own translation unit, and links nothing of
-rem g4gpu's. It is built the way a user project with a custom hook is built, so if that
-rem arrangement ever stops working this fails at compile or link time. It takes ~3.5 minutes
-rem because it compiles the transport kernels for its own hook type - which is the honest cost
-rem of the arrangement and is measured in docs/RESULT.md rather than hidden.
+rem action, instantiates the engine for it, and links nothing of g4gpu's stock engine. It is
+rem built the way a user project with a custom hook is built, so if that arrangement ever stops
+rem working this fails at compile or link time.
+rem
+rem IT USED TO COMPILE ITS OWN KERNELS IN ONE TRANSLATION UNIT, and this comment used to call
+rem the ~3.5 minutes that took "the honest cost of the arrangement". It was honest, it was
+rem measured, and it was never necessary: the hook is a template parameter, so a project's
+rem kernels split one-per-unit exactly as the engine's did in docs/RISK.md V65. What forced the
+rem issue is that with V66's two switches on, that unit stopped compiling at all - ptxas died
+rem with 0xC0000005 on run_step_hadron<double, ParticleType(13), QualityFactorScoring>, which is
+rem V65's crash arriving through a different door, in a file the engine's split never touched.
+rem build_hook_engine.bat below gives it the same structure the engine has.
 set TESTS_PROJECT=test_custom_hook
 
 rem Tests that run a real scene through the STOCK engine: they link out\transport_run.lib
@@ -106,18 +113,41 @@ for %%T in (%TESTS%) do (
 for %%T in (%TESTS_GPU%) do (
   %NVG% -o tests\%%T.exe tests\%%T.cu -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
 )
-for %%T in (%TESTS_PROJECT%) do (
-  %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
-    -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
-)
+rem THE TWO CUSTOM-HOOK PROJECTS ARE BUILT WITHOUT A `for` LOOP, and that is not an oversight.
+rem Each one needs its own hook header, its own type name, its own archive and its own -I, so a
+rem loop over a list of names could never have served two of them; the list existed because the
+rem list had one entry. They are also the only two blocks here that cannot carry `rem` lines
+rem inside them, since an unescaped `)` in a comment closes a parenthesised block early.
+rem
+rem Compiled to an OBJECT first, so the check build_engine.bat runs over the engine's object can
+rem be run over this one. It has to be a check on the artefact: two objects holding the same
+rem specialisation link cleanly on CUDA 11.6 - docs/RISK.md V65 - so a launch that lost its
+rem declaration would simply be compiled here again, cost minutes of nvcc, and say nothing at
+rem all. That is exactly how this file came to hold eighteen kernels.
+rem
+rem The hook class lives in tests\include so that the generated units and the project can both
+rem see it, which is where a Geant4 project's action class lives anyway.
+call "%~dp0build_hook_engine.bat" "%~dp0tests\include\QualityFactorScoring.hh" ^
+  QualityFactorScoring qfs || exit /b 1
+%NVG% -I "%SRC%\g4" -I "%~dp0tests\include" -I "%G4GPU_HOOK_INC%" ^
+  -c -o out\test_custom_hook.obj tests\test_custom_hook.cu || exit /b 1
+call :hook_object_gate test_custom_hook || exit /b 1
+%NVG% -I "%SRC%\g4" -o tests\test_custom_hook.exe out\test_custom_hook.obj ^
+  src\scenes\scene_b1.cu "%G4GPU_HOOK_LIB%" ^
+  -Xlinker /IMPLIB:out/test_custom_hook.lib || exit /b 1
 for %%T in (%TESTS_SCENE%) do (
   %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu src\scenes\scene_b1.cu ^
     "%~dp0out\transport_run.lib" -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
 )
-for %%T in (%TESTS_HOOK%) do (
-  %NVG% -I "%SRC%\g4" -o tests\%%T.exe tests\%%T.cu ^
-    -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
-)
+rem The second custom-hook project, and it gets the same treatment for the same reason: its
+rem eighteen kernels are CellTap's rather than QualityFactorScoring's, so they are a second
+rem archive. It links no scene, for the reason its own comment above gives.
+call "%~dp0build_hook_engine.bat" "%~dp0tests\include\CellTap.hh" CellTap cell || exit /b 1
+%NVG% -I "%SRC%\g4" -I "%~dp0tests\include" -I "%G4GPU_HOOK_INC%" ^
+  -c -o out\test_voxel_scoring.obj tests\test_voxel_scoring.cu || exit /b 1
+call :hook_object_gate test_voxel_scoring || exit /b 1
+%NVG% -I "%SRC%\g4" -o tests\test_voxel_scoring.exe out\test_voxel_scoring.obj ^
+  "%G4GPU_HOOK_LIB%" -Xlinker /IMPLIB:out/test_voxel_scoring.lib || exit /b 1
 rem From here on they are just tests - run and counted with the rest.
 set TESTS=%TESTS% %TESTS_GPU% %TESTS_PROJECT% %TESTS_SCENE% %TESTS_HOOK%
 echo BUILD OK
@@ -728,4 +758,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\compare_depth.ps
 
 echo.
 echo ALL OK
+exit /b 0
+
+rem ---------------------------------------------------------------- the custom-hook gate
+rem
+rem %1 is a test name; out\%1.obj must carry no stepping kernel.
+rem
+rem The whole per-hook split rests on the `extern template` declarations in the generated
+rem hook_kernels.cuh suppressing implicit instantiation in the project that launches the
+rem kernels, and the LINK will not catch a mistake: two objects holding the same specialisation
+rem link cleanly on CUDA 11.6, the stubs being COMDAT-folded, so a launch added without a
+rem declaration costs minutes of nvcc and says nothing at all. build_engine.bat runs this same
+rem cuobjdump over the engine's own object; docs/RISK.md V65 has both halves and the inversion.
+rem
+rem A subroutine rather than the same six lines twice, and a subroutine rather than a `for`
+rem body, because a `rem` containing a closing parenthesis inside a parenthesised block ends
+rem the block there.
+:hook_object_gate
+for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\%~1.obj" ^| findstr /c:"run_step_"`) do (
+  echo FATAL: out\%~1.obj carries a stepping kernel:
+  echo        %%N
+  echo        A launch was added without a matching declaration in the generated
+  echo        hook_kernels.cuh, so that kernel is compiled into the project's own
+  echo        translation unit again. See docs/RISK.md V65.
+  exit /b 1
+)
 exit /b 0

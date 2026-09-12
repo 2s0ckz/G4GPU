@@ -510,10 +510,21 @@ The project names its hook and instantiates the engine for it, in **one** `.cu` 
 #define G4STEP_HOOK QualityFactorScoring
 #include "g4/G4RunManager.hh"
 #include "host/transport_run_impl.cuh"
+#include "hook_kernels.cuh"   // generated: declares this hook's kernels, defined elsewhere
 namespace g4gpu::host { template class TransportEngine<double, QualityFactorScoring>; }
 ```
 
 then `rm->SetStepHook(QualityFactorScoring(d_w, d_p, n, slot));` before `BeamOn`.
+
+The fourth line is P8e's, and the hook class moves into a header to go with it
+(`include/QualityFactorScoring.hh`, where a Geant4 project's action class lives anyway).
+`build_hook_engine.bat <header> <type> <tag>` reads the engine's own kernel list, writes one
+translation unit per stepping kernel for that hook type, compiles them six at a time and
+archives them into `out/hook_<tag>.lib`, which the project links. Without it the project's own
+`.cu` instantiates all eighteen kernels — which took three and a half minutes until the Urban
+ion branch went live and then stopped compiling at all, with the same `ptxas died with status
+0xC0000005` that RISK **V65** split the engine to cure. The hook is a template parameter like
+any other, so a project's kernels split exactly as the engine's do.
 [`tests/test_custom_hook.cu`](tests/test_custom_hook.cu) is exactly this, built and run by
 `build_all.bat`.
 
@@ -523,13 +534,19 @@ then `rm->SetStepHook(QualityFactorScoring(d_w, d_p, n, slot));` before `BeamOn`
 against it, which is the arrangement Geant4 has. A project with a custom hook does not even
 link `transport_run.lib` - it instantiates its own specialization and owns its own build.
 
-**But the compile time does not go away, it moves.** Measured: a project with its own hook
-takes **208 s** to build; rebuilding the engine takes **202 s**. The transport kernels are
-templated on the hook, so a new hook type is a new set of kernels and something has to compile
-them. This is genuinely unlike Geant4, where your project builds in seconds because the
-transport is already compiled and dispatch is virtual. The price of a virtual call there is
-nothing against Geant4's per-step cost; here it would defeat inlining at every one of 3x10^7
-steps a second.
+**But the compile time does not go away, it moves.** The transport kernels are templated on the
+hook, so a new hook type is a new set of kernels and something has to compile them. This is
+genuinely unlike Geant4, where your project builds in seconds because the transport is already
+compiled and dispatch is virtual. The price of a virtual call there is nothing against Geant4's
+per-step cost; here it would defeat inlining at every one of 3×10⁷ steps a second.
+
+What P8e changed is the *shape* of that cost, and it is measured: the project's own translation
+unit now compiles in **18.4 s**, and its eighteen kernels in **347 s** as eighteen units six at
+a time — against **366 s** for the engine's own seventeen. It used to be one unit of 208 s,
+which is fewer seconds of CPU and was the wrong trade twice over: it rebuilt all eighteen
+kernels when `main()` changed, and once the Urban ion branch went live ptxas would not compile
+it at all. Now editing the hook class rebuilds the kernels and editing the rest of the project
+rebuilds 18 seconds.
 
 Note what is *not* affected: a project using the **stock** hook links the prebuilt object and
 compiles in seconds, paying one predicated load per step. The slow path is opt-in, and only for
