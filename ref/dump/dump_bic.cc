@@ -56,6 +56,9 @@
 #include <vector>
 
 #include "G4Alpha.hh"
+#include "G4AngularDistribution.hh"
+#include "G4AngularDistributionNP.hh"
+#include "G4AngularDistributionPP.hh"
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4Deuteron.hh"
@@ -85,6 +88,16 @@
 #include "G4RKPropagation.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4VNuclearDensity.hh"
+#include "G4XNNElastic.hh"
+#include "G4XNNElasticLowE.hh"
+#include "G4XNNTotal.hh"
+#include "G4XNNTotalLowE.hh"
+#include "G4XPDGElastic.hh"
+#include "G4XPDGTotal.hh"
+#include "G4XnpElastic.hh"
+#include "G4XnpElasticLowE.hh"
+#include "G4XnpTotal.hh"
+#include "G4XnpTotalLowE.hh"
 #include "Randomize.hh"
 
 namespace {
@@ -707,6 +720,294 @@ void write_bic_apply() {
   std::fclose(g);
 }
 
+// =============================================================================================
+// The im_r_matrix collision tree (P9b).
+// =============================================================================================
+
+/// The eight uniforms the deterministic angular dump cycles through, and the engine that serves
+/// them. Same eight as ref/dump/dump_elastic.cc, deliberately: a sampler driven by a prescribed
+/// sequence is a deterministic function of its inputs, so `CosTheta` can be compared EXACTLY
+/// rather than through a histogram, and one sequence shared across packages means one place to
+/// change it. The phase shifts the window so that a sampler which draws two uniforms per call
+/// (G4AngularDistribution does) still sees all eight.
+const double kImrSeq[8] = {0.05, 0.37, 0.63, 0.91, 0.12, 0.78, 0.29, 0.55};
+
+class ImrCycleEngine : public CLHEP::HepRandomEngine {
+ public:
+  void reset(int phase) { phase_ = phase; n_ = 0; }
+  int draws() const { return n_; }
+  double flat() override {
+    const double v = kImrSeq[(n_ + phase_) % 8];
+    ++n_;
+    return v;
+  }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long, int) override {}
+  void setSeeds(const long*, int) override {}
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "ImrCycleEngine"; }
+
+ private:
+  int phase_ = 0;
+  int n_ = 0;
+};
+
+/// An engine that serves ONE prescribed uniform, for the table sweep below.
+///
+/// The eight-value cycle above proves the sampler is right at the eight points of the cumulative
+/// it reaches, and it was MEASURED that that is all it proves: moving one entry of the 7,020-value
+/// NP table by one part in 65,000 changed none of the 1,600 angles it produced. A table sampler
+/// has to be checked over its table, not over eight of its rows - so the sweep drives `sample`
+/// across (0, 1) in 199 steps at every tabulated energy, which makes the bisection visit
+/// essentially every one of the 180 angle bins in every one of the 39 and 40 energy rows.
+class ImrFixedEngine : public CLHEP::HepRandomEngine {
+ public:
+  void set(double v) { v_ = v; n_ = 0; }
+  int draws() const { return n_; }
+  double flat() override {
+    ++n_;
+    return v_;
+  }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long, int) override {}
+  void setSeeds(const long*, int) override {}
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "ImrFixedEngine"; }
+
+ private:
+  double v_ = 0.5;
+  int n_ = 0;
+};
+
+/// The 39 and 40 lab kinetic energies the two tables are tabulated at, in GeV, copied from
+/// G4AngularDistributionNP::elab and G4AngularDistributionPP::elab. They are private statics in
+/// classes with no accessor, so the sweep cannot ask for them - and `tools/extract_bic_imr.pl`
+/// asserts the port's copy against the same source lines, so a release that moves a tabulated
+/// energy fails the extractor and then fails here as a shifted angle.
+const double kImrElabNP[39] = {0.010, 0.020, 0.030, 0.050, 0.070, 0.100, 0.140, 0.180, 0.240,
+                               0.340, 0.420, 0.500, 0.580, 0.620, 0.680, 0.740, 0.800, 0.900,
+                               1.000, 1.100, 1.200, 1.300, 1.400, 1.500, 1.600, 1.700, 1.800,
+                               1.900, 2.000, 2.200, 2.400, 2.600, 2.800, 3.000, 3.400, 3.800,
+                               4.200, 4.600, 5.000};
+const double kImrElabPP[40] = {0.010, 0.020, 0.040, 0.070, 0.100, 0.120, 0.140, 0.180, 0.220,
+                               0.260, 0.280, 0.300, 0.340, 0.420, 0.520, 0.620, 0.700, 0.800,
+                               0.900, 1.000, 1.100, 1.200, 1.300, 1.400, 1.500, 1.600, 1.700,
+                               1.800, 1.900, 2.000, 2.200, 2.400, 2.600, 2.800, 3.000, 3.400,
+                               3.800, 4.200, 4.600, 5.000};
+
+/// Builds the two kinetic tracks a cross-section source is asked about: particle 1 along +z with
+/// whatever energy puts the pair at `sqrt_s`, particle 2 at rest. That is the configuration
+/// `G4CollisionComposite::BufferCrossSection` builds too, and it is the only one in which
+/// `sqrt_s` determines the answer - every class here reads `(p1+p2).mag()` and nothing else
+/// about the kinematics.
+///
+/// The REQUESTED sqrt(s) and the one Geant4 then computes from the two four-vectors differ by
+/// rounding, so the caller dumps the computed one and the port is fed that. Comparing against
+/// the requested value would be comparing two different energies at 1e-16 and calling the
+/// difference a transcription error.
+void imr_make_pair(const G4ParticleDefinition* d1, const G4ParticleDefinition* d2,
+                   double sqrt_s, G4LorentzVector& p1, G4LorentzVector& p2) {
+  const double m1 = d1->GetPDGMass();
+  const double m2 = d2->GetPDGMass();
+  const double e1 = (sqrt_s * sqrt_s - m1 * m1 - m2 * m2) / (2.0 * m2);
+  const double p = (e1 > m1) ? std::sqrt(e1 * e1 - m1 * m1) : 0.0;
+  p1 = G4LorentzVector(G4ThreeVector(0, 0, p), std::sqrt(p * p + m1 * m1));
+  p2 = G4LorentzVector(G4ThreeVector(0, 0, 0), m2);
+}
+
+void write_imr_xsec() {
+  FILE* f = std::fopen("bic_imr_xsec.csv", "w");
+  std::fprintf(f, "pair,source,sqrt_s_MeV,sigma_mb\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {{"pp", p, p}, {"nn", n, n}, {"np", n, p}, {"pn", p, n}};
+
+  // The grid. 1876.5 MeV is 2 m_p, the threshold; 1877.05 is the first point of
+  // G4XNNTotalLowE::ss; 1.8964808 GeV and one log step either side of it are the three places
+  // the four log vectors change branch; 3000 and 5000 MeV are the two patch boundaries and are
+  // included from BOTH sides at one part in 1e9, because which arm answers at the boundary is
+  // decided by a `<` against a `<=` and that is exactly what a transcription gets wrong.
+  std::vector<double> grid;
+  for (double e = 1876.6; e < 1900.0; e += 1.0) { grid.push_back(e); }
+  for (double e = 1900.0; e < 3000.0; e += 20.0) { grid.push_back(e); }
+  for (double e = 3000.0; e <= 6000.0; e += 50.0) { grid.push_back(e); }
+  const double kEdges[] = {1877.05, 1896.4808, 1877.5,  1877.6,   1878.0,
+                           1896.4808 * 0.99,   2999.999999, 3000.0, 3000.000001,
+                           4999.999999,        5000.0,      5000.000001,
+                           1858.6,  1860.0,   1870.0,  2925.49, 3002.71};
+  for (double e : kEdges) { grid.push_back(e); }
+
+  // The four composites and every arm under them, each dumped separately so that a failing
+  // composite says which arm it came from instead of only that it disagrees.
+  G4XNNTotal xNNTotal;
+  G4XnpTotal xnpTotal;
+  G4XNNElastic xNNElastic;
+  G4XnpElastic xnpElastic;
+  G4XNNTotalLowE xNNTotalLowE;
+  G4XnpTotalLowE xnpTotalLowE;
+  G4XNNElasticLowE xNNElasticLowE;
+  G4XnpElasticLowE xnpElasticLowE;
+  G4XPDGTotal xPDGTotal;
+  G4XPDGElastic xPDGElastic;
+
+  for (const Pair& pr : pairs) {
+    for (double want : grid) {
+      G4LorentzVector q1, q2;
+      imr_make_pair(pr.a, pr.b, want, q1, q2);
+      G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      auto row = [&](const char* name, double sigma) {
+        std::fprintf(f, "%s,%s,%.17g,%.17g\n", pr.name, name, s, sigma / millibarn);
+      };
+      row("XNNTotal", xNNTotal.CrossSection(t1, t2));
+      row("XNNElastic", xNNElastic.CrossSection(t1, t2));
+      row("XnpElastic", xnpElastic.CrossSection(t1, t2));
+      row("XnpTotal", xnpTotal.CrossSection(t1, t2));
+      row("XNNTotalLowE", xNNTotalLowE.CrossSection(t1, t2));
+      row("XNNElasticLowE", xNNElasticLowE.CrossSection(t1, t2));
+      row("XnpElasticLowE", xnpElasticLowE.CrossSection(t1, t2));
+      row("XnpTotalLowE", xnpTotalLowE.CrossSection(t1, t2));
+      row("XPDGTotal", xPDGTotal.CrossSection(t1, t2));
+      row("XPDGElastic", xPDGElastic.CrossSection(t1, t2));
+    }
+  }
+  std::fclose(f);
+}
+
+void write_imr_angular() {
+  FILE* f = std::fopen("bic_imr_angular.csv", "w");
+  std::fprintf(f, "dist,s_MeV2,m1_MeV,m2_MeV,phase,cos_theta,draws\n");
+  FILE* g = std::fopen("bic_imr_obe.csv", "w");
+  std::fprintf(g, "sym,s_MeV2,m1_MeV,m2_MeV,cos_theta,dsigma\n");
+
+  const double mp = G4Proton::ProtonDefinition()->GetPDGMass();
+  const double mn = G4Neutron::NeutronDefinition()->GetPDGMass();
+
+  // The lab kinetic energies the two tables are tabulated at, plus points between and outside
+  // them: 5 MeV is below elab[0] = 10 MeV (where the energy bisection extrapolates downwards)
+  // and 6 GeV above elab[last] = 5 GeV (where it extrapolates upwards). Both extrapolations are
+  // live in the cascade - a 1.5 GeV proton's first collision is above nothing, but a nucleon
+  // that has already lost most of its energy is below 10 MeV all the time.
+  const double kEkinMeV[] = {5.0,   10.0,   15.0,   20.0,   35.0,   50.0,  70.0,   100.0,
+                             140.0, 180.0,  240.0,  300.0,  400.0,  500.0, 620.0,  800.0,
+                             1000.0, 1200.0, 1500.0, 1900.0, 2500.0, 3000.0, 4000.0, 5000.0,
+                             6000.0};
+  // Three mass pairs: both on shell, and two off-shell cases, because a cascade nucleon inside
+  // the nuclear potential has an actual mass below its PDG mass (docs/PORTED.md 2.1.10) and
+  // `ek`'s formula divides by m1 alone.
+  struct Masses { double m1, m2; };
+  const Masses kMasses[] = {{mp, mp}, {mn, mp}, {mp - 30.0, mp}, {mp, mp - 45.0}};
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(eng);
+
+  G4AngularDistributionNP np;
+  G4AngularDistributionPP pp;
+  G4AngularDistribution obeSym(true);
+  G4AngularDistribution obeAsym(false);
+
+  for (const Masses& m : kMasses) {
+    for (double ekin : kEkinMeV) {
+      // S from the lab kinetic energy the way the tables' own `ek` inverts it, so that the
+      // energy landing in the bisection is the tabulated one rather than one rounding away.
+      const double s = (ekin + m.m1) * 2.0 * m.m1 + m.m1 * m.m1 + m.m2 * m.m2;
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        const double c1 = np.CosTheta(s, m.m1, m.m2);
+        std::fprintf(f, "NP,%.17g,%.17g,%.17g,%d,%.17g,%d\n", s, m.m1, m.m2, phase, c1,
+                     eng->draws());
+        eng->reset(phase);
+        const double c2 = pp.CosTheta(s, m.m1, m.m2);
+        std::fprintf(f, "PP,%.17g,%.17g,%.17g,%d,%.17g,%d\n", s, m.m1, m.m2, phase, c2,
+                     eng->draws());
+        eng->reset(phase);
+        const double c3 = obeSym.CosTheta(s, m.m1, m.m2);
+        std::fprintf(f, "OBEsym,%.17g,%.17g,%.17g,%d,%.17g,%d\n", s, m.m1, m.m2, phase, c3,
+                     eng->draws());
+        eng->reset(phase);
+        const double c4 = obeAsym.CosTheta(s, m.m1, m.m2);
+        std::fprintf(f, "OBEasym,%.17g,%.17g,%.17g,%d,%.17g,%d\n", s, m.m1, m.m2, phase, c4,
+                     eng->draws());
+        eng->reset(phase);
+        const double c5 = np.Phi();
+        std::fprintf(f, "Phi,%.17g,%.17g,%.17g,%d,%.17g,%d\n", s, m.m1, m.m2, phase, c5,
+                     eng->draws());
+      }
+      // The normalised cumulative itself, which is what the bisection inverts - dumped on a
+      // cos(theta) grid so that a disagreement in the formula is separated from a disagreement
+      // in the twelve halvings above it.
+      for (int i = 0; i <= 20; ++i) {
+        const double ct = -1.0 + 0.1 * i;
+        std::fprintf(g, "1,%.17g,%.17g,%.17g,%.17g,%.17g\n", s, m.m1, m.m2, ct,
+                     obeSym.DifferentialCrossSection(s, m.m1, m.m2, ct));
+        std::fprintf(g, "0,%.17g,%.17g,%.17g,%.17g,%.17g\n", s, m.m1, m.m2, ct,
+                     obeAsym.DifferentialCrossSection(s, m.m1, m.m2, ct));
+      }
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
+/// The table sweep: every tabulated energy of each table, and 199 values of the sampled uniform
+/// at each, so that the bisection walks the whole cumulative rather than eight points of it.
+/// See ImrFixedEngine for why this exists and what the eight-value cycle was measured not to
+/// catch. The energy is set EXACTLY on a tabulated point and also halfway between two, because
+/// on a node `delab` cancels the interpolation and between nodes it does not - and a
+/// transcription that read the wrong energy row would pass on the nodes alone.
+void write_imr_angular_sweep() {
+  FILE* f = std::fopen("bic_imr_angular_sweep.csv", "w");
+  std::fprintf(f, "dist,s_MeV2,m1_MeV,m2_MeV,sample,cos_theta\n");
+
+  const double mp = G4Proton::ProtonDefinition()->GetPDGMass();
+  auto* eng = new ImrFixedEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(eng);
+  G4AngularDistributionNP np;
+  G4AngularDistributionPP pp;
+
+  auto sweep = [&](const char* name, const double* elab, int n_e, bool is_np) {
+    for (int j = 0; j < n_e; ++j) {
+      // The tabulated energy, and the midpoint to the next one.
+      double ek[2] = {elab[j] * CLHEP::GeV, 0.0};
+      int n_ek = 1;
+      if (j + 1 < n_e) {
+        ek[1] = 0.5 * (elab[j] + elab[j + 1]) * CLHEP::GeV;
+        n_ek = 2;
+      }
+      for (int q = 0; q < n_ek; ++q) {
+        const double s = (ek[q] + mp) * 2.0 * mp + mp * mp + mp * mp;
+        for (int i = 1; i < 200; ++i) {
+          const double sample = i / 200.0;
+          eng->set(sample);
+          const double c = is_np ? np.CosTheta(s, mp, mp) : pp.CosTheta(s, mp, mp);
+          std::fprintf(f, "%s,%.17g,%.17g,%.17g,%.17g,%.17g\n", name, s, mp, mp, sample, c);
+        }
+      }
+    }
+  };
+  sweep("NP", kImrElabNP, 39, true);
+  sweep("PP", kImrElabPP, 40, false);
+
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete eng;
+  std::fclose(f);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -716,6 +1017,9 @@ void dump_bic(const DumpContext&) {
   write_nucleus_stats();
   write_blir();
   write_bic_apply();
+  write_imr_xsec();
+  write_imr_angular();
+  write_imr_angular_sweep();
 }
 
 }  // namespace
@@ -724,5 +1028,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_limits.csv bic_density.csv bic_density_radius.csv bic_fermi.csv "
                     "bic_nucleus.csv bic_nucleons.csv bic_field.csv bic_rk.csv "
                     "bic_nucleus_stats.csv bic_nucleus_moments.csv bic_blir.csv "
-                    "bic_blir_status.csv bic_apply.csv bic_apply_status.csv",
+                    "bic_blir_status.csv bic_apply.csv bic_apply_status.csv "
+                    "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv",
                     dump_bic);

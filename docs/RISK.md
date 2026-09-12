@@ -7704,3 +7704,65 @@ above - which matters because the two differ by exactly the imbalance being corr
 the commented-out line back changes a corrected momentum by 76 relative units on the oracle's
 `far-off` case while leaving the whole-event answer within 3e-12, so it is a difference only the
 corrector's own oracle can see.
+
+### V91: the np cross-section grid is stretched by 1% and the pp grid beside it is not
+
+`G4XNNElasticLowE`'s constructor builds two `G4PhysicsLogVector`s from the same `_eMax` and two
+DIFFERENT `_eMin`s, because it reassigns the member between them:
+
+    _eMin = _eMinTable * GeV;                                   // 1.8964808 GeV
+    _eMax = G4Exp(G4Log(_eMinTable) + tableSize*_eStepLog)*GeV;  // 1.8964808*e^1.01 GeV
+    G4PhysicsVector* pp = new G4PhysicsLogVector(_eMin,_eMax,tableSize);
+    _eMin = G4Exp(G4Log(_eMinTable)-_eStepLog)*GeV;             // one log step lower
+    G4PhysicsVector* np = new G4PhysicsLogVector(_eMin,_eMax,tableSize);
+
+A `G4PhysicsLogVector(Emin, Emax, 101)` spreads 102 nodes evenly in log across
+`log(Emax/Emin)`. For pp that span is 1.01 and the step comes out at exactly 1.01/101 = 0.01,
+which is `_eStepLog` - the grid the 101 tabulated values were measured on. For np the span is
+1.02 and the step is 1.02/101 = 0.0100990. The np table's 101 values are therefore laid down 1%
+too far apart: value 100, which the data places at `_eMinTable*e^0.99`, is read at
+`_eMinTable*e^0.9999`.
+
+`G4XnpElasticLowE` and `G4XnpTotalLowE` do the same thing - their first `_eMin` assignment is
+dead, overwritten one line later by the shifted one - so every np cross section the binary
+cascade evaluates comes off the stretched grid and every pp one off the correct grid. The two
+tables are the same physics measured the same way; only the placement differs.
+
+How much it is worth, measured: putting the np vector on the pp grid moves the np elastic cross
+section by up to **4.93 relative** (`tests/test_bic_imr.cu`, pn at sqrt(s) = 1897.6 MeV, where
+the table is falling from 1500 mb to 248 mb over one log step and a 1% shift in energy is a
+factor of five in sigma). Near the minimum, at 2.5 GeV, the same shift is worth 0.3%.
+
+Reproduced as written in `src/physics/hadronic/bic/im_r/xsec_nn.cuh`, with the two `Emin`
+helpers named `lowe_emin_pp` and `lowe_emin_np` so that the asymmetry is visible in the call
+rather than hidden in a constant, and `tools/extract_bic_imr.pl` pins `_eMinTable` and
+`_eStepLog` in all three source files.
+
+### V92: four cross-section tables have a 102nd node holding zero, and one energy grid is short by one
+
+`G4PhysicsLogVector(Emin, Emax, Nbin)` sets `numberOfNodes = Nbin + 1` and zero-fills
+`dataVector`. All four im_r_matrix low-energy tables pass `tableSize = 101` as `Nbin` and then
+call `PutValue` 101 times, for indices 0 to 100 - so `dataVector[101]` stays **zero** and the
+last interpolation interval runs from the last tabulated cross section down to nothing over the
+top 1% of the vector's range. At `sqrtS == edgeMax` exactly, `Value()` returns 0.
+
+`G4XNNTotalLowE` has the same shape in a different container: `ss[29]` is declared with 29 slots
+and initialised with 28 energies, so `ss[28]` is zero, and the constructor's
+`for (i=0; i<29; i++)` pushes a 29th (energy, sigma) pair at **sqrt(s) = 0** carrying the last
+cross section. `G4LowEXsection::CrossSection` takes logs of both members of the pair it
+interpolates between, so reaching that pair would evaluate `log(0)`; and the loop that finds the
+pair leaves its iterator on `end()-1` for an argument past the last energy, after which `*(it+1)`
+reads one past the end of the vector.
+
+None of this is reachable in QBBC. `G4XNNTotalLowE::IsValid` is `e > 0 && e < 3*GeV` and
+`G4XNNElasticLowE`'s is `InLimits(e, 0, 3*GeV)`, while `edgeMax` is 5.21 GeV and the 29th pair
+needs 3002.71 MeV; the `G4CrossSectionPatch` above them hands everything past 3 GeV to
+`G4XPDGTotal` or to the transition blend. So the zeros sit one validity check away from being
+read, and what keeps them unread is a property of the COMPOSITION and not of the classes.
+
+The port reproduces the zero node (`LogVec101::node_value` returns 0 past index 100, scaled by
+millibarn like every other node) and the zero 29th energy, and refuses the out-of-bounds read
+rather than performing it: `lowe_xsection` stops at the last complete pair and sets a flag, because
+a kernel that reads past an array does not throw, it returns a number. `tests/test_bic_imr.cu`
+asserts `ss[28] == 0` and `ss[27] == 3002.71`, so a release that fills the slot fails the
+extractor's count check first and this second.

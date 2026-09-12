@@ -904,6 +904,11 @@ docs/RISK.md V66.
 
 #### 2.1.10 binary_cascade - the nucleus model, the fields, the propagator and both entry points (P9)
 
+**P9b has started on the cascade.** The cross sections and the angular distributions its channels
+sample from are in and bitwise; `Propagate`, the collision channels above them, `G4Scatterer` and
+the resonance tables are not, and the two refusals below still stand. The paragraph P9 wrote is
+kept as it was written, because what it says about the ion arm above 50 MeV/nucleon is still true.
+
 **The number to read first: `G4BinaryCascade`'s cascade proper is NOT here.** Everything below is
 the machinery the two binary models are built on, plus the two branches of them that reach a
 compound nucleus without a cascade. What is missing is `Propagate` and the whole `im_r_matrix`
@@ -934,7 +939,10 @@ in three places.
 | G4RKPropagation (`Init`, `Transport`, `FieldTransport`, `FreeTransport`, both `GetSphereIntersectionTimes`), G4KM_NucleonEqRhs, G4KM_OpticalEqRhs, and the field machinery they drive - G4ClassicalRK4, G4MagErrorStepper, G4MagInt_Driver (`AccurateAdvance`, `OneGoodStep`, `QuickAdvance`, `ComputeNewStepSize`) | y | **P** | `bic/rk_propagation.cuh`; 11 initial states x 5 nuclei x 12 steps = 7,260 position and momentum comparisons at 2.8e-13, 660 cascade states exact, and the per-step momentum transfer at 1.3e-11 MeV absolute. The exit test's short circuit is load-bearing - hoisting the intersection call out of the `||` moves the C12 neutron 2.807 relative in x. The position-error tolerance compares a time to a length and is never binding: V71. `QuickAdvance` is reached on 17 of the 55 trajectories. **Refused by name:** `G4RKFieldIntegrator`, `G4Absorber`, and the spin terms, which are dead for `nvar = 6` |
 | **G4BinaryCascade::ApplyYourself**, the `theBCminP` branch | y | **P** | `bic/binary_cascade.cuh`, entry point `bic::apply_yourself()`. A nucleon below 45 MeV never enters the cascade: the whole reaction is `G4PreCompoundModel::ApplyYourself`, which is P6's. 18 cases of {p, n} on {C, O, Al, Fe, Pb} at 5-46 MeV x 5,000 events: compound (Z, A) exact, energy balance 2e-10 MeV/event, species yields worst 3.44 sigma. The 44/46 MeV pair straddles the threshold and the REFUSAL at 46 is asserted against what Geant4 did instead. **Refused by name:** the cascade proper, every pion at every energy (the species test is an `&&`), any projectile that is not a nucleon or a charged pion, and the per-secondary creator model id, which P3's product does not carry |
 | **G4BinaryLightIonReaction::ApplyYourself**, the fusion arm | y | **P** | `bic/light_ion_reaction.cuh`, entry point `bic::blir_apply_yourself()`, with `SetLighterAsProjectile`, `FuseNucleiAndPrompound` and `EnergyAndMomentumCorrector`. 20 cases of {d, alpha, C12} on {C, O, Al, Fe, Pb, H} at 1-45 MeV/nucleon x 5,000 events: the fusion gate's verdict exact in all 20 including the one that returns the primary ALIVE (alpha on H at 1 MeV/nucleon - Li5 is unbound), compound (Z, A) exact in 100,000 events, energy balance 2e-10 MeV/event, species yields 3.01 sigma and kinetic energies 3.19. The rotate-to-lab block is the identity and is not carried: V75. **Refused by name:** `Interact` and everything under it, and with it every ion at or above 50 MeV/nucleon; `GetProjectileExcitation`, `SortResult` and `DeExciteSpectatorNucleus`, whose arithmetic is recorded in comments and runs nowhere |
-| The `im_r_matrix` collision tree: G4Scatterer, G4CollisionManager, every `G4Collision*` and `G4X*`, G4AngularDistribution and its tables, G4ResonanceNames, G4ResonanceWidth, G4PartialWidthTable, G4BaryonWidth, G4BaryonPartialWidth | y | **-** | not ported. This is the cascade, and it is what P9 did not reach |
+| The `im_r_matrix` collision tree: G4Scatterer, G4CollisionManager, every `G4Collision*` and `G4X*`, G4AngularDistribution and its tables, G4ResonanceNames, G4ResonanceWidth, G4PartialWidthTable, G4BaryonWidth, G4BaryonPartialWidth | y | **P** | **partly, P9b - see the rows below.** The cross sections and the angular distributions are in; the collision channels, the resonance tables, `G4Scatterer` and `G4CollisionManager` are not |
+| **G4XNNTotal, G4XnpTotal, G4XNNElastic, G4XnpElastic** and every arm under them - G4XNNTotalLowE, G4XnpTotalLowE, G4XNNElasticLowE, G4XnpElasticLowE, G4XPDGTotal, G4XPDGElastic - with G4CrossSectionPatch, G4CrossSectionComposite, G4LowEXsection, G4VCrossSectionSource::FindKeyParticle and the G4PhysicsLogVector shape the four tables are poured into (P9b) | y | **V** | `bic/im_r/xsec_nn.cuh`. 6,280 points: ten sources x four nucleon pairs x 157 values of sqrt(s), including both sides of both patch boundaries at one part in 1e9. **Bitwise**, all of them. The np grid is stretched by 1% and the pp grid is not: docs/RISK.md V91. Four tables carry a zero 102nd node and one energy grid is short by one: V92. **Refused by name:** the kaon, antinucleon and gamma rows of the two PDG fits, which no channel `G4Scatterer` registers can reach; `G4XpnTotal` and `G4XpnElastic`, which nothing in 11.1.1 includes; `G4CollisionPN`, which `G4Scatterer.cc` includes and never registers |
+| **G4AngularDistributionNP, G4AngularDistributionPP** and their float tables, **G4AngularDistribution** (the one-boson-exchange formula, `DifferentialCrossSection`, `Cross`, `CosTheta` in both symmetric and asymmetric forms) and `Phi` (P9b) | y | **V** | `bic/im_r/angular.cuh`, tables by `tools/extract_bic_imr.pl` into `im_r/imr_tables.hh`. **Bitwise** on 43,244 points, driven by a prescribed uniform on both sides: 31,044 of them sweep 199 values of the sample across every one of the 39 and 40 tabulated energies and the midpoints between them, so the bisection walks the whole cumulative. The narrower eight-phase set was MEASURED not to be enough - one table entry moved by 1e-5 changed none of its 1,600 angles and 75 of the sweep's. The tables are `G4float` and that is load-bearing: one float ulp in one of 7,020 entries moves a cosine by 7.5e-5. **Refused by name:** `pcm`, `dsigmax` and `sigtot`, appended to both data files and read by nothing; `NENERGYC`, a leftover of the pre-2010 22-energy shape |
+| G4Scatterer (`GetTimeToInteraction`, `Scatter`, `GetCollisions`, `GetCrossSection`, `FindCollision`), G4CollisionManager, G4CollisionInitialState, every `G4Collision*` and `G4Concrete*` channel, G4VElasticCollision, G4VScatteringCollision, the `G4X*Table` resonance tables, G4ResonanceNames, G4BaryonWidth, G4BaryonPartialWidth, G4PartialWidthTable, G4DetailedBalancePhaseSpaceIntegral | y | **-** | not ported |
 | G4BCDecay, G4BCLateParticle, G4BCAction, G4RKFieldIntegrator, G4Absorber, G4MesonAbsorption | y | **-** | not ported; they are reached only from `Propagate` |
 
 Constants no run can be asked for - `theBCminP`, the four `theCutOnP` assignments and the mass
@@ -944,15 +952,20 @@ checked by `tools/extract_bic_constants.pl`, which asserts the Geant4 SOURCE sti
 them. 93 checks. A test that compared the port's copy against a literal in the test would be
 comparing a copy with itself, which is docs/RISK.md V52; this is V41's form instead.
 
-Tests: `test_bic_nucleus.cu` (8.6 s) and `test_bic_apply.cu` (11 s). Device probes, never
+Tests: `test_bic_nucleus.cu` (8.6 s), `test_bic_apply.cu` (11 s) and `test_bic_imr.cu` (P9b, 0.5 s;
+49,684 comparisons, every one bitwise). Device probes, never
 launched, `-arch=sm_86`: `bic_nucleus_probe` 82 registers / 168 bytes stack, `bic_rk_probe` 156 /
-720, `bic_apply_probe` 255 / 10,080, `bic_blir_probe` 255 / 10,112. The last two are P6's
-`preco::deexcite` inlined whole - it alone reports 10,812 bytes of spill stores - and are the
-first time the full de-excitation chain has been compiled for a device.
+720, `bic_apply_probe` 255 / 10,080, `bic_blir_probe` 255 / 10,112, `bic_imr_probe` 122 / 48 with
+no spills. The two at 255 are P6's `preco::deexcite` inlined whole - it alone reports 10,812 bytes
+of spill stores - and are the first time the full de-excitation chain has been compiled for a
+device. The cross sections and the angular distributions cost almost nothing beside it: the whole
+im_r_matrix arithmetic in one kernel is 48 bytes of frame, because the tables are `static const`
+arrays in constant/global memory and nothing is copied into a local.
 
 One finding here belongs to P3 and is filed where P9's oracle found it: `G4PhotonEvaporation`
 creates one electron rest mass out of nothing per conversion electron, 511 keV, because the
 atomic binding energy that should pay for it is a local initialised to zero. docs/RISK.md V76.
+
 #### 2.1.11 FTFP: the tuned parameters and the Lund string fragmentation (P11, first half)
 
 The bottom half of QBBC's FTFP arm: `G4FTFParameters`, which is a large table of tuned constants
