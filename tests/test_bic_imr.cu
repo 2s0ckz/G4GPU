@@ -51,6 +51,10 @@
 //                        4 GeV and coarse to 61 GeV - the coarse arm because the class searches
 //                        `ie < 119` and above 48.109 GeV extrapolates rather than clamps, which a
 //                        grid stopping at 4 GeV cannot see.
+//   bic_imr_clebsch      G4Pow::logfactorial, G4Clebsch::TriangleCoeff, ClebschGordanCoeff,
+//                        ClebschGordan and Weight over the whole (2J1, 2M1, 2J2, 2M2, 2J) box,
+//                        with the M values two units past their J so the guards that reject them
+//                        are exercised. 39,291 points.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -67,6 +71,7 @@
 #include <vector>
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
+#include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_tables.cuh"
 #include "physics/hadronic/bic/im_r/scatterer.cuh"
@@ -707,6 +712,75 @@ int main() {
       cmp_scaled(b_dbi, imr::dbi_phase_space_integral(column, sqrt_s), dv(r, 2), 1e-9,
                  nm + " sqrt(s)=" + std::to_string(sqrt_s));
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3e. G4Clebsch - the isospin bookkeeping every resonance cross section is scaled by - and
+  //     G4Pow's log-factorial table underneath it.
+  //
+  //     The M values in the sweep run two units PAST their J on purpose: the two guard `if`s at
+  //     the top of ClebschGordanCoeff are what reject those, and a port that dropped either
+  //     would return a number where Geant4 returns zero. 39,291 points.
+  // -------------------------------------------------------------------------------------------
+  const int b_logfact = new_bucket("LogFactorialTable", 1e-15);
+  const int b_tri = new_bucket("ClebschTriangleCoeff", 1e-15);
+  const int b_cgc = new_bucket("ClebschGordanCoeff", 1e-14);
+  const int b_cg = new_bucket("ClebschGordan (the square)", 1e-14);
+  const int b_wgt = new_bucket("ClebschWeight", 1e-14);
+  long long clebsch_range_hits = 0;
+  {
+    const auto rows = read_csv("bic_imr_clebsch.csv");
+    for (const auto& r : rows) {
+      const std::string kind = sv(r, 0);
+      const int j1 = iv(r, 1), m1 = iv(r, 2), j2 = iv(r, 3), m2 = iv(r, 4);
+      const int j3 = iv(r, 5), j4 = iv(r, 6);
+      const double want = dv(r, 7);
+      imr::ClebschRefusal cref;
+      const std::string where = kind + "(" + sv(r, 1) + "," + sv(r, 2) + "," + sv(r, 3) + "," +
+                                sv(r, 4) + "," + sv(r, 5) + "," + sv(r, 6) + ")";
+      if (kind == "logfact") {
+        cmp_scaled(b_logfact, imr::log_factorial(j1), want, 1e-12, where);
+      } else if (kind == "triangle") {
+        cmp_scaled(b_tri, imr::clebsch_triangle_coeff(j1, j2, j3), want, 1e-12, where);
+      } else if (kind == "coeff") {
+        // The coefficient crosses zero and is of order 1, so the floor is 1e-12 - below the
+        // smallest non-zero value any of these take and far above the rounding of a sum of
+        // exponentials.
+        cmp_scaled(b_cgc, imr::clebsch_gordan_coeff(j1, m1, j2, m2, j3, cref), want, 1e-12,
+                   where);
+      } else if (kind == "cg") {
+        cmp_scaled(b_cg, imr::clebsch_gordan(j1, m1, j2, m2, j3, cref), want, 1e-12, where);
+      } else if (kind == "weight") {
+        cmp_scaled(b_wgt, imr::clebsch_weight(j1, m1, j2, m2, j3, j4, cref), want, 1e-12, where);
+      }
+      if (cref.coefficient_range) { ++clebsch_range_hits; }
+    }
+  }
+  {
+    const int b_guard = new_bucket("ClebschDeadGuards", 0.0);
+    // ClebschGordanCoeff's three `JustWarning; return 0` exits - kMin < 0, kMax < kMin and
+    // kMax >= 512 - are UNREACHABLE, and this is the assertion that says so. Geant4 agrees from
+    // the other side: the same 18,225-point sweep raised zero G4Exceptions in the oracle run,
+    // which was measured by installing a handler that counted them (it counted zero, and then
+    // crashed the run for an unrelated reason - see ref/dump/dump_bic.cc).
+    //
+    // The reason is structural: kMin is max(0, -sum2, -sum4) and kMax is min(sum1, sum3, sum5),
+    // and once the two M checks and the triangle inequality have passed, the Racah bounds
+    // guarantee kMax >= kMin. kMin < 0 cannot happen at all - it starts at 0 and only grows. So
+    // the guards cost three comparisons per call and catch nothing, and asserting ZERO hits is
+    // what would break if the port's bounds arithmetic were wrong in either direction.
+    cmp_int(b_guard, clebsch_range_hits, 0, "no ClebschGordanCoeff range guard is ever reached");
+
+    // GenerateIso3's two answerable branches, and the refusal of the third.
+    imr::ClebschRefusal cref2;
+    const imr::Iso3Pair p = imr::clebsch_generate_iso3(1, 1, 1, -1, 3, 3, cref2);
+    cmp_int(b_guard, cref2.generate_iso3 ? 1 : 0, 1, "GenerateIso3 refuses its sampling branch");
+    cmp_int(b_guard, p.valid ? 1 : 0, 0, "and returns nothing");
+    imr::ClebschRefusal cref3;
+    const imr::Iso3Pair q = imr::clebsch_generate_iso3(1, 1, 1, -1, 0, 3, cref3);
+    cmp_int(b_guard, (cref3.generate_iso3 || !q.valid) ? 1 : 0, 0,
+            "but answers when an outgoing isospin is zero");
+    cmp_int(b_guard, static_cast<long long>(q.m2), 0, "with m2 = twoM1 + twoM2");
   }
 
   // -------------------------------------------------------------------------------------------

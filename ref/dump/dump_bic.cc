@@ -66,6 +66,7 @@
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
+#include "G4Clebsch.hh"
 #include "G4DetailedBalancePhaseSpaceIntegral.hh"
 #include "G4Deuteron.hh"
 #include "G4DynamicParticle.hh"
@@ -87,6 +88,7 @@
 #include "G4Nucleus.hh"
 #include "G4PhysicsModelCatalog.hh"
 #include "G4PionMinus.hh"
+#include "G4Pow.hh"
 #include "G4PionPlus.hh"
 #include "G4PionZero.hh"
 #include "G4PreCompoundModel.hh"
@@ -1413,6 +1415,77 @@ void write_imr_resonance() {
   std::fclose(g);
 }
 
+/// G4Clebsch over every isospin combination the binary cascade's channels can form, and G4Pow's
+/// log-factorial table that they are all built on.
+///
+/// The ranges are chosen from what the resonance channels actually pass:
+/// `G4VXResonance::IsospinCorrection` calls `Weight(isoIn1, iso3In1, isoIn2, iso3In2, isoOut1,
+/// isoOut2)` with isospins of 1 (nucleon), 2 (pion) and 3 (Delta), and `ClebschGordan` is reached
+/// with total isospins up to their sum. The sweep goes past that on both sides so that a
+/// transcription which is right on the used set and wrong just outside it is still caught.
+///
+/// The sweep raises NO G4Exception at all, which was measured rather than assumed: an earlier
+/// version of this dump installed a handler to swallow the JustWarning banners the rejected
+/// combinations were expected to print, and the handler counted zero. It also crashed the whole
+/// oracle run, because `G4VExceptionHandler`'s constructor installs itself into the state
+/// manager - so the "previous handler" read after constructing it IS it, restoring that put the
+/// doomed object back, and the `delete` left the state manager holding freed memory for the next
+/// module's first warning to dereference. Every bic CSV was written correctly and the program
+/// died between the last fclose and the registry's "wrote" line, with exit code 1 and no message.
+/// The handler is gone; this note is what is left of it.
+void write_imr_clebsch() {
+  FILE* f = std::fopen("bic_imr_clebsch.csv", "w");
+  std::fprintf(f, "kind,j1,m1,j2,m2,j3,j4,value\n");
+
+
+  // logfactorial itself, which everything else is differences of.
+  for (int z = 0; z < 512; ++z) {
+    std::fprintf(f, "logfact,%d,0,0,0,0,0,%.17g\n", z, G4Pow::GetInstance()->logfactorial(z));
+  }
+  // TriangleCoeff over every triad up to 2J = 8.
+  for (int a = 0; a <= 8; ++a) {
+    for (int b = 0; b <= 8; ++b) {
+      for (int c = 0; c <= 8; ++c) {
+        std::fprintf(f, "triangle,%d,0,%d,0,%d,0,%.17g\n", a, b, c,
+                     G4Clebsch::TriangleCoeff(a, b, c));
+      }
+    }
+  }
+  // The coefficient and its square, over the whole (2J1, 2M1, 2J2, 2M2, 2J) box. The M values
+  // run past their J on purpose: the first two `if`s in ClebschGordanCoeff are what reject them
+  // and a port that dropped either would return a number where Geant4 returns zero.
+  for (int j1 = 0; j1 <= 4; ++j1) {
+    for (int m1 = -j1 - 2; m1 <= j1 + 2; ++m1) {
+      for (int j2 = 0; j2 <= 4; ++j2) {
+        for (int m2 = -j2 - 2; m2 <= j2 + 2; ++m2) {
+          for (int j = 0; j <= 8; ++j) {
+            std::fprintf(f, "coeff,%d,%d,%d,%d,%d,0,%.17g\n", j1, m1, j2, m2, j,
+                         G4Clebsch::ClebschGordanCoeff(j1, m1, j2, m2, j));
+            std::fprintf(f, "cg,%d,%d,%d,%d,%d,0,%.17g\n", j1, m1, j2, m2, j,
+                         G4Clebsch::ClebschGordan(j1, m1, j2, m2, j));
+          }
+        }
+      }
+    }
+  }
+  // Weight, over the same box with both outgoing isospins.
+  for (int j1 = 0; j1 <= 3; ++j1) {
+    for (int m1 = -j1; m1 <= j1; m1 += 2) {
+      for (int j2 = 0; j2 <= 3; ++j2) {
+        for (int m2 = -j2; m2 <= j2; m2 += 2) {
+          for (int o1 = 0; o1 <= 3; ++o1) {
+            for (int o2 = 0; o2 <= 3; ++o2) {
+              std::fprintf(f, "weight,%d,%d,%d,%d,%d,%d,%.17g\n", j1, m1, j2, m2, o1, o2,
+                           G4Clebsch::Weight(j1, m1, j2, m2, o1, o2));
+            }
+          }
+        }
+      }
+    }
+  }
+  std::fclose(f);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1428,6 +1501,7 @@ void dump_bic(const DumpContext&) {
   write_imr_collision();
   write_imr_scatterer();
   write_imr_resonance();
+  write_imr_clebsch();
 }
 
 }  // namespace
@@ -1440,5 +1514,5 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv "
                     "bic_imr_collision.csv bic_imr_elastic_fs.csv "
                     "bic_imr_scatterer.csv bic_imr_manager.csv "
-                    "bic_imr_restab.csv bic_imr_dbi.csv",
+                    "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv",
                     dump_bic);
