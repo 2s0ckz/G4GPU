@@ -8453,3 +8453,60 @@ Two smaller facts measured in the same pass, both of them dead code rather than 
   * `Weight` raises both ends of its isospin range to `|M|`, and it cannot matter: `ClebschGordan`
     already returns zero for `|twoM| > twoJ`, so the floor only removes zero terms. Removing it
     changes none of the 1,600 weights.
+
+### V107: the binary cascade's pion-nucleon ELASTIC cross section is exactly zero everywhere it runs
+
+QBBC registers `G4BinaryCascade` for pi+ and pi- from 0 to 1.5 GeV, and
+`G4BinaryCascade::ApplyYourself`'s species test is an `&&`, so a pion enters the cascade at every
+energy (docs/PORTED.md 2.1.10). Inside it, `G4Scatterer`'s second channel is
+`G4CollisionMesonBaryon`, a composite of `G4CollisionMesonBaryonToResonance` and
+`G4CollisionMesonBaryonElastic`. The elastic one contributes **nothing at all** over that window,
+and the reason is three classes deep.
+
+`G4CollisionMesonBaryonElastic`'s cross section is `G4XMesonBaryonElastic`, which does not use its
+own tracks' identities: it builds a dummy pi+ and a dummy proton carrying the REAL four-momenta,
+evaluates `G4XPDGElastic` on that pair, and scales by a ratio of two AQM cross sections. So the
+answer is the PDG pi+p elastic fit read at a `pLab` built from the real kinematics and the pi+ and
+proton PDG masses - and that fit's first parameter is
+
+    const G4double G4XPDGElastic::pPiPlusPDGFit[7] = { 2., 200., 0., 11.4, -0.4, 0.079, 0. };
+
+with `if (pLab < pMinFit) return 0.0;` and `pMinFit = 2 GeV`. A pion on a nucleon at rest reaches
+`pLab = 2 GeV` only at a pion kinetic energy of **1870 MeV**, which is past the 1.5 GeV where QBBC
+stops handing pions to BIC at all.
+
+Measured on the 900 in-charge configurations `tests/test_bic_imr.cu` compares: every one of the
+600 pion-NUCLEON rows is exactly zero, from 20 MeV to 1500 MeV of pion kinetic energy, with the
+target at rest and with the target carrying its own Fermi-scale momentum. The only non-zero rows -
+113 of them - are the pairs where the baryon is a RESONANCE: a pi+ on a Delta(1232) turns on at
+sqrt(s) = 2166 MeV and a pi- on an N(1440) earlier still, because the heavier baryon raises
+sqrt(s) at the same kinetic energy and the dummy `pLab`, which is built with the PROTON mass, goes
+past 2 GeV.
+
+So every pion-nucleon collision the binary cascade performs goes through
+`G4CollisionMesonBaryonToResonance` - Delta and N* production - and the elastic half exists only
+for a pion that finds a resonance still alive. That is worth knowing before anyone reads a
+pion-induced spectrum out of this model, and it is also why the composite's total cannot be
+approximated by its elastic partial: at 300 MeV the Delta dominates and the elastic partial is 0.
+
+Two smaller facts from the same three classes, both reproduced:
+
+  * **`G4XAqmTotal`'s strangeness ratio is an integer division.** `G4int sTrk1`, `G4int qTrk1`,
+    `G4double sRatio1 = sTrk1 / qTrk1;` - so a Lambda (one strange quark, two light) gets 0 where
+    the physical ratio is 0.5 and the `(1 - 0.4*sRatio)` suppression is skipped. Only a particle
+    with at least as many strange quarks as light ones gets a non-zero ratio. Nothing this cascade
+    reaches is strange, so it cannot bite here.
+  * **`G4XAqmElastic` raises an area to the power 1.5.** `0.39 * powA(sigmaTot, 1.5)` with
+    `sigmaTot` about 2.7e-24 mm^2 gives 1.7e-36, and the `if (sigma > sigmaTot) throw` that
+    follows can therefore never fire - asserted, over all 2,100 points. The number is meaningless
+    alone and is only ever used as a ratio, where the units and the 0.39 cancel. MEASURED: that
+    ratio is exactly 1 for every species pair this channel accepts, because every meson here is a
+    pion and every baryon a nucleon or a non-strange resonance, so forcing the factor to 1 changes
+    none of the 900 cross sections. It is still computed, because a release that gave BIC a kaon
+    would make it stop being 1.
+
+**And the kaon and hyperon channels are not reachable because they are commented out.**
+`G4CollisionMesonBaryonToResonance`'s constructor carries 11 Lambda and 7 Sigma
+`G4ConcreteMesonBaryonToResonance` channels inside a `/* ... */` block in 11.1.1. The brief's
+question - whether QBBC's species set reaches the kaon and hyperon channels - has the answer that
+nothing does, because the code that would is not compiled.

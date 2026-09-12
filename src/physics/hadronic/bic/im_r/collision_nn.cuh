@@ -188,9 +188,16 @@ struct ElasticFinalState {
 ///   * between `cosTheta` and `phi` sits a block of nested `if`s over the species with EMPTY
 ///     bodies - `if (trk1.GetDefinition() == G4Proton::Proton()) { } else { }` - left over from a
 ///     debug printout. It consumes no randoms and changes nothing, and is not carried.
+/// Which angular distribution a `G4VElasticCollision` subclass was constructed with. Three
+/// subclasses reach this function and each passes a different one: `G4CollisionnpElastic` the NP
+/// table, `G4CollisionNNElastic` the PP table, and `G4CollisionMesonBaryonElastic`
+/// `G4AngularDistribution(false)` - the one-boson-exchange formula in its ASYMMETRIC branch,
+/// which is the only place in the binary cascade that branch is live.
+enum ElasticAngular : int { kAngularNp = 0, kAngularPp = 1, kAngularObeAsym = 2 };
+
 template <typename Rng>
 __host__ __device__ inline ElasticFinalState elastic_final_state(
-    bool use_np_distribution, const LorentzVector& p1_in, const LorentzVector& p2_in,
+    ElasticAngular which_angular, const LorentzVector& p1_in, const LorentzVector& p2_in,
     double actual1, double actual2, double m10, double m20, Rng& rng, AngularRefusal& ref) {
   ElasticFinalState out;
   const LorentzVector pcm = p1_in + p2_in;
@@ -206,9 +213,17 @@ __host__ __device__ inline ElasticFinalState elastic_final_state(
     out.empty = true;
     return out;
   }
-  const double cos_theta = use_np_distribution
-                               ? angular_np_cos_theta(S, actual1, actual2, rng, ref)
-                               : angular_pp_cos_theta(S, actual1, actual2, rng, ref);
+  // The OBE branch builds its forty constants on every call, exactly as `G4VScatteringCollision`
+  // constructs a fresh `G4AngularDistribution(true)` per object and `G4CollisionMesonBaryonElastic`
+  // one `G4AngularDistribution(false)` per object - the constants are a function of nine fixed
+  // numbers, so a cached copy and a rebuilt one are the same doubles.
+  const double cos_theta =
+      (which_angular == kAngularNp)
+          ? angular_np_cos_theta(S, actual1, actual2, rng, ref)
+          : ((which_angular == kAngularPp)
+                 ? angular_pp_cos_theta(S, actual1, actual2, rng, ref)
+                 : angular_obe_cos_theta(angular_obe_constants(), false, S, actual1, actual2,
+                                         rng, ref));
   const double phi = angular_phi(rng);
   const double theta = std::acos(cos_theta);
   Vec3d p_final1{std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), cos_theta};

@@ -55,6 +55,13 @@
 //                        ClebschGordan and Weight over the whole (2J1, 2M1, 2J2, 2M2, 2J) box,
 //                        with the M values two units past their J so the guards that reject them
 //                        are exercised. 39,291 points.
+//   bic_imr_meson        the meson-baryon ELASTIC channel - G4XAqmTotal, G4XAqmElastic,
+//                        G4XMesonBaryonElastic and G4CollisionMesonBaryonElastic - over pion-
+//                        nucleon AND pion-resonance pairs, plus a nucleon pair the parton-count
+//                        test must reject. The cross section is zero for every pion-nucleon row:
+//                        docs/RISK.md V107.
+//   bic_imr_meson_fs     the same channel's FinalState, 8 phases per point. The only place in the
+//                        cascade where the one-boson-exchange formula's asymmetric branch runs.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -72,6 +79,7 @@
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
+#include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_tables.cuh"
 #include "physics/hadronic/bic/im_r/scatterer.cuh"
@@ -514,7 +522,8 @@ int main() {
       imr::AngularRefusal aref;
       const bool is_np = imr::np_elastic_is_in_charge(q.pdg1, q.pdg2);
       const imr::ElasticFinalState fs = imr::elastic_final_state(
-          is_np, q.p1, q.p2, q.actual1, q.actual2, q.m1, q.m2, rng, aref);
+          is_np ? imr::kAngularNp : imr::kAngularPp, q.p1, q.p2, q.actual1, q.actual2, q.m1,
+          q.m2, rng, aref);
       const std::string where = pair + " off=" + sv(r, 1) + " tilt=" + sv(r, 2) + " sqrt(s)=" +
                                 std::to_string(dv(r, 3)) + " phase=" + std::to_string(phase);
       cmp_int(b_fsempty, fs.empty ? 1 : 0, want_empty, where);
@@ -781,6 +790,107 @@ int main() {
     cmp_int(b_guard, (cref3.generate_iso3 || !q.valid) ? 1 : 0, 0,
             "but answers when an outgoing isospin is zero");
     cmp_int(b_guard, static_cast<long long>(q.m2), 0, "with m2 = twoM1 + twoM2");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3f. The meson-baryon ELASTIC channel - the first one in this package a pion reaches.
+  //     G4XAqmTotal, G4XAqmElastic, G4XMesonBaryonElastic, and G4CollisionMesonBaryonElastic's
+  //     IsInCharge, CrossSection and FinalState.
+  //
+  //     The pairs include a pion on a Delta(1232) and on an N(1440), because the channel's
+  //     IsInCharge is by PARTON COUNT and accepts them - and they turn out to be the only pairs
+  //     for which the cross section is not identically zero. docs/RISK.md V107.
+  // -------------------------------------------------------------------------------------------
+  const int b_mincharge = new_bucket("MesonBaryonIsInCharge", 0.0);
+  const int b_aqm = new_bucket("AqmCrossSections", 1e-15);
+  const int b_mbx = new_bucket("MesonBaryonElasticCrossSection", 1e-15);
+  const int b_mbzero = new_bucket("MesonBaryonElasticIsZeroBelow2GeVpLab", 0.0);
+  const int b_mbfs = new_bucket("MesonBaryonElasticFinalState", 5e-15);
+  const int b_mbdraws = new_bucket("MesonBaryonElasticDraws", 0.0);
+  {
+    const double m_pip = 139.5701;
+    const auto rows = read_csv("bic_imr_meson.csv");
+    for (const auto& r : rows) {
+      const int pdg1 = iv(r, 1);
+      const int pdg2 = iv(r, 2);
+      const double m1 = dv(r, 3);
+      const double m2 = dv(r, 4);
+      const imr::LorentzVector p1v(deex::Vec3d{dv(r, 6), dv(r, 7), dv(r, 8)}, dv(r, 9));
+      const imr::LorentzVector p2v(deex::Vec3d{dv(r, 10), dv(r, 11), dv(r, 12)}, dv(r, 13));
+      const std::string where = sv(r, 0) + " sqrt(s)=" + std::to_string(dv(r, 5));
+      imr::XsecRefusal xref;
+      const bool in_charge = imr::meson_baryon_elastic_is_in_charge(pdg1, pdg2, xref);
+      cmp_int(b_mincharge, in_charge ? 1 : 0, iv(r, 14), where);
+
+      int nq1 = 0, ns1 = 0, nq2 = 0, ns2 = 0;
+      imr::XsecRefusal pref;
+      if (imr::parton_counts(pdg1, nq1, ns1, pref) &&
+          imr::parton_counts(pdg2, nq2, ns2, pref)) {
+        cmp_scaled(b_aqm, imr::x_aqm_total(nq1, ns1, nq2, ns2) / imr::millibarn(), dv(r, 15),
+                   1e-9, where + " aqm total");
+        bool exceeds = false;
+        cmp_scaled(b_aqm, imr::x_aqm_elastic(nq1, ns1, nq2, ns2, exceeds), dv(r, 16), 1e-40,
+                   where + " aqm elastic");
+        // The `if (sigma > sigmaTot) throw` in G4XAqmElastic can never fire - the elastic form
+        // raises an area in mm^2 to the power 1.5 and lands nine orders below the total.
+        cmp_int(b_mbzero, exceeds ? 1 : 0, 0, where + " aqm elastic never exceeds the total");
+      } else {
+        std::printf("REFUSED parton counts: %s\n", where.c_str());
+        ++fails;
+      }
+      if (!in_charge) { continue; }
+      const double got = imr::meson_baryon_elastic_cross_section(pdg1, pdg2, m1, m2, p1v, p2v,
+                                                                 m_pip, mp, xref);
+      cmp_scaled(b_mbx, got / imr::millibarn(), dv(r, 17), 1e-9, where);
+      // A pion on a NUCLEON is zero over the whole of QBBC's BIC window, and the assertion says
+      // so from the port's side as well as the oracle's: pLab never reaches the 2 GeV the pi+p
+      // PDG fit starts at. Only the two resonance pairs, whose larger sqrt(s) pushes the dummy
+      // pLab past it, are ever non-zero.
+      const bool baryon_is_nucleon = (pdg2 == 2212 || pdg2 == 2112 || pdg1 == 2212 ||
+                                      pdg1 == 2112);
+      if (baryon_is_nucleon) {
+        cmp_int(b_mbzero, (got == 0.0) ? 1 : 0, 1, where + " pion-nucleon elastic is zero");
+      }
+    }
+  }
+  {
+    const double m_pip = 139.5701;
+    const auto rows = read_csv("bic_imr_meson_fs.csv");
+    for (const auto& r : rows) {
+      const imr::LorentzVector p1v(deex::Vec3d{dv(r, 2), dv(r, 3), dv(r, 4)}, dv(r, 5));
+      const imr::LorentzVector p2v(deex::Vec3d{dv(r, 6), dv(r, 7), dv(r, 8)}, dv(r, 9));
+      const int phase = iv(r, 10);
+      const int want_empty = iv(r, 11);
+      // The two PDG masses are recovered from the corresponding cross-section row's pair name;
+      // here only the actual masses and the outgoing PDG masses are needed, and both come from
+      // the four-momenta and the pair.
+      const double a1 = std::sqrt(std::fabs(p1v.e * p1v.e - g4gpu::mag2(p1v.v)));
+      const double a2 = std::sqrt(std::fabs(p2v.e * p2v.e - g4gpu::mag2(p2v.v)));
+      // Every pair in this file is built on shell, so the actual masses ARE the PDG masses.
+      CycleRng rng;
+      rng.reset(phase);
+      imr::AngularRefusal aref;
+      const imr::ElasticFinalState fs =
+          imr::meson_baryon_elastic_final_state(p1v, p2v, a1, a2, a1, a2, rng, aref);
+      const std::string where =
+          sv(r, 0) + " sqrt(s)=" + std::to_string(dv(r, 1)) + " phase=" + std::to_string(phase);
+      cmp_int(b_mbdraws, fs.empty ? 1 : 0, want_empty, where + " empty");
+      cmp_int(b_mbdraws, rng.n, iv(r, 20), where + " draws");
+      if (want_empty != 0 || fs.empty) { continue; }
+      const double s1 = std::sqrt(dv(r, 12) * dv(r, 12) + dv(r, 13) * dv(r, 13) +
+                                  dv(r, 14) * dv(r, 14));
+      const double s2 = std::sqrt(dv(r, 16) * dv(r, 16) + dv(r, 17) * dv(r, 17) +
+                                  dv(r, 18) * dv(r, 18));
+      cmp_scaled(b_mbfs, fs.p1.v.x, dv(r, 12), s1, where + " p1x");
+      cmp_scaled(b_mbfs, fs.p1.v.y, dv(r, 13), s1, where + " p1y");
+      cmp_scaled(b_mbfs, fs.p1.v.z, dv(r, 14), s1, where + " p1z");
+      cmp_scaled(b_mbfs, fs.p1.e, dv(r, 15), s1, where + " p1e");
+      cmp_scaled(b_mbfs, fs.p2.v.x, dv(r, 16), s2, where + " p2x");
+      cmp_scaled(b_mbfs, fs.p2.v.y, dv(r, 17), s2, where + " p2y");
+      cmp_scaled(b_mbfs, fs.p2.v.z, dv(r, 18), s2, where + " p2z");
+      cmp_scaled(b_mbfs, fs.p2.e, dv(r, 19), s2, where + " p2e");
+      (void)m_pip;
+    }
   }
 
   // -------------------------------------------------------------------------------------------

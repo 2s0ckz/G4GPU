@@ -63,6 +63,7 @@
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4CollisionManager.hh"
+#include "G4CollisionMesonBaryonElastic.hh"
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
@@ -98,6 +99,8 @@
 #include "G4ShortLivedConstructor.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4VNuclearDensity.hh"
+#include "G4XAqmElastic.hh"
+#include "G4XAqmTotal.hh"
 #include "G4XDeltaDeltaTable.hh"
 #include "G4XDeltaDeltastarTable.hh"
 #include "G4XDeltaNstarTable.hh"
@@ -106,6 +109,7 @@
 #include "G4XNNElastic.hh"
 #include "G4XNNElasticLowE.hh"
 #include "G4XNNTotal.hh"
+#include "G4XMesonBaryonElastic.hh"
 #include "G4XNNstarTable.hh"
 #include "G4XNNTotalLowE.hh"
 #include "G4XPDGElastic.hh"
@@ -1486,6 +1490,110 @@ void write_imr_clebsch() {
   std::fclose(f);
 }
 
+/// The meson-baryon ELASTIC channel: G4XAqmTotal, G4XAqmElastic, G4XMesonBaryonElastic, and
+/// G4CollisionMesonBaryonElastic's IsInCharge, CrossSection and FinalState.
+///
+/// The pairs include a pion on a DELTA as well as on a nucleon, because
+/// `G4CollisionMesonBaryonElastic::IsInCharge` is by parton count and accepts one - it is the only
+/// way a short-lived particle is ever an incoming track in G4Scatterer's tree.
+void write_imr_meson() {
+  FILE* f = std::fopen("bic_imr_meson.csv", "w");
+  std::fprintf(f,
+               "pair,pdg1,pdg2,m1,m2,sqrt_s_MeV,in1x,in1y,in1z,in1e,in2x,in2y,in2z,in2e,"
+               "in_charge,aqm_total_mb,aqm_elastic,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_meson_fs.csv", "w");
+  std::fprintf(g,
+               "pair,sqrt_s_MeV,in1x,in1y,in1z,in1e,in2x,in2y,in2z,in2e,phase,empty,"
+               "p1x,p1y,p1z,p1e,p2x,p2y,p2z,p2e,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+
+  struct MPair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  std::vector<MPair> pairs;
+  pairs.push_back({"pip_p", G4PionPlus::PionPlusDefinition(), G4Proton::ProtonDefinition()});
+  pairs.push_back({"pim_p", G4PionMinus::PionMinusDefinition(), G4Proton::ProtonDefinition()});
+  pairs.push_back({"pi0_n", G4PionZero::PionZeroDefinition(), G4Neutron::NeutronDefinition()});
+  pairs.push_back({"p_pip", G4Proton::ProtonDefinition(), G4PionPlus::PionPlusDefinition()});
+  // A pion on a Delta(1232)+ and on an N(1440)+, which the parton-count test accepts and the
+  // to-resonance channel's generic-type test does not.
+  if (ptable->FindParticle(2214) != nullptr) {
+    pairs.push_back({"pip_delta", G4PionPlus::PionPlusDefinition(), ptable->FindParticle(2214)});
+  }
+  if (ptable->FindParticle(12112) != nullptr) {
+    pairs.push_back({"pim_n1440", G4PionMinus::PionMinusDefinition(),
+                     ptable->FindParticle(12112)});
+  }
+  // A nucleon pair, which the parton-count test must REJECT (3 and 3).
+  pairs.push_back({"p_n", G4Proton::ProtonDefinition(), G4Neutron::NeutronDefinition()});
+
+  G4XAqmTotal aqmTotal;
+  G4XAqmElastic aqmElastic;
+  G4XMesonBaryonElastic mbElastic;
+  G4CollisionMesonBaryonElastic mbChannel;
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(eng);
+
+  for (const MPair& pr : pairs) {
+    const double m1 = pr.a->GetPDGMass();
+    const double m2 = pr.b->GetPDGMass();
+    for (int tilt = 0; tilt < 2; ++tilt) {
+      for (double t = 20.0; t <= 1500.0; t += 20.0) {
+        // Particle 1 carrying kinetic energy t, particle 2 at rest or with its own momentum.
+        const double e1 = t + m1;
+        G4ThreeVector v1(0, 0, std::sqrt(e1 * e1 - m1 * m1));
+        G4LorentzVector q2(G4ThreeVector(0, 0, 0), m2);
+        if (tilt != 0) {
+          v1.rotateY(0.7);
+          v1.rotateZ(1.3);
+          const G4ThreeVector v2(31.0, -44.0, 19.0);
+          q2 = G4LorentzVector(v2, std::sqrt(v2.mag2() + m2 * m2));
+        }
+        const G4LorentzVector q1(v1, e1);
+        G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+        G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+        const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+        const bool inCharge = mbChannel.IsInCharge(t1, t2);
+        std::fprintf(f,
+                     "%s,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                     "%.17g,%d,%.17g,%.17g,%.17g\n",
+                     pr.name, pr.a->GetPDGEncoding(), pr.b->GetPDGEncoding(), m1, m2, s, q1.x(),
+                     q1.y(), q1.z(), q1.t(), q2.x(), q2.y(), q2.z(), q2.t(), inCharge ? 1 : 0,
+                     aqmTotal.CrossSection(t1, t2) / millibarn,
+                     aqmElastic.CrossSection(t1, t2),
+                     inCharge ? mbElastic.CrossSection(t1, t2) / millibarn : 0.0);
+        if (!inCharge) { continue; }
+        for (int phase = 0; phase < 8; ++phase) {
+          eng->reset(phase);
+          G4KineticTrackVector* fs = mbChannel.FinalState(t1, t2);
+          std::fprintf(g, "%s,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,",
+                       pr.name, s, q1.x(), q1.y(), q1.z(), q1.t(), q2.x(), q2.y(), q2.z(),
+                       q2.t(), phase);
+          if (fs == nullptr || fs->size() < 2) {
+            std::fprintf(g, "1,0,0,0,0,0,0,0,0,%d\n", eng->draws());
+          } else {
+            const G4LorentzVector a = (*fs)[0]->Get4Momentum();
+            const G4LorentzVector b = (*fs)[1]->Get4Momentum();
+            std::fprintf(g, "0,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", a.x(),
+                         a.y(), a.z(), a.t(), b.x(), b.y(), b.z(), b.t(), eng->draws());
+          }
+          if (fs != nullptr) {
+            for (auto* kt : *fs) { delete kt; }
+            delete fs;
+          }
+        }
+      }
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1502,6 +1610,7 @@ void dump_bic(const DumpContext&) {
   write_imr_scatterer();
   write_imr_resonance();
   write_imr_clebsch();
+  write_imr_meson();
 }
 
 }  // namespace
@@ -1514,5 +1623,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv "
                     "bic_imr_collision.csv bic_imr_elastic_fs.csv "
                     "bic_imr_scatterer.csv bic_imr_manager.csv "
-                    "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv",
+                    "bic_imr_restab.csv bic_imr_dbi.csv bic_imr_clebsch.csv "
+                    "bic_imr_meson.csv bic_imr_meson_fs.csv",
                     dump_bic);
