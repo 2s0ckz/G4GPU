@@ -1166,7 +1166,7 @@ it also cannot tell a difference in the model from a difference in what the two 
 growth at sqrt(10) says "real", not "physics".
 
 Device probe, never launched, `-arch=sm_86`: `ftf_apply_device_probe`, which instantiates the
-whole of `ftf::apply_yourself`, is **255 registers, an 880-byte stack frame and 0 bytes spilled**
+whole of `ftf::apply_yourself`, is **255 registers, an 864-byte stack frame and 0 bytes spilled**
 in the entry function; `ftf_scatter` compiled on its own spills 24 bytes of stores and 48 of
 loads, which the entry's own frame absorbs. 400 bytes cmem[0], 5,968 bytes cmem[2]. The
 hand-over into P6 is behind a `__noinline__` and costs a 0-byte frame, because it stops at

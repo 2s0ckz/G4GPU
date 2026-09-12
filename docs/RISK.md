@@ -8241,7 +8241,7 @@ at the boundary; it does not silently de-excite a rho.
 `bic::Nucleon` arrays (250 + 64 nucleons at 72 bytes), one shared `Nucleus3DScratch`, a
 565-slot splitable-hadron pool at 168 bytes each, 512 interactions at 32, 320 `ExcitedString`s
 at 184, and P11's 53,816-byte string-decay workspace. Every byte is behind a pointer and none of
-it is on the stack - the device probe is an 880-byte frame with nothing spilled - but it is one
+it is on the stack - the device probe is an 864-byte frame with nothing spilled - but it is one
 per TRACK IN FLIGHT, not one per string or per event.
 
 For scale: P11's string-decay workspace alone is 53,816 bytes and P9's nucleus 18 kB, so this is
