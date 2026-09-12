@@ -7856,3 +7856,112 @@ Two smaller things in the same six files, recorded here because they are the sam
   * `G4XNDeltastarTable.hh` says `// 40 is missing... @@@@@@@` beside `sigmaND1930`, and there is
     indeed no `sigmaND1940` column - `delta(1940)` exists as a particle and has no N Delta*
     production cross section. The extractor asserts the absence.
+
+---
+
+### V95: the second msc model was worth a fifth of the row, and the reference moved further than that
+
+V83's switch, flipped. `em::kWentzelLeptonMscWired` is `true`: `G4EmStandardPhysics::
+ConstructProcess` gives e+- a `G4UrbanMscModel` below `MscEnergyLimit()` = 100 MeV and a
+`G4WentzelVIModel` above it, and `step_lepton` now dispatches both. Nothing in the physics moved
+to make that possible - P14c had the model, the table and the dispatch written and oracled
+(V83) - and what held it off was the translation unit, exactly as V63/V65/V66 held
+`kUrbanIonMscWired` off for the ion. With P8e's split the whole engine compiles in **361.8 s**,
+seventeen units, first time, and `src/host/transport_run_lepton.cu` alone rebuilds in 149 s.
+
+#### The kernel, and it is 448 bytes
+
+`-Xptxas -v` on the shipped lepton unit, both instantiations, every column identical in each:
+
+| `run_step_lepton<double, _, StepTap<double>>` | stack frame | spill st/ld | registers | cmem[0] |
+|---|---|---|---|---|
+| `kWentzelLeptonMscWired` false | 3040 B | 96/56 | 255 | 1472 |
+| **true** | **3488 B** | **100/56** | 255 | 1472 |
+
+The four `__device__ __noinline__` wrappers V81 added are in the log as functions of their own -
+`wv_lepton_limit`, `wv_lepton_geom`, `wv_lepton_true`, `wv_lepton_scatter`, none of them holding
+a frame - which is why a second complete msc model costs a frame and not an explosion. The
+register count is at the 255 cap on both sides, as it has been since P8e.
+
+#### The gate cannot move, and does not, to the track-step
+
+B1's 6 MeV gamma gate at 2,000,000 events: **425.945 pGy +/- 0.867349, 1.17179 sigma,
+25,993,577 track-steps**, with the flag in EITHER position - every printed digit and every step
+the same. The branch is a strict `>` against `kMscEnergyLimit()` (`G4RegionModels::SelectIndex`
+tests `e <= lowKineticEnergy[idx]`, so 100 MeV itself belongs to Urban: `tests/
+test_electron_hi.cu` checks that against Geant4's own answer), and no secondary of a 6 MeV
+photon reaches 100 MeV, so no uniform this branch draws can reach the gate. The same holds for
+the sweep's **e- 100 MeV row**, whose primaries start at exactly 100 MeV: 3.31744E-007 Gy before
+and after, identical, -0.09% and -0.4 sigma against Geant4 either way.
+
+`tests/test_lepton_transport.cu` passes on the device both ways. The balance closes to
+**1.023e-15** of the primary energy with the branch on (9.095e-16 with it off) and block 4 reads
+**9,585 of 15,933** steps above 100 MeV against **9,508 of 13,728** - which are V83's two
+recorded columns, reproduced. The 1 MeV and 50 MeV rows of the balance are identical in every
+column, which is the gate's claim again at the level of one track.
+
+#### The 1 GeV row: what the substitution was worth, and what it did not close
+
+The sweep at its own event counts says -1.67% (3.7 sigma) before and **-1.28% (2.9 sigma)**
+after. That comparison is not good enough to carry the finding, and the reason is the reference.
+Both sides re-taken at **1,000,000 events**, port and Geant4, same configuration, same script's
+macros:
+
+| 1 GeV e- into B1, dose per 10,000 events | | vs Geant4 (1M) |
+|---|--:|--:|
+| port, `kWentzelLeptonMscWired` **false** | 23,734.2 +/- 24.06 pGy | -0.532%, **-3.74 sigma** |
+| port, `kWentzelLeptonMscWired` **true** (ships) | **23,782.0 +/- 23.97 pGy** | -0.332%, **-2.33 sigma** |
+| Geant4 11.1.1 EM-only, 1,000,000 events | 23,861.2 +/- 24.04 pGy | - |
+| *Geant4 11.1.1 EM-only, 100,000 events (the sweep's)* | *24,027.3 +/- 76.2 pGy* | |
+
+So **the second msc model is worth +47.8 pGy, +0.201% of the row**, and it moves the row from
+-0.53% to -0.33%. It is a fifth of the deficit. V83 called it "the leading candidate for the
+residual - not a proven attribution"; it is now measured, and it was not the whole of it.
+
+**And the reference moved further than the fix did.** Geant4's own two samples of the same
+configuration differ by -0.69% - 24,027.3 pGy at 100,000 events against 23,861.2 at 1,000,000 -
+which is **2.3 sigma of the 100,000-event run's own quoted rms**, computed on the pair that
+shares its first 100,000 events. A 1 GeV electron deposits in a 6 cm trapezoid 19 cm inside the
+envelope through a heavy-tailed distribution: rare showers that happen to develop in the right
+place carry a large share of the dose, and B1's rms estimator converges slowly on such a
+distribution. **So part of the -1.67% the sweep reported was the reference, not the port**, and
+the 1 GeV electron row should not be read at 100,000 events by either side. The estimator itself
+is not broken - Geant4's own error falls from 76.2 pGy at 100,000 events to 24.04 at 1,000,000,
+a ratio of 3.17 against sqrt(10) = 3.16, and the port's from 75.9 to 23.97 - so what this is is
+the tail, arriving late.
+
+#### V62 is excluded, by the measurement and not by the argument
+
+V83 named two other terms in this row: the discrete rates (V78) and what V62's `extremesmallstep`
+branch, on since P8e, does at high energy. The second is now settled. The lepton unit rebuilt
+alone with `kLeptonExtremeSmallStep` forced false and the other sixteen objects in the archive
+byte-for-byte the ones the row above was taken with:
+
+| 1,000,000 events, 1 GeV e- | dose per 10k | track-steps |
+|---|--:|--:|
+| WentzelVI on, `kLeptonExtremeSmallStep` **on** (ships) | 23,782.0 pGy | 205,579,159 |
+| WentzelVI on, `kLeptonExtremeSmallStep` **off** | 23,781.9 pGy | 205,578,950 |
+| WentzelVI **off**, `kLeptonExtremeSmallStep` on | 23,734.2 pGy | 203,516,181 |
+
+One part in 240,000 of the dose and 209 steps of 205.6 million, against 47.8 pGy and 2.06 million
+steps for the msc model on the same row and the same statistics - a factor of **478**. V66
+measured the same branch worth -0.00069 pGy on the gamma gate and this is the same conclusion at
+a hundred times the beam energy: `tsmall` is three to eight ten-thousandths of a millimetre in
+water, which is the end of a range and not the top of a shower. The flag was then restored, the
+one unit rebuilt a third time and the row re-run: **23,782.0 pGy and 205,579,159 track-steps**,
+the first row to the digit, which is the check that the three runs differ by the two flags and by
+nothing else in the machine.
+
+**What is left is -0.33%, 2.3 sigma, and it is not attributed.** V78's discrete rates are the
+largest named candidate: this port draws brems and delta-ray interaction lengths from the models
+at the pre-step energy, where `G4VEnergyLossProcess::PostStepGetPhysicalInteractionLength` caches
+`preStepLambda` from a lambda table at up to `1/lambdaFactor` of the current energy and
+`PostStepDoIt` then rejects with probability `1 - lambda(E_post)/preStepLambda`. That
+approximation is a function of the STEP LENGTH, so it is not independent of the msc model this
+entry just changed - the primary's mean step in this beam went from 34.9 mm to 12.9 mm
+(`tests/test_lepton_transport.cu` block 2: 1872.8 mm over 53.6 steps to 800.9 mm over 62.2), and
+whatever V78 is worth here was re-weighted by that. A second candidate is that the residual is
+not on the lepton path at all: the sweep's photon rows carry -0.27% at 100 MeV and -0.52% at
+6 MeV on their own, and most of a 1 GeV electron's dose in that trapezoid arrives as a shower
+photon. Both are directions to look, not attributions, and the way to settle either is the way
+this entry settled V62.

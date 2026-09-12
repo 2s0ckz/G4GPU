@@ -589,11 +589,13 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     const em::UrbanCoeffs<real_t>& uc = s.msc->coeffs[mat];
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
-    // `em::kWentzelLeptonMscWired` is FALSE and its own comment says why: the model, its
-    // table and this dispatch are all transcribed and tested, and `transport_run.cu` does not
-    // survive ptxas with the branch instantiated. docs/RISK.md V63, V81 and V83. It has to be
-    // `if constexpr` below and not a runtime `false`, because a runtime false still leaves
-    // every arm in the translation unit and the translation unit is the thing that dies.
+    // `em::kWentzelLeptonMscWired` is TRUE since P14d, and its own comment says what held it
+    // false for a package: the model, its table and this dispatch were all transcribed and
+    // tested by P14c, and `transport_run.cu` - one unit with twenty kernels - did not survive
+    // ptxas with the branch instantiated. docs/RISK.md V63, V81, V83, and V65 for the split
+    // that removed the wall. It stays `if constexpr` below rather than a runtime test, because
+    // a runtime `false` leaves every arm in the translation unit and the unit was the thing
+    // that died - which is the arrangement the next branch added here will need too.
     const bool wv_msc = em::kWentzelLeptonMscWired && (p.ekin > em::kMscEnergyLimit<real_t>());
 
     // `currentMinimalStep` as Geant4 hands it to the msc model: `G4PhysicsListHelper`'s
@@ -605,10 +607,12 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     [[maybe_unused]] const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
 
     const ParticleDef<real_t> lpd = particle_def<real_t>(lepton_type);
-    // `[[maybe_unused]]` on this and the six below because `em::kWentzelLeptonMscWired` is
-    // false and `if constexpr` therefore discards every arm that reads them. They are declared
-    // here, out of the arms, because the two halves of a WentzelVI step share them - which is
-    // the shape the branch has to keep for the day the switch flips.
+    // `[[maybe_unused]]` on this and the six below, and it is KEPT with
+    // `em::kWentzelLeptonMscWired` now true: the attribute says these may be unused in some
+    // instantiation, not that they are unused in this one, and building the port with the flag
+    // false - which is how V95's before-column was taken - has `if constexpr` discard every
+    // arm that reads them again. They are declared here, out of the arms, because the two
+    // halves of a WentzelVI step share them.
     [[maybe_unused]] constexpr real_t kCosThetaLim = real_t(-1);  // MscThetaLimit() = pi
     // The cut the msc model is handed is the material's ELECTRON production threshold, which
     // is what `G4WentzelVIModel::ComputeTransportXSectionPerVolume` reads out of

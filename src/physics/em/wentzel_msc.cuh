@@ -604,34 +604,47 @@ __host__ __device__ inline WentzelScatterResult<real_t> wv_sample_scattering(
 
 /// Whether `step_lepton` dispatches `G4WentzelVIModel` above `em::kMscEnergyLimit()`.
 ///
-/// **FALSE, AND THE REASON IS A COMPILER AND NOT THE PHYSICS.** This is docs/RISK.md V63's
-/// `kUrbanIonMscWired` a second time, on the other stepper: the model is transcribed, oracled
-/// and tested (`tests/test_wentzel_msc.cu`, `tests/test_electron_hi.cu`), the transport mean
-/// free path table it reads is built and compared against Geant4's at its own 43 nodes to
-/// 5.1e-16, the dispatch below is written and runs on the device in
-/// `tests/test_lepton_transport.cu` - and `src/host/transport_run.cu`, the one translation
-/// unit that holds all twenty kernels, dies in ptxas with it on:
+/// **TRUE SINCE P14d, AND WHAT HELD IT FALSE WAS A COMPILER AND NOT THE PHYSICS.** This was
+/// docs/RISK.md V63's `kUrbanIonMscWired` a second time, on the other stepper: the model was
+/// transcribed, oracled and tested (`tests/test_wentzel_msc.cu`, `tests/test_electron_hi.cu`)
+/// by P14c, the transport mean free path table it reads was built and compared against
+/// Geant4's at its own 43 nodes to 5.1e-16, the dispatch below was written and ran on the
+/// device in `tests/test_lepton_transport.cu` - and `src/host/transport_run.cu`, the one
+/// translation unit that then held all twenty kernels, died in ptxas with it on:
 ///
 ///     Internal error
 ///     nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
 ///
 /// V55's remedy was tried first and is the four `__noinline__` wrappers below, which are kept
 /// because they are right for the hot path anyway; they did not move the wall, exactly as V63
-/// found for the ion. V63's nine-build table is the evidence that there is no arrangement of
-/// `__noinline__` to find - "an arrangement either falls on the right side or it does not, for
-/// no reason visible in the source, and the only lever left with real headroom is to stop
-/// asking one translation unit to hold twenty kernels". That lever is P8e's.
+/// found for the ion. What moved it is P8e's split of the engine into one translation unit per
+/// kernel (docs/RISK.md V65): `src/host/transport_run_lepton.cu` holds `run_step_lepton`'s two
+/// instantiations and nothing else, and it compiles with this branch in it, first time. What
+/// the second msc model costs the kernel, off that unit's own `-Xptxas -v` log with the flag in
+/// both positions - both instantiations, every column the same in each:
 ///
-/// **WHAT THE PORT DOES INSTEAD, AND WHAT IT COSTS.** With this false, `step_lepton` uses
-/// `G4UrbanMscModel` at every energy, which is what it did before P14c - and `em::UrbanTable`
-/// stops at 100 MeV, so above that the transport mean free path is the 100 MeV one. That is a
-/// clamp of the same family as docs/RISK.md V64 and it is named here rather than left to be
-/// found: it is a substitution in the msc STEP LENGTH of an electron above 100 MeV, not in its
-/// energy loss, and the energy-loss tables this package rebuilt are read correctly at every
-/// energy either way. docs/RISK.md V83 has the measurement.
+///     flag off   3040 B stack frame,  96/56 spill st/ld, 255 registers, 1472 B cmem[0]
+///     flag on    3488 B stack frame, 100/56 spill st/ld, 255 registers, 1472 B cmem[0]
 ///
-/// Turning it on is this one word, once `transport_run.cu` is more than one translation unit.
-constexpr bool kWentzelLeptonMscWired = false;
+/// 448 bytes of frame and four of spill stores, at the same 255-register cap and the same
+/// argument list. The four `__noinline__` wrappers below are why it is a frame and not an
+/// inlined explosion: they appear in the log as functions of their own.
+///
+/// **WHAT THE SUBSTITUTION COST WHILE IT LASTED.** With this false, `step_lepton` used
+/// `G4UrbanMscModel` at every energy and `em::UrbanTable` stops at 100 MeV, so above that the
+/// transport mean free path was the 100 MeV one - a clamp of docs/RISK.md V64's family in the
+/// msc STEP LENGTH and the deflection of an electron above 100 MeV, not in its energy loss.
+/// B1's 1 GeV electron row is what is sensitive to it: at 1,000,000 events a side it reads
+/// 23,734.2 pGy per 10k with this false and 23,782.0 with it true, against Geant4's 23,861.2 -
+/// **+0.201% of the row, -0.53% to -0.33%**, which is a fifth of the deficit and not all of it.
+/// docs/B1_SWEEP.md and docs/RISK.md V95 carry the rest, including the two candidates for what
+/// is left and the one of them this package excluded by measurement.
+///
+/// The 6 MeV gamma gate cannot move, because the branch below is taken on a STRICT `>` against
+/// `kMscEnergyLimit()` and B1's photon secondaries never reach 100 MeV. Measured rather than
+/// assumed: 425.945 pGy +/- 0.867349 and 25,993,577 track-steps with the flag in either
+/// position, every printed digit and every step the same.
+constexpr bool kWentzelLeptonMscWired = true;
 
 // ------------------------------------- the e+- branch, out of line, and it is not tidiness
 //

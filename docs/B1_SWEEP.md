@@ -165,3 +165,49 @@ sigma. 100 MeV is the last energy the old table covered without clamping, so wha
 is the table's construction - spline against linear interpolation, and an inverse-range vector
 where there had been a binary search - rather than its ceiling. The 20 MeV row is unchanged
 within its 0.9% statistics.
+
+---
+
+## The electron rows a third time, after P14d (2026-09-12)
+
+P14c's section above ends "the way to separate them is to re-take this row with the switch
+flipped, which is what P8e's split of the transport translation unit makes possible." P14d
+flipped it: `em::kWentzelLeptonMscWired` is `true`, so an e+- above `G4EmParameters::
+MscEnergyLimit()` = 100 MeV is stepped by `G4WentzelVIModel` and one below it by
+`G4UrbanMscModel`, which is what `G4EmStandardPhysics::ConstructProcess` builds. docs/RISK.md
+V95 has the compile, the kernel and the two inversions; this is the dose.
+
+| beam | events | port before | port after | G4 EM-only | diff before | diff after | sigma before | sigma after |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| gamma 6 MeV | 2,000,000 | 8.5189E-008 | 8.5189E-008 | 8.5615E-008 | -0.50% | -0.50% | -1.7 | -1.7 |
+| e- 100 MeV | 300,000 | 3.3174E-007 | 3.3174E-007 | 3.3204E-007 | -0.09% | -0.09% | -0.4 | -0.4 |
+| **e- 1000 MeV** | 100,000 | 2.3626E-007 | **2.3720E-007** | 2.4027E-007 | -1.67% | **-1.28%** | -3.7 | **-2.9** |
+
+The first two rows are IDENTICAL, not merely consistent - every digit the run prints, and
+25,993,577 track-steps either way for the gamma gate. `G4RegionModels::SelectIndex` tests
+`e <= lowKineticEnergy[idx]`, so 100 MeV belongs to Urban and `step_lepton`'s branch is a strict
+`>`; a 6 MeV photon makes no secondary above 100 MeV and a 100 MeV electron beam starts exactly
+at the boundary. A branch that draws no uniform cannot move a seeded run.
+
+**The 100,000-event 1 GeV row is not precise enough to carry the finding, and the reason is the
+reference.** Both sides re-taken at 1,000,000 events:
+
+| 1 GeV e-, dose per 10,000 events | | vs Geant4 (1M) |
+|---|--:|--:|
+| port, WentzelVI off | 23,734.2 ± 24.06 pGy | -0.532%, -3.74 σ |
+| **port, WentzelVI on (ships)** | **23,782.0 ± 23.97 pGy** | **-0.332%, -2.33 σ** |
+| Geant4 11.1.1 EM-only, 1,000,000 events | 23,861.2 ± 24.04 pGy | — |
+| *Geant4 11.1.1 EM-only, 100,000 events (this table's)* | *24,027.3 ± 76.2 pGy* | |
+
+Geant4's two samples of its own configuration differ by -0.69%, which is 2.3 σ of the
+100,000-event run's quoted rms on a pair that shares its first 100,000 events. The dose a 1 GeV
+electron puts in a 6 cm trapezoid 19 cm inside the envelope is heavy-tailed, so that rms
+converges slowly. **Part of the -1.67% recorded above was the reference and not the port**, and
+this row wants 1,000,000 events on both sides.
+
+**What the switch was worth: +47.8 pGy, +0.201% of the row, -0.53% to -0.33%.** A fifth of the
+deficit, and not all of it. Of the two other terms V83 named, `extremesmallstep` (RISK V62) is
+excluded by measurement - forced off, the same 1,000,000-event row moves by 0.1 pGy and 209 of
+205,579,159 track-steps - and the discrete rates (RISK V78) are the largest candidate left,
+together with the possibility that the residual is the photon rows' own -0.27%/-0.52% arriving
+through a shower rather than anything on the lepton path. docs/RISK.md V95.
