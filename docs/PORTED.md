@@ -956,12 +956,14 @@ atomic binding energy that should pay for it is a local initialised to zero. doc
 #### 2.1.11 FTFP: the tuned parameters and the Lund string fragmentation (P11, first half)
 
 The bottom half of QBBC's FTFP arm: `G4FTFParameters`, which is a large table of tuned constants
-plus the hadron-nucleon cross sections every FTF interaction samples its impact parameter from,
-and the whole of `G4LundStringFragmentation` - one excited string in, a list of hadrons out. The
-entry point of the package, `ftf::apply_yourself`, does **not** exist yet: `G4FTFModel`,
-`G4FTFParticipants`, `G4DiffractiveExcitation`, `G4ExcitedStringDecay` and `G4TheoFSGenerator`
-are the top half and are not written, so nothing in the port yet PRODUCES a string for this code
-to fragment. What is here is exact against Geant4 11.1.1 and has no caller.
+plus the hadron-nucleon cross sections every FTF interaction samples its impact parameter from;
+the whole of `G4LundStringFragmentation` - one excited string in, a list of hadrons out; and
+`G4ExcitedStringDecay` over it, which fragments a LIST of strings, redraws every short-lived
+product's mass from a Breit-Wigner and corrects the energy-momentum balance that redrawing
+breaks. The entry point of the package, `ftf::apply_yourself`, does **not** exist yet:
+`G4FTFModel`, `G4FTFParticipants`, `G4DiffractiveExcitation` and `G4TheoFSGenerator` are the top
+half and are not written, so nothing in the port yet PRODUCES a string for this code to
+fragment. What is here is exact against Geant4 11.1.1 and has no caller.
 
 **Why the exact half is exact.** The same technique as 2.1.4's: `ref/dump/dump_ftf.cc` installs
 an eight-value uniform cycle as CLHEP's engine, so every sampler and the whole fragmentation
@@ -982,21 +984,27 @@ stream by one.
 | G4FragmentingString (all four constructors, `TransformToAlignedCms`, `TransformToCenterOfMass`, `LorentzRotate`, the light-cone accessors) | **V** | `ftf/fragmenting_string.cuh`. The redundancy in the state is reproduced rather than derived: `Pplus` after a `SetPleft` is `(Pleft+Pright).plus()`, which is not the same double as `Pleft.plus()+Pright.plus()` |
 | CLHEP `HepLorentzRotation` (`set(bx,by,bz)`, `rotateY`, `rotateZ`, `inverse`, `vectorMultiplication`), `Hep3Vector::phi`/`theta` | **V** | `ftf/lorentz.cuh`. Transcribed as a MATRIX and not as `boost()` + rotations: composing then applying is a different order of products, and the difference is at the last bit of every hadron momentum, which is the size the oracle compares at |
 | `G4KineticTrack`'s constructor, the one line of it that is physics | **V** | the kaon0 / anti_kaon0 -> K0S or K0L coin toss, in `ftf/lund_fragment.cuh`. The masses are equal to the last bit, so it changes no kinematics - only the species and the stream |
-| **G4ExcitedStringDecay** (`FragmentStrings`, `EnergyAndMomentumCorrector`) | **-** | not written |
-| **G4FTFModel**, G4FTFParticipants, G4DiffractiveExcitation, G4ElasticHNScattering, G4FTFAnnihilation, G4DiffractiveSplitableHadron, G4VPartonStringModel, G4InteractionContent, G4ExcitedString | **-** | not written. This is the half that makes the strings, samples the impact parameter, excites the participants and hands a `WoundedNucleus` to 2.1.4's `Propagate` |
+| **G4ExcitedStringDecay** (`FragmentStrings`, `FragmentString`, `EnergyAndMomentumCorrector`) | **V** | `ftf/string_fragmentation.cuh`, entry point `ftf::ftf_fragment_strings()`. 8 string-vector cases x 8 phases: every hadron's species, four-momentum, invariant mass and formation time, and the event's draw count, all exact but the momenta at 3.9e-13. The corrector is dumped SEPARATELY and driven directly (`ftf_corrector.csv`, 8 cases including all four of its early returns, worst 0) because it is a 500-iteration fixed point and a transcription that reaches the same answer by a different route is right while one that never ran is not. Statistically 8 cases x 20,000 events on species, multiplicity and **the energy balance** - a histogram of log10 of the relative energy error, which is where a port that skipped the correction shows up: 99% of Geant4's events land in the -6 bin, and the perturbation that raises the `perMillion` trigger to 1e-2 moves 9,070 of them to -3 (95 sigma) |
+| G4SampleResonance (`SampleMass`, `BrWigInt0`, `BrWigInv`), and `GetMinimumMass` as a column | **V** | same file; 2,728 sampled masses with their draw counts at worst 0, over the zero-width arm, the `minMass > maxMass` protection and every short-lived particle in the table with the arguments `FragmentStrings` passes. `GetMinimumMass` is recursive over decay tables and is **not** transcribed: it is `minmass` in `data/ftf_hadrons.hh`, dumped from Geant4 and compared here against the oracle's own argument - 1,670 points - so the column is load-bearing rather than decorative |
+| `G4ExcitedString` (`Get4Momentum`, `LorentzRotate`, `IsExcited`) | **V** | `ftf::ExcitedString` in the same file, with the NOT-EXCITED case (a string that carries a hadron rather than a parton pair) and the kinky-string third parton refused by name (`kKinkyStrings`) |
+| **G4FTFModel**, G4FTFParticipants, G4DiffractiveExcitation, G4ElasticHNScattering, G4FTFAnnihilation, G4DiffractiveSplitableHadron, G4VPartonStringModel, G4InteractionContent | **-** | not written. This is the half that makes the strings, samples the impact parameter, excites the participants and hands a `WoundedNucleus` to 2.1.4's `Propagate` |
 | **G4TheoFSGenerator** | **-** | not written |
 | G4QGSModel and the QGS string arm | **-** | refused by name: not in QBBC's FTFP chain, and 2.1.4's note on the null `GetPrimaryProjectile()` (docs/RISK.md V50) is why it must stay refused rather than half-built |
 
 Tests: `test_ftf_params.cu` - 152,576 exact comparisons, worst 4.4e-16, 4,920 rows refused by
 name. `test_ftf_lund.cu` - 70,555 comparisons, of which 26,400 are draw counts and 889 are
-statistical z-scores.
+statistical z-scores. `test_ftf_strings.cu` - 11,254 comparisons over the layer above it, of
+which 500 are statistical.
 
-Device probe (`ftf_lund_device_probe`, never launched, `-Xptxas -v` on sm_52): **210 registers,
-152-byte stack frame, 0 bytes spilled**, 213,047 bytes gmem for the tables, 6,160 bytes cmem[2].
-`ftf_fragment_string` itself inlines to a 0-byte frame. The workspace is 33,320 bytes and lives
-behind a pointer, one per track: the 350-entry final-state enumeration is 5,600 of it and the
-three hadron lists 27,648, and on the stack it would blow `Upload`'s 16,384-byte frame limit
-before the first string fragmented.
+Device probes, never launched, `-Xptxas -v` on sm_52. `ftf_lund_device_probe`: **210 registers,
+152-byte stack frame, 0 bytes spilled**, 213,047 bytes gmem for the tables, 6,160 bytes cmem[2];
+`ftf_fragment_string` itself inlines to a 0-byte frame. `ftf_strings_device_probe`, which
+instantiates the layer above: **236 registers, 56-byte stack frame, 0 bytes spilled**, 3,988
+bytes cmem[2]. The per-string workspace is 33,320 bytes and the string-decay workspace that
+contains it 53,816, both behind a pointer and one per TRACK rather than per string: the
+350-entry final-state enumeration is 5,600 of the first and the three hadron lists 27,648, and
+on the stack either would blow `Upload`'s 16,384-byte frame limit before the first string
+fragmented.
 
 ### 2.2 What QBBC needs and is not there
 

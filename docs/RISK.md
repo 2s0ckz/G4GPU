@@ -7669,3 +7669,38 @@ gone, replaced by a printed count; what is still asserted is the part that is a 
 Geant4 - the 485 non-ion particles compared in both directions, the 12 quarks, the 50 diquarks,
 and every mass, width, charge and subtype. An assertion on a number that another package's dump
 can change is a test that fails for the wrong package, and this one would have failed for P3.
+
+### V90: the string fragmentation's energy balance is broken on purpose, and put back by a loop
+
+`G4ExcitedStringDecay::FragmentStrings` does something to the Lund fragmentation's output that a
+reader of `G4LundStringFragmentation` alone would not expect: it REPLACES THE MASS of every
+short-lived product. A rho+ leaves the fragmentation at the PDG pole mass, and FragmentStrings
+redraws it from a Breit-Wigner between `G4SampleResonance::GetMinimumMass(def) + 10 MeV` and
+`pole + 5*width`, keeps the three-momentum and recomputes the energy. The resonances are most of
+what a string makes - rho, omega, K*, Delta - so after this step the hadrons of a string no
+longer carry the string's four-momentum.
+
+`EnergyAndMomentumCorrector` is what puts it back, and it is not a safety net: it runs on
+essentially every event. The trigger is `|(E_hadrons - E_string)/E_hadrons| > perMillion` for any
+one string, and the loop then scales every hadron's three-momentum by a common factor in the
+c.m.s. of the strings, recomputing energies from the masses the hadrons now have, until the
+energies sum to the collision mass within 1e-5 or 500 iterations have passed.
+
+Measured, 20,000 events on each of eight string-vector cases: 99% of Geant4's events end with a
+relative energy error in the 1e-6 decade - just inside the corrector's own limit - and a few
+hundred at 1e-12, which are the events with no short-lived product to redraw. That histogram is
+now an oracle file (`ftf_stringstat_balance.csv`) and the test compares it bin by bin, because it
+is the only thing that distinguishes a port that ran the correction from one that did not: with
+the `perMillion` trigger raised to 1e-2 the port's events move from the -6 bin to the -3 bin,
+9,070 of them in one case, which is 95 sigma. Every exact per-hadron comparison in the same test
+would still have passed at the FIRST string, and failed later for reasons that look like noise.
+
+Three consequences worth keeping in view. A caller cannot assume the hadrons of one string
+balance that string - only the TOTAL balances, and only to 1e-5. `G4TheoFSGenerator` and P6's
+`Propagate` receive that 1e-5, so an energy-balance assertion anywhere downstream has to be
+looser than the corrector's own limit. And the corrector boosts by `TotalCollisionMom`, not by
+the hadrons' own `SumMom` - the alternative is written and commented out in the source one line
+above - which matters because the two differ by exactly the imbalance being corrected: putting
+the commented-out line back changes a corrected momentum by 76 relative units on the oracle's
+`far-off` case while leaving the whole-event answer within 3e-12, so it is a difference only the
+corrector's own oracle can see.

@@ -982,6 +982,368 @@ void dump_fragstat() {
   delete L;
 }
 
+// ---------------------------------------------------------------------------------------------
+// ftf_resonance.csv - G4SampleResonance::SampleMass, the Breit-Wigner every short-lived product
+// of the fragmentation has its mass redrawn from
+// ---------------------------------------------------------------------------------------------
+
+void dump_resonance() {
+  FILE* f = std::fopen("ftf_resonance.csv", "w");
+  std::fprintf(f, "pdg,pole,gamma,min,max,phase,mass,draws\n");
+  G4SampleResonance BrW;
+  CycleEngine eng;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+
+  // The arms first, by hand: zero width (no draw at all), minMass > maxMass (A.R.'s 2017
+  // protection, which replaces the minimum with the maximum rather than throwing), and a
+  // pole outside [min, max] on both sides so that the zero-width max/min clamp is decided
+  // both ways.
+  const double kArms[][4] = {
+    {770.0, 0.0, 300.0, 1000.0},    // zero width, pole inside
+    {770.0, 0.0, 900.0, 1000.0},    // zero width, pole below the minimum
+    {770.0, 0.0, 300.0, 500.0},     // zero width, pole above the maximum
+    {770.0, 150.0, 1200.0, 900.0},  // minMass > maxMass
+    {770.0, 150.0, 290.0, 1520.0},  // the ordinary rho
+    {1232.0, 117.0, 1088.0, 1817.0},// the Delta
+    {892.0, 51.0, 644.0, 1147.0},   // the K*
+  };
+  for (const auto& a : kArms) {
+    for (int phase = 0; phase < 8; ++phase) {
+      eng.reset(phase);
+      const double m = BrW.SampleMass(a[0], a[1], a[2], a[3]);
+      std::fprintf(f, "0,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%d\n", a[0], a[1], a[2], a[3], phase,
+                   m, eng.draws());
+    }
+  }
+
+  // Then every short-lived particle the fragmentation can produce, with the arguments
+  // FragmentStrings actually passes: (PDGMass, PDGWidth, GetMinimumMass + 10 MeV,
+  // PDGMass + 5*PDGWidth). This is the row that makes data/ftf_hadrons.hh's `minmass` column
+  // load-bearing rather than decorative.
+  G4ParticleTable* pt = G4ParticleTable::GetParticleTable();
+  const G4int n = (G4int)pt->size();
+  for (G4int i = 0; i < n; ++i) {
+    const G4ParticleDefinition* d = pt->GetParticle(i);
+    if (!d || !d->IsShortLived() || d->GetDecayTable() == nullptr) { continue; }
+    const G4int code = d->GetPDGEncoding();
+    if (code == 0 || code >= 1000000000 || code <= -1000000000) { continue; }
+    const double pole = d->GetPDGMass();
+    const double gamma = d->GetPDGWidth();
+    const double lo = BrW.GetMinimumMass(d) + 10.0 * MeV;
+    const double hi = pole + 5.0 * gamma;
+    for (int phase = 0; phase < 8; ++phase) {
+      eng.reset(phase);
+      const double m = BrW.SampleMass(pole, gamma, lo, hi);
+      std::fprintf(f, "%d,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%d\n", code, pole, gamma, lo, hi,
+                   phase, m, eng.draws());
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ftf_corrector.csv - EnergyAndMomentumCorrector on its own
+//
+// It draws no random number, so this is an exact oracle with no phase axis, and it is dumped
+// SEPARATELY from FragmentStrings for the reason docs/RISK.md V52 gives: the corrector is a
+// 500-iteration fixed point, and a transcription that converges to the same answer by a
+// different route is right, while one that returns the same answer because it never ran is not.
+// The four early returns are enumerated by hand, because each of them is a different meaning of
+// "false" - and one of them, the empty list, returns TRUE.
+// ---------------------------------------------------------------------------------------------
+
+struct CorrectorHadron { int pdg; double px, py, pz; };
+struct CorrectorCase {
+  const char* name;
+  double cms_px, cms_py, cms_pz, cms_e;
+  int n;
+  CorrectorHadron h[6];
+};
+
+const CorrectorCase kCorrectorCases[] = {
+  {"empty", 0, 0, 5000, 6000, 0, {}},
+  {"single", 0, 0, 5000, 6000, 1, {{211, 100, 0, 2000}}},
+  {"too-heavy", 0, 0, 0, 500, 2, {{2212, 10, 0, 100}, {-2212, -10, 0, -100}}},
+  {"two-pions", 0, 0, 0, 2000, 2, {{211, 100, 50, 300}, {-211, -80, -40, -280}}},
+  {"boosted", 0, 0, 5000, 6000, 3,
+   {{211, 100, 50, 1500}, {-211, -80, -40, 1400}, {111, 20, 10, 1600}}},
+  {"off-axis", 300, -200, 5000, 6200, 4,
+   {{2212, 150, -100, 1200}, {-211, -80, -40, 900}, {211, 60, 30, 1100}, {111, 10, 5, 700}}},
+  {"far-off", 0, 0, 0, 8000, 5,
+   {{2212, 900, 0, 900}, {-2212, -900, 0, -900}, {211, 200, 100, 50},
+    {-211, -100, -50, -100}, {111, 30, 20, 10}}},
+  // Two back-to-back momenta, which is as close as a hadron list gets to the corrector's
+  // `SumMass = SumMom.m2(); if (SumMass < 0) return FALSE` guard - and does not reach it. The
+  // guard is DEAD: every term of the sum is timelike and future-pointing, and that survives
+  // addition, so m2 cannot come out negative. Established by removing the guard from the port
+  // and finding no oracle row that moves, which is the sentinel probe docs/RISK.md V52 asks
+  // for rather than an argument about it.
+  {"back-to-back", 0, 0, 0, 20000, 2, {{111, 3000, 0, 0}, {111, -3000, 0, 0}}},
+};
+
+struct TagCorrector {
+  using type = G4bool (G4ExcitedStringDecay::*)(G4KineticTrackVector*, G4LorentzVector&);
+  friend type bridge(TagCorrector);
+};
+template struct PrivateBridge<TagCorrector, &G4ExcitedStringDecay::EnergyAndMomentumCorrector>;
+
+void dump_corrector() {
+  FILE* f = std::fopen("ftf_corrector.csv", "w");
+  // The INPUT momenta are columns of the same row, so that the test builds the corrector's
+  // input from the oracle rather than from a second copy of the table above. The corrector
+  // never changes the length or the order of the list, so out[i] is in[i] corrected.
+  std::fprintf(f, "case,cms_px,cms_py,cms_pz,cms_e,n,success,index,pdg,in_px,in_py,in_pz,"
+                  "px,py,pz,e\n");
+  G4ExcitedStringDecay* dec = new G4ExcitedStringDecay(new G4LundStringFragmentation());
+  for (const CorrectorCase& c : kCorrectorCases) {
+    G4KineticTrackVector* v = new G4KineticTrackVector;
+    for (int i = 0; i < c.n; ++i) {
+      const G4ParticleDefinition* d =
+          G4ParticleTable::GetParticleTable()->FindParticle(c.h[i].pdg);
+      const double m = d->GetPDGMass();
+      const G4ThreeVector p3(c.h[i].px, c.h[i].py, c.h[i].pz);
+      const G4LorentzVector mom(p3, std::sqrt(p3.mag2() + m * m));
+      v->push_back(new G4KineticTrack(const_cast<G4ParticleDefinition*>(d), 0.0,
+                                      G4ThreeVector(0, 0, 0), mom));
+    }
+    G4LorentzVector cms(c.cms_px, c.cms_py, c.cms_pz, c.cms_e);
+    const G4bool ok = (dec->*bridge(TagCorrector()))(v, cms);
+    if (v->empty()) {
+      std::fprintf(f, "%s,%.17g,%.17g,%.17g,%.17g,%d,%d,-1,0,0,0,0,0,0,0,0\n", c.name,
+                   c.cms_px, c.cms_py, c.cms_pz, c.cms_e, c.n, ok ? 1 : 0);
+    }
+    for (int i = 0; i < (int)v->size(); ++i) {
+      const G4LorentzVector p = (*v)[i]->Get4Momentum();
+      std::fprintf(f,
+                   "%s,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d,%.17g,%.17g,%.17g,"
+                   "%.17g,%.17g,%.17g,%.17g\n",
+                   c.name, c.cms_px, c.cms_py, c.cms_pz, c.cms_e, c.n, ok ? 1 : 0, i,
+                   (*v)[i]->GetDefinition()->GetPDGEncoding(), c.h[i].px, c.h[i].py, c.h[i].pz,
+                   p.px(), p.py(), p.pz(), p.e());
+    }
+    for (auto* t : *v) { delete t; }
+    delete v;
+  }
+  delete dec;
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ftf_strings.csv / ftf_stringstat*.csv - G4ExcitedStringDecay::FragmentStrings
+//
+// The whole layer: several strings at once, in the c.m.s. of their sum, with every short-lived
+// product's mass redrawn from a Breit-Wigner and the energy-momentum correction loop putting
+// the sum back. `track` is a NOT-EXCITED string - G4ExcitedString built on a G4KineticTrack
+// rather than on two partons - which FragmentStrings copies through the G4KineticTrack
+// constructor, kaon0 coin toss and all.
+// ---------------------------------------------------------------------------------------------
+
+struct StringSpec { int left, right; double mass; int direction; double bz, bx; int track_pdg; };
+struct StringVecCase { const char* name; int n; StringSpec s[4]; };
+
+const StringVecCase kStringVecs[] = {
+  {"two-strings", 2, {{1, -1, 5000, +1, 0.30, 0.00, 0}, {2, 2103, 4000, -1, -0.20, 0.05, 0}}},
+  {"three-strings", 3, {{1, -1, 5000, +1, 0.30, 0.00, 0}, {2, 2103, 4000, -1, -0.20, 0.05, 0},
+                        {3, -3, 3000, +1, 0.10, -0.05, 0}}},
+  {"with-track", 3, {{1, -1, 5000, +1, 0.30, 0.00, 0}, {0, 0, 0, +1, 0.00, 0.00, 2212},
+                     {2, 2103, 4000, -1, -0.20, 0.05, 0}}},
+  // A K0S and not a kaon0, deliberately. G4KineticTrack's constructor substitutes K0S or K0L
+  // for a kaon0 ON A COIN TOSS, so a track built here with code 311 would be substituted while
+  // THIS vector is being built - out of the counted region, from whatever the engine's state
+  // was - and FragmentStrings' own copy of it would then find a K0S and spend no deviate. The
+  // asymmetry is not a property of the model: any G4KineticTrack that exists has already been
+  // through that constructor, so a not-excited string can never carry a kaon0 in a real run.
+  // The port transcribes the substitution in its copy anyway, because FragmentStrings calls
+  // the constructor and a caller that hands it a kaon0 must get Geant4's answer.
+  {"with-k0s-track", 2, {{1, -1, 5000, +1, 0.30, 0.00, 0}, {0, 0, 0, +1, 0.20, 0.02, 310}}},
+  {"one-string", 1, {{1, 2103, 6000, +1, 0.25, 0.03, 0}}},
+  {"light-pair", 2, {{1, -1, 1500, +1, 0.10, 0.00, 0}, {2, 2101, 2000, -1, -0.10, 0.02, 0}}},
+  {"below-threshold", 2, {{1, -1, 300, +1, 0.05, 0.00, 0}, {1, 2103, 1000, -1, -0.05, 0.01, 0}}},
+  {"heavy-pair", 2, {{2101, -2101, 8000, +1, 0.20, 0.00, 0},
+                     {2103, -2103, 12000, -1, -0.15, 0.04, 0}}},
+};
+
+/// One case's strings, freshly built. FragmentStrings MUTATES them - it transforms the partons
+/// into the c.m.s. and, only on failure, back - so every call needs its own copy.
+G4ExcitedStringVector* make_string_vector(const StringVecCase& c) {
+  G4ExcitedStringVector* v = new G4ExcitedStringVector;
+  for (int i = 0; i < c.n; ++i) {
+    const StringSpec& s = c.s[i];
+    if (s.track_pdg != 0) {
+      const G4ParticleDefinition* d =
+          G4ParticleTable::GetParticleTable()->FindParticle(s.track_pdg);
+      const double m = d->GetPDGMass();
+      G4LorentzVector mom(0.0, 0.0, 0.0, m);
+      mom.boost(G4ThreeVector(s.bx, 0.0, s.bz));
+      G4KineticTrack* kt = new G4KineticTrack(const_cast<G4ParticleDefinition*>(d), 0.0,
+                                              G4ThreeVector(0, 0, 0), mom);
+      v->push_back(new G4ExcitedString(kt));
+      continue;
+    }
+    G4Parton* l = new G4Parton(s.left);
+    G4Parton* r = new G4Parton(s.right);
+    const double half = 0.5 * s.mass;
+    G4LorentzVector pl(0.0, 0.0, half, half);
+    G4LorentzVector pr(0.0, 0.0, -half, half);
+    pl.boost(G4ThreeVector(s.bx, 0.0, s.bz));
+    pr.boost(G4ThreeVector(s.bx, 0.0, s.bz));
+    l->Set4Momentum(pl);
+    r->Set4Momentum(pr);
+    v->push_back(new G4ExcitedString(l, r, s.direction));
+  }
+  return v;
+}
+
+void delete_string_vector(G4ExcitedStringVector* v) {
+  for (auto* s : *v) { delete s; }
+  delete v;
+}
+
+/// The cases themselves, so that the port builds its input from the oracle and not from a
+/// second copy of the table that can drift from this one.
+void dump_string_specs() {
+  FILE* f = std::fopen("ftf_stringspec.csv", "w");
+  std::fprintf(f, "case,n,index,left,right,mass,direction,bz,bx,track_pdg,"
+                  "lpx,lpy,lpz,le,rpx,rpy,rpz,re\n");
+  for (const StringVecCase& c : kStringVecs) {
+    G4ExcitedStringVector* v = make_string_vector(c);
+    for (int i = 0; i < c.n; ++i) {
+      const StringSpec& s = c.s[i];
+      G4LorentzVector pl(0, 0, 0, 0), pr(0, 0, 0, 0);
+      int track_pdg = s.track_pdg;
+      if (s.track_pdg != 0) {
+        pl = (*v)[i]->GetKineticTrack()->Get4Momentum();
+        // The code the track ACTUALLY carries, which is not necessarily the one asked for -
+        // see the K0S comment on the case table. The port builds its input from this column.
+        track_pdg = (*v)[i]->GetKineticTrack()->GetDefinition()->GetPDGEncoding();
+      } else {
+        pl = (*v)[i]->GetLeftParton()->Get4Momentum();
+        pr = (*v)[i]->GetRightParton()->Get4Momentum();
+      }
+      std::fprintf(f,
+                   "%s,%d,%d,%d,%d,%.17g,%d,%.17g,%.17g,%d,"
+                   "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                   c.name, c.n, i, s.left, s.right, s.mass, s.direction, s.bz, s.bx,
+                   track_pdg, pl.px(), pl.py(), pl.pz(), pl.e(), pr.px(), pr.py(), pr.pz(),
+                   pr.e());
+    }
+    delete_string_vector(v);
+  }
+  std::fclose(f);
+}
+
+void dump_strings() {
+  FILE* f = std::fopen("ftf_strings.csv", "w");
+  std::fprintf(f, "case,phase,draws,nhadrons,index,pdg,px,py,pz,e,mass,formation_time\n");
+  G4ExcitedStringDecay* dec = new G4ExcitedStringDecay(new G4LundStringFragmentation());
+  CycleEngine eng;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+  for (const StringVecCase& c : kStringVecs) {
+    for (int phase = 0; phase < 8; ++phase) {
+      G4ExcitedStringVector* v = make_string_vector(c);
+      eng.reset(phase);
+      G4KineticTrackVector* out = dec->FragmentStrings(v);
+      const int draws = eng.draws();
+      const int n = (out == nullptr) ? -1 : (int)out->size();
+      if (out == nullptr || out->empty()) {
+        std::fprintf(f, "%s,%d,%d,%d,-1,0,0,0,0,0,0,0\n", c.name, phase, draws, n);
+      } else {
+        for (int i = 0; i < (int)out->size(); ++i) {
+          const G4LorentzVector p = (*out)[i]->Get4Momentum();
+          std::fprintf(f, "%s,%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", c.name,
+                       phase, draws, n, i, (*out)[i]->GetDefinition()->GetPDGEncoding(), p.px(),
+                       p.py(), p.pz(), p.e(), p.mag(), (*out)[i]->GetFormationTime());
+        }
+      }
+      if (out != nullptr) {
+        for (auto* t : *out) { delete t; }
+        delete out;
+      }
+      delete_string_vector(v);
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  delete dec;
+}
+
+/// The statistical half of the same cases: species, multiplicity, and the ENERGY BALANCE, which
+/// is what the corrector exists for. `nhadrons = 0` counts the events FragmentStrings gave up
+/// on after 100 attempts - it returns a null vector then, and that is a physical outcome rather
+/// than an error, so it is a bin like any other.
+void dump_stringstat() {
+  G4ExcitedStringDecay* dec = new G4ExcitedStringDecay(new G4LundStringFragmentation());
+  CLHEP::HepJamesRandom eng(20260912);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+
+  FILE* f = std::fopen("ftf_stringstat.csv", "w");
+  std::fprintf(f, "case,n_events,pdg,count,sum_e,sum_pz,sum_pt2\n");
+  FILE* g = std::fopen("ftf_stringstat_mult.csv", "w");
+  std::fprintf(g, "case,n_events,multiplicity,count\n");
+  FILE* h = std::fopen("ftf_stringstat_balance.csv", "w");
+  std::fprintf(h, "case,n_events,n_ok,rel_e_bin,count\n");
+  const int N = 20000;
+  for (const StringVecCase& c : kStringVecs) {
+    std::map<int, long long> count, mult, balance;
+    std::map<int, double> sum_e, sum_pz, sum_pt2;
+    long long n_ok = 0;
+    for (int ev = 0; ev < N; ++ev) {
+      G4ExcitedStringVector* v = make_string_vector(c);
+      G4LorentzVector total(0, 0, 0, 0);
+      for (auto* s : *v) { total += s->Get4Momentum(); }
+      G4KineticTrackVector* out = dec->FragmentStrings(v);
+      const int n = (out == nullptr) ? 0 : (int)out->size();
+      mult[n]++;
+      if (out != nullptr) {
+        G4LorentzVector sum(0, 0, 0, 0);
+        for (auto* t : *out) {
+          const int pdg = t->GetDefinition()->GetPDGEncoding();
+          const G4LorentzVector p = t->Get4Momentum();
+          count[pdg]++;
+          sum_e[pdg] += p.e();
+          sum_pz[pdg] += p.pz();
+          sum_pt2[pdg] += p.px() * p.px() + p.py() * p.py();
+          sum += p;
+          delete t;
+        }
+        delete out;
+        if (n > 0) {
+          ++n_ok;
+          // log10 of the relative energy error, floored - the corrector's whole job in one
+          // number. Geant4's own threshold for running it is 1e-6 and its convergence limit is
+          // 1e-5, so a port that never ran it would sit in the -2 and -3 bins.
+          const double rel = std::fabs((sum.e() - total.e()) / total.e());
+          int bin = -12;
+          if (rel > 0.0) { bin = (int)std::floor(std::log10(rel)); }
+          if (bin < -12) { bin = -12; }
+          if (bin > 1) { bin = 1; }
+          balance[bin]++;
+        }
+      }
+      delete_string_vector(v);
+    }
+    for (const auto& kv : count) {
+      std::fprintf(f, "%s,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, N, kv.first, kv.second,
+                   sum_e[kv.first], sum_pz[kv.first], sum_pt2[kv.first]);
+    }
+    for (const auto& kv : mult) {
+      std::fprintf(g, "%s,%d,%d,%lld\n", c.name, N, kv.first, kv.second);
+    }
+    for (const auto& kv : balance) {
+      std::fprintf(h, "%s,%d,%lld,%d,%lld\n", c.name, N, n_ok, kv.first, kv.second);
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+  CLHEP::HepRandom::setTheEngine(saved);
+  delete dec;
+}
+
 void dump_ftf(const DumpContext&) {
   dump_params();
   dump_lund_tables();
@@ -993,6 +1355,11 @@ void dump_ftf(const DumpContext&) {
   dump_last_states();
   dump_fragment();
   dump_fragstat();
+  dump_resonance();
+  dump_corrector();
+  dump_string_specs();
+  dump_strings();
+  dump_stringstat();
 }
 
 }  // namespace
@@ -1000,6 +1367,8 @@ void dump_ftf(const DumpContext&) {
 G4GPU_REGISTER_DUMP("ftf",
                     "ftf_params.csv ftf_procprob.csv ftf_geom.csv ftf_lund_params.csv "
                     "ftf_lund_tables.csv ftf_hadrons.csv ftf_minmass.csv ftf_build.csv "
-                    "ftf_samplers.csv ftf_decisions.csv ftf_laststates.csv ftf_fragment.csv ftf_fragstat.csv "
-                    "ftf_fragstat_mult.csv",
+                    "ftf_samplers.csv ftf_decisions.csv ftf_laststates.csv ftf_fragment.csv "
+                    "ftf_fragstat.csv ftf_fragstat_mult.csv ftf_resonance.csv "
+                    "ftf_corrector.csv ftf_stringspec.csv ftf_strings.csv ftf_stringstat.csv "
+                    "ftf_stringstat_mult.csv ftf_stringstat_balance.csv",
                     dump_ftf);

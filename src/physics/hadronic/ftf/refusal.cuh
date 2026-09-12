@@ -122,6 +122,15 @@ enum class FtfRefusal : int {
   /// sub-types with opposite signs.
   kIllegalPartonPair,
 
+  /// A SHORT-LIVED product whose `G4SampleResonance::GetMinimumMass` the oracle could not
+  /// answer for - `ftf_hadrons.csv` writes -1 where `IsShortLived()` is true and
+  /// `GetDecayTable()` is null, because that function dereferences the decay table with no
+  /// null check and Geant4 would crash. The only such particles are the diquarks, and
+  /// G4ExcitedStringDecay::FragmentStrings resamples the mass of every short-lived product
+  /// without that check either, so it is safe there only because a diquark is never a
+  /// fragmentation product. Reported instead of assumed.
+  kResonanceMinimumMassMissing,
+
   /// A hadron PDG code that the Meson / Baryon tables or G4HadronBuilder produced and
   /// data/ftf_hadrons.hh does not carry. In Geant4 FindParticle returns a null pointer and
   /// every caller has a branch for it; here the code is reported so that a missing table row
@@ -177,6 +186,8 @@ __host__ __device__ inline const char* ftf_refusal_name(FtfRefusal r) {
       return "G4HadronBuilder::Barion: Illegal quark content as input";
     case FtfRefusal::kIllegalPartonPair:
       return "G4VLongitudinalStringDecay::SetMinimalStringMass: Illegal quark content";
+    case FtfRefusal::kResonanceMinimumMassMissing:
+      return "G4SampleResonance::GetMinimumMass for a short-lived particle with no decay table";
     case FtfRefusal::kUnknownHadronCode: return "a PDG code absent from data/ftf_hadrons.hh";
     case FtfRefusal::kStringHadronCapacity: return "hadrons-per-string capacity";
     case FtfRefusal::kStringCapacity: return "strings-per-interaction capacity";
