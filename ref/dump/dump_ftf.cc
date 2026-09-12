@@ -82,7 +82,17 @@
 #include "G4HadronBuilder.hh"
 #include "G4HadronicParameters.hh"
 #include "G4IonTable.hh"
+#include "G4Alpha.hh"
+#include "G4AntiLambda.hh"
+#include "G4GenericIon.hh"
+#include "G4HadronicInteraction.hh"
+#include "G4HadronicProcess.hh"
+#include "G4He3.hh"
 #include "G4KaonMinus.hh"
+#include "G4ProcessManager.hh"
+#include "G4ProcessVector.hh"
+#include "G4Triton.hh"
+#include "G4VProcess.hh"
 #include "G4KaonPlus.hh"
 #include "G4KineticTrack.hh"
 #include "G4KineticTrackVector.hh"
@@ -2659,6 +2669,60 @@ void dump_modelbig() {
   std::fclose(fm);
 }
 
+// ---------------------------------------------------------------------------------------------
+// ftf_windows.csv - which particles QBBC actually gives FTFP, and between which energies
+//
+// docs/PORTED.md 2.1.11b states the energy windows by reading the builders - 3 GeV upwards for
+// p, n, pi+- through `GetMinEnergyTransitionFTF_Cascade()`, all energies for anti-nucleons
+// through `BuildFTFP_BERT(..., bert=false)`, 3 GeV/nucleon upwards for ions through
+// `G4IonPhysicsXS`. Reading a builder is not measuring one: the number that decides is what the
+// CONSTRUCTED process holds, after every SetMinEnergy/SetMaxEnergy any of the three builders
+// made, and G4HadronicProcess keeps it where it can be read.
+//
+// The physics list is already built by the time any dump runs, so this costs nothing: it walks
+// the process manager of each species, finds the G4HadronicProcess objects, and writes one row
+// per registered model with the energy range that model is asked for. A row whose model name is
+// FTFP means this package is on that species' path in that window; there is no row for a
+// species QBBC does not give it, and the absence is the point.
+void dump_ftfwindows() {
+  FILE* f = std::fopen("ftf_windows.csv", "w");
+  std::fprintf(f, "particle,pdg,baryon,charge,mass_MeV,process,subtype,model,emin_MeV,emax_MeV\n");
+  const G4ParticleDefinition* all[] = {
+      G4Proton::Proton(),        G4Neutron::Neutron(),      G4PionPlus::PionPlus(),
+      G4PionMinus::PionMinus(),  G4KaonPlus::KaonPlus(),    G4KaonMinus::KaonMinus(),
+      G4AntiProton::AntiProton(), G4AntiNeutron::AntiNeutron(),
+      G4Lambda::Lambda(),        G4AntiLambda::AntiLambda(),
+      G4Deuteron::Deuteron(),    G4Triton::Triton(),        G4He3::He3(),
+      G4Alpha::Alpha(),          G4GenericIon::GenericIon()};
+  for (const G4ParticleDefinition* pn : all) {
+    G4ProcessManager* pm = pn->GetProcessManager();
+    if (pm == nullptr) { continue; }
+    G4ProcessVector* pv = pm->GetProcessList();
+    for (G4int i = 0; i < (G4int)pv->size(); ++i) {
+      G4VProcess* pr = (*pv)[i];
+      G4HadronicProcess* hp = dynamic_cast<G4HadronicProcess*>(pr);
+      if (hp == nullptr) { continue; }
+      const std::vector<G4HadronicInteraction*>& models = hp->GetHadronicInteractionList();
+      if (models.empty()) {
+        std::fprintf(f, "%s,%d,%d,%d,%.17g,%s,%d,(none),0,0\n", pn->GetParticleName().c_str(),
+                     pn->GetPDGEncoding(), pn->GetBaryonNumber(),
+                     (G4int)pn->GetPDGCharge(), pn->GetPDGMass() / MeV,
+                     pr->GetProcessName().c_str(), pr->GetProcessSubType());
+        continue;
+      }
+      for (const G4HadronicInteraction* m : models) {
+        std::fprintf(f, "%s,%d,%d,%d,%.17g,%s,%d,%s,%.17g,%.17g\n",
+                     pn->GetParticleName().c_str(), pn->GetPDGEncoding(),
+                     pn->GetBaryonNumber(), (G4int)pn->GetPDGCharge(), pn->GetPDGMass() / MeV,
+                     pr->GetProcessName().c_str(), pr->GetProcessSubType(),
+                     m->GetModelName().c_str(), m->GetMinEnergy() / MeV,
+                     m->GetMaxEnergy() / MeV);
+      }
+    }
+  }
+  std::fclose(f);
+}
+
 void dump_ftf(const DumpContext&) {
   dump_params();
   dump_lund_tables();
@@ -2685,6 +2749,7 @@ void dump_ftf(const DumpContext&) {
   dump_nucstat();
   dump_aaradius();
   dump_prescatter();
+  dump_ftfwindows();
   dump_modelcases();
   dump_modelstat();
   dump_modelbig();
@@ -2703,7 +2768,7 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_getlist.csv ftf_getlist_aa.csv ftf_aanucleus.csv ftf_annih.csv "
                     "ftf_modelstat_strings.csv ftf_modelstat_species.csv "
                     "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelcases.csv "
-                    "ftf_nucstat.csv ftf_aaradius.csv ftf_prescatter.csv "
+                    "ftf_nucstat.csv ftf_aaradius.csv ftf_prescatter.csv ftf_windows.csv "
                     "ftf_modelbig_strings.csv "
                     "ftf_modelbig_mult.csv",
                     dump_ftf);

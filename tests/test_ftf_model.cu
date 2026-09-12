@@ -1,8 +1,8 @@
 // G4FTFModel and the classes that make the strings, against ref/oracle/ftf_*.csv.
 //
 // This is the half of FTFP that P11 could not write: from a projectile and a nucleus to a
-// vector of excited strings and a wounded nucleus. Six tables, and the split between them is
-// the split between what a shared random stream can check and what it cannot.
+// vector of excited strings and a wounded nucleus. The split between the tables is the split
+// between what a shared random stream can check and what it cannot.
 //
 //   ftf_splitup.csv    G4DiffractiveSplitableHadron::SplitUp, i.e. ChooseStringEnds, for 37
 //                      hadron codes x 8 phases of the eight-value cycle. Two parton codes and
@@ -25,9 +25,22 @@
 //                      The nucleus is replayed because G4Fancy3DNucleus's rejection sampling
 //                      shares no stream with this port's Philox - P9's pattern
 //                      (docs/PORTED.md 2.1.10).
-//   ftf_modelstat_*    the statistical half: 15 cases x 20,000 events of the whole model.
-//                      String count and mass at GetStrings exit, species and multiplicity of
-//                      the hadrons Scatter returns, and the wounded nucleus's hole count.
+//   ftf_getlist_aa.csv the NUCLEUS-NUCLEUS arm of GetList on two replayed nuclei, and
+//   ftf_aanucleus.csv  the two configurations it is replayed from - the projectile one after
+//                      G4FTFModel::Init has boosted and Lorentz-contracted it.
+//   ftf_annih.csv      G4FTFAnnihilation on nine collisions x 8 phases: all four channels, both
+//                      hadrons, both partons and their momenta, and the additional string.
+//   ftf_modelstat_*    the statistical half: 24 cases x 20,000 events of the whole model, IN
+//                      TWO PASSES. The string counters come from Init + GetStrings and the
+//                      hadron ones from Scatter, because that is what the dump does and because
+//                      Scatter's rejection loop is a conditioning - docs/RISK.md V105.
+//   ftf_nucstat.csv    P9's nucleus measured the way FTF's geometry uses it, and
+//   ftf_aaradius.csv   the impact-parameter range of an AA collision, which is the contracted
+//                      projectile's outer radius plus the target's plus 2 fm.
+//   ftf_prescatter.csv the model with the rejection loop taken off, plus that loop's own
+//                      inputs: the proton and neutron hit counts of both nuclei.
+//   ftf_windows.csv    which particles QBBC's constructed processes actually give FTFP and
+//                      between which energies, so the entry point can be run over all of them.
 //
 //   ftf_modelcases.csv the INPUTS of those cases - the projectile's PDG mass and lab momentum
 //                      as Geant4 computed them - so that the statistical half does not have to
@@ -645,7 +658,8 @@ int main(int argc, char** argv) {
           bic::Nucleon& n = nucleons[nuc_csv.i(rr, "index")];
           const long long type = nuc_csv.i(rr, "type");
           n.type = (type == 1) ? bic::kProton : ((type == 2) ? bic::kNeutron : bic::kLambda);
-          n.position = ftf::Vec3d{nuc_csv.d(rr, "posx"), nuc_csv.d(rr, "posy"), nuc_csv.d(rr, "posz")};
+          n.position = ftf::Vec3d{nuc_csv.d(rr, "posx"), nuc_csv.d(rr, "posy"),
+                                   nuc_csv.d(rr, "posz")};
           n.momentum = ftf::Vec4(nuc_csv.d(rr, "px"), nuc_csv.d(rr, "py"), nuc_csv.d(rr, "pz"),
                                  nuc_csv.d(rr, "e"));
           n.binding_energy = nuc_csv.d(rr, "binding");
@@ -1777,6 +1791,119 @@ int main(int argc, char** argv) {
                     scale(kv.second, ref_n), n_min,
                     std::string(c.name) + " mult " + std::to_string(kv.first));
         }
+      }
+      delete ws;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 8. ftf_windows.csv - the entry point over every window QBBC actually gives FTFP
+  //
+  // docs/PORTED.md states the energy windows by reading the builders. This reads them off the
+  // CONSTRUCTED processes instead - one row per model G4HadronicProcess holds, with the energy
+  // range it is asked for - and then runs `ftf::apply_yourself` at three energies inside every
+  // FTFP row, on carbon and on lead. It is not a comparison against Geant4 numbers; it is the
+  // generality check the P11b brief asks for, and its verdict per row is one of three:
+  //
+  //   ran        secondaries came back
+  //   refused    a NAMED refusal came back, which is the honest answer for an unwritten arm
+  //   silent     neither, which would be a bug and fails
+  //
+  // An ION row is run only when the table gives a usable PDG mass (d, t, He3, alpha);
+  // GenericIon's mass is not a nuclide's and the ion arm is covered by the statistical cases.
+  // -------------------------------------------------------------------------------------------
+  {
+    Csv cw2;
+    if (cw2.load(dir + "/ftf_windows.csv")) {
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      WS* ws = new WS();
+      static physics::hadronic::HadFinalState<double, 128> out;
+      int n_rows = 0, n_points = 0, n_ran = 0, n_refused = 0, n_silent = 0;
+      std::map<int, int> refusal_counts;
+      std::map<int, std::string> refusal_where;
+      const int targets[][2] = {{12, 6}, {207, 82}};
+      for (size_t r = 0; r < cw2.rows.size(); ++r) {
+        const std::string& model = cw2.s(r, "model");
+        if (model.find("FTF") == std::string::npos) { continue; }
+        const int pdg = static_cast<int>(cw2.i(r, "pdg"));
+        const int baryon = static_cast<int>(cw2.i(r, "baryon"));
+        const int charge = static_cast<int>(cw2.i(r, "charge"));
+        const double mass = cw2.d(r, "mass_MeV");
+        const double emin = cw2.d(r, "emin_MeV");
+        const double emax = cw2.d(r, "emax_MeV");
+        const bool is_ion = (baryon > 1) || (baryon < -1);
+        if (is_ion && (mass <= 0.0 || pdg == 0)) { continue; }  // GenericIon
+        ++n_rows;
+        hadronic::xs::Projectile<double> proj;
+        if (is_ion) {
+          proj.pdg = pdg;
+          proj.mass = mass;
+          proj.charge = charge;
+          proj.baryon_number = baryon;
+          proj.n_lambdas = 0;
+        } else {
+          const data::FtfHadron* h = data::ftf_find_hadron(pdg);
+          if (h == nullptr) { continue; }
+          proj = projectile_of(pdg);
+        }
+        // Three energies inside the window: just above the floor, the geometric middle, and
+        // just below the ceiling - capped at 100 GeV, which is where QBBC's own beams stop
+        // being interesting and where a 100 TeV row would otherwise put the test.
+        const double hi = (emax > 100000.0) ? 100000.0 : emax;
+        const double lo = (emin > 0.0) ? emin : 1.0;
+        const double energies[3] = {lo * 1.05, std::sqrt(lo * hi), hi * 0.95};
+        for (double kin : energies) {
+          if (kin <= 0.0 || kin < emin || kin > emax) { continue; }
+          for (const auto& t : targets) {
+            ++n_points;
+            physics::hadronic::HadProjectile<double> hp;
+            hp.pdg = proj.pdg;
+            hp.mass = proj.mass;
+            hp.charge = proj.charge;
+            hp.baryon_number = proj.baryon_number;
+            hp.kin_energy = kin;
+            physics::hadronic::HadNucleus nuc;
+            nuc.a = t[0];
+            nuc.z = t[1];
+            out = physics::hadronic::HadFinalState<double, 128>();
+            Philox<double> rng(static_cast<uint32_t>(n_points), 41u);
+            ftf::apply_yourself(hp, nuc, out, ws, lund, rng);
+            if (out.n_secondaries > 0) {
+              ++n_ran;
+            } else if (ws->report.refused != ftf::FtfRefusal::kNone ||
+                       ws->report.model.refused != ftf::FtfRefusal::kNone ||
+                       ws->report.generator.any() || ws->report.low_energy_dummy) {
+              ++n_refused;
+              // A positive code is an `FtfRefusal`; -1 is P6's `Propagate` refusing (which for
+              // FTFP is almost always `short_lived_track`, docs/RISK.md V100); -2 is the
+              // charm/bottom or hypernucleus dummy branch below 100 MeV.
+              int code = static_cast<int>(ws->report.refused);
+              if (code == 0) { code = static_cast<int>(ws->report.model.refused); }
+              if (code == 0) { code = ws->report.generator.any() ? -1 : -2; }
+              ++refusal_counts[code];
+              if (refusal_where.find(code) == refusal_where.end()) {
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "%s at %.4g MeV on A=%d",
+                              cw2.s(r, "particle").c_str(), kin, t[0]);
+                refusal_where[code] = buf;
+              }
+            } else {
+              ++n_silent;
+              if (n_silent <= 5) {
+                std::printf("FAIL: %s at %.4g MeV on A=%d produced nothing and reported "
+                            "nothing\n", cw2.s(r, "particle").c_str(), kin, t[0]);
+              }
+              ++fails;
+            }
+          }
+        }
+      }
+      std::printf("\nenergy windows: %d FTFP rows, %d (beam, energy, target) points, "
+                  "%d ran, %d refused by name, %d silent\n", n_rows, n_points, n_ran,
+                  n_refused, n_silent);
+      for (const auto& kv : refusal_counts) {
+        std::printf("    refusal %4d : %5d points   e.g. %s\n", kv.first, kv.second,
+                    refusal_where[kv.first].c_str());
       }
       delete ws;
     }

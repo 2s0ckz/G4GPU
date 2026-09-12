@@ -240,7 +240,8 @@ __host__ __device__ inline void ftf_participants_get_list_hadron(
       const double dy = impact_y - nucleon->position.y;
       const double impact2 = dx * dx + dy * dy;
 
-      if (ftf_get_probability_of_interaction(params, impact2 / fermi_unit / fermi_unit) > rng.uniform()) {
+      if (ftf_get_probability_of_interaction(params, impact2 / fermi_unit / fermi_unit) >
+          rng.uniform()) {
         p->pool[primary].status = 1;  // It takes part in the interaction
         int target_slot = kNullSplitable;
         if (!nucleon->hit) {
@@ -336,7 +337,8 @@ __host__ __device__ inline void ftf_participants_get_list_nucleus(
         const double dy = impact_y + proj_nucleon->position.y - targ_nucleon->position.y;
         const double impact2 = dx * dx + dy * dy;
         int target_slot = kNullSplitable;
-        if (ftf_get_probability_of_interaction(params, impact2 / fermi_unit / fermi_unit) > rng.uniform()) {
+        if (ftf_get_probability_of_interaction(params, impact2 / fermi_unit / fermi_unit) >
+          rng.uniform()) {
           if (!proj_nucleon->hit) {
             projectile_slot =
                 FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kProjectileBase + ip;
