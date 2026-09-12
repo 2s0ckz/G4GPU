@@ -1974,6 +1974,98 @@ void dump_modelstat() {
   std::fclose(fw);
 }
 
+// ---------------------------------------------------------------------------------------------
+// ftf_modelbig*.csv - docs/RISK.md V88's rule, applied
+// ---------------------------------------------------------------------------------------------
+
+/// The three cases that carried the worst z-scores at 20,000 events, re-run at 200,000.
+///
+/// V88: "20,000 events is the oracle's limit and four port seeds agreeing is not independence -
+/// when a statistical row sits at 3 sigma, re-run BOTH sides at 200,000 before calling it."
+/// The worst rows at 20,000 were n_Fe_10's NN-collision count (3.49), pip_Al_10's multiplicity
+/// (3.43) and pim_C_10's string count (3.31), and a 3-sigma row at 20,000 is either a
+/// fluctuation - in which case it shrinks in SIGMA terms at 200,000 only if it was one - or a
+/// real 0.5% difference, which at ten times the statistics comes back at 10 sigma. The point of
+/// the re-run is that those two outcomes are distinguishable and a single 20,000-event number
+/// is not.
+///
+/// Only three cases, and only the light targets: this runs inside the same table dump as
+/// everything else and 200,000 events of a 50 GeV pion on lead would dominate its runtime.
+const ModelCase kBigCases[] = {
+    {"n_Fe_10", 2112, 10000.0, 56, 26},
+    {"pip_Al_10", 211, 10000.0, 27, 13},
+    {"pim_C_10", -211, 10000.0, 12, 6},
+};
+
+void dump_modelbig() {
+  FILE* fs = std::fopen("ftf_modelbig_strings.csv", "w");
+  std::fprintf(fs, "case,n_events,quantity,bin,count\n");
+  FILE* fm = std::fopen("ftf_modelbig_mult.csv", "w");
+  std::fprintf(fm, "case,n_events,multiplicity,count\n");
+
+  const int N = 200000;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const ModelCase& c : kBigCases) {
+    const G4ParticleDefinition* d = def_of(c.pdg);
+    {
+      CLHEP::HepJamesRandom eng(20260912);
+      CLHEP::HepRandom::setTheEngine(&eng);
+      FtfModelProbe* model = new FtfModelProbe("FTFP");
+      std::map<int, long long> nstrings, nncoll, tused;
+      for (int ev = 0; ev < N; ++ev) {
+        G4Nucleus nucleus(c.a, c.z);
+        const double p = std::sqrt(c.kin * (c.kin + 2.0 * d->GetPDGMass()));
+        G4DynamicParticle dp(d, G4ThreeVector(0.0, 0.0, p));
+        model->Init(nucleus, dp);
+        G4ExcitedStringVector* v = model->GetStrings();
+        ++nstrings[v ? (int)v->size() : 0];
+        ++nncoll[model->GetNumberOfNNcollisions()];
+        ++tused[c.a - model->GetNumberOfTargetSpectatorNucleons()];
+        if (v) {
+          for (size_t i = 0; i < v->size(); ++i) { delete (*v)[i]; }
+          delete v;
+        }
+      }
+      for (const auto& kv : nstrings) {
+        std::fprintf(fs, "%s,%d,nstrings,%d,%lld\n", c.name, N, kv.first, kv.second);
+      }
+      for (const auto& kv : nncoll) {
+        std::fprintf(fs, "%s,%d,nncoll,%d,%lld\n", c.name, N, kv.first, kv.second);
+      }
+      for (const auto& kv : tused) {
+        std::fprintf(fs, "%s,%d,participants,%d,%lld\n", c.name, N, kv.first, kv.second);
+      }
+      delete model;
+    }
+    {
+      CLHEP::HepJamesRandom eng(20260913);
+      CLHEP::HepRandom::setTheEngine(&eng);
+      G4FTFModel* model = new G4FTFModel("FTFP");
+      model->SetFragmentationModel(new G4ExcitedStringDecay(new G4LundStringFragmentation()));
+      std::map<int, long long> mult;
+      for (int ev = 0; ev < N; ++ev) {
+        G4Nucleus nucleus(c.a, c.z);
+        const double p = std::sqrt(c.kin * (c.kin + 2.0 * d->GetPDGMass()));
+        G4DynamicParticle dp(d, G4ThreeVector(0.0, 0.0, p));
+        G4KineticTrackVector* r = model->Scatter(nucleus, dp);
+        ++mult[r ? (int)r->size() : 0];
+        if (r) {
+          for (size_t i = 0; i < r->size(); ++i) { delete (*r)[i]; }
+          delete r;
+        }
+      }
+      for (const auto& kv : mult) {
+        std::fprintf(fm, "%s,%d,%d,%lld\n", c.name, N, kv.first, kv.second);
+      }
+      delete model;
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(fs);
+  std::fclose(fm);
+}
+
 void dump_ftf(const DumpContext&) {
   dump_params();
   dump_lund_tables();
@@ -1996,6 +2088,7 @@ void dump_ftf(const DumpContext&) {
   dump_create_strings();
   dump_getlist();
   dump_modelstat();
+  dump_modelbig();
 }
 
 }  // namespace
@@ -2009,5 +2102,6 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_stringstat_mult.csv ftf_stringstat_balance.csv ftf_splitup.csv "
                     "ftf_hnelastic.csv ftf_excite.csv ftf_cstrings.csv ftf_nucleus.csv "
                     "ftf_getlist.csv ftf_modelstat_strings.csv ftf_modelstat_species.csv "
-                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv",
+                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelbig_strings.csv "
+                    "ftf_modelbig_mult.csv",
                     dump_ftf);

@@ -8159,3 +8159,133 @@ and what it breaks is a books claim: 1.022 MeV per escaping positron appears in 
 not in the beam. It is not fixed here because it is not this package's change and it would move
 the same gate V96's continuous loss is being judged on; the number is asserted in the test
 instead, so that fixing it has to come through that line.
+
+### V98: a parton's constructor samples, and only the draw count could have said so
+
+`G4Parton::G4Parton( G4int PDGcode )` (util/src/G4Parton.cc:38) draws a colour -
+`(G4int)(3.*G4UniformRand())+1`, once for a quark, once for a diquark and twice for a gluon -
+and then a spin projection, `(G4int)((iSpin+1)*G4UniformRand())`, whenever `GetPDGiSpin()` is
+non-zero. Nothing in FTF ever READS `theColour`, `theSpinZ` or `theIsoSpinZ`: the fragmentation
+uses the PDG code and nothing else. So the constructor is, from the port's point of view, three
+uniforms and no information.
+
+`G4DiffractiveSplitableHadron::SplitUp` builds two of them on every string, so a proton costs
+FIVE deviates - two in `ChooseStringEnds`, two for the u quark, one for the spin-0 diquark - and
+the first transcription spent two. Every hadron of every event after the first string would have
+been drawn from a stream shifted by three.
+
+The answer was right and the count was wrong, which is the only shape this error has:
+`ref/oracle/ftf_splitup.csv` compares both parton codes AND the draw count, and the codes agreed
+at every one of 296 (code, phase) points while the count read `got 2 want 5`. The same argument
+2.1.11 makes for the K0 coin toss, one layer up. Fixing it needed a new oracle column,
+`GetPDGiSpin`, because a spin-0 diquark costs one deviate and a spin-1 diquark two, and no rule
+about the PDG code is the port's to invent.
+
+### V99: Geant4 divides two integers to decide whether a collision may be inelastic
+
+`G4FTFModel::ExciteParticipants` (G4FTFModel.cc:917) reads
+
+    if ( G4UniformRand() < ( 1.0 - target->GetSoftCollisionCount()     / MaxNumOfInelCollisions ) *
+                           ( 1.0 - projectile->GetSoftCollisionCount() / MaxNumOfInelCollisions ) )
+
+and `GetSoftCollisionCount()` returns `G4int` while `MaxNumOfInelCollisions` is a `G4int`. The
+division is INTEGER. The factor is therefore exactly 1 until a hadron has had `Nmax` soft
+collisions and exactly 0 at `Nmax` - a hard cap, not a linear suppression. (At `2*Nmax` it is
+-1, so two saturated hadrons give a product of +1 and the collision is accepted again, which is
+why the count is compared and never clamped.)
+
+Written with a floating-point division - which is what the expression looks like it means, and
+what a reader who has not checked the return type will write - the model rejects inelastic
+collisions gradually and turns them into elastic ones. MEASURED against
+`ref/oracle/ftf_modelstat_*.csv` for a 10 GeV proton on lead: **12% fewer pions**, 0.33 fewer
+quark-exchange tracks per event, 7.5% too many excited strings, and an excited-string mass
+spectrum 27% short in the 1.26-1.58 GeV bin.
+
+What makes it worth an entry is what did NOT move. The wounded-nucleon count agreed to 0.2%, the
+string-count distribution agreed, the impact parameter agreed, and the total multiplicity was
+within the gate. A statistical test built only out of "how many nucleons were hit" and "how many
+hadrons came out" would have passed. It was found by adding three counters that split those two
+apart - the impact parameter alone, `A - NumberOfTargetSpectatorNucleons` (the Glauber count,
+separately from the reggeon cascade) and `GetNumberOfNNcollisions` (how many of those were
+actually excited) - all three of which are PUBLIC on `G4FTFModel` and cost one line each to
+dump. A histogram that measures an outcome cannot say which step produced it; one that measures
+a step can.
+
+### V100: P6 refuses an edge case that is on FTFP's main path
+
+`docs/PORTED.md` 2.1.4 refuses `G4DecayKineticTracks` - the first line of both
+`G4GeneratorPrecompoundInterface::Propagate` entry points, which decays every short-lived track
+in the list through `G4KineticTrack::Decay()`. The refusal is written as one of four edge cases,
+alongside anti-nuclei and hypernuclei, and `CascadeTrack::is_short_lived` carries the fact so
+that a list containing one is refused rather than de-excited as though the resonance were a
+stable secondary. That is the right behaviour and the wrong expectation of how often it happens.
+
+The FTF fragmentation produces resonances as its NORMAL output. `G4ExcitedStringDecay::
+FragmentStrings` redraws every short-lived product's mass from a Breit-Wigner and hands the rho,
+omega, K*, eta and Delta on undecayed - 2.1.11's own note says the resonances "are most of what
+a string makes". Measured: 4 of the first 5 `ftf::apply_yourself` calls for a 10 GeV proton on
+carbon were refused by `preco::propagate_residual` on the short-lived test, and the one that was
+not had only two secondaries.
+
+So the FTFP chain is complete up to the hand-over and stops there, for a reason that belongs to
+neither package alone: P11b produces exactly what Geant4 produces, and P6 ported the interface
+without the decay stage in front of it. `G4KineticTrack::Decay` needs the resonance-width
+machinery (`G4SampleResonance`, `G4Integrator`, `IntegrateCMMomentum`) that
+`bic/kinetic_track.cuh` also refuses by name - it belongs with `G4BCDecay` - so whoever writes it
+closes three refusals at once. Until then the FTFP arm makes strings, fragments them and reports
+at the boundary; it does not silently de-excite a rho.
+
+### V101: the FTF interaction workspace is 289 kB, and that is per track
+
+`sizeof(ftf::FtfWorkspace<250, 64, 512, 320, 256, 96>)` is 289,152 bytes. It holds two
+`bic::Nucleon` arrays (250 + 64 nucleons at 72 bytes), one shared `Nucleus3DScratch`, a
+501-slot splitable-hadron pool at 104 bytes each, 512 interactions at 32, 320 `ExcitedString`s
+at 184, and P11's 53,816-byte string-decay workspace. Every byte is behind a pointer and none of
+it is on the stack - the device probe is a 768-byte frame with nothing spilled - but it is one
+per TRACK IN FLIGHT, not one per string or per event.
+
+For scale: P11's string-decay workspace alone is 53,816 bytes and P9's nucleus 18 kB, so this is
+five times the largest thing the hadronic port had before it. A kernel with a few thousand
+resident tracks wants most of a gigabyte for workspaces alone.
+
+Three of the capacities are template parameters and all three are REFUSED rather than truncated
+when exceeded, so the trade is available to whoever wires this in: `kMaxProjA` is 250 only
+because nothing should be refused by default and 64 covers every ion a galactic-cosmic-ray
+problem contains; `kMaxStrings` at 320 is above what a proton on lead produces (the
+20,000-event maximum is 31) but below the `1 + A_target + A_proj` that cannot overflow;
+`kMaxInteractions` at 512 the same. Shrinking them is a decision about which events get reported
+instead of simulated, which is why it is recorded here rather than made here.
+
+### V102: two columns with the same name, and the reader took the second
+
+`ref/oracle/ftf_nucleus.csv` was dumped with the header
+`nucleus,a,z,index,type,x,y,z,px,py,pz,e,binding` - the nucleus's CHARGE and the nucleon's z
+COORDINATE both called `z`. A reader that builds a name-to-index map keeps the last, so the port
+replayed Al27 with `Z = 3`, being the integer part of the first nucleon's z in fermi.
+
+What makes it worth recording is how nearly it hid. Z enters the replayed configuration only
+through `G4FTFParameters::InitForInteraction`, which mixes the proton and neutron cross sections
+by Z/A, and from there only through `RadiusOfHNinteractions2` in the step function
+`RadiusOfHNinteractions2 > b^2`. So the impact parameter agreed exactly, the draw count agreed
+exactly, and the identity and interaction time of the participant the two sides DID agree on
+agreed exactly - 1,260 of 1,460 comparisons were still zero. One nucleon in one of the 200
+(nucleus, projectile, phase) groups changed sides.
+
+The general lesson is for the dump and not for the port: a CSV column name is an identifier in a
+namespace the writer does not control, and `x,y,z` for a position sitting next to `a,z` for a
+nuclide is a collision waiting for a reader. They are `posx,posy,posz` now.
+
+### V103: the two log-distribution probabilities are distinct parameters with the same value
+
+`G4DiffractiveExcitation::ExciteParticipants_doNonDiffraction` samples the projectile's
+light-cone minus-component with `GetProbLogDistrPrD()` and the target's plus-component with
+`GetProbLogDistr()`. They are separate members of `G4FTFParameters`, set in separate statements,
+and in 11.1.1 every branch of `InitForInteraction` sets both to 0.55 - the baryon collection,
+the pion collection and the two literal fallbacks.
+
+Swapping them in the port changed nothing: 10,749 comparisons, all still exact. That is a FAILED
+perturbation, and it is recorded rather than quietly replaced because the reason it failed is a
+property of Geant4 and not of the test. No oracle this package can build will ever separate the
+two, and a future tune that gives them different values would make a silently-swapped port wrong
+with no existing test able to see it. The perturbation that DOES bite that arm is the sign of
+`Qplus = -(TPlusNew - Ptarget.plus())`, which fails four exact buckets and two statistics.

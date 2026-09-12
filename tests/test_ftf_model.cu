@@ -321,6 +321,30 @@ void z_compare_counts(ZStat& z, long long got, long long want, double overdisper
   }
 }
 
+/// Two MEANS compared: `|m1 - m2| / sqrt(var/n1 + var/n2)`, with the variance measured on the
+/// port side and used for both sides.
+///
+/// Using one variance for two samples is a real assumption and it is the right one here: the
+/// two sides are meant to be the same distribution, so if they are, the port's variance is the
+/// oracle's; and if they are not, the difference in the MEANS is what this is looking for and
+/// a wrong variance changes the z by a factor, not a sign. The oracle dumps sums and counts but
+/// not sums of squares, which is why the variance has to come from one side.
+void z_mean_compare(ZStat& z, double sum_port, double sumsq_port, long long n_port,
+                    double sum_ref, long long n_ref, const std::string& where) {
+  ++z.bins;
+  const double m1 = sum_port / n_port;
+  const double m2 = sum_ref / n_ref;
+  const double var = (sumsq_port / n_port - m1 * m1) * n_port / (n_port - 1.0);
+  const double se = (var > 0.0) ? std::sqrt(var / n_port + var / n_ref) : 0.0;
+  const double s = (se > 0.0) ? std::fabs(m1 - m2) / se : 0.0;
+  if (s > z.worst) {
+    z.worst = s;
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), " got %.6g want %.6g", m1, m2);
+    z.where = where + buf;
+  }
+}
+
 /// Var/Mean of a per-event count, from the running sum and sum-of-squares.
 double overdispersion_of(long long sum, long long sum_sq, long long n_events) {
   if (n_events < 2 || sum <= 0) { return 1.0; }
@@ -665,6 +689,19 @@ int main(int argc, char** argv) {
   const int z_species = new_z("model species");
   const int z_mult = new_z("model multiplicity");
   const int z_holes = new_z("model wounded nucleons");
+  // The rapidity/xF and pT spectra, as their first moments per species: <E>, <pz> and <pt2> in
+  // the lab. A mean is not a spectrum, but it is what a 20,000-event oracle can carry per
+  // species without a per-species histogram axis, and a port whose longitudinal or transverse
+  // scale is wrong moves it.
+  // The energy-momentum balance per event, in one number per case: the mean total energy of
+  // everything Scatter returns. It is the sum of the oracle's per-species `sum_e` column over
+  // species, divided by the number of events, against the same quantity from the port - so a
+  // port that lost or invented energy anywhere between the impact parameter and the last
+  // fragmentation moves it, whatever the species composition does.
+  const int z_etot = new_z("model <E_total> per event");
+  const int z_mean_e = new_z("model <E> per species");
+  const int z_mean_pz = new_z("model <pz> per species");
+  const int z_mean_pt2 = new_z("model <pt2> per species");
   const int z_b = new_z("model impact parameter");
   const int z_part = new_z("model participants");
   const int z_nn = new_z("model NN collisions");
@@ -699,6 +736,10 @@ int main(int argc, char** argv) {
         // Reference histograms for this case.
         std::map<int, long long> ref_nstrings, ref_mass, ref_species, ref_mult, ref_holes;
         std::map<int, long long> ref_b, ref_part, ref_nn, ref_exc;
+        // The three momentum sums per species, which is how the oracle carries the rapidity/xF
+        // and pT spectra: `sum_pz/count` is the mean longitudinal momentum of that species and
+        // `sum_pt2/count` its mean transverse momentum squared, both in the lab.
+        std::map<int, double> ref_sum_e, ref_sum_pz, ref_sum_pt2;
         long long ref_n = 0;
         for (size_t r = 0; r < cs.rows.size(); ++r) {
           if (cs.s(r, "case") != c.name) { continue; }
@@ -721,7 +762,11 @@ int main(int argc, char** argv) {
         }
         for (size_t r = 0; r < ch.rows.size(); ++r) {
           if (ch.s(r, "case") != c.name) { continue; }
-          ref_species[static_cast<int>(ch.i(r, "pdg"))] = ch.i(r, "count");
+          const int sp = static_cast<int>(ch.i(r, "pdg"));
+          ref_species[sp] = ch.i(r, "count");
+          ref_sum_e[sp] = ch.d(r, "sum_e");
+          ref_sum_pz[sp] = ch.d(r, "sum_pz");
+          ref_sum_pt2[sp] = ch.d(r, "sum_pt2");
         }
         for (size_t r = 0; r < cm.rows.size(); ++r) {
           if (cm.s(r, "case") != c.name) { continue; }
@@ -744,6 +789,10 @@ int main(int argc, char** argv) {
         // `z_compare_counts`.
         std::map<int, long long> sq_mass, sq_species, sq_exc;
         std::map<int, long long> ev_mass, ev_species, ev_exc;
+        std::map<int, double> got_sum_e, got_sq_e, got_sum_pz, got_sq_pz, got_sum_pt2,
+            got_sq_pt2;
+        double got_etot = 0.0, got_etot_sq = 0.0;
+        long long n_ok = 0;
         const hadronic::xs::Projectile<double> proj = projectile_of(c.pdg);
         const data::FtfHadron* pd = data::ftf_find_hadron(c.pdg);
         const double p = std::sqrt(c.kin * (c.kin + 2.0 * pd->mass));
@@ -778,11 +827,25 @@ int main(int argc, char** argv) {
             ++got_nn[ws->model.n_nn_collisions];
             ++got_part[c.a - ws->model.n_target_spectators];
           }
+          ++n_ok;
           ++got_mult[ws->strings.n_out];
+          double ev_etot = 0.0;
           for (int i = 0; i < ws->strings.n_out; ++i) {
-            ++got_species[ws->strings.out[i].pdg];
-            ++ev_species[ws->strings.out[i].pdg];
+            ev_etot += ws->strings.out[i].momentum.e;
+            const int sp = ws->strings.out[i].pdg;
+            ++got_species[sp];
+            ++ev_species[sp];
+            const ftf::Vec4& m = ws->strings.out[i].momentum;
+            const double pt2 = m.v.x * m.v.x + m.v.y * m.v.y;
+            got_sum_e[sp] += m.e;
+            got_sq_e[sp] += m.e * m.e;
+            got_sum_pz[sp] += m.v.z;
+            got_sq_pz[sp] += m.v.z * m.v.z;
+            got_sum_pt2[sp] += pt2;
+            got_sq_pt2[sp] += pt2 * pt2;
           }
+          got_etot += ev_etot;
+          got_etot_sq += ev_etot * ev_etot;
           int nh = 0;
           for (int i = 0; i < ws->model.target.my_a; ++i) {
             if (ws->model.target.nucleons[i].hit) { ++nh; }
@@ -844,6 +907,129 @@ int main(int argc, char** argv) {
                            scale(kv.second, ref_n),
                            overdispersion_of(got_exc[kv.first], sq_exc[kv.first], n_events),
                            std::string(c.name) + " excited " + std::to_string(kv.first));
+        }
+        // The energy balance, one comparison per case.
+        {
+          double ref_etot = 0.0;
+          for (const auto& kv : ref_sum_e) { ref_etot += kv.second; }
+          if (n_ok > 1) {
+            z_mean_compare(zstats[z_etot], got_etot, got_etot_sq, n_ok, ref_etot, ref_n,
+                           std::string(c.name) + " E_total");
+          }
+        }
+        // The per-species momentum moments. `sum/count` is the mean, and the z is the
+        // difference of two means over the standard error of that difference, with the
+        // variance measured on the port side (the same physics, so the same spread) and used
+        // for both. Species with fewer than 200 entries on either side are skipped: a mean
+        // over a handful of hadrons has an error bar the comparison cannot resolve.
+        for (const auto& kv : ref_species) {
+          const int sp = kv.first;
+          const long long n_p = got_species[sp];
+          const long long n_r = kv.second;
+          if (n_p < 200 || n_r < 200) {
+            ++zstats[z_mean_e].skipped;
+            ++zstats[z_mean_pz].skipped;
+            ++zstats[z_mean_pt2].skipped;
+            continue;
+          }
+          z_mean_compare(zstats[z_mean_e], got_sum_e[sp], got_sq_e[sp], n_p, ref_sum_e[sp], n_r,
+                         std::string(c.name) + " <E> pdg " + std::to_string(sp));
+          z_mean_compare(zstats[z_mean_pz], got_sum_pz[sp], got_sq_pz[sp], n_p, ref_sum_pz[sp],
+                         n_r, std::string(c.name) + " <pz> pdg " + std::to_string(sp));
+          z_mean_compare(zstats[z_mean_pt2], got_sum_pt2[sp], got_sq_pt2[sp], n_p,
+                         ref_sum_pt2[sp], n_r,
+                         std::string(c.name) + " <pt2> pdg " + std::to_string(sp));
+        }
+      }
+      delete ws;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 7. ftf_modelbig_*.csv - docs/RISK.md V88's rule, applied to the three worst rows
+  //
+  // V88: 20,000 events is the oracle's limit, and a row at 3 sigma there is either a
+  // fluctuation or a real sub-percent difference - the two are not distinguishable from one
+  // 20,000-event number. So the three cases that carried the worst z at 20,000 are re-run at
+  // 200,000 on BOTH sides. A fluctuation comes back at a similar or smaller z; a real
+  // difference comes back at roughly sqrt(10) times it.
+  // -------------------------------------------------------------------------------------------
+  const int z_big_nstr = new_z("200k nstrings");
+  const int z_big_part = new_z("200k participants");
+  const int z_big_nn = new_z("200k NN collisions");
+  const int z_big_mult = new_z("200k multiplicity");
+  {
+    struct BigCase {
+      const char* name;
+      int pdg;
+      double kin;
+      int a, z;
+    };
+    const BigCase kBig[] = {{"n_Fe_10", 2112, 10000.0, 56, 26},
+                            {"pip_Al_10", 211, 10000.0, 27, 13},
+                            {"pim_C_10", -211, 10000.0, 12, 6}};
+    Csv cs, cm;
+    if (cs.load(dir + "/ftf_modelbig_strings.csv") && cm.load(dir + "/ftf_modelbig_mult.csv")) {
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      WS* ws = new WS();
+      const int n_events = quick ? 20000 : 200000;
+      for (const BigCase& c : kBig) {
+        std::map<int, long long> ref_nstr, ref_part, ref_nn, ref_mult;
+        long long ref_n = 0;
+        for (size_t r = 0; r < cs.rows.size(); ++r) {
+          if (cs.s(r, "case") != c.name) { continue; }
+          ref_n = cs.i(r, "n_events");
+          const std::string& q = cs.s(r, "quantity");
+          const int bin = static_cast<int>(cs.i(r, "bin"));
+          if (q == "nstrings") { ref_nstr[bin] = cs.i(r, "count"); }
+          else if (q == "participants") { ref_part[bin] = cs.i(r, "count"); }
+          else if (q == "nncoll") { ref_nn[bin] = cs.i(r, "count"); }
+        }
+        for (size_t r = 0; r < cm.rows.size(); ++r) {
+          if (cm.s(r, "case") != c.name) { continue; }
+          ref_mult[static_cast<int>(cm.i(r, "multiplicity"))] = cm.i(r, "count");
+        }
+        if (ref_n == 0) {
+          std::printf("FAIL: no 200k oracle rows for %s\n", c.name);
+          ++fails;
+          continue;
+        }
+        std::map<int, long long> got_nstr, got_part, got_nn, got_mult;
+        const hadronic::xs::Projectile<double> proj = projectile_of(c.pdg);
+        const data::FtfHadron* pd = data::ftf_find_hadron(c.pdg);
+        const double p = std::sqrt(c.kin * (c.kin + 2.0 * pd->mass));
+        const ftf::Vec4 primary(0.0, 0.0, p, c.kin + pd->mass);
+        for (int ev = 0; ev < n_events; ++ev) {
+          Philox<double> rng(static_cast<uint32_t>(ev), 11u);
+          if (!ftf::ftf_scatter(ws, proj, primary, c.a, c.z, lund, rng)) { continue; }
+          ++got_nstr[ws->model.n_strings];
+          ++got_nn[ws->model.n_nn_collisions];
+          ++got_part[c.a - ws->model.n_target_spectators];
+          ++got_mult[ws->strings.n_out];
+        }
+        const long long n_min = (ref_n < n_events) ? ref_n : n_events;
+        auto scale = [&](long long v, long long from) {
+          return static_cast<long long>(static_cast<double>(v) * n_min / from + 0.5);
+        };
+        for (const auto& kv : ref_nstr) {
+          z_compare(zstats[z_big_nstr], scale(got_nstr[kv.first], n_events),
+                    scale(kv.second, ref_n), n_min,
+                    std::string(c.name) + " nstrings " + std::to_string(kv.first));
+        }
+        for (const auto& kv : ref_part) {
+          z_compare(zstats[z_big_part], scale(got_part[kv.first], n_events),
+                    scale(kv.second, ref_n), n_min,
+                    std::string(c.name) + " part " + std::to_string(kv.first));
+        }
+        for (const auto& kv : ref_nn) {
+          z_compare(zstats[z_big_nn], scale(got_nn[kv.first], n_events),
+                    scale(kv.second, ref_n), n_min,
+                    std::string(c.name) + " nncoll " + std::to_string(kv.first));
+        }
+        for (const auto& kv : ref_mult) {
+          z_compare(zstats[z_big_mult], scale(got_mult[kv.first], n_events),
+                    scale(kv.second, ref_n), n_min,
+                    std::string(c.name) + " mult " + std::to_string(kv.first));
         }
       }
       delete ws;
