@@ -50,11 +50,14 @@
 // projection the pair allows and divides the chosen one by that sum. For a pion on a nucleon the
 // sum runs over a COMPLETE set, so unitarity makes it exactly 1 and the division is a no-op -
 // MEASURED: removing it changes none of the 2,695 cross sections. Swapping the two constituents
-// is a no-op too, by the symmetry of the squares. And the `isoRes < iso3` guard above it never
-// fires: a pi+ on a proton is iso3 = +3 against a Delta's isoRes of 3, and the N* channels are
-// reached with a pi- or a pi0, where iso3 is negative or +1. All three are transcribed and all
-// three are recorded here as inert, because each would come alive for an entrance pair this
-// channel does not currently see.
+// is a no-op too, by the symmetry of the squares.
+//
+// The `isoRes < iso3` guard above it is a shortcut and not a filter. It DOES fire now that
+// `collision_meson.cuh` sums all 25 channels for every pion-nucleon pair - a pi+ on a proton is
+// iso3 = +3 against an N*'s isoRes of 1 - but MEASURED: disabling it changes none of the 3,000
+// buffered partials or totals, because the Clebsch-Gordan coefficient underneath is zero for
+// exactly the projections the guard rejects and reaches the same answer by a longer route. It is
+// transcribed because a release that changed either half would have to change both.
 //
 //   * the **particle-antiparticle halving** in `NormalizedClebsch`:
 //     `if (def1->GetPDGEncoding() != -(def2->GetPDGEncoding())) cleb = 0.5*cleb;` inside a test on
@@ -78,6 +81,7 @@ struct AnnihRefusal {
   bool antiparticle_branch = false;///< the dead halving in NormalizedClebsch; see the header
   int refused_pdg = 0;
   ClebschRefusal clebsch;
+  XsecRefusal clebsch_xsec;        ///< what the elastic partial beside it refused, if anything
 };
 
 /// The 25 columns of `G4BaryonWidth` and `G4BaryonPartialWidth`, in the order the extractor lays

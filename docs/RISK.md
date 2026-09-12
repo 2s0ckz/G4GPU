@@ -8703,9 +8703,11 @@ checked.
 `NormalizedClebschGordan` divides the chosen squared Clebsch-Gordan coefficient by the sum over
 every pion projection the pair allows - and for a pion on a nucleon that sum is over a complete
 set, so unitarity makes it exactly 1. Removing the division changes none of the 2,695 cross
-sections; so does swapping the two constituents, by the symmetry of the squares; and the
-`isoRes < iso3` guard never fires, because a pi+ on a proton gives iso3 = +3 against a Delta's
-isoRes of 3 and the N* channels are reached with a pi- or a pi0.
+sections; so does swapping the two constituents, by the symmetry of the squares. The third is the
+`isoRes < iso3` guard, which DOES fire - once the whole 25-channel tree is summed, a pi+ on a
+proton gives iso3 = +3 against every N*'s isoRes of 1 - but disabling it changes none of the 3,000
+buffered partials either, because the Clebsch-Gordan coefficient underneath returns zero for
+exactly the projections it rejects. It is a shortcut, not a filter.
 
 **A note on hbarc.** The cross section ends in `hbarc_squared`, and CLHEP DERIVES that -
 `hbar_Planck * c_light` with `hbar_Planck = h_Planck/twopi` - where the Particle Data Group's
@@ -8713,3 +8715,40 @@ quoted 197.32696812 MeV fm is 6e-8 below it. Pasting the PDG decimal put every o
 sections 1.25e-7 out, which the oracle reported on the first channel it reached. It is the same
 lesson `core/units.cuh` records for `barn()`: where CLHEP computes a constant, compute it the same
 way.
+
+### V112: a buffered cross section is zero at the top of its own grid, and a nested one loses a node
+
+`G4CrossSectionBuffer::CrossSection` (im_r_matrix, 11.1.1) looks for the first grid point ABOVE
+the requested `sqrt(s)`:
+
+```
+G4double x1(1), y1(0);
+G4double x2(2), y2(0);
+for(size_t i=0; i<theData.size(); i++) { if(theData[i].first>sqrts) { ...; break; } }
+G4double result = y1 + (sqrts-x1) * (y2-y1)/(x2-x1);
+if(result<0) result = 0;
+if(y1<0.01*CLHEP::millibarn) result = 0;
+```
+
+At or above the LAST grid point nothing is greater, the loop falls through without breaking, and
+the initialisers survive: `y1` is 0, so the floor test `y1 < 0.01*millibarn` is true and the
+function returns **0**. That is the documented "zero above the grid" - but it applies exactly AT
+the last point too, and the last point is `theT[31] = 100 GeV` of kinetic energy.
+
+This matters because `G4CollisionComposite` nests. `G4CollisionMesonBaryon` has no cross-section
+source, so its total is a 32-point buffer whose node is the sum of its components' `CrossSection`
+calls at that node's tracks - and one of those components, `G4CollisionMesonBaryonToResonance`,
+has no cross-section source either, so ITS answer is already a buffer lookup. At the parent's
+32nd node the child is being asked for its own 32nd point, where it returns zero. **The parent's
+top node is elastic-only**, for every particle pair, whatever the resonance sum there actually is.
+
+MEASURED on pi+ p: the child buffer reproduces its node exactly at nodes 0 to 30 and returns 0 at
+node 31, where the raw sum of the 25 resonance channels is 7.946e-3 mb at sqrt(s) = 13.74 GeV.
+That value is below the 0.01 mb floor in its own right, so for this pair the two mechanisms agree;
+the point is that the fall-through would discard it at any size. The same structure sits under
+`G4CollisionNN`'s components 4 and 5, which are three buffers deep.
+
+Reproduced, not fixed. Nothing in the binary cascade's window interpolates across that node - the
+segment it affects starts at sqrt(s) = 9.75 GeV - so the port asserts it directly in
+`tests/test_bic_imr.cu` instead of finding it in a comparison: rebuilding the parent's nodes from
+the child's RAW sums instead of its buffered ones passes 3,000 of 3,000 dumped rows.

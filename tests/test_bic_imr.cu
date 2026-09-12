@@ -81,6 +81,14 @@
 //   bic_imr_annih        G4XAnnihilationChannel over all 25 pion-nucleon resonance channels and
 //                        two pion charges, with the two mass-dependent widths dumped beside the
 //                        cross section so a disagreement says which of the three factors it is.
+//   bic_imr_mbpartial    G4CollisionMesonBaryon's two partials and its buffered TOTAL, over five
+//                        pion-nucleon pairs x 300 kinetic energies from 10 MeV to 3 GeV. The
+//                        range runs to 3 GeV because the elastic partial is identically zero
+//                        below 1865 MeV (docs/RISK.md V107) and a sweep that stopped at 1.5 GeV
+//                        compared a column of zeros - MEASURED: buffering the elastic partial,
+//                        which is wrong, passed 1,500 of 1,500 on the short range.
+//   bic_imr_mbselect     which of the two components one prescribed uniform lands in, 8 phases
+//                        per energy.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -131,6 +139,27 @@ __global__ void bic_imr_probe(double* out, double s, double m1, double m2) {
   out[3] = imr::x_nn_total(2212, 2212, m1, m2, std::sqrt(s), xref);
   out[4] = imr::x_nn_elastic(2212, 2212, m1, m2, std::sqrt(s), xref);
   out[5] = imr::x_np_elastic(2112, 2212, m1, m2, std::sqrt(s), xref);
+}
+
+/// The meson-baryon composite's own probe. It takes the buffer by pointer rather than building
+/// one, because `build_meson_baryon_buffers` is the cascade's setup step and a 32 x 3 array of
+/// doubles on a kernel stack would report a stack frame this module does not actually need at
+/// collision time.
+__global__ void bic_imr_meson_probe(double* out, const imr::MesonBaryonBuffers* buf, double s,
+                                    double m_pion, double m_baryon) {
+  CycleRngDev rng;
+  imr::XsecRefusal xref;
+  imr::MesonRefusal mref;
+  const double e1 = (s - m_pion * m_pion - m_baryon * m_baryon) / (2.0 * m_baryon);
+  const imr::LorentzVector p1(deex::Vec3d{0.0, 0.0, std::sqrt(e1 * e1 - m_pion * m_pion)}, e1);
+  const imr::LorentzVector p2(deex::Vec3d{0.0, 0.0, 0.0}, m_baryon);
+  double partial[imr::kMesonBaryonChannelCount];
+  imr::meson_baryon_partials(*buf, 211, 2212, m_pion, m_baryon, p1, p2, m_pion, m_baryon,
+                             partial, xref);
+  out[0] = partial[0];
+  out[1] = partial[1];
+  out[2] = imr::meson_baryon_cross_section(211, 2212, std::sqrt(s), *buf, mref);
+  out[3] = imr::meson_baryon_select(partial, rng);
 }
 
 namespace {
@@ -1312,6 +1341,115 @@ int main() {
             "but D1700_Npi is there");
     cmp_int(b_annk, (imr::total_width_column(2220, false) >= 0) ? 1 : 0, 1,
             "and N(2220) is there");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3k. G4CollisionMesonBaryon's two partials and the selection between them - the whole of what
+  //     a pion does in the cascade once G4Scatterer has found the channel.
+  // -------------------------------------------------------------------------------------------
+  const int b_mbpart = new_bucket("MesonBaryonPartials", 1e-13);
+  const int b_mbtot = new_bucket("MesonBaryonBufferedTotal", 1e-13);
+  const int b_mbsel = new_bucket("MesonBaryonSelection", 0.0);
+  {
+    const double m_pip = 139.5701;
+    struct MPair { const char* name; int pion; int baryon; };
+    const MPair kPairs[] = {{"pip_p", 211, 2212},  {"pim_p", -211, 2212},
+                            {"pi0_p", 111, 2212},  {"pip_n", 211, 2112},
+                            {"pim_n", -211, 2112}};
+    static imr::MesonBaryonBuffers mbuf[5];
+    std::map<std::string, int> idx;
+    for (int k = 0; k < 5; ++k) {
+      idx[kPairs[k].name] = k;
+      const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
+      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      const int iso3_pion = (kPairs[k].pion == 211) ? 2 : ((kPairs[k].pion == -211) ? -2 : 0);
+      const int iso3_bar = (kPairs[k].baryon == 2212) ? 1 : -1;
+      imr::AnnihRefusal aref;
+      imr::build_meson_baryon_buffers(kPairs[k].pion, kPairs[k].baryon, m_pion, m_bar, iso3_pion,
+                                      iso3_bar, m_pip, mp, mbuf[k], aref);
+      if (aref.unknown_resonance) {
+        std::printf("REFUSED while building meson-baryon buffers for %s\n", kPairs[k].name);
+        ++fails;
+      }
+    }
+    // The tracks come from the CSV, not from sqrt(s): the elastic partial is evaluated on the
+    // tracks as given and reconstructing them by inverting the invariant mass loses digits.
+    auto tracks = [&](const std::vector<std::string>& r, imr::LorentzVector& p1,
+                      imr::LorentzVector& p2) {
+      p1 = imr::LorentzVector(deex::Vec3d{0.0, 0.0, dv(r, 2)}, dv(r, 3));
+      p2 = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 0.0}, dv(r, 4));
+    };
+    const auto rows = read_csv("bic_imr_mbpartial.csv");
+    for (const auto& r : rows) {
+      const auto it = idx.find(sv(r, 0));
+      if (it == idx.end()) { continue; }
+      const int k = it->second;
+      const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
+      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      imr::LorentzVector p1, p2;
+      tracks(r, p1, p2);
+      const int comp = iv(r, 5);
+      double partial[imr::kMesonBaryonChannelCount];
+      imr::XsecRefusal xref;
+      imr::meson_baryon_partials(mbuf[k], kPairs[k].pion, kPairs[k].baryon, m_pion, m_bar, p1, p2,
+                                 m_pip, mp, partial, xref);
+      cmp_scaled(b_mbpart, partial[comp] / imr::millibarn(), dv(r, 6), 1e-9,
+                 sv(r, 0) + " comp " + sv(r, 5) + " sqrt(s)=" + sv(r, 1));
+      imr::MesonRefusal mref;
+      const double tot = imr::meson_baryon_cross_section(kPairs[k].pion, kPairs[k].baryon,
+                                                         (p1 + p2).mag(), mbuf[k], mref);
+      if (mref.any()) {
+        std::printf("REFUSED meson-baryon total for %s\n", sv(r, 0).c_str());
+        ++fails;
+      }
+      cmp_scaled(b_mbtot, tot / imr::millibarn(), dv(r, 7), 1e-9,
+                 sv(r, 0) + " total sqrt(s)=" + sv(r, 1));
+    }
+    // The two-level nesting is invisible in the numbers above and this is why. MEASURED with a
+    // probe on pi+ p: the child buffer reproduces its own node exactly at 31 of the 32 nodes,
+    // and the one it does not is the LAST - `G4CrossSectionBuffer::CrossSection`'s search never
+    // finds a grid point above sqrt(s) there, so x1,y1 keep their initialisers 1 and 0 and the
+    // 0.01 mb floor on y1 forces the result to zero. So the composite's 32nd node is ELASTIC
+    // ONLY, for every pair, whatever the resonance sum is there. For pi+ p that sum is 7.946e-3
+    // mb at sqrt(s) = 13.74 GeV, below the floor in its own right; the point is that it would be
+    // discarded at any size. Nothing in the 10-3000 MeV sweep reaches that node, which is why
+    // rebuilding the parent from the raw child sum instead of the buffered one passed 3,000 of
+    // 3,000 - so the nesting is asserted here rather than inferred from a comparison.
+    for (int k = 0; k < 5; ++k) {
+      const double top = imr::buffered_cross_section(mbuf[k].grid, mbuf[k].to_resonance,
+                                                     imr::kBufferPoints,
+                                                     mbuf[k].grid[imr::kBufferPoints - 1]);
+      cmp_int(b_mbtot, (top == 0.0) ? 1 : 0, 1,
+              std::string(kPairs[k].name) + " child buffer is zero at its own last node");
+      cmp_int(b_mbtot, (mbuf[k].to_resonance[imr::kBufferPoints - 1] > 0.0) ? 1 : 0, 1,
+              std::string(kPairs[k].name) + " though the raw sum there is not");
+      for (int t = 0; t < imr::kBufferPoints - 1; ++t) {
+        const double at = imr::buffered_cross_section(mbuf[k].grid, mbuf[k].to_resonance,
+                                                      imr::kBufferPoints, mbuf[k].grid[t]);
+        cmp_int(b_mbtot, (at == mbuf[k].to_resonance[t]) ? 1 : 0, 1,
+                std::string(kPairs[k].name) + " node " + std::to_string(t) + " is the identity");
+      }
+    }
+    const auto srows = read_csv("bic_imr_mbselect.csv");
+    for (const auto& r : srows) {
+      const auto it = idx.find(sv(r, 0));
+      if (it == idx.end()) { continue; }
+      const int k = it->second;
+      const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
+      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      imr::LorentzVector p1, p2;
+      tracks(r, p1, p2);
+      double partial[imr::kMesonBaryonChannelCount];
+      imr::XsecRefusal xref;
+      imr::meson_baryon_partials(mbuf[k], kPairs[k].pion, kPairs[k].baryon, m_pion, m_bar, p1, p2,
+                                 m_pip, mp, partial, xref);
+      CycleRng rng;
+      rng.reset(iv(r, 5));
+      const int selected = imr::meson_baryon_select(partial, rng);
+      cmp_int(b_mbsel, selected, iv(r, 6),
+              sv(r, 0) + " sqrt(s)=" + sv(r, 1) + " phase=" + sv(r, 5));
+      cmp_int(b_mbsel, rng.n, iv(r, 7), sv(r, 0) + " draws");
+    }
   }
 
   // -------------------------------------------------------------------------------------------

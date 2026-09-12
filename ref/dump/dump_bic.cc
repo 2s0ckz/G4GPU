@@ -63,7 +63,9 @@
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4CollisionManager.hh"
+#include "G4CollisionMesonBaryon.hh"
 #include "G4CollisionMesonBaryonElastic.hh"
+#include "G4CollisionMesonBaryonToResonance.hh"
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionNNToDeltaDelta.hh"
@@ -1754,7 +1756,7 @@ void write_imr_nnchannels() {
   // `s = m1^2 + m2^2 + 2 m2 E1` lands an ulp or two away, and the buffer's interpolation slope
   // for the N-Delta channel just above threshold is 0.18 mb per MeV, which turns that ulp into
   // 4e-14 of the answer. The same mistake in the same shape as the first bic_imr_collision dump.
-  std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
+  std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb,total_mb\n");
   FILE* g = std::fopen("bic_imr_nnselect.csv", "w");
   std::fprintf(g, "pair,sqrt_s_MeV,in1z,in1e,in2e,phase,selected,draws\n");
 
@@ -2088,6 +2090,81 @@ void write_imr_annih() {
   std::fclose(f);
 }
 
+/// G4CollisionMesonBaryon's two partial cross sections and the selection between them - the whole
+/// of what a pion in the binary cascade does, once G4Scatterer has found the channel.
+void write_imr_mbselect() {
+  FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
+  std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_mbselect.csv", "w");
+  std::fprintf(g, "pair,sqrt_s_MeV,in1z,in1e,in2e,phase,selected,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {
+      {"pip_p", G4PionPlus::PionPlusDefinition(), p},
+      {"pim_p", G4PionMinus::PionMinusDefinition(), p},
+      {"pi0_p", G4PionZero::PionZeroDefinition(), p},
+      {"pip_n", G4PionPlus::PionPlusDefinition(), n},
+      {"pim_n", G4PionMinus::PionMinusDefinition(), n}};
+
+  std::vector<G4VCollision*> comps;
+  comps.push_back(new G4CollisionMesonBaryonToResonance());
+  comps.push_back(new G4CollisionMesonBaryonElastic());
+  // The parent composite, so the buffered TOTAL - the number G4Scatterer turns into a radius -
+  // is compared and not merely the two partials that go into its nodes.
+  G4CollisionMesonBaryon parent;
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const Pair& pr : pairs) {
+    const double m1 = pr.a->GetPDGMass();
+    const double m2 = pr.b->GetPDGMass();
+    // Up to 3 GeV, not 1.5: G4XMesonBaryonElastic is identically zero below 2 GeV/c lab momentum
+    // (docs/RISK.md V107), which for a pion is T = 1865 MeV, so a sweep that stopped at 1.5 GeV
+    // compared a partial that was zero in every row and could not tell a buffered elastic from a
+    // raw one. MEASURED: with the range at 1500 MeV, buffering the elastic partial - which is
+    // wrong, G4CollisionMesonBaryonElastic has a real cross-section source - passed 1500 of 1500.
+    for (double t = 10.0; t <= 3000.0; t += 10.0) {
+      const double e1 = t + m1;
+      const G4LorentzVector q1(G4ThreeVector(0, 0, std::sqrt(e1 * e1 - m1 * m1)), e1);
+      const G4LorentzVector q2(G4ThreeVector(0, 0, 0), m2);
+      G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+      G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+      const double s = (t1.Get4Momentum() + t2.Get4Momentum()).mag();
+      double partial[2];
+      const double total = parent.CrossSection(t1, t2);
+      for (int i = 0; i < 2; ++i) {
+        partial[i] = comps[i]->IsInCharge(t1, t2) ? comps[i]->CrossSection(t1, t2) : 0.0;
+        std::fprintf(f, "%s,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%.17g\n", pr.name, s, q1.z(), q1.t(),
+                     q2.t(), i, partial[i] / millibarn, total / millibarn);
+      }
+      CLHEP::HepRandom::setTheEngine(eng);
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        double sum = partial[0] + partial[1];
+        const double random = G4UniformRand() * sum;
+        double running = 0.0;
+        int selected = -1;
+        for (int i = 0; i < 2; ++i) {
+          running += partial[i];
+          if (running > random) { selected = i; break; }
+        }
+        std::fprintf(g, "%s,%.17g,%.17g,%.17g,%.17g,%d,%d,%d\n", pr.name, s, q1.z(), q1.t(),
+                     q2.t(), phase, selected, eng->draws());
+      }
+      CLHEP::HepRandom::setTheEngine(saved);
+    }
+  }
+  for (auto* c : comps) { delete c; }
+  delete eng;
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -2109,6 +2186,7 @@ void dump_bic(const DumpContext&) {
   write_imr_nnchannels();
   write_imr_resonance_fs();
   write_imr_annih();
+  write_imr_mbselect();
 }
 
 }  // namespace
@@ -2125,5 +2203,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_meson.csv bic_imr_meson_fs.csv "
                     "bic_imr_resxsec.csv bic_imr_species.csv "
                     "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv "
-                    "bic_imr_resfs.csv bic_imr_annihfs.csv bic_imr_annih.csv",
+                    "bic_imr_resfs.csv bic_imr_annihfs.csv bic_imr_annih.csv "
+                    "bic_imr_mbpartial.csv bic_imr_mbselect.csv",
                     dump_bic);
