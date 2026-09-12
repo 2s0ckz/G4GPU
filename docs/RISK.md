@@ -7766,3 +7766,49 @@ rather than performing it: `lowe_xsection` stops at the last complete pair and s
 a kernel that reads past an array does not throw, it returns a number. `tests/test_bic_imr.cu`
 asserts `ss[28] == 0` and `ss[27] == 3002.71`, so a release that fills the slot fails the
 extractor's count check first and this second.
+
+### V93: a 200 mb cap truncates the proton-proton cross section below 15 MeV, and two gates beside it can never do anything
+
+`G4Scatterer::GetTimeToInteraction` decides whether two tracks collide by comparing the squared
+impact parameter against `sigma/pi`. Before it gets there it applies four cheap rejections:
+
+    static const G4double maxCrossSection = 500*millibarn;
+    if (0.7*pi*distance_fast > maxCrossSection) return time;          // (a) LAB transverse
+    ...
+    if (pi*distance > maxCrossSection) return time;                   // (b) CM impact parameter
+    static const G4double maxChargedCrossSection = 200*millibarn;
+    if (both charged && pi*distance > maxChargedCrossSection) return time;          // (c)
+    if (either is a neutron && sqrtS > 1.91*GeV && pi*distance > maxChargedCrossSection) ... // (d)
+
+Three of the four read as speed optimisations - reject obviously-distant pairs before paying for a
+boost and a table lookup. **(c) is not one.** One millibarn is 0.1 fm^2, so 200 mb is a disc of
+radius 2.523 fm, and the tabulated pp total cross section is **above** 200 mb whenever
+`sqrt(s) < 1884 MeV` - which is a kinetic energy below about 15 MeV, where `G4XNNTotalLowE` reads
+250 mb at 1882.7 MeV, 600 at 1879.6 and 2000 at 1877.05. Between 2.523 fm and `sqrt(sigma/pi)`
+the final test would have accepted the collision and (c) refuses it.
+
+Measured on the 8,448 configurations `tests/test_bic_imr.cu` compares: of the 1,056 pp rows with
+the target in front of the projectile, **128 have their collision suppressed by (c) alone**, at
+2, 5 and 12 MeV of relative kinetic energy where the total is 1499, 597 and 249 mb. Removing the
+gate changes the verdict of every one of them; the first is `T = 2 MeV, b = 2.5232 fm,
+sigma = 1499.3 mb`.
+
+Whether that matters to a dose is a separate question - a 2 MeV pp collision inside a nucleus
+transfers little - but it is not a rounding and it is not an optimisation: it is a hard ceiling on
+the pp interaction radius that no cross section can exceed, and nothing in the class says so.
+
+**(a) and (d), by contrast, provably cannot change an answer, and one of them says so itself.**
+
+  * (d) fires only above `sqrt(s) = 1.91 GeV`, where the NN total is under 50 mb, so `pi*distance`
+    above 200 mb is four times what the final test could accept anyway. Geant4's own comment is
+    the proof: "neutrons special - pn is largest cross-section, but above 1.91 GeV is less than
+    200 mb". Removing it changed none of the 8,448 verdicts.
+  * (a) is (b) evaluated in the lab frame with a 0.7 safety margin, so it can only pass pairs that
+    (b) will reject. Dropping the margin - making it strictly stronger - changed none of the 8,448
+    verdicts either. The margin exists in case the CM impact parameter exceeds the lab transverse
+    distance; on this grid it never does by enough to matter.
+
+All four are reproduced in `src/physics/hadronic/bic/im_r/scatterer.cuh`, and the port reports
+WHICH gate stopped a pair (`TimeGate`) rather than collapsing all of them into DBL_MAX, because
+"no collision" is five different physical statements and a cascade that ends early is diagnosed by
+which one.

@@ -35,6 +35,14 @@
 //                        number of uniforms consumed, same grid x 8 phases. The TILT is what
 //                        makes the rotations in it observable at all: with both tracks along +z
 //                        they are the identity (docs/RISK.md V75).
+//   bic_imr_scatterer    G4Scatterer::GetTimeToInteraction and GetCrossSection over 24 impact
+//                        parameters that straddle all three distance thresholds from both sides.
+//                        The grid matters more than the energies: five of the six exits are
+//                        decided by a distance, and the first version of it put the thresholds a
+//                        factor of pi off - one millibarn is 0.1 fm^2 - after which four of six
+//                        perturbations passed because nothing crossed a gate.
+//   bic_imr_manager      G4CollisionManager replayed over a prescribed add/remove sequence with
+//                        two exact ties, compared by WHICH collision won rather than by its time.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -52,6 +60,7 @@
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
+#include "physics/hadronic/bic/im_r/scatterer.cuh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
 
 using namespace g4gpu;
@@ -520,6 +529,101 @@ int main() {
       cmp_scaled(b_fs, fs.p2.v.y, dv(r, 19), s2, where + " p2y");
       cmp_scaled(b_fs, fs.p2.v.z, dv(r, 20), s2, where + " p2z");
       cmp_scaled(b_fs, fs.p2.e, dv(r, 21), s2, where + " p2e");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3c. The scheduler: G4Scatterer::GetTimeToInteraction and GetCrossSection over a grid of
+  //     impact parameters that brackets both distance thresholds, and G4CollisionManager's
+  //     ordering over a prescribed sequence of adds and removals.
+  //
+  //     The impact parameters matter more than the energies here: five of this function's six
+  //     exits are decided by a distance, and 0.795 fm and 1.262 fm - sqrt(200 mb/pi) and
+  //     sqrt(500 mb/pi) - are on the grid from both sides.
+  // -------------------------------------------------------------------------------------------
+  const int b_ttime = new_bucket("ScattererTimeToInteraction", 1e-16);
+  const int b_tverdict = new_bucket("ScattererCollisionOrNot", 0.0);
+  const int b_tsigma = new_bucket("ScattererCrossSection", 1e-15);
+  const int b_mgr = new_bucket("CollisionManagerOrder", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_scatterer.csv");
+    for (const auto& r : rows) {
+      const std::string pair = sv(r, 0);
+      int pdg1 = 0, pdg2 = 0, c1 = 0, c2 = 0;
+      double m1 = 0.0, m2 = 0.0;
+      if (pair == "pp") { pdg1 = pdg2 = 2212; m1 = m2 = mp; c1 = c2 = 1; }
+      else if (pair == "nn") { pdg1 = pdg2 = 2112; m1 = m2 = mn; c1 = c2 = 0; }
+      else if (pair == "np") { pdg1 = 2112; pdg2 = 2212; m1 = mn; m2 = mp; c1 = 0; c2 = 1; }
+      else { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; c1 = 1; c2 = 0; }
+      const double b_fm = dv(r, 3);
+      const double dz_fm = dv(r, 4);
+      const imr::LorentzVector p1v(deex::Vec3d{dv(r, 5), dv(r, 6), dv(r, 7)}, dv(r, 8));
+      const imr::LorentzVector p2v(deex::Vec3d{dv(r, 9), dv(r, 10), dv(r, 11)}, dv(r, 12));
+      const double want_time = dv(r, 13);   // -1 for no collision
+      const double want_sigma = dv(r, 14);  // millibarn
+      // CLHEP's fermi is 1e-12 mm, derived the way core/units.cuh derives its lengths.
+      const double fm = 1.e-12;
+      const deex::Vec3d x1{0.0, 0.0, 0.0};
+      const deex::Vec3d x2{b_fm * fm, 0.0, dz_fm * fm};
+      const double a1 = std::sqrt(std::fabs(p1v.e * p1v.e - g4gpu::mag2(p1v.v)));
+      const double a2 = std::sqrt(std::fabs(p2v.e * p2v.e - g4gpu::mag2(p2v.v)));
+      imr::ScatterRefusal sref;
+      const imr::TimeToInteraction tt = imr::scatterer_time_to_interaction(
+          pdg1, pdg2, c1, c2, x1, x2, p1v, p1v, p2v, a1, a2, m1, m2, sref);
+      const std::string where = pair + " alongz=" + sv(r, 1) + " T=" + sv(r, 2) +
+                                " b=" + sv(r, 3) + " dz=" + sv(r, 4);
+      const bool got_collision = (tt.time < DBL_MAX);
+      cmp_int(b_tverdict, got_collision ? 1 : 0, (want_time >= 0.0) ? 1 : 0, where);
+      if (want_time >= 0.0 && got_collision) {
+        // A time in ns. The one at b = 0, dz = 2 fm is 3.28e-14 ns, so the comparison is
+        // relative with a floor of one attosecond - below which the number is the rounding of
+        // a 2 fm chord divided by c.
+        cmp_scaled(b_ttime, tt.time, want_time, 1e-18, where);
+      }
+      cmp_scaled(b_tsigma,
+                 imr::scatterer_cross_section(pdg1, pdg2, p1v, p2v, a1, a2, m1, m2, sref) /
+                     imr::millibarn(),
+                 want_sigma, 1e-6, where);
+      if (sref.any()) {
+        std::printf("REFUSED scatterer: %s\n", where.c_str());
+        ++fails;
+      }
+    }
+  }
+  {
+    // The manager replayed against the same prescribed sequence. `next_index` in the oracle is
+    // the earliest time in microseconds-as-an-integer, which is a stable way to name WHICH
+    // collision won a tie without depending on a pointer.
+    const auto rows = read_csv("bic_imr_manager.csv");
+    imr::CollisionInitialState storage[16];
+    imr::CollisionList list;
+    list.items = storage;
+    list.capacity = 16;
+    const double times[8] = {2.0, 0.5, 1.7, 0.9, 0.5, 3.1, 0.9, 1.2};
+    imr::ScatterRefusal sref;
+    int add_i = 0;
+    for (const auto& r : rows) {
+      const std::string op = sv(r, 1);
+      if (op == "add") {
+        list.add(times[add_i], add_i, (add_i + 1) % 8, 0, sref);
+        ++add_i;
+      } else if (op == "remove_next") {
+        list.remove(list.next_collision());
+      } else if (op == "remove_tracks") {
+        const int caned[2] = {3, 5};
+        list.remove_tracks(caned, 2);
+      } else if (op == "clear") {
+        list.clear();
+      }
+      const int nxt = list.next_collision();
+      const double nt = (nxt >= 0) ? list.items[nxt].collision_time : -1.0;
+      cmp_int(b_mgr, list.size(), iv(r, 3), "step " + sv(r, 0) + " " + op + " size");
+      // WHICH collision won, by its primary track index - not its time. See the note in
+      // ref/dump/dump_bic.cc: with ties in the list the time is the same either way and the
+      // tie-break is invisible.
+      cmp_int(b_mgr, (nxt >= 0) ? list.items[nxt].primary : -1, iv(r, 4),
+              "step " + sv(r, 0) + " " + op + " next");
+      (void)nt;
     }
   }
 

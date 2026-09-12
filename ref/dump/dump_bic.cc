@@ -61,6 +61,7 @@
 #include "G4AngularDistributionPP.hh"
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
+#include "G4CollisionManager.hh"
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
@@ -89,6 +90,7 @@
 #include "G4PreCompoundModel.hh"
 #include "G4Proton.hh"
 #include "G4RKPropagation.hh"
+#include "G4Scatterer.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4VNuclearDensity.hh"
 #include "G4XNNElastic.hh"
@@ -1139,6 +1141,147 @@ void write_imr_collision() {
   std::fclose(g);
 }
 
+/// `G4Scatterer::GetTimeToInteraction` and `GetCrossSection` over a grid of positions and
+/// momenta, and `G4CollisionManager`'s ordering over a list built from them.
+///
+/// The positions are what make this a test of the SCHEDULER rather than of the cross section:
+/// the impact parameter decides five of the six exits, and four of the five thresholds are
+/// distances. The grid therefore sweeps the transverse offset from 0 to 5 fm, which brackets
+/// `sqrt(500 mb/pi)` = 1.26 fm and `sqrt(200 mb/pi)` = 0.80 fm, and includes a target BEHIND the
+/// projectile so the negative-time exit is exercised.
+void write_imr_scatterer() {
+  FILE* f = std::fopen("bic_imr_scatterer.csv", "w");
+  std::fprintf(f,
+               "pair,along_z,ekin_MeV,bx_fm,dz_fm,p1x,p1y,p1z,p1e,p2x,p2y,p2z,p2e,"
+               "time_ns,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_manager.csv", "w");
+  std::fprintf(g, "step,op,arg,size,next_index,next_time\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {{"pp", p, p}, {"nn", n, n}, {"np", n, p}, {"pn", p, n}};
+
+  // Impact parameters in fermi, straddling all three of the distance thresholds from both
+  // sides. ONE MILLIBARN IS 0.1 fm^2, which is the arithmetic the first version of this grid got
+  // wrong - it put its "threshold" points at 0.79 and 1.26 fm, a factor of pi off, and four of
+  // the six perturbations below then passed because no grid point ever crossed a gate:
+  //
+  //   sqrt(200 mb / pi)       = 2.5231 fm   the charged and the neutron gates
+  //   sqrt(500 mb / pi)       = 3.9894 fm   the CM distance gate
+  //   sqrt(500 mb / (0.7 pi)) = 4.7683 fm   the fast LAB gate, with its 0.7 margin
+  //
+  // and the window between the last two is the ONLY place the 0.7 can decide anything.
+  const double kB[] = {0.0,   0.1,   0.5,   1.0,   1.5,   2.0,   2.4,    2.5230, 2.5232,
+                       2.6,   2.8,   3.0,   3.5,   3.9,   3.9893, 3.9895, 4.2,   4.5,
+                       4.7682, 4.7684, 5.0,  5.5,   7.0,   9.0};
+  // Longitudinal separations in fermi; the negative one puts the target behind the projectile.
+  const double kDz[] = {-3.0, 0.0, 2.0, 6.0};
+  // Kinetic energies spanning QBBC's BIC window for a nucleon. 2 and 5 MeV are there because
+  // that is where the total cross section is hundreds of millibarn - the only place where a
+  // 200 mb gate can reject a pair the final `distance <= sigma/pi` would have accepted. 1010 MeV
+  // is where sqrt(s) crosses 1.91 GeV and the neutron rule switches on.
+  const double kT[] = {2.0,   5.0,   12.0,  20.0,  60.0,   150.0,  400.0,
+                       900.0, 1010.0, 1100.0, 1500.0};
+
+  G4Scatterer scatterer;
+
+  for (const Pair& pr : pairs) {
+    for (int along_z = 0; along_z < 2; ++along_z) {
+      for (double ekin : kT) {
+        for (double b : kB) {
+          for (double dz : kDz) {
+            const double m1 = pr.a->GetPDGMass();
+            const double m2 = pr.b->GetPDGMass();
+            const double e1 = ekin + m1;
+            const double pmag = std::sqrt(e1 * e1 - m1 * m1);
+            G4ThreeVector v1(0, 0, pmag);
+            // `along_z == 0` keeps the projectile on the axis, which takes GetTimeToInteraction's
+            // FAST branch (|unit().z() - 1| < 1e-6); `along_z == 1` tilts it by 0.4 rad, which
+            // takes the general branch. The two compute the same time by different arithmetic
+            // and the port has to have both.
+            if (along_z != 0) { v1.rotateY(0.4); }
+            const G4LorentzVector q1(v1, e1);
+            // The target carries a Fermi-scale momentum of its own, which is what makes the
+            // "target at rest for the geometry, moving for the energy" split observable.
+            const G4ThreeVector v2(23.0, -41.0, 17.0);
+            const G4LorentzVector q2(v2, std::sqrt(v2.mag2() + m2 * m2));
+            const G4ThreeVector x1(0, 0, 0);
+            const G4ThreeVector x2(b * fermi, 0, dz * fermi);
+            G4KineticTrack t1(pr.a, 0.0, x1, q1);
+            G4KineticTrack t2(pr.b, 0.0, x2, q2);
+            const double t = scatterer.GetTimeToInteraction(t1, t2);
+            std::fprintf(f,
+                         "%s,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                         "%.17g,%.17g,%.17g\n",
+                         pr.name, along_z, ekin, b, dz, q1.x(), q1.y(), q1.z(), q1.t(), q2.x(),
+                         q2.y(), q2.z(), q2.t(), (t < DBL_MAX) ? t : -1.0,
+                         scatterer.GetCrossSection(t1, t2) / millibarn);
+          }
+        }
+      }
+    }
+  }
+
+  // G4CollisionManager: a prescribed sequence of adds and removals, with the pending count and
+  // the earliest collision after each. The ordering rule is what matters - `GetNextCollision`
+  // uses a STRICT `>`, so the FIRST of several equal times wins, and a port that used `>=` would
+  // reorder every tie in the cascade.
+  {
+    G4CollisionManager mgr;
+    std::vector<G4KineticTrack*> tracks;
+    const G4LorentzVector q(G4ThreeVector(0, 0, 500), std::sqrt(500.0 * 500.0 +
+                                                               p->GetPDGMass() *
+                                                                   p->GetPDGMass()));
+    for (int i = 0; i < 8; ++i) {
+      tracks.push_back(new G4KineticTrack(p, 0.0, G4ThreeVector(0, 0, 0), q));
+    }
+    // Times chosen with two exact ties (0.5 twice, 0.9 twice) so the tie-break is exercised.
+    const double times[] = {2.0, 0.5, 1.7, 0.9, 0.5, 3.1, 0.9, 1.2};
+    int step = 0;
+    // `next_index` is the index of the WINNING collision's primary track, not its time. The
+    // first version reported the time, and with two collisions at 0.5 ns and two at 0.9 ns that
+    // is the same number whichever wins - so flipping GetNextCollision's strict `>` to `>=`,
+    // which reverses every tie, changed nothing. The tie-break is real: `>` keeps the FIRST of
+    // equal times, and in the cascade the order collisions were added in is the order the
+    // participants were found in.
+    auto report = [&](const char* op, double arg) {
+      G4CollisionInitialState* next = mgr.GetNextCollision();
+      int which = -1;
+      if (next != nullptr) {
+        for (std::size_t k = 0; k < tracks.size(); ++k) {
+          if (next->GetPrimary() == tracks[k]) { which = static_cast<int>(k); break; }
+        }
+      }
+      std::fprintf(g, "%d,%s,%.17g,%d,%d,%.17g\n", step++, op, arg,
+                   static_cast<int>(mgr.Entries()), which,
+                   next ? next->GetCollisionTime() : -1.0);
+    };
+    for (int i = 0; i < 8; ++i) {
+      mgr.AddCollision(times[i], tracks[i], tracks[(i + 1) % 8]);
+      report("add", times[i]);
+    }
+    // Remove the earliest, twice, so the tie-break is observed resolving.
+    for (int i = 0; i < 2; ++i) {
+      G4CollisionInitialState* next = mgr.GetNextCollision();
+      const double tt = next->GetCollisionTime();
+      mgr.RemoveCollision(next);
+      report("remove_next", tt);
+    }
+    // Then cane two tracks, which removes every collision touching either.
+    G4KineticTrackVector caned;
+    caned.push_back(tracks[3]);
+    caned.push_back(tracks[5]);
+    mgr.RemoveTracksCollisions(&caned);
+    report("remove_tracks", 35.0);
+    mgr.ClearAndDestroy();
+    report("clear", 0.0);
+    for (auto* kt : tracks) { delete kt; }
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1152,6 +1295,7 @@ void dump_bic(const DumpContext&) {
   write_imr_angular();
   write_imr_angular_sweep();
   write_imr_collision();
+  write_imr_scatterer();
 }
 
 }  // namespace
@@ -1162,5 +1306,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_nucleus_stats.csv bic_nucleus_moments.csv bic_blir.csv "
                     "bic_blir_status.csv bic_apply.csv bic_apply_status.csv "
                     "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv "
-                    "bic_imr_collision.csv bic_imr_elastic_fs.csv",
+                    "bic_imr_collision.csv bic_imr_elastic_fs.csv "
+                    "bic_imr_scatterer.csv bic_imr_manager.csv",
                     dump_bic);
