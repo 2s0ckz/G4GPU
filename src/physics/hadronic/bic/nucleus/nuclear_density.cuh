@@ -141,7 +141,13 @@ __host__ __device__ inline NuclearDensity make_shell_model_density(int an_a, int
   d.kind = kShellModelDensity;
   d.the_a = an_a;
   const double r0sq = 0.8133 * deex::fermi() * deex::fermi();
-  d.the_r_square = r0sq * data::g4pow_z13<double>(an_a) * data::g4pow_z13<double>(an_a);
+  // `r0sq * Z23(theA)` with `Z23(Z) = { x = Z13(Z); return x*x; }` - so the SQUARE is formed
+  // first and the product second. Writing it as `r0sq * z13 * z13` groups left to right and
+  // differs by an ulp, which `GetRelativeDensity` then amplifies: the exponent is `-r^2/R^2`
+  // and reaches -439 at 30 fm on He4, so one ulp in R^2 is 1.1e-13 relative in the density.
+  // Measured, by making exactly that mistake: 1.137e-13 against a 1e-15 tolerance.
+  const double z13 = data::g4pow_z13<double>(an_a);
+  d.the_r_square = r0sq * (z13 * z13);
   const double x = 1.0 / (u::pi<double>() * d.the_r_square);
   d.rho0 = x * std::sqrt(x);
   return d;
