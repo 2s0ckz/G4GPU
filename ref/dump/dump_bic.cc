@@ -1194,7 +1194,16 @@ void write_imr_scatterer() {
   const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
   const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
   struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
-  const Pair pairs[] = {{"pp", p, p}, {"nn", n, n}, {"np", n, p}, {"pn", p, n}};
+  // The four PION rows are what make G4CollisionMesonBaryon reachable through G4Scatterer at
+  // all: QBBC hands BIC every pi+/pi- below its Bertini window, and until the composite existed
+  // this dump had no pair `FindCollision` would answer 1 for. `p_pip` is the same pair with the
+  // tracks the other way round, because `IsInCharge` is a disjunction over both orders and a
+  // port that tested only (meson, baryon) would pass everything else.
+  const Pair pairs[] = {{"pp", p, p},   {"nn", n, n},   {"np", n, p},    {"pn", p, n},
+                        {"pip_p", G4PionPlus::PionPlusDefinition(), p},
+                        {"pim_p", G4PionMinus::PionMinusDefinition(), p},
+                        {"pip_n", G4PionPlus::PionPlusDefinition(), n},
+                        {"p_pip", p, G4PionPlus::PionPlusDefinition()}};
 
   // Impact parameters in fermi, straddling all three of the distance thresholds from both
   // sides. ONE MILLIBARN IS 0.1 fm^2, which is the arithmetic the first version of this grid got
@@ -2108,7 +2117,15 @@ void write_imr_mbselect() {
       {"pim_p", G4PionMinus::PionMinusDefinition(), p},
       {"pi0_p", G4PionZero::PionZeroDefinition(), p},
       {"pip_n", G4PionPlus::PionPlusDefinition(), n},
-      {"pim_n", G4PionMinus::PionMinusDefinition(), n}};
+      {"pim_n", G4PionMinus::PionMinusDefinition(), n},
+      // A pion on a RESONANCE, which the cascade makes as soon as the first Delta is produced.
+      // The two components disagree about it: G4CollisionMesonBaryonElastic::IsInCharge counts
+      // partons and accepts it, G4ConcreteMesonBaryonToResonance::IsInCharge compares
+      // G4ParticleTypeConverter generic types and a Delta++ is D1232 and not NUCLEON, so it
+      // rejects it. The composite is therefore ELASTIC-ONLY here, and that is the only pair in
+      // this sweep where component 0 is identically zero.
+      {"pip_dpp", G4PionPlus::PionPlusDefinition(),
+       G4ParticleTable::GetParticleTable()->FindParticle(2224)}};
 
   std::vector<G4VCollision*> comps;
   comps.push_back(new G4CollisionMesonBaryonToResonance());

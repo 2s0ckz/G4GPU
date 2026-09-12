@@ -620,15 +620,45 @@ int main() {
   const int b_tsigma = new_bucket("ScattererCrossSection", 1e-15);
   const int b_mgr = new_bucket("CollisionManagerOrder", 0.0);
   {
+    // The meson-baryon composite's buffer, one per pair of DEFINITIONS, built up front because
+    // a device kernel cannot build it inside the call the way G4CollisionComposite does.
+    const double m_pip_s = 139.5701;
+    struct MbPair { const char* name; int pion; int baryon; double m_baryon; int iso3_pion;
+                    int iso3_baryon; };
+    const MbPair kMb[] = {{"pip_p", 211, 2212, mp, 2, 1},
+                          {"pim_p", -211, 2212, mp, -2, 1},
+                          {"pip_n", 211, 2112, mn, 2, -1},
+                          {"p_pip", 211, 2212, mp, 2, 1}};
+    static imr::MesonBaryonBuffers sbuf[4];
+    for (int k = 0; k < 4; ++k) {
+      imr::AnnihRefusal aref;
+      imr::build_meson_baryon_buffers(kMb[k].pion, kMb[k].baryon, m_pip_s, kMb[k].m_baryon,
+                                      kMb[k].iso3_pion, kMb[k].iso3_baryon, m_pip_s, mp,
+                                      sbuf[k], aref);
+      if (aref.unknown_resonance) {
+        std::printf("REFUSED scatterer meson buffer for %s\n", kMb[k].name);
+        ++fails;
+      }
+    }
     const auto rows = read_csv("bic_imr_scatterer.csv");
     for (const auto& r : rows) {
       const std::string pair = sv(r, 0);
       int pdg1 = 0, pdg2 = 0, c1 = 0, c2 = 0;
       double m1 = 0.0, m2 = 0.0;
+      const imr::MesonBaryonBuffers* mb = nullptr;
       if (pair == "pp") { pdg1 = pdg2 = 2212; m1 = m2 = mp; c1 = c2 = 1; }
       else if (pair == "nn") { pdg1 = pdg2 = 2112; m1 = m2 = mn; c1 = c2 = 0; }
       else if (pair == "np") { pdg1 = 2112; pdg2 = 2212; m1 = mn; m2 = mp; c1 = 0; c2 = 1; }
-      else { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; c1 = 1; c2 = 0; }
+      else if (pair == "pn") { pdg1 = 2212; pdg2 = 2112; m1 = mp; m2 = mn; c1 = 1; c2 = 0; }
+      else if (pair == "pip_p") {
+        pdg1 = 211; pdg2 = 2212; m1 = m_pip_s; m2 = mp; c1 = 1; c2 = 1; mb = &sbuf[0];
+      } else if (pair == "pim_p") {
+        pdg1 = -211; pdg2 = 2212; m1 = m_pip_s; m2 = mp; c1 = -1; c2 = 1; mb = &sbuf[1];
+      } else if (pair == "pip_n") {
+        pdg1 = 211; pdg2 = 2112; m1 = m_pip_s; m2 = mn; c1 = 1; c2 = 0; mb = &sbuf[2];
+      } else {  // p_pip: the same pair with the tracks the other way round
+        pdg1 = 2212; pdg2 = 211; m1 = mp; m2 = m_pip_s; c1 = 1; c2 = 1; mb = &sbuf[3];
+      }
       const double b_fm = dv(r, 3);
       const double dz_fm = dv(r, 4);
       const imr::LorentzVector p1v(deex::Vec3d{dv(r, 5), dv(r, 6), dv(r, 7)}, dv(r, 8));
@@ -643,7 +673,7 @@ int main() {
       const double a2 = std::sqrt(std::fabs(p2v.e * p2v.e - g4gpu::mag2(p2v.v)));
       imr::ScatterRefusal sref;
       const imr::TimeToInteraction tt = imr::scatterer_time_to_interaction(
-          pdg1, pdg2, c1, c2, x1, x2, p1v, p1v, p2v, a1, a2, m1, m2, sref);
+          pdg1, pdg2, c1, c2, x1, x2, p1v, p1v, p2v, a1, a2, m1, m2, sref, mb);
       const std::string where = pair + " alongz=" + sv(r, 1) + " T=" + sv(r, 2) +
                                 " b=" + sv(r, 3) + " dz=" + sv(r, 4);
       const bool got_collision = (tt.time < DBL_MAX);
@@ -655,7 +685,7 @@ int main() {
         cmp_scaled(b_ttime, tt.time, want_time, 1e-18, where);
       }
       cmp_scaled(b_tsigma,
-                 imr::scatterer_cross_section(pdg1, pdg2, p1v, p2v, a1, a2, m1, m2, sref) /
+                 imr::scatterer_cross_section(pdg1, pdg2, p1v, p2v, a1, a2, m1, m2, sref, mb) /
                      imr::millibarn(),
                  want_sigma, 1e-6, where);
       if (sref.any()) {
@@ -1353,15 +1383,24 @@ int main() {
   {
     const double m_pip = 139.5701;
     struct MPair { const char* name; int pion; int baryon; };
+    // `pip_dpp` is a pion on a Delta++: in charge of the ELASTIC component by parton count and
+    // not of the to-resonance one, whose IsInCharge compares G4ParticleTypeConverter generic
+    // types and sees D1232 rather than NUCLEON. Its component 0 is identically zero in all 300
+    // oracle rows, which is what makes the gate in `build_meson_baryon_buffers` observable.
     const MPair kPairs[] = {{"pip_p", 211, 2212},  {"pim_p", -211, 2212},
                             {"pi0_p", 111, 2212},  {"pip_n", 211, 2112},
-                            {"pim_n", -211, 2112}};
-    static imr::MesonBaryonBuffers mbuf[5];
+                            {"pim_n", -211, 2112}, {"pip_dpp", 211, 2224}};
+    static imr::MesonBaryonBuffers mbuf[6];
     std::map<std::string, int> idx;
-    for (int k = 0; k < 5; ++k) {
+    for (int k = 0; k < 6; ++k) {
       idx[kPairs[k].name] = k;
       const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
-      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      const imr::SpeciesProperties bar = imr::species_properties(kPairs[k].baryon, mp, mn);
+      if (!bar.known) {
+        std::printf("REFUSED baryon properties for %d\n", kPairs[k].baryon);
+        ++fails;
+      }
+      const double m_bar = bar.mass;
       const int iso3_pion = (kPairs[k].pion == 211) ? 2 : ((kPairs[k].pion == -211) ? -2 : 0);
       const int iso3_bar = (kPairs[k].baryon == 2212) ? 1 : -1;
       imr::AnnihRefusal aref;
@@ -1385,7 +1424,7 @@ int main() {
       if (it == idx.end()) { continue; }
       const int k = it->second;
       const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
-      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      const double m_bar = imr::species_properties(kPairs[k].baryon, mp, mn).mass;
       imr::LorentzVector p1, p2;
       tracks(r, p1, p2);
       const int comp = iv(r, 5);
@@ -1436,7 +1475,7 @@ int main() {
       if (it == idx.end()) { continue; }
       const int k = it->second;
       const double m_pion = (kPairs[k].pion == 111) ? 134.9766 : m_pip;
-      const double m_bar = (kPairs[k].baryon == 2212) ? mp : mn;
+      const double m_bar = imr::species_properties(kPairs[k].baryon, mp, mn).mass;
       imr::LorentzVector p1, p2;
       tracks(r, p1, p2);
       double partial[imr::kMesonBaryonChannelCount];

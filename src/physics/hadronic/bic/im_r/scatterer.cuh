@@ -51,13 +51,12 @@
 //   * **`G4Scatterer::Scatter` and `GetFinalState`** for a nucleon pair: they call
 //     `G4CollisionComposite::FinalState`, whose selection needs the six resonance-production
 //     partial cross sections this package does not have. `ScatterRefusal::final_state`.
-//   * **every meson-baryon pair.** `G4Scatterer`'s channel list is
-//     `GROUP2(G4CollisionNN, G4CollisionMesonBaryon)` and the second is a composite of
-//     `G4CollisionMesonBaryonToResonance` and `G4CollisionMesonBaryonElastic`, neither of which
-//     is here - so `FindCollision` cannot answer for a pion and `GetTimeToInteraction` cannot
-//     either. `ScatterRefusal::meson_baryon`, at the point the channel would have been found.
-//     This is why the file cannot yet serve a pion, and a pion is what `theBCminP`'s `&&` lets
-//     into the cascade at every energy (bic/binary_cascade.cuh).
+//   * a meson-baryon pair whose 32-point BUFFER the caller did not supply.
+//     `G4CollisionMesonBaryon` has no cross-section source, so its total is a cache built once
+//     per pair of particle definitions inside `CrossSection` itself, under `bufferMutex`. A
+//     device kernel cannot allocate one, so the cascade owns it and builds it up front;
+//     `ScatterRefusal::meson_baryon` fires if it arrives null or unbuilt. The channel itself is
+//     no longer refused: `collision_meson.cuh` has both components.
 //   * **`G4CollisionManager::Print`** and the `debug_G4CollisionManager` block in
 //     `GetNextCollision`, which print and change nothing.
 #ifndef G4GPU_BIC_IMR_SCATTERER_CUH
@@ -66,6 +65,7 @@
 #include <cfloat>
 #include <cmath>
 
+#include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/kinetic_track.cuh"
 
@@ -73,12 +73,13 @@ namespace g4gpu::bic::imr {
 
 /// What the scatterer could not do.
 struct ScatterRefusal {
-  bool meson_baryon = false;  ///< a pion is in the pair; see the file header
+  bool meson_baryon = false;  ///< a meson-baryon pair arrived without a built buffer
   bool final_state = false;   ///< Scatter/GetFinalState needs the resonance partials
   bool list_full = false;     ///< the collision list's capacity
   int pdg1 = 0;
   int pdg2 = 0;
   CollisionRefusal collision;
+  MesonRefusal meson;
   __host__ __device__ bool any() const { return meson_baryon || final_state || list_full; }
 };
 
@@ -91,34 +92,39 @@ __host__ __device__ inline double neutron_special_sqrt_s() { return 1.91 * u::Ge
 /// `G4Scatterer::FindCollision` - the first registered channel that is in charge, in the order
 /// `GROUP2(G4CollisionNN, G4CollisionMesonBaryon)` registers them.
 ///
-/// Returns 0 for G4CollisionNN, 1 for G4CollisionMesonBaryon and -1 for neither. The
-/// meson-baryon channel is recognised but cannot be evaluated: `IsInCharge` for it is
-/// `G4CollisionComposite`'s scan over its two components, and the port has neither, so being
-/// "in charge" is asserted from the species rather than computed and the caller is refused.
+/// Returns 0 for G4CollisionNN, 1 for G4CollisionMesonBaryon and -1 for neither. Both tests are
+/// the channels' own `IsInCharge`: `G4GeneralNNCollision`'s two-nucleon test and
+/// `G4CollisionComposite`'s scan over the meson-baryon composite's two components.
 __host__ __device__ inline int scatterer_find_collision(int pdg1, int pdg2,
                                                         ScatterRefusal& ref) {
   if (collision_nn_is_in_charge(pdg1, pdg2)) { return 0; }
-  const bool m1 = (pdg1 == kPdgPiPlus || pdg1 == kPdgPiMinus || pdg1 == 111);
-  const bool m2 = (pdg2 == kPdgPiPlus || pdg2 == kPdgPiMinus || pdg2 == 111);
-  const bool b1 = (pdg1 == kPdgProton || pdg1 == kPdgNeutron);
-  const bool b2 = (pdg2 == kPdgProton || pdg2 == kPdgNeutron);
-  if ((m1 && b2) || (m2 && b1)) {
-    ref.meson_baryon = true;
-    ref.pdg1 = pdg1;
-    ref.pdg2 = pdg2;
-    return 1;
-  }
+  if (meson_baryon_is_in_charge(pdg1, pdg2, ref.meson.xsec)) { return 1; }
   return -1;
 }
 
 /// `G4Scatterer::GetCrossSection` - the in-charge channel's cross section, or zero if none is.
+///
+/// `mb` is the meson-baryon composite's 32-point buffer for THIS pair of definitions, or null.
+/// Geant4 builds that buffer lazily inside the call, under `bufferMutex`, and keeps one per pair
+/// on the composite for the life of the run; a device kernel cannot allocate, so the caller owns
+/// it and passing null for a meson-baryon pair is a refusal rather than a zero.
 __host__ __device__ inline double scatterer_cross_section(
     int pdg1, int pdg2, const LorentzVector& p1, const LorentzVector& p2, double actual1,
-    double actual2, double pdg1_mass, double pdg2_mass, ScatterRefusal& ref) {
+    double actual2, double pdg1_mass, double pdg2_mass, ScatterRefusal& ref,
+    const MesonBaryonBuffers* mb = nullptr) {
   const int channel = scatterer_find_collision(pdg1, pdg2, ref);
-  if (channel != 0) { return 0.0; }
-  return collision_nn_cross_section(pdg1, pdg2, p1, p2, actual1, actual2, pdg1_mass, pdg2_mass,
-                                    ref.collision.xsec);
+  if (channel == 0) {
+    return collision_nn_cross_section(pdg1, pdg2, p1, p2, actual1, actual2, pdg1_mass, pdg2_mass,
+                                      ref.collision.xsec);
+  }
+  if (channel != 1) { return 0.0; }
+  if (mb == nullptr || !mb->built) {
+    ref.meson_baryon = true;
+    ref.pdg1 = pdg1;
+    ref.pdg2 = pdg2;
+    return 0.0;
+  }
+  return meson_baryon_cross_section(pdg1, pdg2, (p1 + p2).mag(), *mb, ref.meson);
 }
 
 /// The two intermediate quantities `GetTimeToInteraction` computes before it decides, returned
@@ -158,7 +164,8 @@ enum TimeGate : int {
 __host__ __device__ inline TimeToInteraction scatterer_time_to_interaction(
     int pdg1, int pdg2, int charge1, int charge2, const Vec3d& pos1, const Vec3d& pos2,
     const LorentzVector& tracking1, const LorentzVector& p1, const LorentzVector& p2,
-    double actual1, double actual2, double pdg1_mass, double pdg2_mass, ScatterRefusal& ref) {
+    double actual1, double actual2, double pdg1_mass, double pdg2_mass, ScatterRefusal& ref,
+    const MesonBaryonBuffers* mb = nullptr) {
   TimeToInteraction out;
   const LorentzVector mom1_in = tracking1;
   double collision_time = 0.0;
@@ -233,13 +240,16 @@ __host__ __device__ inline TimeToInteraction scatterer_time_to_interaction(
   }
 
   const int channel = scatterer_find_collision(pdg1, pdg2, ref);
-  if (channel != 0) {
-    // Either no channel at all, or the meson-baryon one, which is refused above.
+  if (channel < 0) {
     out.gate = kGateNoChannel;
     return out;
   }
-  const double sigma = collision_nn_cross_section(pdg1, pdg2, p1, p2, actual1, actual2,
-                                                  pdg1_mass, pdg2_mass, ref.collision.xsec);
+  const double sigma = scatterer_cross_section(pdg1, pdg2, p1, p2, actual1, actual2, pdg1_mass,
+                                               pdg2_mass, ref, mb);
+  if (ref.meson_baryon) {
+    out.gate = kGateNoChannel;
+    return out;
+  }
   out.cross_section = sigma;
   if (!(sigma > 0.0)) {
     out.gate = kGateZeroCrossSection;

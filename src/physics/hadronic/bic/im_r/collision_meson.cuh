@@ -130,6 +130,32 @@ __host__ __device__ inline ElasticFinalState meson_baryon_elastic_final_state(
   return elastic_final_state(kAngularObeAsym, p1, p2, actual1, actual2, m10, m20, rng, ref);
 }
 
+/// `G4ConcreteMesonBaryonToResonance::IsInCharge` - `G4ParticleTypeConverter::GetGenericType` on
+/// both tracks against the primaries (proton, pi+), in either order.
+///
+/// The converter gives every resonance its OWN generic type - D1232, N1440 and so on, one per
+/// multiplet - so NUCLEON means a ground-state proton or neutron and nothing else. A pion on a
+/// Delta is therefore NOT in charge here, though it IS in charge of the elastic component, whose
+/// test is by parton count. That asymmetry is the whole reason this predicate exists separately.
+__host__ __device__ inline bool meson_baryon_to_resonance_is_in_charge(int pdg1, int pdg2) {
+  const bool pion1 = (pdg1 == kPdgPiPlus || pdg1 == kPdgPiMinus || pdg1 == 111);
+  const bool pion2 = (pdg2 == kPdgPiPlus || pdg2 == kPdgPiMinus || pdg2 == 111);
+  const bool nucl1 = (pdg1 == kPdgProton || pdg1 == kPdgNeutron);
+  const bool nucl2 = (pdg2 == kPdgProton || pdg2 == kPdgNeutron);
+  return (pion1 && nucl2) || (pion2 && nucl1);
+}
+
+/// `G4CollisionComposite::IsInCharge` for `G4CollisionMesonBaryon` - true if EITHER component is.
+///
+/// The elastic component's parton-count test subsumes the to-resonance one (a pion has two
+/// partons and a nucleon three), so the composite's answer is the parton-count answer; the
+/// disjunction is written out anyway because the two components are free to diverge and a
+/// reader should not have to re-derive the containment.
+__host__ __device__ inline bool meson_baryon_is_in_charge(int pdg1, int pdg2, XsecRefusal& ref) {
+  return meson_baryon_to_resonance_is_in_charge(pdg1, pdg2) ||
+         meson_baryon_elastic_is_in_charge(pdg1, pdg2, ref);
+}
+
 /// The 25 `G4ConcreteMesonBaryonToResonance` channels, in the order
 /// `G4CollisionMesonBaryonToResonance`'s constructor adds them: the ten Deltas first, then the
 /// fifteen N*, each by increasing nominal mass. That order is what
@@ -197,6 +223,8 @@ __host__ __device__ inline void build_meson_baryon_buffers(
     int pion_pdg, int baryon_pdg, double m_pion, double m_baryon, int iso3_pion, int iso3_baryon,
     double m_pi_plus, double m_proton, MesonBaryonBuffers& buf, AnnihRefusal& ref) {
   buffer_sqrt_s_grid(m_pion, m_baryon, buf.grid);
+  const bool to_resonance_in_charge = meson_baryon_to_resonance_is_in_charge(pion_pdg,
+                                                                            baryon_pdg);
   double elastic_node[kBufferPoints];
   for (int t = 0; t < kBufferPoints; ++t) {
     buf.to_resonance[t] = 0.0;
@@ -208,7 +236,10 @@ __host__ __device__ inline void build_meson_baryon_buffers(
     // rebuilt from the grid's own sqrt(s) rather than carried.
     const double sqrt_s = buf.grid[t];
     double sum = 0.0;
-    for (int c = 0; c < kMesonBaryonToResonanceCount; ++c) {
+    // `BufferCrossSection` tests each component's `IsInCharge` at the node before adding it, and
+    // the to-resonance child's is the generic-type one - so a pion on a RESONANCE contributes
+    // nothing here and its buffer is elastic-only.
+    for (int c = 0; to_resonance_in_charge && c < kMesonBaryonToResonanceCount; ++c) {
       const MesonBaryonChannelSpec& sp = meson_baryon_channels()[c];
       const SpeciesProperties res = species_properties(sp.res_pdg, m_proton, m_baryon);
       if (!res.known) {
@@ -254,7 +285,9 @@ __host__ __device__ inline void meson_baryon_partials(const MesonBaryonBuffers& 
                                                       XsecRefusal& ref) {
   const double sqrt_s = (p1 + p2).mag();
   partial_out[kMesonBaryonToResonance] =
-      buffered_cross_section(buf.grid, buf.to_resonance, kBufferPoints, sqrt_s);
+      meson_baryon_to_resonance_is_in_charge(pion_pdg, baryon_pdg)
+          ? buffered_cross_section(buf.grid, buf.to_resonance, kBufferPoints, sqrt_s)
+          : 0.0;
   partial_out[kMesonBaryonElastic] = x_meson_baryon_elastic(pion_pdg, baryon_pdg, m_pion,
                                                             m_baryon, p1, p2, m_pi_plus,
                                                             m_proton, ref);
@@ -270,7 +303,7 @@ __host__ __device__ inline void meson_baryon_partials(const MesonBaryonBuffers& 
 __host__ __device__ inline double meson_baryon_cross_section(int pdg1, int pdg2, double sqrt_s,
                                                              const MesonBaryonBuffers& buf,
                                                              MesonRefusal& ref) {
-  if (!meson_baryon_elastic_is_in_charge(pdg1, pdg2, ref.xsec)) {
+  if (!meson_baryon_is_in_charge(pdg1, pdg2, ref.xsec)) {
     ref.no_channel = true;
     ref.pdg1 = pdg1;
     ref.pdg2 = pdg2;

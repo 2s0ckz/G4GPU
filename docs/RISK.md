@@ -8752,3 +8752,30 @@ Reproduced, not fixed. Nothing in the binary cascade's window interpolates acros
 segment it affects starts at sqrt(s) = 9.75 GeV - so the port asserts it directly in
 `tests/test_bic_imr.cu` instead of finding it in a comparison: rebuilding the parent's nodes from
 the child's RAW sums instead of its buffered ones passes 3,000 of 3,000 dumped rows.
+
+### V113: a pion cannot scatter off a resonance in the binary cascade below 1.13 GeV
+
+`G4CollisionMesonBaryon`'s two components disagree about what a "meson-baryon" pair is.
+
+  * `G4CollisionMesonBaryonElastic::IsInCharge` counts PARTONS: one track with two and one with
+    three, in either order. A Delta, an N* and every Delta* has three, so a pion on a resonance
+    passes.
+  * `G4ConcreteMesonBaryonToResonance::IsInCharge` compares `G4ParticleTypeConverter` GENERIC
+    TYPES against its primaries (proton, pi+). The converter gives every resonance multiplet its
+    own type - D1232, D1600, N1440 and so on - so `NUCLEON` means a ground-state proton or
+    neutron and nothing else, and a pion on a Delta fails all 25 of them.
+
+So for a pion on a resonance the composite is elastic-only. And docs/RISK.md V107 measured that
+the elastic half is zero over the cascade's window. MEASURED on pi+ Delta++ over 300 pion kinetic
+energies from 10 MeV to 3 GeV: the to-resonance component is zero in all 300 rows and the elastic
+is zero in 112 of them - every energy up to 1120 MeV, the elastic turning on at a pion momentum of
+1261.9 MeV/c. Below that the composite's TOTAL is zero, `G4Scatterer::GetTimeToInteraction` takes
+its zero-cross-section exit, and if `FinalState` were reached anyway it would fall out of its
+selection loop and return NULL - the `throw` under that loop is commented out in 11.1.1.
+
+This is not a corner: the cascade makes a Delta out of the first nucleon-nucleon collision above
+threshold, and any pion that meets one before it decays simply passes through it. Reproduced, and
+the asymmetry is asserted directly - `tests/test_bic_imr.cu` carries the pi+ Delta++ pair for no
+other reason. MEASURED: removing the generic-type gate, so that all 25 resonance channels are
+summed for a pion on a Delta as well, moves the partial by 1.77e+12 relative and turns 300 NULL
+selections into channel 0.
