@@ -43,6 +43,14 @@
 //                        perturbations passed because nothing crossed a gate.
 //   bic_imr_manager      G4CollisionManager replayed over a prescribed add/remove sequence with
 //                        two exact ties, compared by WHICH collision won rather than by its time.
+//   bic_imr_restab       the six resonance-production tables through their own CrossSectionTable(),
+//                        on every one of the 121 tabulated energies and the midpoint between each
+//                        pair. 12,100 points. Five of the six halve their cross section and the
+//                        sixth does not: docs/RISK.md V94.
+//   bic_imr_dbi          G4DetailedBalancePhaseSpaceIntegral for all 25 resonances, fine from 1 to
+//                        4 GeV and coarse to 61 GeV - the coarse arm because the class searches
+//                        `ie < 119` and above 48.109 GeV extrapolates rather than clamps, which a
+//                        grid stopping at 4 GeV cannot see.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -60,6 +68,7 @@
 
 #include "physics/hadronic/bic/im_r/angular.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
+#include "physics/hadronic/bic/im_r/resonance_tables.cuh"
 #include "physics/hadronic/bic/im_r/scatterer.cuh"
 #include "physics/hadronic/bic/im_r/xsec_nn.cuh"
 
@@ -624,6 +633,79 @@ int main() {
       cmp_int(b_mgr, (nxt >= 0) ? list.items[nxt].primary : -1, iv(r, 4),
               "step " + sv(r, 0) + " " + op + " next");
       (void)nt;
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3d. The six resonance-production cross-section tables through their own accessor, and the
+  //     detailed-balance phase-space integral for every resonance it knows.
+  //
+  //     The energy grid is every one of the 121 tabulated energies AND the midpoint between each
+  //     pair: on a node the lookup returns the table entry and a wrong column would still be
+  //     wrong, but between nodes the straight line is what catches a grid read one index off.
+  // -------------------------------------------------------------------------------------------
+  const int b_restab = new_bucket("ResonanceCrossSectionTables", 1e-15);
+  const int b_dbi = new_bucket("DetailedBalancePhaseSpaceIntegral", 1e-15);
+  {
+    const auto rows = read_csv("bic_imr_restab.csv");
+    for (const auto& r : rows) {
+      const std::string tag = sv(r, 0);
+      int which = -1;
+      if (tag == "nd") { which = imr::kResNDelta; }
+      else if (tag == "dd") { which = imr::kResDeltaDelta; }
+      else if (tag == "ndstar") { which = imr::kResNDeltastar; }
+      else if (tag == "ddstar") { which = imr::kResDeltaDeltastar; }
+      else if (tag == "nnstar") { which = imr::kResNNstar; }
+      else if (tag == "dnstar") { which = imr::kResDeltaNstar; }
+      else { continue; }
+      const int mass = iv(r, 1);
+      const double sqrt_s = dv(r, 2);
+      imr::ResonanceTableRefusal rref;
+      const double got = imr::resonance_cross_section_table(which, mass, sqrt_s, rref);
+      if (rref.no_column) {
+        std::printf("REFUSED resonance column: %s %d\n", tag.c_str(), mass);
+        ++fails;
+        continue;
+      }
+      cmp_scaled(b_restab, got / imr::millibarn(), dv(r, 3), 1e-9,
+                 tag + " " + std::to_string(mass) + " sqrt(s)=" + std::to_string(sqrt_s));
+    }
+  }
+  {
+    // "delta+" is the ground-state Delta(1232); only the excited states carry a mass in their
+    // name. The port keys by nominal mass, so the map is from the Geant4 name to that.
+    const auto rows = read_csv("bic_imr_dbi.csv");
+    for (const auto& r : rows) {
+      const std::string nm = sv(r, 0);
+      int column = -1;
+      if (nm == "delta+") {
+        column = imr::kDbiDelta1232;
+      } else {
+        // "delta(1600)+" or "N(1440)+" - the four digits between the parentheses are the mass,
+        // and the column is found by searching the port's own list in the class's own order.
+        const std::size_t a = nm.find('(');
+        const std::size_t b = nm.find(')');
+        if (a == std::string::npos || b == std::string::npos) { continue; }
+        const int mass = std::atoi(nm.substr(a + 1, b - a - 1).c_str());
+        const bool is_delta = (nm[0] == 'd');
+        // N(1700) and delta(1700) share a mass, and N(1900) and delta(1900) do too, so the
+        // search has to know which half of the list to look in: columns 0-9 are the Deltas and
+        // 10-24 the N*. Getting that wrong swaps two columns and nothing else, which is exactly
+        // the kind of thing a grid of only distinct masses would not catch.
+        const int lo = is_delta ? 0 : 10;
+        const int hi = is_delta ? 10 : imr::kDbiColumns;
+        for (int i = lo; i < hi; ++i) {
+          if (imr::dbi_mass(i) == mass) { column = i; break; }
+        }
+      }
+      if (column < 0) {
+        std::printf("REFUSED detailed-balance column: %s\n", nm.c_str());
+        ++fails;
+        continue;
+      }
+      const double sqrt_s = dv(r, 1);
+      cmp_scaled(b_dbi, imr::dbi_phase_space_integral(column, sqrt_s), dv(r, 2), 1e-9,
+                 nm + " sqrt(s)=" + std::to_string(sqrt_s));
     }
   }
 

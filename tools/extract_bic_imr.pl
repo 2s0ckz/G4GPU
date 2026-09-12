@@ -209,6 +209,148 @@ my @compT = grab("$imr/src/G4CollisionComposite.cc",
                  qr/G4CollisionComposite::theT\[nPoints\]/, 32);
 
 # =============================================================================================
+# 5. The six resonance-production cross-section tables. Each is one 121-point energy grid in GeV
+#    and between one and fifteen 121-point sigma columns in millibarn, one per resonance mass.
+#
+#    The columns are named by the resonance's nominal mass - sigmaND1600, sigmaNN1440 - and each
+#    Geant4 table's constructor maps FOUR particle names onto each column, one per charge state
+#    for the Deltas and (for the N* tables) two. The mapping is regular and is recorded here as
+#    the list of masses per table; the port keys by that integer, because a kernel has no strings.
+# =============================================================================================
+my @res_tables = (
+  ['G4XNDeltaTable',          'energyTable', ['ND1232'],                                   'nd'],
+  ['G4XNDeltastarTable',      'energyTable',
+   [qw(ND1600 ND1620 ND1700 ND1900 ND1905 ND1910 ND1920 ND1930 ND1950)],                   'ndstar'],
+  ['G4XNNstarTable',          'energyTable',
+   [qw(NN1440 NN1520 NN1535 NN1650 NN1675 NN1680 NN1700 NN1710 NN1720 NN1900 NN1990 NN2090
+       NN2190 NN2220 NN2250)],                                                             'nnstar'],
+  ['G4XDeltaDeltaTable',      'energyTable', ['DD1232'],                                   'dd'],
+  ['G4XDeltaDeltastarTable',  'energyTable',
+   [qw(DD1600 DD1620 DD1700 DD1900 DD1905 DD1910 DD1920 DD1930 DD1950)],                   'ddstar'],
+  ['G4XDeltaNstarTable',      'energyTable',
+   [qw(DN1440 DN1520 DN1535 DN1650 DN1675 DN1680 DN1700 DN1710 DN1720 DN1900 DN1990 DN2090
+       DN2190 DN2220 DN2250)],                                                             'dnstar'],
+);
+
+my %res_energy;
+my %res_sigma;
+my %res_masses;
+my %short;
+my $n_res_cols = 0;for my $t (@res_tables) {
+  my ($cls, $egrid, $cols, $tag) = @$t;
+  $short{$tag} = [];
+  my @e = grab("$imr/src/$cls.cc", qr/const G4double \Q$cls\E::\Q$egrid\E\[121\]/, 121);
+  $res_energy{$tag} = \@e;
+  my @flat;
+  my @masses;
+  for my $c (@$cols) {
+    # NOT asserted at 121. Several of these columns are declared [121] and initialised with
+    # FEWER values, leaving the tail zero-filled by the language - `G4XNNstarTable::sigmaNN1535`
+    # has 113. The count is checked against the known set below instead, so a column that gets
+    # longer or shorter fails, and the zero tail is written out explicitly rather than left to
+    # whatever the port's compiler does.
+    my @s = grab("$imr/src/$cls.cc", qr/const G4double \Q$cls\E::sigma\Q$c\E\[121\]/, undef);
+    my $got = scalar(@s);
+    die "$cls::sigma$c has $got values, more than the 121 it is declared with\n" if $got > 121;
+    push @{ $short{$tag} }, "$c:$got" if $got != 121;
+    push @s, (0) x (121 - $got);
+    push @flat, @s;
+    ($masses[scalar(@masses)] = $c) =~ s/^\D+//;
+    ++$n_res_cols;
+  }
+  $res_sigma{$tag} = \@flat;
+  $res_masses{$tag} = \@masses;
+}
+# Every one of the six energy grids is the same 121 numbers. Asserted rather than assumed,
+# because the port stores ONE of them: a release that moved one table's grid and not the others
+# would then be read off the wrong energies with no other symptom.
+for my $tag (keys %res_energy) {
+  next if $tag eq 'nd';
+  for my $i (0 .. 120) {
+    die "$tag energy grid differs from G4XNDeltaTable's at $i: "
+      . "$res_energy{$tag}[$i] vs $res_energy{'nd'}[$i]\n"
+      if $res_energy{$tag}[$i] != $res_energy{'nd'}[$i];
+  }
+}
+++$checks;
+printf "  ok %-46s %d columns, all six energy grids identical\n", 'resonance tables',
+       $n_res_cols;
+
+# The columns that are declared [121] and initialised with fewer. Asserted as an exact SET, the
+# form docs/RISK.md V41 recommends - a release that fills one of them, or truncates another,
+# fails here rather than changing a cross section at 39 GeV that nobody would look at.
+my $short_set = join(' ', map { "$_=[" . join(',', @{ $short{$_} }) . "]" }
+                          sort keys %short);
+my $short_want = 'dd=[] ddstar=[] dnstar=[] nd=[] ndstar=[] nnstar=[NN1535:113,NN2190:113]';
+die "the set of short resonance columns changed:\n  got  $short_set\n  want $short_want\n"
+  if $short_set ne $short_want;
+++$checks;
+printf "  ok %-46s %s\n", 'short resonance columns', 'NNstar 1535 and 2190, 113 of 121';
+
+# G4XNDeltastarTable.hh carries the comment "40 is missing... @@@@@@@" against sigmaND1930, and
+# G4XDeltaNstarTable's and G4XNNstarTable's mass lists skip 1940 likewise. Asserted so that the
+# gap is a checked fact rather than a transcription that quietly dropped a column.
+for my $tag (qw(ndstar ddstar)) {
+  die "$tag has a 1940 column, which the port's list does not\n"
+    if grep { $_ eq '1940' } @{ $res_masses{$tag} };
+}
+++$checks;
+printf "  ok %-46s no 1940 column in either Delta* table\n", 'the missing delta(1940)';
+
+# FIVE OF THE SIX TABLES HALVE THEIR CROSS SECTION AND THE SIXTH DOES NOT. Each
+# `CrossSectionTable()` writes one line of the form `G4double value = <sigma> * 0.5 * millibarn`,
+# and G4XNNstarTable's is `G4double value = *(sigmaPointer + i) * millibarn` - no 0.5. That
+# doubles every NN -> N N* cross section relative to its five siblings. docs/RISK.md V94.
+#
+# Asserted per table, by reading the line, so a release that adds or removes the factor anywhere
+# fails here. This is the one number in the six classes that is not data and not a formula - it
+# is a convention, and it is applied inconsistently.
+my %half_want = (
+  'G4XNDeltaTable'         => 1, 'G4XDeltaDeltaTable'     => 1,
+  'G4XNDeltastarTable'     => 1, 'G4XDeltaDeltastarTable' => 1,
+  'G4XNNstarTable'         => 0, 'G4XDeltaNstarTable'     => 1,
+);
+for my $cls (sort keys %half_want) {
+  open my $cfh, '<', "$imr/src/$cls.cc" or die "cannot open $cls.cc: $!";
+  local $/;
+  my $body = <$cfh>;
+  close $cfh;
+  die "$cls: no `G4double value = ... millibarn` line\n"
+    if $body !~ /G4double value\s*=\s*([^;]*millibarn)\s*;/;
+  my $expr = $1;
+  my $has_half = ($expr =~ /0\.5/) ? 1 : 0;
+  die "$cls: the 0.5 factor is " . ($has_half ? 'present' : 'absent')
+    . ", the port assumes " . ($half_want{$cls} ? 'present' : 'absent') . "\n    $expr\n"
+    if $has_half != $half_want{$cls};
+  ++$checks;
+}
+printf "  ok %-46s %s\n", 'the 0.5 in CrossSectionTable',
+       'present in five tables, absent in G4XNNstarTable';
+
+# =============================================================================================
+# 6. G4DetailedBalancePhaseSpaceIntegral's two tables.
+# =============================================================================================
+my $dbi = "$imr/src/G4DetailedBalancePhaseSpaceIntegral.cc";
+my @dbi_cols = qw(delta delta1600 delta1620 delta1700 delta1900 delta1905 delta1910 delta1920
+                  delta1930 delta1950 N1440 N1520 N1535 N1650 N1675 N1680 N1700 N1710 N1720
+                  N1900 N1990 N2090 N2190 N2220 N2250);
+my @dbi_e = grab($dbi, qr/G4DetailedBalancePhaseSpaceIntegral::sqrts\[120\]/, 120);
+my @dbi_flat;
+for my $c (@dbi_cols) {
+  push @dbi_flat, grab($dbi, qr/G4DetailedBalancePhaseSpaceIntegral::\Q$c\E\[120\]/, 120);
+}
+# The energy grid is read with `sqrts[ie]*GeV > sqs`, and the loop stops at ie = 118 - so the
+# LAST grid point is never a left edge and the function extrapolates past it using the last
+# interval. Asserted increasing, which is what makes the linear search correct.
+for my $i (1 .. 119) {
+  die "G4DetailedBalancePhaseSpaceIntegral::sqrts not increasing at $i\n"
+    if $dbi_e[$i] <= $dbi_e[$i - 1];
+}
+++$checks;
+printf "  ok %-46s %d columns x 120, grid increasing\n", 'detailed-balance phase-space integral',
+       scalar(@dbi_cols);
+
+# =============================================================================================
 # Write the header.
 # =============================================================================================
 my $out = 'src/physics/hadronic/bic/im_r/imr_tables.hh';
@@ -252,6 +394,18 @@ constexpr int kAngularAngles = 180;      ///< NANGLE, one-degree bins
 constexpr int kNNTotalLowESize = 29;     ///< G4XNNTotalLowE::tableSize
 constexpr int kNNLowETableSize = 101;    ///< the four log-vector tables
 constexpr int kCompositePoints = 32;     ///< G4CollisionComposite::nPoints
+constexpr int kResonanceTableSize = 121;  ///< every G4X*Table column and its shared energy grid
+constexpr int kDbiSize = 120;             ///< G4DetailedBalancePhaseSpaceIntegral
+constexpr int kDbiColumns = 25;
+
+/// How many sigma columns each of the six resonance tables has. `res_masses_*()` lists the
+/// resonance masses in the order `res_sigma_*()` lays the columns out, 121 values each.
+constexpr int kResColsNd = 1;
+constexpr int kResColsNdstar = 9;
+constexpr int kResColsNnstar = 15;
+constexpr int kResColsDd = 1;
+constexpr int kResColsDdstar = 9;
+constexpr int kResColsDnstar = 15;
 
 HDR
 emit($fh, 'float', 'angular_np_sig', 8, @np_sig);
@@ -271,6 +425,24 @@ emit($fh, 'double', 'pdg_elastic_pp', 7, @pdge_pp);
 emit($fh, 'double', 'pdg_elastic_pip', 7, @pdge_pip);
 emit($fh, 'double', 'pdg_elastic_pim', 7, @pdge_pim);
 emit($fh, 'double', 'composite_T', 8, @compT);
+for my $t (@res_tables) {
+  my ($cls, $egrid, $cols, $tag) = @$t;
+  emit($fh, 'double', "res_sigma_$tag", 8, @{ $res_sigma{$tag} });
+}
+emit($fh, 'double', 'res_energy', 8, @{ $res_energy{'nd'} });
+emit($fh, 'double', 'dbi_sqrts', 8, @dbi_e);
+emit($fh, 'double', 'dbi_integral', 8, @dbi_flat);
+for my $t (@res_tables) {
+  my ($cls, $egrid, $cols, $tag) = @$t;
+  print $fh "__host__ __device__ inline const int* res_masses_$tag() {
+";
+  print $fh "  static const int v[" . scalar(@{ $res_masses{$tag} }) . "] = {"
+            . join(', ', @{ $res_masses{$tag} }) . "};
+  return v;
+}
+
+";
+}
 print $fh "}  // namespace g4gpu::bic::imr\n#endif\n";
 close $fh;
 printf "%s written, %d assertions passed\n", $out, $checks;

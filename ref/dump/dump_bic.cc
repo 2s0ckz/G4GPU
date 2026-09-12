@@ -51,6 +51,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -65,6 +66,7 @@
 #include "G4CollisionNN.hh"
 #include "G4CollisionNNElastic.hh"
 #include "G4CollisionnpElastic.hh"
+#include "G4DetailedBalancePhaseSpaceIntegral.hh"
 #include "G4Deuteron.hh"
 #include "G4DynamicParticle.hh"
 #include "G4ExcitationHandler.hh"
@@ -91,11 +93,18 @@
 #include "G4Proton.hh"
 #include "G4RKPropagation.hh"
 #include "G4Scatterer.hh"
+#include "G4ShortLivedConstructor.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4VNuclearDensity.hh"
+#include "G4XDeltaDeltaTable.hh"
+#include "G4XDeltaDeltastarTable.hh"
+#include "G4XDeltaNstarTable.hh"
+#include "G4XNDeltaTable.hh"
+#include "G4XNDeltastarTable.hh"
 #include "G4XNNElastic.hh"
 #include "G4XNNElasticLowE.hh"
 #include "G4XNNTotal.hh"
+#include "G4XNNstarTable.hh"
 #include "G4XNNTotalLowE.hh"
 #include "G4XPDGElastic.hh"
 #include "G4XPDGTotal.hh"
@@ -1282,6 +1291,128 @@ void write_imr_scatterer() {
   std::fclose(g);
 }
 
+/// The six resonance-production cross-section tables through their own public accessor, and
+/// G4DetailedBalancePhaseSpaceIntegral for every resonance it knows.
+///
+/// `CrossSectionTable()` returns a `G4PhysicsVector` the caller owns, so the dump evaluates it
+/// the way `G4XResonance::CrossSection` does - `GetValue(sqrtS, dummy)` - on a grid that includes
+/// every one of the 121 tabulated energies and the midpoint between each pair. On a node the
+/// interpolation is exact and the value is the table entry; between nodes it is the straight
+/// line, and a table read one column off would agree on neither.
+void write_imr_resonance() {
+  FILE* f = std::fopen("bic_imr_restab.csv", "w");
+  std::fprintf(f, "table,mass,sqrt_s_MeV,sigma_mb\n");
+  FILE* g = std::fopen("bic_imr_dbi.csv", "w");
+  std::fprintf(g, "name,sqrt_s_MeV,integral\n");
+
+  // The short-lived particles have to exist before any of them can be found by name.
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+
+  G4XNDeltaTable nd;
+  G4XDeltaDeltaTable dd;
+  G4XNDeltastarTable ndstar;
+  G4XDeltaDeltastarTable ddstar;
+  G4XNNstarTable nnstar;
+  G4XDeltaNstarTable dnstar;
+
+  const char* kDeltastar[] = {"1600", "1620", "1700", "1900", "1905", "1910", "1920", "1930",
+                              "1950"};
+  const char* kNstar[] = {"1440", "1520", "1535", "1650", "1675", "1680", "1700", "1710",
+                          "1720", "1900", "1990", "2090", "2190", "2220", "2250"};
+
+  // The 121 tabulated energies, in GeV, copied from G4XNDeltaTable::energyTable - private, with
+  // no accessor, and asserted against the source by tools/extract_bic_imr.pl on the port's side.
+  const double kE[121] = {
+    0.0,
+    2.014, 2.014, 2.016, 2.018, 2.022, 2.026, 2.031, 2.037, 2.044, 2.052,
+    2.061, 2.071, 2.082, 2.094, 2.107, 2.121, 2.135, 2.151, 2.168, 2.185,
+    2.204, 2.223, 2.244, 2.265, 2.287, 2.311, 2.335, 2.360, 2.386, 2.413,
+    2.441, 2.470, 2.500, 2.531, 2.562, 2.595, 2.629, 2.664, 2.699, 2.736,
+    2.773, 2.812, 2.851, 2.891, 2.933, 2.975, 3.018, 3.062, 3.107, 3.153,
+    3.200, 3.248, 3.297, 3.347, 3.397, 3.449, 3.502, 3.555, 3.610, 3.666,
+    3.722, 3.779, 3.838, 3.897, 3.957, 4.018, 4.081, 4.144, 4.208, 4.273,
+    4.339, 4.406, 4.473, 4.542, 4.612, 4.683, 4.754, 4.827, 4.900, 4.975,
+    5.000, 6.134, 7.269, 8.403, 9.538, 10.672, 11.807, 12.941, 14.076, 15.210,
+    16.345, 17.479, 18.613, 19.748, 20.882, 22.017, 23.151, 24.286, 25.420, 26.555,
+    27.689, 28.824, 29.958, 31.092, 32.227, 33.361, 34.496, 35.630, 36.765, 37.899,
+    39.034, 40.168, 41.303, 42.437, 43.571, 44.706, 45.840, 46.975, 48.109, 49.244};
+
+  auto sweep = [&](const char* tag, int mass, const G4PhysicsVector* v) {
+    if (v == nullptr) { return; }
+    G4bool dummy = false;
+    for (int i = 0; i < 121; ++i) {
+      const double e = kE[i] * CLHEP::GeV;
+      std::fprintf(f, "%s,%d,%.17g,%.17g\n", tag, mass, e,
+                   const_cast<G4PhysicsVector*>(v)->GetValue(e, dummy) / millibarn);
+      if (i + 1 < 121 && kE[i + 1] > kE[i]) {
+        const double em = 0.5 * (kE[i] + kE[i + 1]) * CLHEP::GeV;
+        std::fprintf(f, "%s,%d,%.17g,%.17g\n", tag, mass, em,
+                     const_cast<G4PhysicsVector*>(v)->GetValue(em, dummy) / millibarn);
+      }
+    }
+    // Both ends of the guard, where Value() clamps to the first and last entries.
+    const double below = 0.5 * CLHEP::GeV;
+    const double above = 60.0 * CLHEP::GeV;
+    std::fprintf(f, "%s,%d,%.17g,%.17g\n", tag, mass, below,
+                 const_cast<G4PhysicsVector*>(v)->GetValue(below, dummy) / millibarn);
+    std::fprintf(f, "%s,%d,%.17g,%.17g\n", tag, mass, above,
+                 const_cast<G4PhysicsVector*>(v)->GetValue(above, dummy) / millibarn);
+  };
+
+  // The two single-column tables are G4VXResonanceTable subclasses with a no-argument accessor;
+  // the four multi-column ones are keyed by particle name and are not.
+  sweep("nd", 1232, nd.CrossSectionTable());
+  sweep("dd", 1232, dd.CrossSectionTable());
+  for (const char* m : kDeltastar) {
+    sweep("ndstar", std::atoi(m), ndstar.CrossSectionTable(std::string("delta(") + m + ")+"));
+    sweep("ddstar", std::atoi(m), ddstar.CrossSectionTable(std::string("delta(") + m + ")+"));
+  }
+  for (const char* m : kNstar) {
+    sweep("nnstar", std::atoi(m), nnstar.CrossSectionTable(std::string("N(") + m + ")+"));
+    sweep("dnstar", std::atoi(m), dnstar.CrossSectionTable(std::string("N(") + m + ")+"));
+  }
+
+  // The phase-space integral, for every resonance the class dispatches on. The grid is the
+  // 120-point table's own energies plus their midpoints, plus one point past the top - where
+  // the loop's `ie < 119` makes the function extrapolate rather than clamp.
+  const char* kDbiNames[] = {
+    // The ground-state Delta is named "delta+", with no mass in the name - only the excited
+    // states carry one. The first version asked for "delta(1232)+" and got a null definition,
+    // which is why the dump writes MISSING rather than skipping: a resonance that cannot be
+    // found is a row in the oracle, not an absence.
+    "delta+", "delta(1600)+", "delta(1620)+", "delta(1700)+", "delta(1900)+",
+    "delta(1905)+", "delta(1910)+", "delta(1920)+", "delta(1930)+", "delta(1950)+",
+    "N(1440)+", "N(1520)+", "N(1535)+", "N(1650)+", "N(1675)+", "N(1680)+", "N(1700)+",
+    "N(1710)+", "N(1720)+", "N(1900)+", "N(1990)+", "N(2090)+", "N(2190)+", "N(2220)+",
+    "N(2250)+"};
+  for (const char* nm : kDbiNames) {
+    G4ParticleDefinition* def = ptable->FindParticle(nm);
+    if (def == nullptr) {
+      std::fprintf(g, "%s,MISSING,0\n", nm);
+      continue;
+    }
+    G4DetailedBalancePhaseSpaceIntegral integral(def);
+    // Fine over the region a cascade actually reaches - 1 to 4 GeV - and then coarse to 61 GeV.
+    // The coarse arm is not decoration: the class's search loop is `for (ie = 0; ie < 119; ie++)`,
+    // so the LAST of its 120 grid points is never taken as a left edge and above 48.109 GeV the
+    // function extrapolates along the last interval instead of clamping. A grid that stopped at
+    // 4 GeV cannot see that, and the first version of this dump stopped at 4 GeV: changing the
+    // bound to 120 then changed nothing.
+    for (int i = 0; i < 240; ++i) {
+      const double s = (1.0 + 0.0125 * i) * CLHEP::GeV;
+      std::fprintf(g, "%s,%.17g,%.17g\n", nm, s, integral.GetPhaseSpaceIntegral(s));
+    }
+    for (int i = 0; i < 120; ++i) {
+      const double s = (4.0 + 0.475 * i) * CLHEP::GeV;
+      std::fprintf(g, "%s,%.17g,%.17g\n", nm, s, integral.GetPhaseSpaceIntegral(s));
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -1296,6 +1427,7 @@ void dump_bic(const DumpContext&) {
   write_imr_angular_sweep();
   write_imr_collision();
   write_imr_scatterer();
+  write_imr_resonance();
 }
 
 }  // namespace
@@ -1307,5 +1439,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_blir_status.csv bic_apply.csv bic_apply_status.csv "
                     "bic_imr_xsec.csv bic_imr_angular.csv bic_imr_angular_sweep.csv bic_imr_obe.csv "
                     "bic_imr_collision.csv bic_imr_elastic_fs.csv "
-                    "bic_imr_scatterer.csv bic_imr_manager.csv",
+                    "bic_imr_scatterer.csv bic_imr_manager.csv "
+                    "bic_imr_restab.csv bic_imr_dbi.csv",
                     dump_bic);

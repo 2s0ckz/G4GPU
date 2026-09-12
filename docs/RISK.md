@@ -7812,3 +7812,47 @@ All four are reproduced in `src/physics/hadronic/bic/im_r/scatterer.cuh`, and th
 WHICH gate stopped a pair (`TimeGate`) rather than collapsing all of them into DBL_MAX, because
 "no collision" is five different physical statements and a cascade that ends early is diagnosed by
 which one.
+
+### V94: five of the six resonance tables halve their cross section and the sixth does not
+
+The six `G4X*Table` classes that carry the NN -> resonance production cross sections each build a
+`G4PhysicsFreeVector` in a method called `CrossSectionTable()`, and each has exactly one line that
+scales the tabulated number:
+
+    G4XNDeltaTable          0.5*sigmaND1232[i] * millibarn
+    G4XDeltaDeltaTable      0.5*sigmaDD1232[i] * millibarn
+    G4XNDeltastarTable      *(sigmaPointer + i) * 0.5* millibarn
+    G4XDeltaDeltastarTable  *(sigmaPointer + i) * 0.5* millibarn
+    G4XDeltaNstarTable      *(sigmaPointer + i) * 0.5* millibarn
+    G4XNNstarTable          *(sigmaPointer + i) * millibarn          <-- no 0.5
+
+So every NN -> N N* cross section is twice its five siblings' convention. The fifteen N*
+resonances - N(1440) through N(2250) - are the ones affected, and `G4XDeltaNstarTable` carries the
+same fifteen columns WITH the half, so the same resonance is halved in one channel and not in the
+other.
+
+The half is undocumented in all six. It reads as the isospin-averaging factor that
+`G4VXResonance::IsospinCorrection` divides back out through `pWeight` - the proton-proton
+Clebsch-Gordan weight - in which case the N N* channel is the one that is not divided by it and
+is a factor of two high relative to N Delta*, Delta Delta* and Delta N*. It could equally be that
+the N N* tables were generated already halved and the five others were not; nothing in the source
+says which.
+
+Either way it is not a rounding. `G4CollisionComposite::FinalState` picks a channel by throwing
+one uniform against the SUM of the partial cross sections, so a factor of two on one of eight
+partials changes how often that channel is selected at every energy where it is open.
+
+Reproduced per table in `src/physics/hadronic/bic/im_r/resonance_tables.cuh`
+(`resonance_table_scale`), and `tools/extract_bic_imr.pl` reads the line out of each of the six
+classes and asserts which five have the factor - so a release that regularises it fails the
+extractor rather than moving a channel's weight quietly. Found by the oracle: the port applied the
+half uniformly and the first `nnstar` comparison came back at exactly 0.5 relative.
+
+Two smaller things in the same six files, recorded here because they are the same kind of fact:
+
+  * `G4XNNstarTable::sigmaNN1535` and `::sigmaNN2190` are declared `[121]` and initialised with
+    113 values, so their top eight entries are zero where their neighbours are still 0.005 mb.
+    Unreachable below 39 GeV; pinned by the extractor as an exact set.
+  * `G4XNDeltastarTable.hh` says `// 40 is missing... @@@@@@@` beside `sigmaND1930`, and there is
+    indeed no `sigmaND1940` column - `delta(1940)` exists as a particle and has no N Delta*
+    production cross section. The extractor asserts the absence.
