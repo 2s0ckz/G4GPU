@@ -60,6 +60,7 @@
 #include "data/ftf_hadrons.hh"
 #include "physics/hadronic/bic/nucleus/nucleus_model.cuh"
 #include "physics/hadronic/deexcitation/nuclear_masses.cuh"
+#include "physics/hadronic/ftf/annihilation.cuh"
 #include "physics/hadronic/ftf/diffractive_excitation.cuh"
 #include "physics/hadronic/ftf/elastic_hn.cuh"
 #include "physics/hadronic/ftf/ftf_parameters.cuh"
@@ -86,11 +87,17 @@ struct FtfModelReport {
   bool nucleus_failed = false;             ///< bic::nucleus_init could not build the nucleus
   bool string_capacity = false;
   bool involved_capacity = false;
+  /// `theAdditionalString` outgrew FtfParticipants::kMaxAdditionalStrings. Its own flag rather
+  /// than `string_capacity`, because the slot that ran out is a participant slot: an
+  /// anti-nucleon on a heavy nucleus annihilates once per wounded nucleon it reaches, and each
+  /// three-string annihilation adds one hadron that did not exist when the event began.
+  bool additional_capacity = false;
   int refused_z = 0, refused_a = 0;
 
   __host__ __device__ bool any() const {
     return refused != FtfRefusal::kNone || put_on_mass_shell_failed || excite_failed ||
-           participants_empty || nucleus_failed || string_capacity || involved_capacity;
+           participants_empty || nucleus_failed || string_capacity || involved_capacity ||
+           additional_capacity;
   }
 };
 
@@ -152,6 +159,11 @@ struct FtfModelWorkspace {
   int n_projectile_spectators = 0;
   int n_target_spectators = 0;
   int n_nn_collisions = 0;
+
+  /// `theAdditionalString.size()` - how many of the pool's `kAdditionalBase + j` slots
+  /// G4FTFAnnihilation's three-string channel has filled this event.
+  int n_additional = 0;
+  AnnihCommon annih;
 
   // ---- the strings this model produces ----
   ExcitedString strings[kMaxStrings];
@@ -970,10 +982,52 @@ __host__ __device__ inline bool ftf_model_excite_participants(
           inner_success = ftf_elastic_scattering(projectile, target, &w->params, rng);
         }
       } else {
-        // Annihilation. Not written: G4FTFAnnihilation's four channel builders and the
-        // `theAdditionalString` bookkeeping under them.
-        w->report.refused = FtfRefusal::kFtfAnnihilation;
-        return false;
+        // Annihilation.
+        if (!w->high_energy_inter) {
+          w->report.refused = FtfRefusal::kAdjustNucleons;
+          return false;
+        }
+        const int add_slot =
+            FtfParticipants<FtfModelWorkspace<kA, kP, kI, kS>::kScratchA, kI>::kAdditionalBase +
+            w->n_additional;
+        SplitableHadron additional;
+        bool made_additional = false;
+        const bool ok = ftf_annihilate(projectile, target, &additional, &made_additional,
+                                       &w->params, &w->annih, rng);
+        if (w->annih.refused != FtfRefusal::kNone) {
+          w->report.refused = w->annih.refused;
+          return false;
+        }
+        if (ok) {
+          inner_success = true;
+          if (made_additional) {
+            if (w->n_additional >=
+                FtfParticipants<FtfModelWorkspace<kA, kP, kI, kS>::kScratchA,
+                                kI>::kMaxAdditionalStrings) {
+              w->report.additional_capacity = true;
+              return false;
+            }
+            w->participants.pool[add_slot] = additional;
+            ++w->n_additional;
+          }
+          w->n_nn_collisions++;
+
+          // Skip the remaining interactions of the two hadrons that have just annihilated, then
+          // rewind the iterator to where it was. `CurrentInteraction` counts from 1, so the
+          // `for` below advances exactly back onto the interaction just processed.
+          while (w->participants.next()) {
+            Interaction& acollision = w->participants.interaction();
+            const int next_pr = acollision.projectile;
+            const int next_tr = acollision.target;
+            if ((next_pr != kNullSplitable &&
+                 &w->participants.pool[next_pr] == projectile) ||
+                (next_tr != kNullSplitable && &w->participants.pool[next_tr] == target)) {
+              acollision.status = 0;
+            }
+          }
+          w->participants.start_loop();
+          for (int i = 0; i < current_interaction; ++i) { (void)w->participants.next(); }
+        }
       }
     }
 
@@ -1173,8 +1227,25 @@ __host__ __device__ inline void ftf_build_strings(FtfModelWorkspace<kA, kP, kI, 
     }
   }
 
-  // `theAdditionalString` is filled only by G4FTFAnnihilation, which this port refuses; there
-  // is nothing to loop over and the loop is not written as an empty one.
+  // The additional strings, which only G4FTFAnnihilation's three-string channel creates. They
+  // are ALWAYS built as projectile-side strings (`isProjectile = true` is set before the loop
+  // and the commented-out line that would have made it depend on the status is left in the
+  // original), and each is already split, so CreateStrings takes its `HadronIsString` arm and
+  // rebuilds the string from the parton momenta the annihilation gave it.
+  for (int ah = 0; ah < w->n_additional; ++ah) {
+    const int slot =
+        FtfParticipants<FtfModelWorkspace<kA, kP, kI, kS>::kScratchA, kI>::kAdditionalBase + ah;
+    SplitableHadron* h = &w->participants.pool[slot];
+    n_made = 0;
+    ftf_create_strings(h, true, &w->params, made, &n_made, &w->report.refused, rng);
+    for (int k = 0; k < n_made; ++k) {
+      if (w->n_strings >= kS) {
+        w->report.string_capacity = true;
+        return;
+      }
+      w->strings[w->n_strings++] = made[k];
+    }
+  }
 }
 
 /// G4FTFModel::GetResiduals, the HighEnergyInter arm.
@@ -1343,6 +1414,7 @@ __host__ __device__ inline void ftf_model_init(FtfModelWorkspace<kA, kP, kI, kS>
   w->n_involved_target = 0;
   w->n_involved_projectile = 0;
   w->n_nn_collisions = 0;
+  w->n_additional = 0;
   w->projectile_pdg = proj.pdg;
   w->projectile_p4 = proj_p4;
   w->projectile_baryon = proj.baryon_number;

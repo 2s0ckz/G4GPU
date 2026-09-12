@@ -51,6 +51,17 @@ struct SplitableHadron {
   int parton[2] = {0, 0};      ///< Parton[0] = string start, Parton[1] = string end
   int parton_index = -1;       ///< PartonIndex
 
+  /// The two partons' four-momenta, and the ONE case in FTF that needs them stored.
+  ///
+  /// The file header says why they are not normally here: `CreateStrings` computes them and
+  /// hands them straight to a `G4ExcitedString`, so nothing reads them back. G4FTFAnnihilation
+  /// is the exception. Its four channels set the partons AND their momenta and then call
+  /// `Splitting()` - so when `BuildStrings` later calls `CreateStrings` on the same hadron,
+  /// `IsSplit()` is already true and the `HadronIsString` arm builds the string out of the
+  /// parton objects as they are. Without these two vectors the annihilation strings would come
+  /// out with zero momentum.
+  Vec4 parton_mom[2];
+
   /// Not a Geant4 member: `alive` is the difference between a G4VSplitableHadron* that exists
   /// and a null one. G4FTFParticipants leaves `SetTarget(0)` on an interaction whose target
   /// nucleon was already hit, and G4FTFModel::GetResiduals' low-energy arm deletes a splitable

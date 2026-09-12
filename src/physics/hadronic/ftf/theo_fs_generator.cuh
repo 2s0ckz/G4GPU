@@ -420,15 +420,23 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   ws->n_tracks = 0;
   ws->n_escaped = 0;
 
-  const data::FtfHadron* pdef = data::ftf_find_hadron(proj_in.pdg);
-  if (pdef == nullptr) {
+  // AN ION IS NOT IN THE HADRON TABLE and cannot be: `data/ftf_hadrons.hh` drops every 10LZZZAAAI
+  // code because which ions exist is a property of the run rather than of Geant4 (the generator
+  // script's header says why, and docs/RISK.md V89 is what happened when a count of them was
+  // asserted). An ion is identified by its baryon number instead, and it carries no charm or
+  // bottom quark, so the first dummy branch below cannot apply to one.
+  const bool projectile_is_ion =
+      (proj_in.baryon_number > 1) || (proj_in.baryon_number < -1);
+  const data::FtfHadron* pdef =
+      projectile_is_ion ? nullptr : data::ftf_find_hadron(proj_in.pdg);
+  if (pdef == nullptr && !projectile_is_ion) {
     ws->report.refused = FtfRefusal::kUnknownHadronCode;
     return;
   }
 
   // The two dummy low-energy branches, in Geant4's order.
   const double energy_threshold_heavy = 100.0 * units::MeV<double>();
-  if (static_cast<double>(proj_in.kin_energy) < energy_threshold_heavy &&
+  if (!projectile_is_ion && static_cast<double>(proj_in.kin_energy) < energy_threshold_heavy &&
       (pdef->nq4 != 0 || pdef->naq4 != 0 || pdef->nq5 != 0 || pdef->naq5 != 0)) {
     out.status = HadFinalStateStatus::kIsAlive;
     out.energy_change = proj_in.kin_energy;

@@ -1102,15 +1102,16 @@ __host__ __device__ inline void ftf_create_strings(SplitableHadron* hadron, bool
   if (!ok) { return; }  // "No end parton found"
 
   if (hadron_is_string) {
-    // The hadron was already split by an earlier call: rebuild the string from the two partons
-    // it already has and give them NO momenta. Reachable only through theAdditionalString,
-    // which only G4FTFAnnihilation fills.
+    // The hadron was already split, which in FTF means G4FTFAnnihilation split it: the string
+    // is rebuilt from the two parton objects AS THEY ARE, momenta included. `start` is
+    // Parton[0] and `end` is Parton[1], and `new G4ExcitedString(end, start, dir)` pushes `end`
+    // first - so `left` is Parton[1] and `right` is Parton[0], and the momenta follow the codes.
     ExcitedString s;
     s.left = end;
     s.right = start;
     s.direction = is_projectile ? +1 : -1;
-    s.pleft = Vec4(0.0, 0.0, 0.0, 0.0);
-    s.pright = Vec4(0.0, 0.0, 0.0, 0.0);
+    s.pleft = hadron->parton_mom[1];
+    s.pright = hadron->parton_mom[0];
     s.excited = true;
     s.time_of_creation = hadron->time_of_creation;
     s.position = hadron->position;

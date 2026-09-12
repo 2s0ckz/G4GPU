@@ -1426,7 +1426,17 @@ G4DiffractiveSplitableHadron* make_target_splitable(int pdg, double px, double p
   G4LorentzVector p(px, py, pz, e);
   n.SetMomentum(p);
   n.SetPosition(G4ThreeVector(x, y, z));
-  return new G4DiffractiveSplitableHadron(n);
+  G4DiffractiveSplitableHadron* h = new G4DiffractiveSplitableHadron(n);
+  // `G4Nucleon::SetParticleType` accepts only proton, neutron, lambda and their anti-species,
+  // so a DELTA target - which a quark exchange produces and G4FTFAnnihilation's weight table
+  // has arms for - cannot be built through the nucleon constructor. Setting the definition
+  // afterwards is what G4DiffractiveExcitation itself does when it turns a nucleon into a
+  // Delta. Without this the `pbar_d_1G` row asked Geant4 about a NEUTRON and the port about a
+  // Delta+, and the disagreement looked like a port bug.
+  if (pdg != 2212 && pdg != 2112) {
+    h->SetDefinition(G4ParticleTable::GetParticleTable()->FindParticle(pdg));
+  }
+  return h;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1594,6 +1604,106 @@ void dump_excite() {
                    pr->GetSoftCollisionCount(), tr->GetSoftCollisionCount(), eng.draws());
       delete pr;
       delete tr;
+    }
+    delete par;
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ftf_annih.csv - G4FTFAnnihilation::Annihilate, every channel
+// ---------------------------------------------------------------------------------------------
+
+struct AnnihCase {
+  const char* name;
+  int proj_pdg;
+  int targ_pdg;
+  double plab;        ///< anti-baryon pz, MeV/c
+  double targ_px, targ_py, targ_pz, targ_e;
+  int targ_a, targ_z;
+};
+
+/// Nine collisions chosen so that the FOUR channels are all reached across the phase grid.
+/// `Ksi` selects among X_a : X_b : X_c : X_d, and the four cross sections move by orders of
+/// magnitude between "at rest" (Prel2 <= 0, the fixed 625.1 / 0 / 49.989 / 6.614 mb) and 10
+/// GeV/c, so the low-momentum rows reach the 3-shirt diagram and the high ones the single
+/// quark-antiquark string. The anti-neutron and the anti-Lambda rows exercise two more of the
+/// nine-by-two weight table's arms, and the Delta+ target row the `2214` entry.
+const AnnihCase kAnnihCases[] = {
+    {"pbar_p_rest",  -2212, 2212, 1.0,     0.0,  0.0,  0.0,  938.272013, 1,  1},
+    {"pbar_p_100",   -2212, 2212, 100.0,   0.0,  0.0,  0.0,  938.272013, 12, 6},
+    {"pbar_p_1G",    -2212, 2212, 1000.0,  0.0,  0.0,  0.0,  938.272013, 12, 6},
+    {"pbar_p_10G",   -2212, 2212, 10000.0, 0.0,  0.0,  0.0,  938.272013, 12, 6},
+    {"pbar_n_1G",    -2212, 2112, 1000.0,  20.0, -15.0, 10.0, 930.0,     12, 6},
+    {"nbar_p_1G",    -2112, 2212, 1000.0,  0.0,  0.0,  0.0,  938.272013, 12, 6},
+    {"nbar_n_10G",   -2112, 2112, 10000.0, 0.0,  0.0,  0.0,  939.56536,  56, 26},
+    {"lbar_p_1G",    -3122, 2212, 1000.0,  0.0,  0.0,  0.0,  938.272013, 12, 6},
+    {"pbar_d_1G",    -2212, 2214, 1000.0,  0.0,  0.0,  0.0,  1232.0,     12, 6},
+};
+
+void dump_annih() {
+  FILE* f = std::fopen("ftf_annih.csv", "w");
+  std::fprintf(f, "case,phase,result,ppdg,tpdg,ppx,ppy,ppz,pe,tpx,tpy,tpz,te,"
+                  "pstatus,tstatus,pncol,tncol,pq0,pq1,pq0px,pq0py,pq0pz,pq0e,"
+                  "pq1px,pq1py,pq1pz,pq1e,ptime,pposx,pposy,pposz,"
+                  "nadd,apdg,aq0,aq1,apx,apy,apz,ae,"
+                  "aq0px,aq0py,aq0pz,aq0e,aq1px,aq1py,aq1pz,aq1e,draws\n");
+  G4FTFAnnihilation ann;
+  CycleEngine eng;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+  for (const AnnihCase& c : kAnnihCases) {
+    G4FTFParameters* par = new G4FTFParameters();
+    par->InitForInteraction(def_of(c.proj_pdg), c.targ_a, c.targ_z, c.plab);
+    for (int ph = 0; ph < 8; ++ph) {
+      eng.reset(ph);
+      G4DiffractiveSplitableHadron* pr =
+          make_projectile_splitable(c.proj_pdg, 0.0, 0.0, c.plab);
+      G4DiffractiveSplitableHadron* tr = make_target_splitable(
+          c.targ_pdg, c.targ_px, c.targ_py, c.targ_pz, c.targ_e, 1.0 * fermi, -2.0 * fermi,
+          0.5 * fermi);
+      pr->SetStatus(1);
+      tr->SetStatus(1);
+      tr->SetTimeOfCreation(3.25);
+      G4VSplitableHadron* add = nullptr;
+      const G4bool r = ann.Annihilate(pr, tr, add, par);
+      const G4LorentzVector pp = pr->Get4Momentum();
+      const G4LorentzVector tp = tr->Get4Momentum();
+      const G4ThreeVector ps = pr->GetPosition();
+      // The projectile's two partons, which the annihilation channels set AND give momenta to;
+      // they survive into the string because BuildStrings finds the hadron already split.
+      G4Parton* p0 = pr->GetNextParton();
+      G4Parton* p1 = pr->GetNextParton();
+      const G4LorentzVector p0m = p0 ? p0->Get4Momentum() : G4LorentzVector(0, 0, 0, 0);
+      const G4LorentzVector p1m = p1 ? p1->Get4Momentum() : G4LorentzVector(0, 0, 0, 0);
+      G4LorentzVector am(0, 0, 0, 0), a0m(0, 0, 0, 0), a1m(0, 0, 0, 0);
+      int apdg = 0, aq0 = 0, aq1 = 0;
+      if (add != nullptr) {
+        am = add->Get4Momentum();
+        apdg = add->GetDefinition() ? add->GetDefinition()->GetPDGEncoding() : 0;
+        G4Parton* a0 = add->GetNextParton();
+        G4Parton* a1 = add->GetNextParton();
+        if (a0) { aq0 = a0->GetPDGcode(); a0m = a0->Get4Momentum(); }
+        if (a1) { aq1 = a1->GetPDGcode(); a1m = a1->Get4Momentum(); }
+      }
+      std::fprintf(f,
+                   "%s,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                   "%d,%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                   "%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,"
+                   "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n",
+                   c.name, ph, r ? 1 : 0, pr->GetDefinition()->GetPDGEncoding(),
+                   tr->GetDefinition()->GetPDGEncoding(), pp.px(), pp.py(), pp.pz(), pp.e(),
+                   tp.px(), tp.py(), tp.pz(), tp.e(), pr->GetStatus(), tr->GetStatus(),
+                   pr->GetSoftCollisionCount(), tr->GetSoftCollisionCount(),
+                   p0 ? p0->GetPDGcode() : 0, p1 ? p1->GetPDGcode() : 0, p0m.px(), p0m.py(),
+                   p0m.pz(), p0m.e(), p1m.px(), p1m.py(), p1m.pz(), p1m.e(),
+                   pr->GetTimeOfCreation(), ps.x(), ps.y(), ps.z(), add ? 1 : 0, apdg, aq0, aq1,
+                   am.px(), am.py(), am.pz(), am.e(), a0m.px(), a0m.py(), a0m.pz(), a0m.e(),
+                   a1m.px(), a1m.py(), a1m.pz(), a1m.e(), eng.draws());
+      delete pr;
+      delete tr;
+      delete add;
     }
     delete par;
   }
@@ -1801,9 +1911,20 @@ void dump_getlist() {
 struct ModelCase {
   const char* name;
   int pdg;
-  double kin;   ///< kinetic energy, MeV
+  double kin;   ///< kinetic energy, MeV - TOTAL, not per nucleon
   int a, z;
+  int proj_a = 0;  ///< a projectile ION's mass number; 0 for a hadron
+  int proj_z = 0;
 };
+
+/// The projectile definition, which for an ion is `G4IonTable::GetIon(Z, A, 0)` and not
+/// anything `FindParticle` can be asked for.
+const G4ParticleDefinition* projectile_def(const ModelCase& c) {
+  if (c.proj_a > 0) {
+    return G4ParticleTable::GetParticleTable()->GetIonTable()->GetIon(c.proj_z, c.proj_a, 0.0);
+  }
+  return def_of(c.pdg);
+}
 
 /// The beams and targets docs/HADRONIC_PLAN.md's P11 brief names, less the ion and anti-nucleon
 /// arms that this port refuses: {p, n, pi+, pi-, K+} at {4, 10, 50} GeV on {C, O, Al, Fe, Pb}
@@ -1819,7 +1940,289 @@ const ModelCase kModelCases[] = {
     {"pim_C_10", -211, 10000.0, 12,  6},  {"pim_Pb_50", -211, 50000.0, 207, 82},
     {"kp_C_10",  321,  10000.0, 12,  6},  {"kp_Fe_50", 321,  50000.0, 56,  26},
     {"p_O_10",   2212, 10000.0, 16,  8},
+    // The ION arm, at the brief's {alpha, C12} x {8, 20} GeV per nucleon. The kinetic energy
+    // below is the TOTAL, which is what G4HadProjectile carries: 4 x 8 GeV, 12 x 20 GeV and so
+    // on. These exercise the nucleus-nucleus branches of GetList, ReggeonCascade,
+    // PutOnMassShell and BuildStrings, which share almost all of their code with the
+    // hadron-nucleus ones and none of their test coverage without these rows.
+    {"a_C_8",    0, 32000.0,  12,  6,  4,  2},
+    {"a_Pb_8",   0, 32000.0,  207, 82, 4,  2},
+    {"a_C_20",   0, 80000.0,  12,  6,  4,  2},
+    {"C12_C_8",  0, 96000.0,  12,  6,  12, 6},
+    {"C12_Pb_8", 0, 96000.0,  207, 82, 12, 6},
+    {"C12_C_20", 0, 240000.0, 12,  6,  12, 6},
 };
+
+// ---------------------------------------------------------------------------------------------
+// ftf_aanucleus.csv and ftf_getlist_aa.csv - GetList's NUCLEUS-NUCLEUS arm, exactly
+//
+// The hadron arm is checked exactly by replaying one nucleus (ftf_nucleus.csv); the AA arm needs
+// TWO, and the projectile one has been boosted and Lorentz-contracted by `G4FTFModel::Init`
+// before GetList sees it. Both are dumped after those operations, so the port replays exactly
+// the configuration the participant search ran on and the comparison is exact rather than
+// statistical - which matters because a 3% difference in an AA participant count is invisible
+// against the event-to-event spread and obvious here.
+// ---------------------------------------------------------------------------------------------
+
+struct AaCase {
+  const char* name;
+  int proj_a, proj_z;
+  int targ_a, targ_z;
+  double kin;  ///< TOTAL kinetic energy of the ion, MeV
+};
+
+const AaCase kAaCases[] = {
+    {"He4_C12", 4, 2, 12, 6, 32000.0},
+    {"C12_C12", 12, 6, 12, 6, 96000.0},
+    {"C12_Pb207", 12, 6, 207, 82, 96000.0},
+};
+
+void dump_getlist_aa() {
+  FILE* fn = std::fopen("ftf_aanucleus.csv", "w");
+  std::fprintf(fn, "case,side,a,z,index,type,posx,posy,posz,px,py,pz,e,binding\n");
+  FILE* fl = std::fopen("ftf_getlist_aa.csv", "w");
+  std::fprintf(fl, "case,phase,b,ninter,index,proj_index,targ_index,time,status,draws\n");
+
+  CLHEP::HepJamesRandom nuceng(20260915);
+  CycleEngine eng;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const AaCase& c : kAaCases) {
+    CLHEP::HepRandom::setTheEngine(&nuceng);
+    G4FTFParticipants parts;
+    parts.InitProjectileNucleus(c.proj_a, c.proj_z, 0);
+    parts.Init(c.targ_a, c.targ_z);
+    G4V3DNucleus* pnuc = parts.GetProjectileNucleus();
+    G4V3DNucleus* tnuc = parts.GetWoundedNucleus();
+
+    // The projectile's boost and contraction, exactly as G4FTFModel::Init applies them.
+    const G4ParticleDefinition* d =
+        G4ParticleTable::GetParticleTable()->GetIonTable()->GetIon(c.proj_z, c.proj_a, 0.0);
+    const double m = d->GetPDGMass();
+    const double p = std::sqrt(c.kin * (c.kin + 2.0 * m));
+    const double e = c.kin + m;
+    const G4ThreeVector boost(0.0, 0.0, p / e);
+    pnuc->DoLorentzBoost(boost);
+    pnuc->DoLorentzContraction(boost);
+
+    G4Nucleon* n = nullptr;
+    for (int side = 0; side < 2; ++side) {
+      G4V3DNucleus* nuc = (side == 0) ? pnuc : tnuc;
+      const int a = (side == 0) ? c.proj_a : c.targ_a;
+      const int z = (side == 0) ? c.proj_z : c.targ_z;
+      nuc->StartLoop();
+      int idx = 0;
+      while ((n = nuc->GetNextNucleon())) {
+        const int type = (n->GetDefinition() == G4Proton::Proton())     ? 1
+                         : (n->GetDefinition() == G4Neutron::Neutron()) ? 2
+                                                                        : 3;
+        const G4ThreeVector pos = n->GetPosition();
+        const G4LorentzVector mom = n->Get4Momentum();
+        std::fprintf(fn, "%s,%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                     c.name, side, a, z, idx, type, pos.x(), pos.y(), pos.z(), mom.px(),
+                     mom.py(), mom.pz(), mom.e(), n->GetBindingEnergy());
+        ++idx;
+      }
+    }
+
+    G4FTFParameters* par = new G4FTFParameters();
+    par->InitForInteraction(d, c.targ_a, c.targ_z, p / c.proj_a);
+
+    // The projectile nucleus is TRANSLATED by GetList when it finds an interaction, so every
+    // phase has to start from the same positions: they are saved and restored around each call.
+    std::vector<G4ThreeVector> saved_pos;
+    pnuc->StartLoop();
+    while ((n = pnuc->GetNextNucleon())) { saved_pos.push_back(n->GetPosition()); }
+
+    for (int ph = 0; ph < 8; ++ph) {
+      for (int side = 0; side < 2; ++side) {
+        G4V3DNucleus* nuc = (side == 0) ? pnuc : tnuc;
+        nuc->StartLoop();
+        while ((n = nuc->GetNextNucleon())) {
+          if (n->AreYouHit()) {
+            delete n->GetSplitableHadron();
+            n->Hit(nullptr);
+          }
+        }
+      }
+      {
+        pnuc->StartLoop();
+        size_t k = 0;
+        while ((n = pnuc->GetNextNucleon())) { n->SetPosition(saved_pos[k++]); }
+      }
+      CLHEP::HepRandom::setTheEngine(&eng);
+      eng.reset(ph);
+      G4ReactionProduct rp(d);
+      rp.SetMomentum(0.0, 0.0, p);
+      rp.SetTotalEnergy(e);
+      parts.GetList(rp, par);
+      const int draws = eng.draws();
+      const double b = parts.GetImpactParameter();
+      int ninter = 0;
+      parts.StartLoop();
+      while (parts.Next()) { ++ninter; }
+      parts.StartLoop();
+      int kk = 0;
+      while (parts.Next()) {
+        const G4InteractionContent& in = parts.GetInteraction();
+        int pi = -1, ti = -1, j = 0;
+        pnuc->StartLoop();
+        j = 0;
+        while ((n = pnuc->GetNextNucleon())) {
+          if (n == in.GetProjectileNucleon()) { pi = j; }
+          ++j;
+        }
+        tnuc->StartLoop();
+        j = 0;
+        while ((n = tnuc->GetNextNucleon())) {
+          if (n == in.GetTargetNucleon()) { ti = j; }
+          ++j;
+        }
+        std::fprintf(fl, "%s,%d,%.17g,%d,%d,%d,%d,%.17g,%d,%d\n", c.name, ph, b, ninter, kk, pi,
+                     ti, in.GetInteractionTime(), in.GetStatus(), draws);
+        ++kk;
+      }
+      if (ninter == 0) {
+        std::fprintf(fl, "%s,%d,%.17g,0,-1,-1,-1,0,0,%d\n", c.name, ph, b, draws);
+      }
+    }
+    // Erase the marks so the splitable hadrons go with `parts`.
+    for (int side = 0; side < 2; ++side) {
+      G4V3DNucleus* nuc = (side == 0) ? pnuc : tnuc;
+      nuc->StartLoop();
+      while ((n = nuc->GetNextNucleon())) {
+        if (n->AreYouHit()) {
+          delete n->GetSplitableHadron();
+          n->Hit(nullptr);
+        }
+      }
+    }
+    parts.Clean();
+    delete par;
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(fn);
+  std::fclose(fl);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ftf_nucstat.csv - the nucleus's own geometry, which is what the FTF geometry is built on
+// ---------------------------------------------------------------------------------------------
+
+/// `GetOuterRadius()` and the transverse RMS of one sampled nucleus, N times per nuclide.
+///
+/// This is P9's `G4Fancy3DNucleus` and not this package's code, and it is dumped here because
+/// FTF is the first consumer that is SENSITIVE to it in a way a radial histogram is not.
+/// `G4FTFParticipants::GetList` samples an impact parameter in a disc of radius
+/// `GetOuterRadius() + 2 fm` and then asks, nucleon by nucleon, whether `b^2` in the TRANSVERSE
+/// plane is inside `RadiusOfHNinteractions2`. So the two numbers that decide a participant count
+/// are an EXTREME-value statistic (the furthest nucleon) and a transverse second moment -
+/// neither of which a histogram of |r| constrains tightly.
+///
+/// He4 and C12 are here because they are the two projectile ions the brief names, and C12
+/// because it is the one nuclide `G4Fancy3DNucleus::ChoosePositions` builds from three alpha
+/// clusters rather than from the density (docs/RISK.md V68).
+void dump_nucstat() {
+  struct NucStatCase { const char* name; int a, z; };
+  const NucStatCase kCases[] = {{"He4", 4, 2},    {"C12", 12, 6},   {"O16", 16, 8},
+                                {"Al27", 27, 13}, {"Fe56", 56, 26}, {"Pb207", 207, 82}};
+  FILE* f = std::fopen("ftf_nucstat.csv", "w");
+  std::fprintf(f, "nucleus,a,z,n_events,quantity,bin,count\n");
+  const int N = 20000;
+  CLHEP::HepJamesRandom eng(20260914);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&eng);
+  for (const NucStatCase& c : kCases) {
+    std::map<int, long long> outer, rms_t, rms_r;
+    G4Fancy3DNucleus* nuc = new G4Fancy3DNucleus();
+    for (int ev = 0; ev < N; ++ev) {
+      nuc->Init(c.a, c.z);
+      nuc->SortNucleonsIncZ();
+      // `GetOuterRadius()` in quarter-fermi bins.
+      int b = (G4int)(4.0 * nuc->GetOuterRadius() / fermi);
+      if (b < 0) { b = 0; }
+      if (b > 199) { b = 199; }
+      ++outer[b];
+      double sx = 0.0, sr = 0.0;
+      nuc->StartLoop();
+      G4Nucleon* n = nullptr;
+      while ((n = nuc->GetNextNucleon())) {
+        const G4ThreeVector p = n->GetPosition();
+        sx += (p.x()*p.x() + p.y()*p.y()) / (fermi*fermi);
+        sr += p.mag2() / (fermi*fermi);
+      }
+      int bt = (G4int)(10.0 * std::sqrt(sx / c.a));
+      if (bt < 0) { bt = 0; }
+      if (bt > 199) { bt = 199; }
+      ++rms_t[bt];
+      int br = (G4int)(10.0 * std::sqrt(sr / c.a));
+      if (br < 0) { br = 0; }
+      if (br > 199) { br = 199; }
+      ++rms_r[br];
+    }
+    delete nuc;
+    for (const auto& kv : outer) {
+      std::fprintf(f, "%s,%d,%d,%d,outer_qfm,%d,%lld\n", c.name, c.a, c.z, N, kv.first,
+                   kv.second);
+    }
+    for (const auto& kv : rms_t) {
+      std::fprintf(f, "%s,%d,%d,%d,rms_t_dfm,%d,%lld\n", c.name, c.a, c.z, N, kv.first,
+                   kv.second);
+    }
+    for (const auto& kv : rms_r) {
+      std::fprintf(f, "%s,%d,%d,%d,rms_r_dfm,%d,%lld\n", c.name, c.a, c.z, N, kv.first,
+                   kv.second);
+    }
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+/// ftf_modelcases.csv - the INPUTS of the statistical cases, so that the port does not have to
+/// copy them.
+///
+/// `pmass` matters and is the reason this file exists rather than a table duplicated in the
+/// test: for an ION the projectile's PDG mass comes from `G4IonTable`, which is
+/// `G4NucleiProperties::GetNuclearMass(A, Z)` and NOT the sum of nucleon masses minus the
+/// binding energy that `G4Fancy3DNucleus::GetMass()` gives (P9's nucleus_model.cuh lists all
+/// three answers). Getting it from the wrong one moves sqrt(s) and every distribution with it,
+/// by an amount too small to look like a bug and too large to be rounding.
+void dump_modelcases() {
+  FILE* f = std::fopen("ftf_modelcases.csv", "w");
+  // The G4FTFParameters columns are here because P11's `ftf_params.csv` grid is 22 named
+  // PROJECTILE PARTICLES and an ion is not one of them - `InitForInteraction`'s
+  // `ProjectileIsNucleus` arm is reached only through a beam whose baryon number exceeds 1, and
+  // nothing before P11b ever handed it one. These eleven numbers are every parameter the model
+  // above reads, for exactly the cases the statistical half runs, and they are compared
+  // EXACTLY: an ion arm that is 1% out in `RadiusOfHNinteractions2` produces a participant
+  // count that is 3% out and looks like a fluctuation.
+  // `RadiusOfHNinteractions2` has no getter - it is `Xtotal/pi/10` and nothing else, so
+  // comparing `xtotal` compares it.
+  std::fprintf(f, "case,pdg,kin,a,z,proj_a,proj_z,pmass,plab,plab_per_n,"
+                  "xtotal,xelastic,xinel,prob_el,prob_annih,cof_nd,cof_nd_pr,r2_nd,dof_nd,"
+                  "pt2_nd,maxpt2_nd,exc_per_wn,max_ncoll\n");
+  for (const ModelCase& c : kModelCases) {
+    const G4ParticleDefinition* d = projectile_def(c);
+    const double m = d->GetPDGMass();
+    const double p = std::sqrt(c.kin * (c.kin + 2.0 * m));
+    const double plab_per_n = (c.proj_a > 0) ? p / c.proj_a : p;
+    G4FTFParameters* par = new G4FTFParameters();
+    par->InitForInteraction(d, c.a, c.z, plab_per_n);
+    std::fprintf(f,
+                 "%s,%d,%.17g,%d,%d,%d,%d,%.17g,%.17g,%.17g,"
+                 "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                 c.name, d->GetPDGEncoding(), c.kin, c.a, c.z, c.proj_a, c.proj_z, m, p,
+                 plab_per_n, par->GetTotalCrossSection(), par->GetElasticCrossSection(),
+                 par->GetInelasticCrossSection(),
+                 par->GetProbabilityOfElasticScatt(), par->GetProbabilityOfAnnihilation(),
+                 par->GetCofNuclearDestruction(), par->GetCofNuclearDestructionPr(),
+                 par->GetR2ofNuclearDestruction(), par->GetDofNuclearDestruction(),
+                 par->GetPt2ofNuclearDestruction(), par->GetMaxPt2ofNuclearDestruction(),
+                 par->GetExcitationEnergyPerWoundedNucleon(), par->GetMaxNumberOfCollisions());
+    delete par;
+  }
+  std::fclose(f);
+}
 
 /// `G4VPartonStringModel::Scatter` N times, plus a separate `Init` + `GetStrings` pass for the
 /// string-level numbers, which `Scatter` consumes and does not return.
@@ -1842,7 +2245,7 @@ void dump_modelstat() {
   CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
 
   for (const ModelCase& c : kModelCases) {
-    const G4ParticleDefinition* d = def_of(c.pdg);
+    const G4ParticleDefinition* d = projectile_def(c);
 
     // ---- pass 1: the strings at GetStrings exit ----
     {
@@ -2007,7 +2410,7 @@ void dump_modelbig() {
   CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
 
   for (const ModelCase& c : kBigCases) {
-    const G4ParticleDefinition* d = def_of(c.pdg);
+    const G4ParticleDefinition* d = projectile_def(c);
     {
       CLHEP::HepJamesRandom eng(20260912);
       CLHEP::HepRandom::setTheEngine(&eng);
@@ -2085,8 +2488,12 @@ void dump_ftf(const DumpContext&) {
   dump_splitup();
   dump_hnelastic();
   dump_excite();
+  dump_annih();
   dump_create_strings();
   dump_getlist();
+  dump_getlist_aa();
+  dump_nucstat();
+  dump_modelcases();
   dump_modelstat();
   dump_modelbig();
 }
@@ -2101,7 +2508,9 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_corrector.csv ftf_stringspec.csv ftf_strings.csv ftf_stringstat.csv "
                     "ftf_stringstat_mult.csv ftf_stringstat_balance.csv ftf_splitup.csv "
                     "ftf_hnelastic.csv ftf_excite.csv ftf_cstrings.csv ftf_nucleus.csv "
-                    "ftf_getlist.csv ftf_modelstat_strings.csv ftf_modelstat_species.csv "
-                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelbig_strings.csv "
+                    "ftf_getlist.csv ftf_getlist_aa.csv ftf_aanucleus.csv ftf_annih.csv "
+                    "ftf_modelstat_strings.csv ftf_modelstat_species.csv "
+                    "ftf_modelstat_mult.csv ftf_modelstat_wounded.csv ftf_modelcases.csv ftf_nucstat.csv "
+                    "ftf_modelbig_strings.csv "
                     "ftf_modelbig_mult.csv",
                     dump_ftf);

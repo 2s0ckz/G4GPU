@@ -98,7 +98,13 @@ enum class FtfRefusal : int {
   /// own value below.
   kFtfModelGetStrings,
 
-  /// G4FTFAnnihilation - the five annihilation channels for an anti-baryon projectile.
+  /// G4FTFAnnihilation. WRITTEN since P11b (`ftf/annihilation.cuh`): all four channels, the
+  /// nine-by-two weight table and the additional string. The value is kept for the one case
+  /// Geant4 itself cannot answer - a target that is neither a nucleon nor a Delta, which its
+  /// `isUnknown` branch reports to G4cout and then continues with unscaled cross sections. That
+  /// continuation is reported as `kUndefinedProjectileNucleonAssumed` instead; this value is
+  /// unused and is not removed, because an enumerator's numeric value is what the oracle rows
+  /// of a refused case carry.
   kFtfAnnihilation,
 
   /// G4FTFModel::AdjustNucleons and its three algorithm methods

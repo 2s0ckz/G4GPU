@@ -65,12 +65,18 @@ struct Interaction {
 /// `[1, 1+kMaxA)` belong to target nucleon i, and `[1+kMaxA, 1+2*kMaxA)` to projectile nucleon
 /// i. `bic::Nucleon::hit_by` carries the slot, which is exactly what `G4Nucleon::Hit(ptr)` and
 /// `GetSplitableHadron()` carry in Geant4.
-template <int kMaxA = bic::kMaxNucleons, int kMaxInteractions = 1024>
+template <int kMaxA = bic::kMaxNucleons, int kMaxInteractions = 1024, int kMaxAdditional = 64>
 struct FtfParticipants {
-  static constexpr int kPoolSize = 1 + 2 * kMaxA;
+  /// `theAdditionalString` in G4FTFModel: a splitable hadron that did not exist before the
+  /// event, created by G4FTFAnnihilation's three-string channel. One per annihilation, and an
+  /// anti-nucleon on lead can annihilate several times, so the slots are a capacity like any
+  /// other and are refused rather than truncated.
+  static constexpr int kPoolSize = 1 + 2 * kMaxA + kMaxAdditional;
   static constexpr int kPrimarySlot = 0;
   static constexpr int kTargetBase = 1;
   static constexpr int kProjectileBase = 1 + kMaxA;
+  static constexpr int kAdditionalBase = 1 + 2 * kMaxA;
+  static constexpr int kMaxAdditionalStrings = kMaxAdditional;
 
   SplitableHadron pool[kPoolSize];
   Interaction interactions[kMaxInteractions];
@@ -117,9 +123,9 @@ __host__ __device__ inline void ftf_choose_impact_xy(double max_impact, double* 
 /// The FIRST interaction is left alone - the loop starts at 1 - so interaction 0 keeps its
 /// absolute time and every other one is measured from it. The projectile's z is then copied
 /// from the target's, which is what makes the two ends of a collision share a point.
-template <int kMaxA, int kMaxInteractions>
+template <int kMaxA, int kMaxInteractions, int kMaxAdd>
 __host__ __device__ inline void ftf_shift_interaction_time(
-    FtfParticipants<kMaxA, kMaxInteractions>* p) {
+    FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p) {
   const double initial_time = p->interactions[0].interaction_time;
   for (int i = 1; i < p->n_interactions; ++i) {
     const double inter_time = p->interactions[i].interaction_time - initial_time;
@@ -145,9 +151,9 @@ __host__ __device__ inline void ftf_shift_interaction_time(
 /// equal times means two nucleon pairs with equal `z_p + z_t`, which for sampled positions is a
 /// measure-zero event - the same argument P9 makes for `SortNucleonsIncZ`
 /// (bic/nucleus/fancy_3d_nucleus.cuh).
-template <int kMaxA, int kMaxInteractions>
+template <int kMaxA, int kMaxInteractions, int kMaxAdd>
 __host__ __device__ inline void ftf_sort_interactions_inc_t(
-    FtfParticipants<kMaxA, kMaxInteractions>* p) {
+    FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p) {
   if (p->n_interactions < 2) { return; }  // Geant4's "Avoid unnecesary work"
   for (int i = 1; i < p->n_interactions; ++i) {
     Interaction key = p->interactions[i];
@@ -161,9 +167,9 @@ __host__ __device__ inline void ftf_sort_interactions_inc_t(
 }
 
 /// Append one interaction, or report the capacity.
-template <int kMaxA, int kMaxInteractions>
+template <int kMaxA, int kMaxInteractions, int kMaxAdd>
 __host__ __device__ inline bool ftf_push_interaction(
-    FtfParticipants<kMaxA, kMaxInteractions>* p, const Interaction& in) {
+    FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p, const Interaction& in) {
   if (p->n_interactions >= kMaxInteractions) {
     p->interaction_capacity = true;
     return false;
@@ -183,9 +189,9 @@ __host__ __device__ inline bool ftf_push_interaction(
 /// of the sampled configuration (the furthest nucleon plus one hard-core distance), so it
 /// changes event to event - which is why the participant list cannot be replayed from (A, Z)
 /// alone and the oracle has to replay the nucleus as well.
-template <int kMaxA, int kMaxInteractions, typename Rng>
+template <int kMaxA, int kMaxInteractions, int kMaxAdd, typename Rng>
 __host__ __device__ inline void ftf_participants_get_list_hadron(
-    FtfParticipants<kMaxA, kMaxInteractions>* p, bic::Nucleus3D* target,
+    FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p, bic::Nucleus3D* target,
     const FtfParameters<double>* params, int primary_pdg, const Vec4& primary_p4, Rng& rng) {
 
   double betta_z = primary_p4.v.z / primary_p4.e;
@@ -196,7 +202,7 @@ __host__ __device__ inline void ftf_participants_get_list_hadron(
 
   const double deltaxy = 2.0 * deex::fermi();  // Extra nuclear radius
 
-  const int primary = FtfParticipants<kMaxA, kMaxInteractions>::kPrimarySlot;
+  const int primary = FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kPrimarySlot;
   p->pool[primary] = splitable_from_primary(primary_pdg, primary_p4);
 
   const double xyradius = target->outer_radius() + deltaxy;
@@ -238,7 +244,7 @@ __host__ __device__ inline void ftf_participants_get_list_hadron(
         p->pool[primary].status = 1;  // It takes part in the interaction
         int target_slot = kNullSplitable;
         if (!nucleon->hit) {
-          target_slot = FtfParticipants<kMaxA, kMaxInteractions>::kTargetBase + i;
+          target_slot = FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kTargetBase + i;
           p->pool[target_slot] =
               splitable_from_nucleon(nucleon->pdg(), nucleon->momentum, nucleon->position);
           nucleon->hit = true;
@@ -280,9 +286,9 @@ __host__ __device__ inline void ftf_participants_get_list_hadron(
 /// `DoTranslation( theBeamPosition )` moves the whole projectile nucleus to the impact point
 /// and is inside the loop, guarded by `theInteractions.size() != 0`: a pass that found nothing
 /// leaves the projectile where it was and re-samples, so the translation happens exactly once.
-template <int kMaxA, int kMaxInteractions, typename Rng>
+template <int kMaxA, int kMaxInteractions, int kMaxAdd, typename Rng>
 __host__ __device__ inline void ftf_participants_get_list_nucleus(
-    FtfParticipants<kMaxA, kMaxInteractions>* p, bic::Nucleus3D* target,
+    FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>* p, bic::Nucleus3D* target,
     bic::Nucleus3D* projectile, const FtfParameters<double>* params, const Vec4& primary_p4,
     Rng& rng) {
 
@@ -333,7 +339,7 @@ __host__ __device__ inline void ftf_participants_get_list_nucleus(
         if (ftf_get_probability_of_interaction(params, impact2 / fermi_unit / fermi_unit) > rng.uniform()) {
           if (!proj_nucleon->hit) {
             projectile_slot =
-                FtfParticipants<kMaxA, kMaxInteractions>::kProjectileBase + ip;
+                FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kProjectileBase + ip;
             p->pool[projectile_slot] = splitable_from_nucleon(
                 proj_nucleon->pdg(), proj_nucleon->momentum, proj_nucleon->position);
             proj_nucleon->hit = true;
@@ -343,7 +349,7 @@ __host__ __device__ inline void ftf_participants_get_list_nucleus(
             projectile_slot = proj_nucleon->hit_by;
           }
           if (!targ_nucleon->hit) {
-            target_slot = FtfParticipants<kMaxA, kMaxInteractions>::kTargetBase + it;
+            target_slot = FtfParticipants<kMaxA, kMaxInteractions, kMaxAdd>::kTargetBase + it;
             p->pool[target_slot] = splitable_from_nucleon(
                 targ_nucleon->pdg(), targ_nucleon->momentum, targ_nucleon->position);
             targ_nucleon->hit = true;
