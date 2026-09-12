@@ -602,7 +602,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // lengths only - not the continuous-loss limit. It cannot change `t_step`, which is the
     // minimum of everything below regardless, but it is what `wv_step_limit`'s two early
     // returns test and those decide whether lateral displacement happens at all.
-    const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
+    [[maybe_unused]] const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
 
     const ParticleDef<real_t> lpd = particle_def<real_t>(lepton_type);
     // `[[maybe_unused]]` on this and the six below because `em::kWentzelLeptonMscWired` is

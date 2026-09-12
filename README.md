@@ -39,8 +39,11 @@ number here can mean. The gate is 3 σ.
 A twelve-beam sweep of the same geometry - photons at 1, 6 and 100 MeV, electrons at 20, 100 and
 1000 MeV, protons at 210, 400 and 1000 MeV, alphas at 840, 1600 and 4000 MeV, the port against
 Geant4 with only the physics the port lacks inactivated - is in [`docs/B1_SWEEP.md`](docs/B1_SWEEP.md):
-eleven rows within statistics, one defect (electrons above 100 MeV, open question 5), and the
-port's event loop 11 to 39 times faster than Geant4's single-threaded EM-only loop.
+eleven rows within statistics, one defect (electrons above 100 MeV, RISK V64), and the port's
+event loop 11 to 39 times faster than Geant4's single-threaded EM-only loop. **That defect is
+fixed**: the e± tables are on Geant4's own grid now and the 1 GeV electron row has gone from
+-53.96% (154.9 sigma) to **-1.67%** (3.7 sigma), with what is left of it named and still open -
+open question 5.
 
 ### Throughput
 
@@ -392,9 +395,14 @@ send every one of them somewhere else.
    extrapolation was a constant where Geant4 has a function, and every positron in this port was
    reading the electron's range table (RISK V77). A third, RISK V82, was found by the device
    energy balance the fix came with: `step_lepton` was splitting the continuous loss and
-   depositing only the collision half. What remains open here is the DISCRETE rates, which this
-   port draws from the models rather than from `G4VEnergyLossProcess`'s lambda tables and its
-   integral approach - refused by name and measured, RISK V78.
+   depositing only the collision half. **The 1 GeV B1 row went from -53.96% to -1.67%**
+   (154.9 sigma to 3.7), and the gamma gate moved 0.11 sigma. What is still open under it: the
+   msc model above 100 MeV (RISK V83, waiting on the transport translation unit being split);
+   the DISCRETE rates, which this port draws from the models rather than from
+   `G4VEnergyLossProcess`'s lambda tables and its integral approach (RISK V78); and a lepton
+   fired through a VACUUM, which is killed on its first step because the range there is so long
+   that `range - step_len` is a no-op in double arithmetic (RISK V84, pre-existing, found by
+   giving the depth-dose harness a particle name).
 
 
 ---

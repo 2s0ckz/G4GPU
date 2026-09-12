@@ -7490,3 +7490,66 @@ switch in either position, which is why the 1 GeV B1 row moves by what it moves 
 (docs/B1_SWEEP.md) with the switch off. Extending the Urban table instead is not a smaller
 change than it looks: its 240 nodes are one log grid from 1 keV, so moving its ceiling moves
 every node below it, and B1's 6 MeV gamma gate reads those nodes.
+
+---
+
+### V84: an electron fired through a vacuum is annihilated on its first step
+
+Found by giving `ref/proton/proton_depth.cc` a particle name and firing an electron into it. The
+harness's world is `G4_Galactic` and the gun sits 1 mm outside the phantom, so the first step of
+every primary is a 1 mm step in a vacuum. A proton crosses it and deposits 100.0000% of the beam
+energy in the water behind it. A 20 MeV electron deposits **0.0000%**, and a 20 MeV positron
+deposits 1.03% - which is its two annihilation photons and nothing else, emitted where the
+positron died.
+
+**The mechanism, and it is one line.** `step_lepton`:
+
+    real_t e_after = s.range_table->energy_from_range(mat, is_positron, range - step_len);
+    // Second guard: the step must strictly reduce the energy...
+    if (e_after >= p.ekin) { e_after = real_t(0); }
+
+`G4_Galactic` is hydrogen at 1e-25 g/cm3, so a 20 MeV electron's range in it is 6.61e26 mm
+(measured, from the port's own table, which inverts correctly there - `energy_from_range` of
+that range returns 20.0027 MeV and of half of it 9.62 MeV). `range - step_len` for a 1 mm step
+is `6.61e26 - 1`, which in double IS `6.61e26`: the subtraction is below the last bit. So
+`e_after == p.ekin`, the guard fires, and the electron's entire kinetic energy is taken as the
+loss of a 1 mm vacuum step. It is deposited in the world volume, which nothing scores, and the
+track is dead before it reaches the phantom.
+
+Three things were ruled out with measurements rather than reasoning. The range table is not the
+problem: it is well-conditioned in the vacuum and inverts to 4 significant figures at every
+energy tried. The Urban msc machinery is not the problem: with `lambda0 = 3.15e28 mm` and
+`range = 6.61e26 mm` it returns `z_step = 1.32e26`, a geometric step cut to the 1 mm boundary,
+and a true path of exactly 1 mm - no NaN anywhere. And it is not new: the guard predates P14c,
+and the OLD table's vacuum range was the same order of magnitude, so the same subtraction was
+the same no-op.
+
+**Why nothing had seen it.** Example B1's world is `G4_AIR`, where a 20 MeV electron's range is
+about 1.3e5 mm and `range - step_len` is perfectly representable; the proton and alpha depth-dose
+gates cross the same vacuum but `step_hadron` reads a different table with a different guard; and
+no other harness in this port fires a lepton into a vacuum. The defect needs a density ratio of
+about 1e16 between the range and the step, which a vacuum gives and no real material does.
+
+**What the right structure is, and it is not a bigger epsilon.**
+`G4VEnergyLossProcess::AlongStepDoIt` computes the loss LINEARLY first and only inverts the range
+when the linear answer is large (G4VEnergyLossProcess.cc:825-834):
+
+    eloss = length*GetDEDXForScaledEnergy(preStepScaledEnergy, ...);
+    ...
+    if(eloss > linLossLimit*preStepKinEnergy) {
+      ...
+      eloss = preStepKinEnergy - ScaledKinEnergyForLoss(x)/massRatio;
+    }
+
+with `linLossLimit` = 0.01. This port always inverts and guards. In a vacuum the linear form
+gives `1e-26 MeV/mm * 1 mm`, which is the right answer; the inversion cannot, because the
+information is not in the difference of two doubles that equal each other.
+
+**Refused by P14c rather than fixed, and the reason is the blast radius.** Putting
+`linLossLimit` in changes the energy loss of EVERY electron step whose loss is under 1% of its
+energy, which is most of them, in every run - the 6 MeV gamma gate included. That is a package
+with its own before-and-after, not the last commit of this one. What P14c owed here was the
+electron depth-dose comparison (`ref/oracle/run.bat` now produces
+`ref/oracle/electron_depth.csv`, 100,000 events of 1 GeV in 4 m of water, peak at 680 mm =
+1.88 X0); the Geant4 half is produced and checked, and the PORT half is not quoted, because
+what it would measure is this.

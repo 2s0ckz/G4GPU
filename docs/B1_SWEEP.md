@@ -103,7 +103,65 @@ one to quote, and it says: same answer, one GPU against one core, 11 to 39 times
   measurement of what it does to the gamma gate; the photon and low-energy electron rows above
   carry that too. **The measurement was taken by P8e and the branch is on** (RISK V66): it moves
   the 2,000,000-event gamma gate by 0.0004 pGy on the mean of five seeds, so these rows stand.
+- e+- above 100 MeV are scattered by Urban where Geant4 uses WentzelVI, with a transport mean
+  free path clamped at 100 MeV (RISK V83: the model and its table are transcribed and oracled,
+  and `transport_run.cu` does not survive ptxas with the branch instantiated - V63 again). The
+  1 GeV electron row carries that substitution and is 1.67% low; that is the leading candidate
+  for the residual rather than a proven attribution.
 - The `e- 20 MeV` row deposits only through bremsstrahlung photons (the electron's own range is
   10 cm and the trapezoid starts 19 cm in), so it tests the radiative chain at 0.9% statistics.
 - Geant4 was single-threaded by choice: the timing is one core against one GPU, and the EM-only
   loop time is the honest denominator.
+
+---
+
+## The electron rows again, after P14c (2026-09-11)
+
+The 1 GeV electron row above is what the sweep was run to find: docs/RISK.md V64, an e+- range
+table that stopped at 100 MeV and clamped, so every electron above it was transported as a
+100 MeV electron. P14c rebuilt those tables on Geant4's own grid - 100 eV to 100 TeV, 7 bins per
+decade, one per species, `G4LossTableBuilder`'s spline and integration - dispatched
+`G4eBremsstrahlungRelModel` above 1 GeV with `G4EmModelManager`'s continuity factor across the
+boundary, and fixed a collision/radiative split that was discarding part of every electron's
+continuous loss (V82). The three electron beams and the 6 MeV photon gate were re-run from
+`phys/electron_hi` with the same script, the same event counts and the same inactivation list.
+
+| beam | events | port before | port after | G4 EM-only | diff before | diff after | sigma before | sigma after |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| gamma 6 MeV | 2,000,000 | 8.5170E-008 | 8.5189E-008 | 8.5615E-008 | -0.52% | -0.50% | -1.8 | -1.7 |
+| e- 20 MeV | 500,000 | 4.6289E-009 | 4.6259E-009 | 4.5247E-009 | +2.30% | +2.24% | 1.8 | 1.8 |
+| e- 100 MeV | 300,000 | 3.3107E-007 | 3.3174E-007 | 3.3204E-007 | -0.29% | -0.09% | -1.1 | -0.4 |
+| **e- 1000 MeV** | 100,000 | 1.1062E-007 | **2.3626E-007** | 2.4027E-007 | **-53.96%** | **-1.67%** | **-154.9** | **-3.7** |
+
+The Geant4 columns are a fresh run of the same configuration rather than the numbers copied
+down: the EM-only 1 GeV electron and 6 MeV photon read 2.4027E-007 and 8.5615E-008 today
+against 2.4027E-007 and 8.5615E-008 in the table above - the same to the five digits this table
+prints, because `ref/run/runb1.bat` seeds Geant4. The reference has not moved under the port.
+
+**The 1 GeV row went from -54% to -1.7%, and the residual has a name.** What is not in this
+build is `G4WentzelVIModel` for e+- above 100 MeV: it is transcribed, its transport mean free
+path table is compared against Geant4's at 5.1e-16, its dispatch is written - and
+`src/host/transport_run.cu` does not survive ptxas with it instantiated, which is docs/RISK.md
+V63's wall on the other stepper and V81/V83 here. So an electron above 100 MeV is stepped by
+`G4UrbanMscModel` with a transport mean free path clamped at 100 MeV, which is a substitution in
+the step length and the deflection of exactly the part of the track this row is sensitive to:
+the trapezoid is 6 cm of bone 19 cm inside a 20 x 20 x 30 cm water envelope, so how far
+sideways a 1 GeV electron's shower spreads on the way in is most of the answer. That is the
+leading candidate for the -1.67% and it is NOT proven to be all of it: the discrete rates are
+drawn from the models rather than from `G4VEnergyLossProcess`'s lambda tables and its integral
+approach (V78), and Urban's `extremesmallstep` branch is off on the lepton path (V62). The way
+to separate them is to re-take this row with the switch flipped, which is what P8e's split of
+the transport translation unit makes possible.
+
+**The 6 MeV photon gate did not move.** 8.5170E-008 to 8.5189E-008 Gy over 2,000,000 events, or
+425.847 to 425.946 pGy per 10,000 - +0.023%, against a per-run standard error of 0.87 pGy, so
+0.11 sigma. It is not zero and it should not be: V82's fix deposits the sub-cut radiative share
+of the continuous loss that was being discarded, which is +5.3e-5 of a 1 MeV electron's energy,
+and the range table under the gate's few-MeV secondaries changed from 128 linear bins to
+Geant4's 85-node spline. Both move the dose up, and the size is what the arithmetic says.
+
+**The 100 MeV electron row improved without being the target**: -0.29% to -0.09%, 1.1 to 0.4
+sigma. 100 MeV is the last energy the old table covered without clamping, so what changed there
+is the table's construction - spline against linear interpolation, and an inverse-range vector
+where there had been a binary search - rather than its ceiling. The 20 MeV row is unchanged
+within its 0.9% statistics.
