@@ -135,6 +135,14 @@ struct SchedEmitter {
     ++child_count;
     return -1;
   }
+
+  /// The ledger `step_lepton` books a refused track into (P14c, docs/RISK.md V64: an e+- above the
+  /// top of Geant4's own tables is killed and its energy counted under its species). Every
+  /// pointer stays null here, which is the documented "books off" state of EmitterBooks: the
+  /// stepper tests each one before it adds, and this driver runs a 6 MeV photon beam that cannot
+  /// reach the 100 TeV edge in any case. The engine driver is the one that allocates and prints
+  /// these counters; this one only has to present the same shape to the stepper.
+  EmitterBooks books{};
 };
 
 /// Seeds one primary photon per event directly into the gamma buffer. Slot == local event
