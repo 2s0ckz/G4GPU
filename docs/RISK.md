@@ -9588,6 +9588,13 @@ passes and cannot see; `getEnergy()` divides by GeV as the whole cascade package
 are locally right. The only place the mismatch is visible is the one line that joins them, and it
 compiles.
 
+**Measured, not argued.** The perturbation that APPLIES the boost - reading the trapped hyperon's
+energy as the MeV the parameter expects instead of the GeV it is - is caught by the campaign at 5.1
+sigma, on the recoil carbon's mean kinetic energy from an 8 GeV pi- on oxygen: 3.96 MeV against
+2.48. So the no-op is not a curiosity that happens to be invisible. It decides where the trapped
+hyperon's momentum goes - to the daughters, or to the residual - and the residual's recoil energy
+is the observable that says which.
+
 ### V137: a refusal masked a second bug, and only removing the refusal could find it
 
 `G4CascadeCheckBalance::okay()` is four tests, and the port had five. The header says so in a
@@ -9666,3 +9673,37 @@ Three rules, and the third is the one that generalises past this project:
     test at all: it was one conserved quantity, printed, on an event chosen because it should have
     been boring. **When a change is supposed to affect nothing outside its own path, measure
     something on the path it is not supposed to affect.**
+
+### V139: QBBC gives Bertini K0S and K0L, and Bertini's IsApplicable refuses both
+
+`G4HadParticles::sKaons` is `{321, -321, 310, 130}` and `G4HadronicBuilder::BuildFTFP_BERT` builds
+a `G4CascadeInterface` over 0 to 6 GeV for every one of them, so a K0S or a K0L in a QBBC run has a
+Bertini inelastic model registered on it. `G4CascadeInterface::IsApplicable` then says no:
+
+    G4int type = G4InuclElementaryParticle::type(aPD);
+    return (type>0 && G4CascadeChannelTables::GetTable(type));
+
+and `G4InuclElementaryParticle::type(const G4ParticleDefinition*)` is a chain of pointer
+comparisons that names `G4KaonZero::Definition()` and `G4AntiKaonZero::Definition()` and **does not
+name `G4KaonZeroShort` or `G4KaonZeroLong`**. The weak eigenstates have no INUCL type code, so
+`type` is 0 and the test fails at its first term. Every K0S and K0L handed to this model returns
+`NoInteraction` - the track continues unchanged - and below 6 GeV, where Bertini is the only
+inelastic model the builder gives them, that is the whole answer.
+
+Measured in the port, which reproduces it because it transcribes the same map: `pdg 310` and
+`pdg 130` come back `inucl_type 0, applicable 0, qbbc_ok 1` - a window with no model behind it -
+against `pdg 321` and `pdg -321`, which are `inucl_type 11 and 13, applicable 1, qbbc_ok 1`.
+
+**Two of the four kaon species QBBC gives Bertini cannot be processed by it.** That is Geant4's
+arrangement, not a port limitation, and the port must not "fix" it: mapping K0S to `kaonZero` would
+give this model a K0S interaction Geant4 does not have, and the cascade would then emit K0/anti-K0
+from a K0S it was never given. The asymmetry is visible one line away in the same package - the
+cascade's OWN output mixes K0 and anti-K0 into K0S/K0L with a uniform draw in `makeDynamicParticle`
+- so Bertini converts K0 to K0S on the way out and cannot convert K0S back to K0 on the way in.
+
+The rule this is an instance of: **a physics list registering a process on a species is not the
+same as the model accepting it, and the two are written in different packages.** The window and the
+applicability test come from `G4HadronicBuilder` and `G4InuclElementaryParticle` respectively, and
+nothing checks them against each other. A port that reads only the builder concludes that K0S is
+handled; a port that reads only the model concludes that K0S never arrives. Both are wrong, and the
+only way to see it is to evaluate the two together, which `tests/test_bertini_apply.cu` now pins.
