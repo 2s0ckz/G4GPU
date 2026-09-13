@@ -117,7 +117,7 @@ __global__ void bertini_nucleus_probe(int a, int z, NucleiModel* m, BertiniWorks
   cp.current_zone = m->number_of_zones - 1;
   bool in_zero = false;
   bert::nm_boundary_transition(*m, cp.type, cp.position, cp.momentum, cp.current_zone, false,
-                              cp.reflection_counter, in_zero);
+                              cp.reflection_counter, cp.reflected, in_zero);
   out[15] = cp.momentum.e + double(cp.current_zone);
   out[16] = bert::nm_worth_to_propagate(*m, true, cp.type, 0, 0.1) ? 1.0 : 0.0;
   bool moving_in = false;
