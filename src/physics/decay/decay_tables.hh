@@ -36,10 +36,19 @@
 // nonzero number in the whole block. Multiplying as Geant4 multiplies takes it to zero.
 //
 // What is NOT here is refused by PDG code, not approximated: see `decay_refusal` below.
-// K0L, K0S, the hyperons and the anti-hyperons have tables in Geant4 and no row here, and
-// P1's species stub refuses them at emission for the same reason - nothing transports them
-// yet. The refusal is structural: a PDG code with no row gets `kNoTable` and a message that
-// names the code, at the point the decay would have happened.
+// K0L, K0S and the anti-hyperons have tables in Geant4 and no row here, and P1's species stub
+// refuses them at emission for the same reason - nothing transports them yet. The refusal is
+// structural: a PDG code with no row gets `kNoTable` and a message that names the code, at the
+// point the decay would have happened.
+//
+// P10c ADDED THE SEVEN PARTICLE HYPERONS, and the reason is worth stating because it is not
+// "transport now needs them". `G4IntraNucleiCascader::decayTrappedParticle` decays a hyperon the
+// Bertini cascade has trapped below the nuclear potential, inside the nucleus, and puts the
+// daughters back on the cascade stack; that caller is in a different package and needs the table
+// whether or not anything transports a free lambda. The rows are read the same way as every
+// other row here - out of the species' own G4*.cc - and dumped by ref/dump/dump_decay.cc, so
+// they are oracle rows and not an extension on trust. All eleven channels are
+// G4PhaseSpaceDecayChannel with two daughters, so no new sampler came with them.
 #pragma once
 #include <cstdint>
 
@@ -66,6 +75,20 @@ enum : int {
   kPdgKaonMinus = -321,
   kPdgNeutron = 2112,
   kPdgProton = 2212,
+  // The seven hyperons, added by P10c. They are here not because QBBC transports them - it does,
+  // through G4HadronicBuilder::BuildFTFP_BERT, but that is not what needs them - but because
+  // `G4IntraNucleiCascader::decayTrappedParticle` decays a hyperon that the Bertini cascade
+  // trapped below the nuclear potential, INSIDE the nucleus, and feeds the daughters back onto
+  // the cascade stack. Without these rows that path had to be refused, and the refusal cost 18%
+  // of a K- event and 47% of a lambda one (docs/RISK.md V135). Every row is from the species'
+  // own G4*.cc, and ref/dump/dump_decay.cc dumps them so each is an oracle row.
+  kPdgLambda = 3122,
+  kPdgSigmaPlus = 3222,
+  kPdgSigmaZero = 3212,
+  kPdgSigmaMinus = 3112,
+  kPdgXiZero = 3322,
+  kPdgXiMinus = 3312,
+  kPdgOmegaMinus = 3334,
 };
 
 /// CLHEP's unit prefixes, so that a mass can be written exactly as its G4ParticleDefinition
@@ -118,7 +141,7 @@ struct ParticleRow {
 /// A function returning a function-local static rather than a namespace-scope array, because
 /// nvcc cannot see a namespace-scope `constexpr` object from device code - the same idiom
 /// data/barashenkov.hh uses, and for the same reason.
-constexpr int kNumParticles = 16;
+constexpr int kNumParticles = 23;   // 16, plus the seven hyperons P10c added
 
 __host__ __device__ inline const ParticleRow* particle_rows() {
   static const ParticleRow v[kNumParticles] = {
@@ -161,6 +184,30 @@ __host__ __device__ inline const ParticleRow* particle_rows() {
     {kPdgNeutron, 939.56536, 7.478e-28 * gev(), 880.2 * second(), false, "neutron"},
     // G4Proton.cc: stable, lifetime -1. Present as the neutron beta decay daughter.
     {kPdgProton, 938.272013, 0.0, -1.0, true, "proton"},
+    // ---- the hyperons, for G4IntraNucleiCascader::decayTrappedParticle (P10c) ----
+    // G4Lambda.cc: 1.115683*GeV, 2.501e-12*MeV, 0.2631*ns
+    {kPdgLambda, 1.115683 * gev(), 2.501e-12 * mev(), 0.2631 * nanosecond(), false, "lambda"},
+    // G4SigmaPlus.cc: 1.18937*GeV, 8.209e-12*MeV, 0.08018*ns
+    {kPdgSigmaPlus, 1.18937 * gev(), 8.209e-12 * mev(), 0.08018 * nanosecond(), false,
+     "sigma+"},
+    // G4SigmaZero.cc: 1.192642*GeV, 8.9e-3*MeV, and then - exactly as G4PionZero.cc does -
+    //   anInstance->SetPDGLifeTime( hbar_Planck/(anInstance->GetPDGWidth()) );
+    // which OVERWRITES the 7.4e-11*ns the constructor was given. The sigma0's width is eight
+    // orders above every other hyperon's because it decays electromagnetically, and that is
+    // what makes the overwrite matter here rather than being a curiosity: 7.4e-11 ns and the
+    // computed 7.3989e-11 ns differ in the fourth digit, not the tenth.
+    {kPdgSigmaZero, 1.192642 * gev(), 8.9e-3 * mev(),
+     hbar_planck_MeV_ns() / (8.9e-3 * mev()), false, "sigma0"},
+    // G4SigmaMinus.cc: 1.197449*GeV, 4.45e-12*MeV, 0.1479*ns
+    {kPdgSigmaMinus, 1.197449 * gev(), 4.45e-12 * mev(), 0.1479 * nanosecond(), false,
+     "sigma-"},
+    // G4XiZero.cc: 1.31486*GeV, 2.27e-12*MeV, 0.290*ns
+    {kPdgXiZero, 1.31486 * gev(), 2.27e-12 * mev(), 0.290 * nanosecond(), false, "xi0"},
+    // G4XiMinus.cc: 1.32171*GeV, 4.02e-12*MeV, 0.1639*ns
+    {kPdgXiMinus, 1.32171 * gev(), 4.02e-12 * mev(), 0.1639 * nanosecond(), false, "xi-"},
+    // G4OmegaMinus.cc: 1.67245*GeV, 8.07e-12*MeV, 0.0821*ns
+    {kPdgOmegaMinus, 1.67245 * gev(), 8.07e-12 * mev(), 0.0821 * nanosecond(), false,
+     "omega-"},
   };
   return v;
 }
@@ -229,7 +276,7 @@ struct DecayTableRow {
 
 /// Every channel, grouped by parent, each group in G4DecayTable::Insert's descending-BR
 /// order. The comment on each row is the line in the Geant4 definition file it came from.
-constexpr int kNumChannels = 19;
+constexpr int kNumChannels = 30;   // 19, plus the eleven hyperon channels P10c added
 
 __host__ __device__ inline const ChannelRow* channel_rows() {
   static const ChannelRow v[kNumChannels] = {
@@ -294,19 +341,56 @@ __host__ __device__ inline const ChannelRow* channel_rows() {
     //   G4VDecayChannel* mode = new G4NeutronBetaDecayChannel("neutron",1.00);
     // and that constructor sets the daughters to e-, anti_nu_e, proton in that order.
     {ChannelKind::kNeutronBeta, 1.00, 3, {kPdgElectron, kPdgAntiNuE, kPdgProton}, 0.0, 0.0},
+    // ---- the hyperons (P10c). EVERY ONE IS G4PhaseSpaceDecayChannel WITH TWO DAUGHTERS, which
+    // is why this extension needed no new channel kind: the whole of the added physics is eleven
+    // rows of data through a sampler that pi+ -> mu+ nu_mu already validated.
+    //
+    // Each group is in G4DecayTable::Insert order. All seven definitions happen to insert in
+    // descending BR already, so Insert's sort is the identity here - stated because the kaon
+    // group above is the counterexample and a reader should not have to check.
+    // ---- lambda : G4Lambda.cc
+    //   mode[0] = new G4PhaseSpaceDecayChannel("lambda",0.639,2,"proton","pi-");
+    //   mode[1] = new G4PhaseSpaceDecayChannel("lambda",0.358,2,"neutron","pi0");
+    // The two sum to 0.997, not 1: SelectADecayChannel normalises by the sum, as for the kaons.
+    {ChannelKind::kPhaseSpace, 0.639, 2, {kPdgProton, kPdgPiMinus, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.358, 2, {kPdgNeutron, kPdgPiZero, 0}, 0.0, 0.0},
+    // ---- sigma+ : G4SigmaPlus.cc, 0.516 + 0.483 = 0.999
+    {ChannelKind::kPhaseSpace, 0.516, 2, {kPdgProton, kPdgPiZero, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.483, 2, {kPdgNeutron, kPdgPiPlus, 0}, 0.0, 0.0},
+    // ---- sigma0 : G4SigmaZero.cc, one channel, and it is ELECTROMAGNETIC - the only hyperon
+    // channel that emits a photon, and the reason a trapped sigma0 puts a gamma back on the
+    // cascade stack rather than a nucleon.
+    {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgLambda, kPdgGamma, 0}, 0.0, 0.0},
+    // ---- sigma- : G4SigmaMinus.cc
+    {ChannelKind::kPhaseSpace, 1.00, 2, {kPdgNeutron, kPdgPiMinus, 0}, 0.0, 0.0},
+    // ---- xi0 : G4XiZero.cc
+    {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgLambda, kPdgPiZero, 0}, 0.0, 0.0},
+    // ---- xi- : G4XiMinus.cc
+    {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgLambda, kPdgPiMinus, 0}, 0.0, 0.0},
+    // ---- omega- : G4OmegaMinus.cc, three channels. Its first daughter is a LAMBDA and its
+    // second a K-, so an omega- trapped in a nucleus puts an unstable daughter back on the
+    // cascade stack, which may itself be trapped and decayed again. That recursion is the
+    // cascade's own loop and not a recursive call; see intra_cascader.cuh.
+    {ChannelKind::kPhaseSpace, 0.678, 2, {kPdgLambda, kPdgKaonMinus, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.236, 2, {kPdgXiZero, kPdgPiMinus, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.086, 2, {kPdgXiMinus, kPdgPiZero, 0}, 0.0, 0.0},
   };
   return v;
 }
 
 /// The parents, and where each one's channels start. Order here is irrelevant to the physics
 /// (the lookup is by PDG code); the channel order WITHIN a group is not.
-constexpr int kNumTables = 8;
+constexpr int kNumTables = 15;   // 8, plus the seven hyperons P10c added
 
 __host__ __device__ inline const DecayTableRow* table_rows() {
   static const DecayTableRow v[kNumTables] = {
       {kPdgMuPlus, 0, 1},     {kPdgMuMinus, 1, 1}, {kPdgPiPlus, 2, 1},
       {kPdgPiMinus, 3, 1},    {kPdgPiZero, 4, 2},  {kPdgKaonPlus, 6, 6},
       {kPdgKaonMinus, 12, 6}, {kPdgNeutron, 18, 1},
+      // The hyperons, channels 19 through 29.
+      {kPdgLambda, 19, 2},    {kPdgSigmaPlus, 21, 2}, {kPdgSigmaZero, 23, 1},
+      {kPdgSigmaMinus, 24, 1}, {kPdgXiZero, 25, 1},   {kPdgXiMinus, 26, 1},
+      {kPdgOmegaMinus, 27, 3},
   };
   return v;
 }
@@ -338,21 +422,21 @@ __host__ __device__ inline const char* decay_refusal_reason(int pdg) {
     case 311:
     case -311:
       return "K0/anti-K0: short-lived, decays through K0S/K0L - refused";
-    case 3122:
+    // The seven PARTICLE hyperons are ported (P10c) and no longer reach this function. Their
+    // ANTIparticles are not, and the asymmetry is not an oversight: `G4InuclParticleNames` has
+    // no anti-hyperon type code at all - the enum stops at anti_alpha - so Bertini's cascade
+    // cannot produce one, cannot trap one, and cannot ask for its decay. Adding the rows would
+    // be adding physics no caller in this port can reach, which is the opposite of what a
+    // refusal-by-name is for.
     case -3122:
-    case 3222:
-    case 3212:
-    case 3112:
     case -3222:
     case -3212:
     case -3112:
-    case 3322:
-    case 3312:
     case -3322:
     case -3312:
-    case 3334:
     case -3334:
-      return "hyperon: has a Geant4 decay table - refused, P1 refuses the species";
+      return "anti-hyperon: has a Geant4 decay table, and no G4InuclParticleNames type code - "
+             "nothing in this port can produce one, so it is refused rather than tabulated";
     case 15:
     case -15:
       return "tau: G4TauLeptonicDecayChannel and friends - refused, not transported";

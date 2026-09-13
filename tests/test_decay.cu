@@ -777,8 +777,11 @@ int main(int argc, char** argv) {
     // catch-all - and that is falsifiable by deleting a case from the switch.
     {
       const char* generic = decay_refusal_reason(987654321);
-      const int named[] = {130, 310, 311, -311, 3122, 3222, 3212, 3112,
-                           3322, 3312, 3334, 15, -15};
+      // The seven PARTICLE hyperons came off this list when P10c gave them tables - a species
+      // with a table is not refused and has no refusal message to name it by. Their
+      // ANTIparticles stay, and so do K0L, K0S, the strong K0 pair and the tau.
+      const int named[] = {130, 310, 311, -311, -3122, -3222, -3212, -3112,
+                           -3322, -3312, -3334, 15, -15};
       for (int pdg : named) {
         const char* why = decay_refusal_reason(pdg);
         require(std::strcmp(why, generic) != 0,
@@ -1572,7 +1575,15 @@ int main(int argc, char** argv) {
     std::printf("== refusals ==\n");
     // A species with no table must come back kNoTable with a message, whatever mass and
     // energy it is handed. K0L (130) is the one the plan names.
-    const int refused[] = {130, 310, 3122, 3222, 3334, -15, 999999};
+    //
+    // The PARTICLE hyperons left this list when P10c transcribed their tables for
+    // `G4IntraNucleiCascader::decayTrappedParticle`; their ANTIparticles are still here, and the
+    // asymmetry is the point. `G4InuclParticleNames` has no anti-hyperon type code, so nothing in
+    // this port can make one, trap one or ask it to decay - tabulating them would add physics no
+    // caller can reach. Testing the anti-hyperons here is what keeps "refused" a decision rather
+    // than an oversight: if a later package starts producing them, this is where it finds out.
+    const int refused[] = {130, 310, -3122, -3222, -3334, -3212, -3112, -3322, -3312, -15,
+                           999999};
     DecayProducts<real_t> out;
     const real_t dir[3] = {0, 0, 1};
     for (int pdg : refused) {

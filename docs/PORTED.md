@@ -1413,9 +1413,26 @@ for which `IsApplicable` is true. Invisible for gamma / e± / p / alpha - all st
 | G4DecayWithSpin, G4UnknownDecay, G4PionDecayMakeSpin, G4VExtDecayer | n | **-** | QBBC registers none of them |
 | G4DecayProcessType | y | **-** | an enum of process sub-types; `core/step_report.cuh` already reserves `fDecay` |
 
-Species with a transcribed table: pi+, pi-, pi0, mu+, mu-, K+, K-, neutron. The refused set is
-K0L, K0S, K0, the hyperons and the tau - each refused by PDG code with a message that names it,
-never treated as stable; 413 species Geant4 gives a decay table come back `kNoTable`.
+Species with a transcribed table: pi+, pi-, pi0, mu+, mu-, K+, K-, neutron, **and since P10c the
+seven hyperons** - lambda, sigma+, sigma0, sigma-, xi0, xi-, omega-. The refused set is K0L, K0S,
+K0, the ANTI-hyperons and the tau - each refused by PDG code with a message that names it, never
+treated as stable.
+
+**Why a package that transports no hyperon has hyperon decay tables.** The caller is not the
+stepper; it is `G4IntraNucleiCascader::decayTrappedParticle` (section 2.1.12), which decays a
+hyperon the Bertini cascade has trapped below the nuclear potential, INSIDE the nucleus, and puts
+the daughters back on the cascade stack. Without these rows that path was refused, and the refusal
+was not a corner: it dropped 18% of the events of a 500 MeV K- on iron and 47% of a 1 GeV lambda
+on lead, with the survivors a visibly different physical sample (docs/RISK.md V135). All eleven
+channels are `G4PhaseSpaceDecayChannel` with two daughters, so the extension added eleven rows of
+data and no sampler; every row is read from the species' own `G4*.cc` and dumped by
+`ref/dump/dump_decay.cc`, whose `kSpecies` array now has fifteen entries, so each new row is an
+oracle row and gets the same comparisons - table, channel order, branching ratio, select-a-channel
+histogram, spectra and closure - that the original eight get.
+
+The anti-hyperons stay refused and the asymmetry is deliberate: `G4InuclParticleNames` has no
+anti-hyperon type code at all, so nothing in this port can produce one, trap one, or ask for its
+decay. Tabulating them would be adding physics no caller can reach.
 
 The at-rest branch is `V` in a narrower sense than the rest, and it is worth stating: measured
 (`ref/oracle/decay_atrest.csv`), `G4HadronicAbsorptionBertini` on pi-/K- and `G4MuonMinusCapture`

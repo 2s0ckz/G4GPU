@@ -305,6 +305,17 @@ __host__ __device__ inline AtRestCompetitor decay_at_rest_competitor(int pdg) {
   switch (pdg) {
     case kPdgPiMinus:
     case kPdgKaonMinus:
+    // The three NEGATIVELY charged hyperons take the same at-rest capture, and the port only
+    // found out when P10c gave the hyperons decay tables and the oracle's at-rest queue for
+    // them stopped being skipped: `G4StoppingPhysics` registers `G4HadronicAbsorptionBertini`
+    // against every negative hadron it knows, which is sigma-, xi- and omega- as well as pi-
+    // and K-. The neutral and positive hyperons get nothing, exactly as pi+ and K+ get nothing.
+    // This is a statement about what must NOT happen - a stopped sigma- is captured, never
+    // decayed - and it costs nothing today because nothing transports a hyperon; it is here so
+    // that whatever does will not have to rediscover it.
+    case kPdgSigmaMinus:
+    case kPdgXiMinus:
+    case kPdgOmegaMinus:
       return AtRestCompetitor::kHadronicAbsorptionBertini;
     case kPdgMuMinus:
       return AtRestCompetitor::kMuonMinusCapture;

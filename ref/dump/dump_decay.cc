@@ -94,8 +94,17 @@ namespace {
 /// (unstable, transported, and killed by the tracking cut long before it decays). Named
 /// rather than discovered so that the port's table and the oracle cover the same set and a
 /// species added to one without the other is a missing row rather than a silent gap.
-const char* const kSpecies[] = {"mu+", "mu-", "pi+", "pi-", "pi0", "kaon+", "kaon-", "neutron"};
-constexpr int kNumSpecies = 8;
+///
+/// P10c added the seven hyperons. They are not here because transport needs them - it does not
+/// yet - but because `G4IntraNucleiCascader::decayTrappedParticle` decays a hyperon the Bertini
+/// cascade has trapped inside a nucleus and needs its G4DecayTable to do it. Adding them to this
+/// list is what makes every new row in src/physics/decay/decay_tables.hh an oracle row: the
+/// table dump, the channel sampler, the select-a-channel histogram and the boost all walk this
+/// array, so the new species get the same seven comparisons the old eight get and none of them
+/// had to be written twice.
+const char* const kSpecies[] = {"mu+", "mu-", "pi+", "pi-", "pi0", "kaon+", "kaon-", "neutron",
+                                "lambda", "sigma+", "sigma0", "sigma-", "xi0", "xi-", "omega-"};
+constexpr int kNumSpecies = 15;
 
 G4ParticleDefinition* find(const char* name) {
   return G4ParticleTable::GetParticleTable()->FindParticle(G4String(name));
