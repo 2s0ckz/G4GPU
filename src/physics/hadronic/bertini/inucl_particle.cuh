@@ -34,6 +34,7 @@
 #include <cmath>
 
 #include "data/g4pow.hh"
+#include "physics/hadronic/bertini/lorentz_convertor.cuh"
 #include "physics/hadronic/deexcitation/nuclear_masses.cuh"
 
 namespace g4gpu::physics::hadronic::bert {
@@ -540,6 +541,104 @@ template <typename Rng>
 __host__ __device__ inline void inucl_random_cos_sin(Rng& rng, double& ct, double& st) {
   ct = 1.0 - 2.0 * rng.uniform();
   st = std::sqrt(1.0 - ct * ct);
+}
+
+// =============================================================================================
+// How an INUCL particle stores its momentum - which is NOT as a four-vector
+// =============================================================================================
+//
+// `G4InuclParticle` holds a `G4DynamicParticle`, and a G4DynamicParticle keeps a **unit
+// direction, a kinetic energy and a dynamical mass**. Every four-vector handed to one is taken
+// apart into those three and rebuilt on every read:
+//
+//   G4InuclParticle::setMomentum(mom)                     [G4InuclParticle.cc, and its own
+//     mass = getMass();                                    comment says "WARNING! Bertini code
+//     if (|mass - mom.m()| <= 1e-5)                        doesn't do four-vectors; repair mass
+//       pDP.Set4Momentum(mom*GeV/MeV);                     before use!"]
+//     else
+//       pDP.SetMomentum(mom.vect()*GeV/MeV);
+//
+//   G4DynamicParticle::Set4Momentum(p)                    [G4DynamicParticle.cc]
+//     direction = p.vect().unit();
+//     mass2 = t*t - |p|^2;
+//     if      (mass2 < EnergyMRA2)              dynamicalMass = 0;
+//     else if (|PDGmass^2 - mass2| > EnergyMRA2) dynamicalMass = sqrt(mass2);
+//     else                                       dynamicalMass stays the PDG mass;
+//     kineticEnergy = t - dynamicalMass;
+//
+//   G4DynamicParticle::Get4Momentum()
+//     |p| = sqrt(Ekin^2 + 2*m*Ekin);  p4 = (direction*|p|, Ekin + m)
+//
+// with `EnergyMomentumRelationAllowance = 1e-2 keV`, so `EnergyMRA2 = 1e-10 MeV^2`.
+//
+// **It is not the identity, and for a photon it is not even close.** Rebuilding from
+// (direction, Ekin, mass) re-imposes the mass shell exactly: a four-vector whose
+// `e^2 - |p|^2` had drifted to a rounding residual comes back with the residual removed. For a
+// massive particle that is a one-ulp change. For a PHOTON, whose `m()` after a boost is
+// `sqrt(of a cancellation)` and therefore of order 1e-8 times its energy rather than 1e-16, it
+// changes `getKinEnergyInTheTRS()` - which is `e - m` - in the ninth digit, and that energy is
+// the abscissa of every angular distribution the collision then samples.
+//
+// Measured, not argued: with this round trip left out, the gamma-nucleon rows of
+// `ref/oracle/bertini_epcollide.csv` disagree by up to 2e-7 relative while every other pair
+// agrees to 2e-13 - and only when the target has a momentum, because a target at rest makes the
+// boost the identity and the residual exactly zero. docs/RISK.md V125.
+//
+// The `*GeV/MeV` and `*MeV/GeV` round trip on top of that is real too (Geant4 stores in MeV and
+// Bertini works in GeV) and is reproduced here for the same reason.
+
+/// `EnergyMomentumRelationAllowance^2`, in MeV^2: (1e-2 keV)^2 = 1e-10.
+constexpr double kInuclEnergyMRA2 = 1.0e-10;
+
+/// G4InuclParticle::setMomentum followed by getMomentum(): what an INUCL particle gives back
+/// after being handed @p mom (in GeV) as a particle of type @p type.
+///
+/// `pdg_mass_mev` is the dynamical mass the definition installed, in Geant4's own units. The
+/// port's mass table is in GeV because every INUCL formula is, so the MeV value is the GeV one
+/// scaled - which is what the comparison `|PDGmass2 - mass2| > EnergyMRA2` is done against, and
+/// the allowance is 1e-10 MeV^2, twenty orders of magnitude above any scaling rounding.
+__host__ __device__ inline LV inucl_store_momentum(const LV& mom, int type,
+                                                   double* stored_ekin_gev = nullptr) {
+  const double mass_gev = inucl_particle_mass(type);
+  const Vec3d p{mom.v.x * 1000.0, mom.v.y * 1000.0, mom.v.z * 1000.0};
+  const double t = mom.e * 1000.0;
+  const double pmod2 = g4gpu::mag2(p);
+  double dyn = mass_gev * 1000.0;      // theDynamicalMass, MeV, as SetDefinition left it
+  double ekin = 0.0;
+  Vec3d dir{1.0, 0.0, 0.0};            // both zero-momentum branches set (1,0,0)
+  if (pmod2 > 0.0) {
+    // CLHEP's Hep3Vector::unit() is `p *= 1/sqrt(mag2)` - a reciprocal multiply, not three
+    // divisions. The difference is one ulp per component and this whole function exists
+    // because of ulps, so it is written CLHEP's way.
+    const double inv = 1.0 / std::sqrt(pmod2);
+    dir = Vec3d{p.x * inv, p.y * inv, p.z * inv};
+    if (std::fabs(mass_gev - mom.mag()) <= 1.0e-5) {   // Set4Momentum
+      const double mass2 = t * t - pmod2;
+      const double pdg2 = dyn * dyn;
+      if (mass2 < kInuclEnergyMRA2) {
+        dyn = 0.0;
+      } else if (std::fabs(pdg2 - mass2) > kInuclEnergyMRA2) {
+        dyn = std::sqrt(mass2);
+      }
+      ekin = t - dyn;
+    } else {                                            // SetMomentum, mass left alone
+      ekin = pmod2 / (std::sqrt(pmod2 + dyn * dyn) + dyn);
+    }
+  }
+  if (stored_ekin_gev != nullptr) { *stored_ekin_gev = ekin * 0.001; }
+  const double pm = std::sqrt(ekin * ekin + 2.0 * dyn * ekin);
+  return LV(Vec3d{dir.x * pm * 0.001, dir.y * pm * 0.001, dir.z * pm * 0.001},
+            (ekin + dyn) * 0.001);
+}
+
+/// `G4InuclParticle::getKineticEnergy()` - the STORED kinetic energy, which after the round trip
+/// above is not `e - m` of the four-vector that went in: it is `t - dynamicalMass` in MeV,
+/// scaled back. `G4ParticleLargerEkin`, the comparator `collide` sorts its final state with,
+/// reads this and not the four-vector.
+__host__ __device__ inline double inucl_stored_kinetic_energy(const LV& mom, int type) {
+  double ekin = 0.0;
+  inucl_store_momentum(mom, type, &ekin);
+  return ekin;
 }
 
 }  // namespace g4gpu::physics::hadronic::bert

@@ -21,12 +21,33 @@
 #ifndef G4GPU_BERTINI_WORKSPACE_CUH
 #define G4GPU_BERTINI_WORKSPACE_CUH
 
+#include "physics/hadronic/bertini/angular_dist.cuh"
 #include "physics/hadronic/bertini/channel_tables.cuh"
 #include "physics/hadronic/bertini/inucl_particle.cuh"
 #include "physics/hadronic/bertini/lorentz_convertor.cuh"
 #include "physics/hadronic/bertini/nuclei_model.cuh"
 
 namespace g4gpu::physics::hadronic::bert {
+
+/// The state G4CascadeFinalStateAlgorithm::Configure builds and its generators then read.
+///
+/// It is here rather than beside the code that uses it because it is 264 bytes of arrays, and
+/// because in Geant4 it is not a per-call object at all: `kinds`, `masses`, `masses2`,
+/// `modules`, `toSCM` and `bullet_ekin` are data members of G4CascadeFinalStateAlgorithm, and
+/// `particle_kinds` and `masses` of G4ElementaryParticleCollider, allocated once per thread and
+/// reused for every collision of the run.
+struct FinalStateConfig {
+  int multiplicity = 0;
+  int kinds[kMaxFinalStateSize];
+  double masses[kMaxFinalStateSize];
+  double masses2[kMaxFinalStateSize];
+  double modules[kMaxFinalStateSize];
+  LorentzConvertor to_scm;
+  double bullet_ekin = 0.0;
+  AngDstChoice ang;          ///< kNone when ChooseGenerators leaves angDist null
+  int mom_index = -1;        ///< -1 when usePhaseSpace switches momDist off
+  bool use_phase_space = false;
+};
 
 /// One cascade particle: G4CascadParticle reduced to its data.
 struct CascadeParticle {
@@ -90,6 +111,11 @@ struct BertiniWorkspace {
   /// 34 tables (G4CascadeKminusPChannel's multiplicity 7); asserted against the data in
   /// tests/test_bertini_data.cu rather than taken on faith.
   double sigma_buf[kMaxChannelsPerMult];
+
+  /// G4CascadeFinalStateAlgorithm's and G4ElementaryParticleCollider's per-collision state.
+  /// Worth 264 bytes of a thread's stack frame if it is a local instead - measured, see the
+  /// probe in tests/test_bertini_collide.cu.
+  FinalStateConfig fs_cfg;
 
   /// G4NucleiModel::thePartners, and the two parallel buffers the quasi-deuteron selection
   /// uses (`qdeutrons` and `acsecs`).

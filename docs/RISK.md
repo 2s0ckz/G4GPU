@@ -8922,3 +8922,282 @@ existed and nothing about the anti-baryon string machinery was exercised by an a
 at all; the annihilation channels, the quark-exchange arms and `PutOnMassShell` had only ever
 seen an anti-NUCLEON. Now they see four more beams, and the one thing that is missing is named
 in one place instead of two.
+
+### V118: QBBC builds Bertini twice, and only one of the two de-excites with PreCompound
+
+`G4CascadeParameters::usePreCompound()` is false by default - its initialiser is
+`(0 != G4CASCADE_USE_PRECOMPOUND && G4CASCADE_USE_PRECOMPOUND[0] != '0')`, and an unset
+environment variable makes it false. Reading only that, a port gives every Bertini event to
+`G4NonEquilibriumEvaporator` + `G4EquilibriumEvaporator` + `G4Fissioner` + `G4BigBanger`, the
+cascade's own de-excitation. That is right for part of QBBC and wrong for the rest.
+
+`G4HadronInelasticQBBC::ConstructProcess` builds a `G4CascadeInterface` for protons and neutrons
+and another for pi+ and pi-, and calls `usePreCompoundDeexcitation()` on **both**, which flips
+the instance's own flag regardless of the parameter. Those four species therefore end in P6's
+`preco::` module. The third Bertini in the same physics list - the one
+`G4HadronicBuilder::BuildFTFP_BERT` makes for K+, K-, K0S, K0L and the six hyperons - gets no such
+call, and no `SetMinEnergy` either, so it runs from 0 to 6 GeV with the evaporators. One class,
+three instances, two configurations, chosen by which physics-list builder constructed it.
+
+The energy windows differ the same way and are not the interface's defaults: nucleons 1-6 GeV,
+pions 1-12 GeV, kaons and hyperons 0-6 GeV, against `G4CascadeInterface`'s own 0 to 100 TeV.
+`ref/oracle/bertini_params.csv` dumps all three windows and the de-excitation choice with them,
+and `bertini/cascade_params.cuh` carries all three rather than one.
+
+Two of the twenty parameters are also not what the source reads like, and both are recorded in
+the same file. `DO_COALESCENCE` defaults **true**: its initialiser is
+`(0 == envvar || envvar[0] != '0')`, four lines below `USE_PRECOMPOUND`'s
+`(0 != envvar && envvar[0] != '0')`, and a null pointer sends the two opposite ways. And
+`RADIUS_SCALE`, `RADIUS_TRAILING`, `FERMI_SCALE` and `XSEC_SCALE` do not come from that function
+at all when the variable is unset - four `HDP.DeveloperGet("BERT_...")` calls overwrite them from
+`G4HadronicDeveloperParameters`. The values agree with the initialiser but the arithmetic does
+not, so they are recorded as the dumped 17-digit doubles (`fermiScale` is 1.9319999999999999,
+not 1.932).
+
+The general lesson is the one the brief for this package stated as an instruction, and this is
+the evidence for it: a model's configuration is not what its parameter class defaults to, it is
+what the physics list did to the object afterwards, and only a dump of the constructed object
+can tell you which.
+
+### V119: an index that is absolute on one path and relative on the other, and the one table that reads off the end
+
+`G4CascadeSampler::findFinalStateIndex` is
+
+    G4int start = index[mult-2], stop = index[mult-1];
+    if (stop-start <= 1) return start;          // absolute index into the whole channel list
+    fillSigmaBuffer(ke, xsec, start, stop);
+    return sampleFlat();                        // relative, 0 .. (stop-start-1)
+
+and `G4CascadeFunctions::getOutgoingParticleTypes` indexes the **per-multiplicity** array
+`xMbfs[channel]` with whatever comes back. The two agree only when `start == 0`, which is
+multiplicity 2 and nothing else. So any channel that has exactly one final state at a
+multiplicity above 2 returns an absolute index into an array sized for that multiplicity alone,
+and reads out of bounds.
+
+In 11.1.1 exactly one of the 34 channels does: `G4CascadeMuMinusPChannel` is
+`G4CascadeData<30,1,1,1,1,1,1,1,1>` - one final state at every multiplicity from 2 to 9. At
+multiplicity 3 it returns `start = 1` and indexes `x3bfs[1]` in an array of one. What it reads is
+whatever the linker put next; on this install it does not crash, which is the worst outcome.
+
+`bertini/channel_tables.cuh` returns `ChannelRefusal::kSingleChannelAboveMult2` rather than
+reproducing the read, because there is nothing to reproduce - the value is not defined by the
+source, it is defined by the object layout. mu- p is reached only from muon capture, which is
+P12's package and is not in this port, so no QBBC event meets it. If one ever does, it is
+reported by name.
+
+The related detail, also in that file: `sampleFlat` returns **0** when the cumulative walk falls
+off the end, with Geant4's own question mark beside it ("Is this right? Shouldn't it return
+maximum, not minimum?"). That one is reachable - `fsum = total * u` with u close to 1 can exceed
+the accumulated partial sum through rounding - and it is reproduced, not corrected, with the
+branch counted so a test can see it fire.
+
+### V120: G4Pow::powN(0.0, n) is zero for every n, including n = 0
+
+`G4Pow::powN` tests its base before its exponent:
+
+    G4double G4Pow::powN(G4double x, G4int n) const {
+      if (x == 0.0) { return 0.0; }
+      ...
+    }
+
+so `powN(0.0, 0)` is 0 and not 1. Four INUCL samplers are power series in the projectile's
+kinetic energy evaluated with `G4Pow::powN` - `G4InuclSpecialFunctions::randomInuclPowers`,
+`G4InuclParamMomDst::GetMomentum`, `G4InuclParamAngDst::GetCosTheta` and the three-body
+distributions built on them - and at exactly zero kinetic energy every one of them collapses to
+zero rather than to its constant term. A cascade particle can reach zero kinetic energy, so this
+is not a limit case that no caller sees.
+
+It was found by a draw **count** disagreeing before any value did: `randomInuclPowers` draws one
+deviate per term and the port's term count differed from the oracle's at ekin = 0. Nothing about
+the returned numbers would have said so, because the port's answer and Geant4's were both
+plausible. This is the concrete argument for dumping the number of random deviates a sampler
+consumed alongside its answer, which every dump in this project now does.
+
+### V121: a Bertini final state generated on the tenth attempt is discarded
+
+`G4ElementaryParticleCollider::generateSCMfinalState` retries the whole chain - multiplicity,
+final state, kinematics - up to ten times:
+
+    G4int itry = 0;
+    while (generate && itry++ < itry_max) {   // itry_max = 10
+      ...
+      generate = !fsGenerator.Generate(etot_scm, masses, scm_momentums);
+    }
+    if (itry >= itry_max) return;             // "Unable to generate valid final state"
+    particles.resize(multiplicity);           // never reached when the tenth pass succeeded
+
+When the tenth pass succeeds, `generate` goes false and the loop condition short-circuits
+**before** the post-increment, so `itry` stops at exactly `itry_max`. The exit test was written
+to catch exhaustion and fires on the success as well: the particles buffer is never filled,
+`collide` sees an empty final state and passes the bullet through unchanged. Nine usable
+attempts, not ten.
+
+**And the oracle cannot see it.** Of the 10,752 cases in `ref/oracle/bertini_epcollide.csv`, 66
+produce no final state - and every one of those is plain exhaustion, which leaves `itry` at 11
+and is rejected by `>` just as it is by `>=`. Not one case succeeds on its tenth pass. So the
+perturbation that matters, `>=` changed to `>`, passed every one of the 173,061 comparisons: the
+difference between the two is a state the grid never reaches. That was found by running it,
+not by assuming it, and it is the reason `bertini/ep_collider.cuh` puts the comparison in a named
+function, `fs_retry_exhausted`, which `tests/test_bertini_collide.cu` asserts at itry = 9, 10 and
+11 directly. V52's distinction: a question pinned by construction, not a hole.
+
+The rest is not exotic. The multi-body generator's rejection rate rises with multiplicity -
+`FillMagnitudes` has its own ten-attempt loop and `FillDirThreeBody`/`FillDirManyBody` abort on
+`|cos(theta)| >= 0.9999` - so at the top of Bertini's range a real cascade will reach the tenth
+attempt, and when it does, whether the event survives depends on this comparison. The reason to
+record it rather than silently match it: a reader of the port who "fixes" the off-by-one gets a
+model that agrees with Geant4 on nothing at high multiplicity, and no oracle row will say so.
+
+### V122: the one gate that stops a final state heavier than the collision, and it is not in the cascade package
+
+`G4VHadDecayAlgorithm::Generate` - the generic hadronic decay base class, in
+`processes/hadronic/util`, not in the cascade tree at all - begins with
+
+    finalState.clear();
+    if (!IsDecayAllowed(initialMass, masses)) return;
+
+and `IsDecayAllowed` is `initialMass > 0 && masses.size() >= 2 && initialMass >= sum(masses)`.
+Everything Bertini's two-body and multi-body generators do sits behind it.
+
+Leaving it out does not produce an error. `G4VHadDecayAlgorithm::TwoBodyMomentum` clamps a
+negative PSQ to zero rather than returning a NaN - it only throws when PSQ is below -1 eV, and a
+final state a few MeV over budget is not - so a two-body state that cannot be paid for comes back
+as two particles at rest. `G4HadDecayGenerator::Generate` then returns `!finalState.empty()`,
+which is **true**, and `generateSCMfinalState` accepts it. The retry loop that was supposed to
+resample the collision never runs. Near a channel's threshold the sampler proposes such states
+routinely, so the failure is neither rare nor loud: it is a slow leak of zero-momentum particles
+into the final state, with the energy balance closing because the masses are real.
+
+This was a live bug in the uncommitted transcription this package inherited, found by reading
+`G4HadDecayGenerator` rather than the cascade classes the brief named, and fixed as
+`fs_is_decay_allowed` in `bertini/ep_collider.cuh`. The lesson is about where to read: the
+Bertini brief lists G4CascadeFinalStateAlgorithm and its methods, and the method that decides
+whether any of them run is two base classes up, in a different package, called from a function
+whose name (`Generate`) appears in the cascade code only as `fsGenerator.Generate(...)`.
+
+### V123: Bertini's phase-space generator samples theta and phi in an order the C++ standard does not fix
+
+`G4CascadeFinalStateAlgorithm::FillUsingKopylov` builds each particle's momentum with
+
+    momV.setRThetaPhi(TwoBodyMomentum(Mass,masses[k],recoilMass),
+                      UniformTheta(), UniformPhi());
+
+Three calls in one argument list. Two of them - `UniformTheta` and `UniformPhi` - each consume a
+random deviate, and the order in which a compiler evaluates function arguments is
+*indeterminately sequenced*: unspecified before C++17 and still unspecified after it. So which of
+the two angles gets the next number out of the engine is a property of the compiler, not of
+Geant4.
+
+The install this port is validated against (MSVC 19.29, x64, Geant4 11.1.1) evaluates the list
+**right to left**: `UniformPhi` takes the first deviate and `UniformTheta` the second. A
+left-to-right compiler - which is what most Linux builds of Geant4 use - draws them the other way
+round. The two builds consume the same number of random numbers and produce different events from
+the same seed.
+
+What makes this expensive to find is exactly that draw count. The port's phase-space pass agreed
+with the oracle on the number of deviates for all 2,688 cases, on every multiplicity and on every
+refusal, and disagreed on the four-momenta by order-unity amounts. Every diagnostic that usually
+localises a sampling error - the draw count, the multiplicity, the product types - said the
+transcription was right. It was found by bisecting the only remaining freedom in the routine.
+
+`bertini/ep_collider.cuh` draws phi first, with the reason written beside it, because the oracle
+is what the port is measured against and the oracle is this build. The branch is off in QBBC
+(`usePhaseSpace` is 0, and the second oracle pass turns it on through
+`/process/had/cascade/usePhaseSpace` precisely so that the transcription is measured at all), so
+no production event takes it. If this port is ever validated against a Linux build of 11.1.1,
+this line is the first thing to check.
+
+The general lesson, which is not about Bertini: a Monte Carlo whose sampler calls the engine
+twice inside one expression is not reproducible across toolchains, and no amount of seed
+discipline fixes it. Two other places in the INUCL tree build a vector from several calls -
+`generateWithRandomAngles` and `generateWithFixedTheta` - and both assign to named locals first,
+which is why they are safe.
+
+### V124: a head-on oracle grid made a whole function invisible, and only a perturbation said so
+
+The first Bertini collider oracle fired every bullet along +z at a target at rest. 2,688 cases,
+28 particle pairs, twelve momenta, eight random phases, draw counts and product types exact and
+four-momenta to 1.7e-13 - and `G4LorentzConvertor::rotate(mom)` was never applied to any of them.
+
+The reason is in `fillKinematics`: `degenerated` is set when the CM velocity has no component
+perpendicular to the SCM axis, and `rotate` returns its argument unchanged when it is set. A
+head-on collision against a stationary target is exactly that case. So the rotation that maps a
+final state built about +z onto the collision's own axes - the last step of every two-body final
+state Bertini produces - was dead code in the port, and 86,938 comparisons agreed with the oracle
+either way. Deleting the call changed nothing.
+
+It was found by the anti-vacuity campaign, which is what that campaign is for: 24 perturbations,
+one at a time, and "two-body skips the rotation" came back NOT CAUGHT. Nothing else in the run
+pointed at it. The grid was not wrong about any number it contained; it was wrong about which
+numbers to contain.
+
+The fix is a second target state, a Fermi momentum off every axis, which is what a real cascade
+presents anyway - `G4NucleiModel::generateNucleon` gives every struck nucleon one. Both are kept,
+because the degenerate branch is a branch too, and `tests/test_bertini_collide.cu` asserts that
+both are present in the file.
+
+The transferable part: **a deterministic oracle proves a transcription agrees on the cases it
+contains, and says nothing about a branch no case enters.** Coverage of the grid is not coverage
+of the code, and the only instrument in this project that distinguishes them is the perturbation
+campaign. Two symmetries to watch when designing a grid: a projectile along a coordinate axis,
+and a target at rest. Each one switches off a frame transformation somewhere.
+
+### V125: an INUCL particle does not store a four-vector, and for a photon that is visible in the ninth digit
+
+`G4InuclParticle` - the base of every particle Bertini's cascade moves around - holds a
+`G4DynamicParticle`, and a `G4DynamicParticle` does not keep a four-vector. It keeps a **unit
+direction, a kinetic energy and a dynamical mass**, and rebuilds the four-vector on every read.
+Geant4 says so itself, twice, in comments on the two functions involved: "FIXME: Bertini code
+doesn't pass valid 4-vectors, so force mass value from supplied PartDefn" and "WARNING! Bertini
+code doesn't do four-vectors; repair mass before use!"
+
+The round trip is
+
+    G4InuclParticle::setMomentum(mom)            // mom in GeV
+      if (|getMass() - mom.m()| <= 1e-5) pDP.Set4Momentum(mom*GeV/MeV);
+      else                               pDP.SetMomentum(mom.vect()*GeV/MeV);
+
+    G4DynamicParticle::Set4Momentum(p)           // p in MeV
+      direction = p.vect().unit();
+      mass2 = t*t - |p|^2;
+      if      (mass2 < EnergyMRA2)               dynamicalMass = 0;
+      else if (|PDGmass^2 - mass2| > EnergyMRA2) dynamicalMass = sqrt(mass2);
+      else                                        dynamicalMass stays the PDG mass;
+      kineticEnergy = t - dynamicalMass;
+
+    G4DynamicParticle::Get4Momentum()
+      |p| = sqrt(Ekin^2 + 2*m*Ekin);  p4 = (direction*|p|, Ekin + m)
+
+with `EnergyMomentumRelationAllowance = 1e-2 keV`, so the allowance is 1e-10 MeV^2.
+
+Rebuilding from (direction, Ekin, mass) **re-imposes the mass shell exactly**. A four-vector
+whose `e^2 - |p|^2` had drifted off the shell by rounding comes back with the drift removed. For
+a massive particle that is a one-ulp change and nothing downstream can see it. For a **photon**
+it is not: `m()` of a boosted null vector is the square root of a cancellation, so it is of order
+1e-8 times the energy rather than 1e-16, and `G4LorentzConvertor::getKinEnergyInTheTRS()` -
+which is literally `bmom.e() - bmom.m()` - inherits all of it. That energy is the abscissa at
+which every angular distribution in the collision is then interpolated.
+
+Measured. Before the round trip was transcribed, the gamma-nucleon rows of
+`ref/oracle/bertini_epcollide.csv` disagreed with the port by up to **2.0e-7 relative** while
+every other particle pair agreed to 2e-13 - and only in the rows where the target carries a
+momentum, because a target at rest makes the boost the identity and the residual exactly zero.
+With `inucl_store_momentum` in `bertini/inucl_particle.cuh` applied where Geant4 stores (the
+SCM final state, and again after the boost to the lab), the worst disagreement over all 104,012
+four-momentum components is **2.5e-14**.
+
+Two further consequences, both transcribed:
+
+  * The `*GeV/MeV` then `*MeV/GeV` scaling is part of it. Geant4 stores in MeV and Bertini works
+    in GeV, and `(x*1000)/1000` is not `x`.
+  * `G4ParticleLargerEkin`, the comparator `collide` sorts its final state with, calls
+    `getKineticEnergy()` - the STORED kinetic energy, `t - dynamicalMass` from the round trip -
+    and not `e - m` of the four-vector. For two products of nearly equal energy the two can
+    order differently.
+
+The lesson is the one V37 drew about `boostVector`'s reciprocal multiply, one level up: **a
+cancellation is an amplifier, and a model that carries massless particles has one in every
+frame transformation.** A tolerance of 1e-12 on four-momenta hid a systematic 2e-7 error on
+every photon row of this oracle for as long as the grid had no moving target (V124) and the
+storage was not transcribed. Neither the draw counts, the multiplicities, the product types nor
+the refusals said anything - all four were exact throughout.

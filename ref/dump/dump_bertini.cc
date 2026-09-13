@@ -38,6 +38,15 @@
 //                         distribution objects.
 //   bertini_momdst.csv    G4MultiBodyMomentumDist: the same two things for the four momentum
 //                         distributions.
+//   bertini_epcollide.csv G4ElementaryParticleCollider::collide: the whole two-body chain -
+//                         multiplicity, final state, momentum moduli, angles, rotations, the
+//                         boost back to the lab and the descending-Ekin sort - for 28 particle
+//                         pairs x 12 lab momenta x 2 target states x 8 phases x 2 generator
+//                         settings, with the draw count beside each answer. The target is run
+//                         at rest and with a Fermi momentum because the first makes the frame
+//                         degenerate and `G4LorentzConvertor::rotate` the identity; the second
+//                         pass turns `usePhaseSpace` on and needs a different engine. Both
+//                         reasons are on dump_epcollide() below.
 //   bertini_apply.csv     G4CascadeInterface::ApplyYourself, N events under a fixed seed, as
 //                         QBBC configures it (PreCompound de-excitation) - multiplicity by
 //                         species, kinetic-energy and angular moments per species, and the
@@ -65,6 +74,8 @@
 #include "G4CascadeChannel.hh"
 #include "G4CascadeChannelTables.hh"
 #include "G4CascadeInterface.hh"
+#include "G4CollisionOutput.hh"
+#include "G4ElementaryParticleCollider.hh"
 #include "G4CascadeParameters.hh"
 #include "G4DynamicParticle.hh"
 #include "G4HadProjectile.hh"
@@ -84,6 +95,7 @@
 #include "G4PionPlus.hh"
 #include "G4Proton.hh"
 #include "G4SystemOfUnits.hh"
+#include "G4UImanager.hh"
 #include "G4TwoBodyAngularDist.hh"
 #include "G4VMultiBodyMomDst.hh"
 #include "G4VTwoBodyAngDst.hh"
@@ -119,10 +131,14 @@ const double kSeq[8] = {0.05, 0.37, 0.63, 0.91, 0.12, 0.78, 0.29, 0.55};
 
 class CycleEngine : public CLHEP::HepRandomEngine {
  public:
-  void reset(int phase) { phase_ = phase; n_ = 0; }
-  int draws() const { return n_; }
+  void reset(int phase) { phase_ = unsigned(phase); n_ = 0; }
+  // `n_` is unsigned and the index is taken on the unsigned value: a rejection sampler driven by
+  // this engine can draw more times than an int can count, and a signed overflow there is
+  // undefined behaviour whose visible form is a NEGATIVE array index. See the comment on
+  // dump_epcollide() - this is not hypothetical, it happened.
+  long long draws() const { return static_cast<long long>(n_); }
   double flat() override {
-    const double v = kSeq[(n_ + phase_) % 8];
+    const double v = kSeq[(n_ + phase_) % 8u];
     ++n_;
     return v;
   }
@@ -137,8 +153,50 @@ class CycleEngine : public CLHEP::HepRandomEngine {
   std::string name() const override { return "CycleEngine"; }
 
  private:
-  int phase_ = 0;
-  int n_ = 0;
+  unsigned phase_ = 0;
+  unsigned n_ = 0;
+};
+
+// A 64-bit linear congruential generator, for the sampler the cycle engine cannot drive.
+//
+// `G4CascadeFinalStateAlgorithm::BetaKopylov` is an unbounded rejection loop - `do { chi = u1;
+// F = sqrt(chi^N (1-chi)); } while (Fmax*u2 > F)` - and it draws TWO deviates per trial. Under a
+// period-8 cycle that is four distinct trials and no more, forever. At N = 3k-5 = 19, which is
+// the k = 8 term of an eight-body phase-space decay, F is below 0.007 for every chi in the cycle
+// except one, and no pair passes: the loop does not terminate. (What it did instead, before the
+// unsigned fix above, was run 2^31 times and then index kSeq out of bounds.)
+//
+// So the usePhaseSpace pass is driven by this instead. It is an LCG in exact 64-bit integer
+// arithmetic - Knuth's MMIX multiplier and increment, the top 53 bits taken as the mantissa -
+// so the port reproduces it bit for bit with six lines and no library, which is the whole
+// requirement: the engine has to be deterministic and reproducible on both sides, and it has to
+// have a period long enough that a rejection sampler terminates. `flat()` is in (0, 1) and never
+// returns 0 or 1, because `randomInuclPowers` and the angular distributions divide by 1 - u.
+class LcgEngine : public CLHEP::HepRandomEngine {
+ public:
+  void reset(int phase) {
+    s_ = 88172645463325252ull + 1442695040888963407ull * static_cast<unsigned long long>(phase + 1);
+    n_ = 0;
+  }
+  long long draws() const { return static_cast<long long>(n_); }
+  double flat() override {
+    s_ = 6364136223846793005ull * s_ + 1442695040888963407ull;
+    ++n_;
+    return (static_cast<double>(s_ >> 11) + 0.5) * (1.0 / 9007199254740992.0);
+  }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long, int) override {}
+  void setSeeds(const long*, int) override {}
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "LcgEngine"; }
+
+ private:
+  unsigned long long s_ = 0;
+  unsigned long long n_ = 0;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -988,6 +1046,140 @@ void dump_apply() {
   std::fclose(s);
 }
 
+// ---------------------------------------------------------------------------------------------
+// bertini_epcollide.csv - G4ElementaryParticleCollider::collide, exact under the cycle.
+//
+// `collide` and `setNucleusState` are the class's only public members, which is enough: under a
+// prescribed uniform cycle the whole chain - multiplicity, final-state selection, momentum
+// moduli, the three angular generators, the rotations and the boost back to the lab - becomes a
+// deterministic function of (types, bullet momentum, phase). The draw count goes with it,
+// because the number of deviates a final state costs is what a transcription of
+// G4CascadeFinalStateAlgorithm's retry loops gets wrong first.
+//
+// Pairs are chosen to reach every arm of collide(): nucleon-nucleon (three charge states), all
+// three pion charges on both nucleons, gamma and kaon on both, one hyperon, and a pion and a
+// photon on each of the three DIBARYONS - which is the absorption arm and the only one that
+// does not go through a channel table.
+// ---------------------------------------------------------------------------------------------
+//
+// **The file is written twice, with `usePhaseSpace` off and then on.** That flag replaces the
+// whole multi-body generator - the INUCL momentum parametrisations, the fixed-theta directions
+// and the three-body triangle - with G4CascadeFinalStateAlgorithm::FillUsingKopylov, a chain of
+// two-body decays. It is 0 in the install, so with one pass the Kopylov transcription would be
+// a reading of the source that nothing measures. `G4CascadeParamMessenger` exposes it as
+// `/process/had/cascade/usePhaseSpace` and its SetNewValue calls `Initialize()`, so the flag can
+// be turned on for a second pass and turned off again; the `ps` column says which pass a row
+// belongs to. Two-body final states are unaffected by it, and the file shows that too.
+//
+// **The second pass is driven by LcgEngine, not CycleEngine, and that is a property of Kopylov
+// rather than a convenience.** `BetaKopylov` is an unbounded rejection loop that draws two
+// deviates per trial, so a period-8 cycle gives it four distinct trials in total; at the
+// multiplicities phase space reaches, no pair among the four is ever accepted and the loop does
+// not terminate. Every other sampler in this package is bounded - `GenerateCosTheta` gives up
+// after ten tries, `FillMagnitudes` after ten, `generateSCMfinalState` after ten - which is why
+// the cycle works everywhere else. `ps` says which engine a row was produced with: 0 is
+// CycleEngine, 1 is LcgEngine, and tests/test_bertini_collide.cu carries both.
+// ---------------------------------------------------------------------------------------------
+void dump_epcollide_pass(FILE* f, int ps);
+
+void dump_epcollide() {
+  FILE* f = std::fopen("bertini_epcollide.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "ps,tm,type1,type2,plab_GeV,phase,draws,n,i,kind,px,py,pz,e\n");
+
+  dump_epcollide_pass(f, 0);
+
+
+  G4UImanager* ui = G4UImanager::GetUIpointer();
+  ui->ApplyCommand("/process/had/cascade/usePhaseSpace true");
+  if (G4CascadeParameters::usePhaseSpace()) {
+    dump_epcollide_pass(f, 1);
+  } else {
+    std::fprintf(stderr, "dump_epcollide: could not turn usePhaseSpace on - no ps=1 rows\n");
+  }
+  ui->ApplyCommand("/process/had/cascade/usePhaseSpace false");
+
+  std::fclose(f);
+}
+
+void dump_epcollide_pass(FILE* f, int ps) {
+  struct Pair { int t1, t2; };
+  static const Pair pairs[] = {
+      {proton, proton}, {proton, neutron}, {neutron, neutron},
+      {pionPlus, proton}, {pionMinus, proton}, {pionZero, proton},
+      {pionPlus, neutron}, {pionMinus, neutron}, {pionZero, neutron},
+      {photon, proton}, {photon, neutron},
+      {kaonPlus, proton}, {kaonMinus, proton}, {kaonZero, neutron},
+      {lambda, proton}, {sigmaMinus, proton}, {xiMinus, neutron}, {omegaMinus, proton},
+      // The absorption arm: pion or photon on a dibaryon.
+      {pionPlus, unboundPN}, {pionMinus, diproton}, {pionZero, unboundPN},
+      {pionZero, diproton}, {pionZero, dineutron}, {pionPlus, dineutron},
+      {pionMinus, unboundPN}, {photon, diproton}, {photon, unboundPN},
+      {photon, dineutron}};
+
+  // Lab momenta of the bullet, GeV/c. Covers the sub-threshold region, the Delta, the
+  // multi-pion rise and the top of Bertini's range.
+  static const double plabs[] = {0.05, 0.1, 0.2, 0.35, 0.5, 0.8, 1.2, 2.0, 3.0, 5.0, 8.0, 12.0};
+
+  // **The target is run twice: at rest, and with a Fermi momentum.** A head-on collision along
+  // z against a stationary target has its CM velocity parallel to the SCM axis, so
+  // `G4LorentzConvertor::degenerated` is TRUE and `rotate(mom)` returns its argument unchanged.
+  // With only the first row, every two-body final state in this file is built about +z and the
+  // rotation is never applied - which a perturbation campaign found by DELETING the call to
+  // `rotate` in the port and watching 86,938 comparisons still agree. In the cascade the struck
+  // nucleon always carries a Fermi momentum (`generateNucleon` samples one), so the second row
+  // is the representative case and the first is the degenerate one; both are kept, because the
+  // degenerate branch is a branch too. 0.2 GeV/c, off every axis, is a typical Fermi momentum.
+  static const G4ThreeVector tmoms[] = {G4ThreeVector(0., 0., 0.),
+                                        G4ThreeVector(0.15, -0.08, 0.11)};
+
+  CycleEngine cyc;
+  LcgEngine lcg;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(
+      (ps == 0) ? static_cast<CLHEP::HepRandomEngine*>(&cyc)
+                : static_cast<CLHEP::HepRandomEngine*>(&lcg));
+
+  G4ElementaryParticleCollider coll;
+  coll.setNucleusState(56, 26);     // for the pi-N absorption recoil, which is off by default
+  G4CollisionOutput out;
+
+  for (const Pair& p : pairs) {
+    const double m1 = G4InuclElementaryParticle::getParticleMass(p.t1);
+    const double m2 = G4InuclElementaryParticle::getParticleMass(p.t2);
+    for (double plab : plabs) {
+      for (int tm = 0; tm < 2; ++tm) {
+        const G4ThreeVector& tp = tmoms[tm];
+        for (int phase = 0; phase < 8; ++phase) {
+          G4InuclElementaryParticle bullet(
+              G4LorentzVector(0., 0., plab, std::sqrt(plab * plab + m1 * m1)), p.t1);
+          G4LorentzVector tmom;
+          tmom.setVectM(tp, m2);
+          G4InuclElementaryParticle target(tmom, p.t2);
+          out.reset();
+          if (ps == 0) { cyc.reset(phase); } else { lcg.reset(phase); }
+          coll.collide(&bullet, &target, out);
+          const long long n = (ps == 0) ? cyc.draws() : lcg.draws();
+          const std::vector<G4InuclElementaryParticle>& prods = out.getOutgoingParticles();
+          if (prods.empty()) {
+            std::fprintf(f, "%d,%d,%d,%d,%.17g,%d,%lld,0,-1,0,0,0,0,0\n", ps, tm, p.t1, p.t2,
+                         plab, phase, n);
+            continue;
+          }
+          for (std::size_t i = 0; i < prods.size(); ++i) {
+            const G4LorentzVector& m = prods[i].getMomentum();
+            std::fprintf(f, "%d,%d,%d,%d,%.17g,%d,%lld,%d,%d,%d,%.17g,%.17g,%.17g,%.17g\n", ps,
+                         tm, p.t1, p.t2, plab, phase, n, static_cast<int>(prods.size()),
+                         static_cast<int>(i), prods[i].type(), m.x(), m.y(), m.z(), m.e());
+          }
+        }
+      }
+    }
+  }
+
+  CLHEP::HepRandom::setTheEngine(saved);
+}
+
 void dump_bertini(const DumpContext&) {
   dump_params();
   dump_particles();
@@ -996,6 +1188,7 @@ void dump_bertini(const DumpContext&) {
   dump_channels();
   dump_chtables();
   dump_angdst();
+  dump_epcollide();
   dump_apply();
 }
 
@@ -1007,5 +1200,6 @@ G4GPU_REGISTER_DUMP("bertini",
                     "bertini_nucxsec.csv bertini_channels.csv bertini_chsample.csv "
                     "bertini_chtables.csv bertini_chfinalstates.csv bertini_chbins.csv bertini_angchoice.csv "
                     "bertini_angdst.csv bertini_3bodydst.csv bertini_momchoice.csv "
+                    "bertini_epcollide.csv "
                     "bertini_apply.csv bertini_apply_species.csv",
                     dump_bertini);
