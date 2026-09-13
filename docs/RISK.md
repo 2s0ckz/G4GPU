@@ -9674,6 +9674,18 @@ Three rules, and the third is the one that generalises past this project:
     been boring. **When a change is supposed to affect nothing outside its own path, measure
     something on the path it is not supposed to affect.**
 
+**A second incident, same file, same day, and it is the harness rather than the edit.** Two
+perturbation runs were started concurrently - one perturbing `bertini/intra_cascader.cuh` and
+building the cascade test, one perturbing `decay/decay_tables.hh` and building the decay test - on
+the reasoning that they touch different files and different executables. They shared one backup
+path. The second run copied `decay_tables.hh` to `bk/apply_one.bak`; the first then "restored" that
+file over `intra_cascader.cuh`, and a 550-line cascade header became a copy of a decay table. It
+was caught in seconds because the check that follows a perturbation run is `grep` for the
+perturbation site, and the site was not there - not because anything failed to compile, which it
+would have, later, after another build. The fix is one line (a backup path per harness) and the
+rule is older than the bug: **a tool that saves and restores files has exactly one safe number of
+concurrent users until its state is per-run, and that number is one.**
+
 ### V139: QBBC gives Bertini K0S and K0L, and Bertini's IsApplicable refuses both
 
 `G4HadParticles::sKaons` is `{321, -321, 310, 130}` and `G4HadronicBuilder::BuildFTFP_BERT` builds
@@ -9707,3 +9719,68 @@ applicability test come from `G4HadronicBuilder` and `G4InuclElementaryParticle`
 nothing checks them against each other. A port that reads only the builder concludes that K0S is
 handled; a port that reads only the model concludes that K0S never arrives. Both are wrong, and the
 only way to see it is to evaluate the two together, which `tests/test_bertini_apply.cu` now pins.
+
+### V140: retryInelasticNucleus has two arms and only one of them has ever fired
+
+`G4CascadeInterface::retryInelasticNucleus` asks for another attempt when either of two things is
+true:
+
+    return ( (numberOfTries < maximumTries) &&
+             (((npart != 0) && (npart+nfrag < 3 && firstOut == bullet->getDefinition())) ||
+              !balance->okay()) );
+
+the first arm being "the final state looks elastic" and the second "energy, momentum, baryon number
+or charge is not conserved". The anti-vacuity perturbation that DELETES the second arm was **not
+caught**: the campaign's 12-case run returned 2,957 comparisons and 0 failures with it gone.
+
+A perturbation that is not caught is either an assertion the test is missing or a fact about the
+code, and the two are told apart by measurement rather than by argument. The interface now counts
+each arm separately and the campaign prints the totals:
+
+    retryInelasticNucleus asked 6449 times on the elastic-looking arm and 0 times on the balance arm
+
+**Zero, over every event of the grid.** The balance arm is dead, so deleting it cannot change an
+event and there is nothing for any assertion to catch. The reason is one level down and is not
+obvious from this function: `G4InuclCollider::collide` has already run its own hundred-attempt loop
+against `setOnShell`, and an event that reaches the interface has either passed that or been
+TRIVIALISED into bullet-plus-target, which conserves everything exactly. By the time
+`retryInelasticNucleus` looks, the balance has been settled by someone else.
+
+Two consequences, and the second is why this is an entry rather than a footnote:
+
+  * The perturbation stays in the campaign, recorded as NOT CAUGHT with this reason beside it. A
+    perturbation whose verdict is "the term is dead" is a result, not a gap - but it is only a
+    result once the deadness is measured, and an uninvestigated NOT CAUGHT is indistinguishable
+    from a missing test.
+  * **A dead term in a retry predicate is dead only for the grid that measured it.** The balance
+    arm would fire if `G4InuclCollider` ever returned an unbalanced event without trivialising -
+    which is what a capacity refusal or a future `Propagate` entry would do. It is transcribed and
+    kept, and the counter is kept with it, so the day it fires the campaign says so instead of
+    silently taking a path nothing has tested.
+
+Same shape as V130's `minimum_recoil_A` and V121's tenth-attempt discard: Geant4 is full of guards
+that cannot fire in the configuration QBBC builds, and the honest port reproduces them and measures
+that they do not fire, rather than deleting them or assuming they matter.
+
+### V141: a branching ratio the assembly campaign cannot see, and the level that can
+
+The anti-vacuity campaign swapped lambda's two branching ratios - `p pi-` 0.639 against `n pi0`
+0.358, two numbers, no code - and `tests/test_bertini_apply.cu` returned **2,951 comparisons and 0
+failures**. The same perturbation against `tests/test_decay.cu` returns **FAILED (3 failures)**.
+
+Both are correct and the pair is the point. The apply campaign is a statistical comparison of an
+assembled model: a trapped lambda occurs in about 4% of the events of its own case and in far fewer
+elsewhere, its two channels differ by one unit of charge on one secondary out of a mean multiplicity
+near ten, and the difference is buried under a five-sigma band built from 2,000 events. The decay
+test compares the branching ratio itself against `ref/oracle/decay_tables.csv` at **tolerance zero**,
+where 0.358 against 0.639 is not a statistical question at all.
+
+**The rule, which is the one that decides where an assertion belongs:** a quantity that is DATA
+should be asserted where it is data, not where it is diluted. Putting the lambda's branching ratios
+under the apply campaign's band would be asking a hundred-thousand-event Monte Carlo to resolve two
+decimal digits it has no power to resolve; the table test resolves them exactly and costs nothing.
+The corollary is the uncomfortable half: **the apply campaign's silence about a number is not
+evidence the number is right**, and every input it cannot resolve needs an exact test one level
+down or it has no test at all. That is why this package has four exact oracles under one statistical
+one, and why a NOT CAUGHT verdict is followed to the level that catches it rather than recorded as
+a gap.

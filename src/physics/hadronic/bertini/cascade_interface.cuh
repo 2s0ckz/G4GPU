@@ -95,6 +95,12 @@ enum class InterfaceRefusal : int {
 struct ApplyResult {
   int n_tries = 0;                  ///< G4CascadeInterface::numberOfTries
   int n_collider_tries = 0;         ///< the last G4InuclCollider::collide attempt count
+  /// How many of this event's attempts each arm of `retryInelasticNucleus` asked to repeat. Both
+  /// are counted every attempt, so they are not exclusive - an attempt can satisfy both. They
+  /// exist because the perturbation that deletes the balance arm was not caught, and this is the
+  /// measurement that says whether that is a missing assertion or a fact about the code.
+  int n_retry_elastic = 0;
+  int n_retry_balance = 0;
   bool no_interaction = false;      ///< twenty attempts failed: the track is left alone
   bool would_throw = false;         ///< throwNonConservationFailure would have ended the job
   bool trivialised = false;         ///< the collider gave up and returned bullet + target
@@ -294,6 +300,30 @@ __host__ __device__ inline bool retry_inelastic_nucleus(int n_tries, int max_tri
          (((npart != 0) && (npart + nfrag < 3 && first_out == bullet_type)) || !balance.okay());
 }
 
+/// The same predicate, decomposed, so that a campaign can say WHICH arm asked for the retry.
+///
+/// It exists because the anti-vacuity perturbation that deletes `|| !balance.okay()` was NOT
+/// caught, and a perturbation that is not caught is either a missing assertion or a fact about the
+/// code. This is how the difference is measured rather than argued: `arm_elastic` counts the
+/// events where the final state looked elastic, `arm_balance` the events where the balance failed.
+/// See the numbers the test prints.
+struct RetryArms {
+  bool elastic = false;
+  bool balance_failed = false;
+};
+
+__host__ __device__ inline RetryArms retry_inelastic_nucleus_arms(const CollisionOutput& out,
+                                                                  int bullet_type,
+                                                                  const CascadeBalance& balance) {
+  RetryArms a;
+  const int npart = out.n_particles;
+  const int nfrag = out.n_nuclei;
+  const int first_out = (npart == 0) ? 0 : out.particles[0].type;
+  a.elastic = (npart != 0) && (npart + nfrag < 3 && first_out == bullet_type);
+  a.balance_failed = !balance.okay();
+  return a;
+}
+
 /// G4CascadeInterface::retryInelasticProton - the hydrogen version, and it retries an EMPTY
 /// final state as well as an elastic-looking two-body one. No balance test at all.
 __host__ __device__ inline bool retry_inelastic_proton(int n_tries, int max_tries,
@@ -408,6 +438,11 @@ __host__ __device__ inline ApplyResult apply_yourself(
 
     balance_collide(balance, bin, global_out);
     ++res.n_tries;
+    if (!is_hydrogen) {
+      const RetryArms a = retry_inelastic_nucleus_arms(global_out, lab.bullet_type, balance);
+      if (a.elastic) { ++res.n_retry_elastic; }
+      if (a.balance_failed) { ++res.n_retry_balance; }
+    }
   } while (is_hydrogen
                ? retry_inelastic_proton(res.n_tries, lim.maximum_tries, global_out,
                                         lab.bullet_type)

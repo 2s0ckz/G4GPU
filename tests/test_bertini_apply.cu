@@ -471,6 +471,8 @@ int main() {
   long long n_thrown = 0, n_nointer = 0, n_refused = 0, n_overflow = 0, n_events = 0;
   long long want_thrown = 0;
   long long n_retried = 0;
+  // Which arm of retryInelasticNucleus asked - see RetryArms in cascade_interface.cuh.
+  long long n_retry_elastic = 0, n_retry_balance = 0;
   int worst_mult = 0;
   std::vector<double> refused_frac, case_worst_sigma;
   int n_biased_cases = 0;
@@ -532,6 +534,8 @@ int main() {
                                *dx, *tp, epo, *ws, lt, pool, pws, 0, rng);
       ++n_events;
       if (r.n_tries > 1) { ++n_retried; }
+      n_retry_elastic += r.n_retry_elastic;
+      n_retry_balance += r.n_retry_balance;
       if (r.refusal != bert::InterfaceRefusal::kNone) {
         ++n_refused;
         ++case_refused;
@@ -708,6 +712,13 @@ int main() {
               " worst multiplicity %d\n",
               n_events, static_cast<int>(cases.size()), n_retried, n_nointer, n_thrown,
               n_refused, n_overflow, worst_mult);
+  // **Which arm of `retryInelasticNucleus` asks for the retries.** Printed because the
+  // anti-vacuity perturbation that deletes `|| !balance.okay()` was NOT caught, and a perturbation
+  // that is not caught is either an assertion this test is missing or a fact about the code. These
+  // two counts decide which: if the balance arm never fires, deleting it cannot change an event
+  // and there is nothing for an assertion to catch.
+  std::printf("    retryInelasticNucleus asked %lld times on the elastic-looking arm and %lld"
+              " times on the balance arm\n", n_retry_elastic, n_retry_balance);
   // Which hyperons the cascade trapped and decayed, over the whole grid. Printed rather than
   // compared: the oracle has no column for it, and the point is to show that every species whose
   // decay table P10c transcribed is one the cascade can actually produce and trap - and to show
@@ -802,6 +813,24 @@ int main() {
         "a K+ de-excites through the cascade's own evaporators");
     pin(bert::qbbc_bertini_range(-321).ok && bert::qbbc_bertini_range(3122).ok,
         "K- and lambda have windows too - the three species the kaon instance is built for");
+
+    // **A WINDOW WITH NO MODEL BEHIND IT.** `G4HadParticles::sKaons` is {321, -321, 310, 130} and
+    // G4HadronicBuilder gives a Bertini instance to all four, so a K0S or K0L in a QBBC run has
+    // this model registered on it from 0 to 6 GeV. `IsApplicable` then refuses both, because
+    // `G4InuclElementaryParticle::type` is a chain of pointer comparisons that names
+    // G4KaonZero and G4AntiKaonZero and NOT G4KaonZeroShort or G4KaonZeroLong - the weak
+    // eigenstates have no INUCL type code at all. Every K0S and K0L handed to Bertini is
+    // NoInteraction. That is Geant4's arrangement and not a port limitation, and it is pinned
+    // HERE, as the two answers together, because neither half is wrong on its own and no code in
+    // Geant4 compares them. docs/RISK.md V139.
+    pin(bert::qbbc_bertini_range(310).ok && !bert::interface_is_applicable(310),
+        "K0S: QBBC gives Bertini a window and Bertini's IsApplicable refuses it");
+    pin(bert::qbbc_bertini_range(130).ok && !bert::interface_is_applicable(130),
+        "K0L: the same, and these two are half of QBBC's kaon set");
+    pin(bert::inucl_type_from_pdg(310) == 0 && bert::inucl_type_from_pdg(130) == 0,
+        "and the reason is that neither has a G4InuclParticleNames code");
+    pin(bert::inucl_type_from_pdg(311) != 0 && bert::inucl_type_from_pdg(-311) != 0,
+        "while the STRONG K0 and anti-K0 do - which is the asymmetry V139 is about");
 
     // The three that need a whole call to reach.
     Philox<double> prng(7u, 8u, 9u);
