@@ -377,10 +377,24 @@ struct CascadeBalance {
   __host__ __device__ bool baryon_okay() const { return delta_b() == 0; }
   __host__ __device__ bool charge_okay() const { return delta_q() == 0; }
   __host__ __device__ bool strange_okay() const { return delta_s() == 0; }
-  /// G4CascadeCheckBalance::okay() - `(energyOkay() && momentumOkay() && baryonOkay() &&
-  /// chargeOkay() && strangeOkay())`. `ekinOkay` is NOT in it.
+  /// G4CascadeCheckBalance::okay() - FOUR tests, and the two that are missing are missing for
+  /// different reasons. `ekinOkay` is simply not called by it. `strangeOkay` is not called by
+  /// anything at all, anywhere in the cascade package, and the header says why one line above
+  /// the expression:
+  ///
+  ///     // Global check, used by G4CascadeInterface validation loop
+  ///     // NOTE:  Strangeness is not required to be conserved in final state
+  ///     G4bool okay() const { return (energyOkay() && momentumOkay() &&
+  ///                                   baryonOkay() && chargeOkay()); }
+  ///
+  /// This port had five tests until P10c, and no test in the package could have caught it: every
+  /// strong process in the cascade conserves strangeness, and the one that does not - a trapped
+  /// hyperon's weak decay - was refused by name for want of a decay table. Wiring that decay is
+  /// what made the fifth term reachable, and it would have thrown away 18% of a K- event.
+  /// docs/RISK.md V137. `strange_okay()` is kept because Geant4 keeps `strangeOkay()`, and for the
+  /// same reason: a caller that wants the number can have it.
   __host__ __device__ bool okay() const {
-    return energy_okay() && momentum_okay() && baryon_okay() && charge_okay() && strange_okay();
+    return energy_okay() && momentum_okay() && baryon_okay() && charge_okay();
   }
 };
 

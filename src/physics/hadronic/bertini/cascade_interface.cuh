@@ -56,6 +56,16 @@
 // `G4ExcitationHandler::BreakItUp` cannot run, and every fragment goes to
 // `G4PreCompoundModel::DeExcite`. Reproduced by not having the branch, with this note in place
 // of it.
+//
+// It is an ORDER dependence and not a configuration flag, which is why it is worth the paragraph:
+// `G4HadronInelasticQBBC::ConstructProcess` creates `thePreCompound` before it creates any
+// `G4CascadeInterface`, so the registry lookup succeeds. A physics list that built Bertini first
+// would give each Bertini instance its own `G4ExcitationHandler`, the branch would be live, and
+// every residual with A <= 20 or Z == 0 would go to Fermi break-up instead of pre-equilibrium -
+// a different model for exactly the light residuals this package's grid is full of. The oracle
+// runs the same order as QBBC (`ref/dump/dump_bertini.cc` constructs its interfaces long after
+// the run manager has initialised the list), so the port and the oracle agree because they make
+// the same choice, not because the choice does not matter.
 #ifndef G4GPU_BERTINI_CASCADE_INTERFACE_CUH
 #define G4GPU_BERTINI_CASCADE_INTERFACE_CUH
 

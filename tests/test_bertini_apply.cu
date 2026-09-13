@@ -444,6 +444,26 @@ int main() {
     const long long v = std::atoll(m);
     if (v > 0) { events_multiplier = v; }
   }
+  // A cheaper run for the anti-vacuity campaign, and the choice of WHICH axis to cut is the
+  // point. Cutting EVENTS was tried first and is wrong: at a quarter of them the unperturbed run
+  // itself fails three buckets, because `ApplyEnergySum`'s 1e-6 band is a 2,000-event band, and
+  // because a case whose energy non-conservation comes from a handful of hard-tuned events has a
+  // sample variance of exactly zero when none of them turns up - which sends `cmp_sigma` into its
+  // 1e-12 fallback and reports 7.8e10. A campaign whose BASELINE fails cannot catch anything.
+  //
+  // Cutting CASES leaves every surviving comparison exactly as it was, statistics and band and
+  // meaning, and only reduces coverage - which is a thing a reader can check. Stride 8 keeps 12
+  // of the 95: both de-excitation arms, hydrogen through lead, and the pion cases that carry the
+  // retry loop. NEVER set for a real run; the bucket counts in the report are the full grid's.
+  long long case_stride = 1;
+  if (const char* m = std::getenv("G4GPU_BERTINI_CASE_STRIDE")) {
+    const long long v = std::atoll(m);
+    if (v > 0) { case_stride = v; }
+  }
+  if (case_stride > 1) {
+    std::printf("  G4GPU_BERTINI_CASE_STRIDE=%lld: a perturbation run over every %lldth case,"
+                " not a measurement over the grid\n", case_stride, case_stride);
+  }
   // An event this port refused is an event dropped from its sample, so WHICH refusal fired is
   // part of the result and not a footnote: a refusal that correlates with the physics would bias
   // every mean in the table.
@@ -455,7 +475,10 @@ int main() {
   std::vector<double> refused_frac, case_worst_sigma;
   int n_biased_cases = 0;
 
+  long long case_index = -1;
   for (Case& c : cases) {
+    ++case_index;
+    if (case_stride > 1 && (case_index % case_stride) != 0) { continue; }
     // The window and the de-excitation choice QBBC gives this species - not the interface's own
     // 0 to 100 TeV, and not G4CascadeParameters::usePreCompound().
     const bert::QbbcBertiniLookup win = bert::qbbc_bertini_range(c.pdg);
@@ -482,8 +505,11 @@ int main() {
     // Refusals PER CASE, because a refusal that is spread evenly costs statistics and a refusal
     // that clusters in one case biases that case. The port's yield is a rate conditional on the
     // event not being refused; Geant4's is unconditional, and the two are the same number only
-    // when the refused events look like the rest. `kTrappedHyperonDecay` does not: it fires on
-    // exactly the strangeness-producing events, which are the ones carrying the kaons.
+    // when the refused events look like the rest. Until P10c `kTrappedHyperonDecay` did not: it
+    // fired on exactly the strangeness-producing events, which are the ones carrying the kaons,
+    // and the correlation below is the measurement of what that cost. P10c decays those hyperons
+    // instead of refusing them, so the counter should now be near zero - and it is REPORTED
+    // rather than removed, because "the refusal no longer fires" is a claim that needs a number.
     long long case_refused = 0;
 
     // The port runs `G4GPU_BERTINI_EVENTS` times the oracle's 2,000 - one by default, so that a
@@ -682,6 +708,22 @@ int main() {
               " worst multiplicity %d\n",
               n_events, static_cast<int>(cases.size()), n_retried, n_nointer, n_thrown,
               n_refused, n_overflow, worst_mult);
+  // Which hyperons the cascade trapped and decayed, over the whole grid. Printed rather than
+  // compared: the oracle has no column for it, and the point is to show that every species whose
+  // decay table P10c transcribed is one the cascade can actually produce and trap - and to show
+  // which ones it never does, so that a later reader knows the table is there on Geant4's
+  // authority and not on measured need.
+  {
+    static const char* kNames[BertiniWorkspace::kNumTrappedSpecies] = {
+        "lambda", "sigma+", "sigma0", "sigma-", "xi0", "xi-", "omega-"};
+    long long tot = 0;
+    for (int i = 0; i < BertiniWorkspace::kNumTrappedSpecies; ++i) { tot += ws->trapped_decays[i]; }
+    std::printf("    trapped hyperons decayed in the nucleus: %lld", tot);
+    for (int i = 0; i < BertiniWorkspace::kNumTrappedSpecies; ++i) {
+      std::printf("  %s %lld", kNames[i], ws->trapped_decays[i]);
+    }
+    std::printf("\n");
+  }
   for (const auto& kv : refusal_count) {
     std::printf("    InterfaceRefusal %d: %lld\n", kv.first, kv.second);
   }
@@ -703,6 +745,112 @@ int main() {
       std::snprintf(buf, sizeof buf, "port threw %lld, Geant4 threw %lld", n_thrown,
                     want_scaled);
       b.where = buf;
+    }
+  }
+
+  // ----------------------------------------------------------------------------------------
+  // The refusals, ASSERTED rather than described. Each is a sub-case this package does not
+  // carry and each is reachable, so each is pinned: a reader who wants to know what
+  // `apply_yourself` will not do can read this block instead of grepping for `Refusal`. It is
+  // why docs/PORTED.md marks G4CascadeInterface `P` and not `V`.
+  {
+    const int bpin = new_bucket("PinnedByConstruction", 0.0);
+    auto pin = [&](bool ok, const char* what) {
+      Bucket& bb = buckets[bpin];
+      ++bb.n;
+      if (!ok) {
+        bb.worst = 1.0;
+        bb.where = what;
+        std::printf("  FAIL pin: %s\n", what);
+      }
+    };
+
+    // `IsApplicable` is a channel-table lookup on the proton, so it is false for exactly the
+    // species Bertini has no table for. An anti-nucleon is INUCL type 51 or 53, and neither 51
+    // nor 53 is among the 34 initial states in src/data/bertini_channels.hh - which is why QBBC
+    // gives an antiproton to FTFP and CHIPS and never to this model. Refused by name, and the
+    // name is the absent table.
+    pin(!bert::interface_is_applicable(-2212), "an antiproton has no channel table");
+    pin(!bert::interface_is_applicable(-2112), "an antineutron has no channel table");
+    // A MU- IS APPLICABLE, and that is the answer rather than the one a reader expects. This pin
+    // asserted the opposite and failed on its first run: `G4CascadeMuMinusPChannel` exists, so
+    // `GetTable(muonMinus)` is non-null and `G4CascadeInterface::IsApplicable` says yes - to the
+    // table that docs/RISK.md V119 shows reading off the end of its own array. What keeps a muon
+    // out of this model is not applicability; it is that QBBC registers no Bertini process on a
+    // muon at all (the window below) and that muon capture is P12's G4MuonMinusCapture. Both
+    // halves are pinned, because "Bertini could be asked" and "QBBC asks" differ here.
+    pin(bert::interface_is_applicable(13),
+        "a mu- IS applicable - G4CascadeMuMinusPChannel exists; V119 is about what it reads");
+    pin(!bert::qbbc_bertini_range(13).ok, "QBBC registers no Bertini on a muon");
+    pin(!bert::interface_is_applicable(11), "an electron has no channel table");
+    pin(bert::interface_is_applicable(2212), "a proton has one");
+    pin(bert::interface_is_applicable(22), "a photon has one - the gamma-p channels exist");
+    pin(bert::interface_is_applicable(1000020040),
+        "an alpha is applicable without a test: GetAtomicMass() > 1 returns true immediately");
+
+    // QBBC's windows, narrower than the model's own 0 to 100 TeV, and the two de-excitation
+    // choices. docs/RISK.md V118.
+    pin(!bert::qbbc_bertini_range(22).ok, "QBBC gives a photon to P13's gamma-nuclear");
+    pin(!bert::qbbc_bertini_range(-2212).ok, "QBBC gives an antiproton to FTFP and CHIPS");
+    pin(!bert::qbbc_bertini_range(3212).ok, "sigma0 is not in G4HadParticles::sHyperons");
+    pin(!bert::qbbc_bertini_range(311).ok, "the strong K0 is not in G4HadParticles::sKaons");
+    pin(bert::qbbc_bertini_range(2212).ok &&
+            bert::qbbc_bertini_range(2212).range.deexcite == bert::DeexciteChoice::kPreCompound,
+        "a proton de-excites through P6");
+    pin(bert::qbbc_bertini_range(321).ok &&
+            bert::qbbc_bertini_range(321).range.deexcite == bert::DeexciteChoice::kCascade,
+        "a K+ de-excites through the cascade's own evaporators");
+    pin(bert::qbbc_bertini_range(-321).ok && bert::qbbc_bertini_range(3122).ok,
+        "K- and lambda have windows too - the three species the kaon instance is built for");
+
+    // The three that need a whole call to reach.
+    Philox<double> prng(7u, 8u, 9u);
+    {
+      HadProjectile<double> p;
+      p.pdg = 2212;
+      p.mass = bert::inucl_particle_mass(bert::kProton) * 1000.0;
+      p.kin_energy = 1500.0;
+      HadNucleus n;
+      n.a = 12;
+      n.z = 6;
+      n.l = 1;                                  // a hyper-nucleus
+      const bert::ApplyResult r = bert::apply_yourself(
+          p, n, *fs, bert::DeexciteChoice::kPreCompound, par, lim, *model, *go, *co, *dx, *tp,
+          epo, *ws, lt, pool, pws, 0, prng);
+      pin(r.refusal == bert::InterfaceRefusal::kHyperNucleus,
+          "a hyper-nuclear target is refused");
+    }
+    {
+      HadProjectile<double> p;
+      p.pdg = 22;
+      p.mass = 0.0;
+      p.kin_energy = 300.0;
+      HadNucleus n;
+      n.a = 2;
+      n.z = 1;
+      const bert::ApplyResult r = bert::apply_yourself(
+          p, n, *fs, bert::DeexciteChoice::kPreCompound, par, lim, *model, *go, *co, *dx, *tp,
+          epo, *ws, lt, pool, pws, 0, prng);
+      pin(r.refusal == bert::InterfaceRefusal::kLightTargetCollider,
+          "a photon on A < 3 goes to G4LightTargetCollider, which is P13's");
+    }
+    {
+      HadProjectile<double> p;
+      p.pdg = 13;                               // mu-
+      p.mass = 105.6583715;
+      p.kin_energy = 100.0;
+      HadNucleus n;
+      n.a = 12;
+      n.z = 6;
+      const bert::ApplyResult r = bert::apply_yourself(
+          p, n, *fs, bert::DeexciteChoice::kPreCompound, par, lim, *model, *go, *co, *dx, *tp,
+          epo, *ws, lt, pool, pws, 0, prng);
+      // And so the interface RUNS a muon rather than refusing it, which is what Geant4 does and
+      // is why this says "completed" and not "refused": the guard that keeps a muon out of a
+      // QBBC run is upstream of the model. Whatever comes back, it must not be a refusal this
+      // package invented.
+      pin(r.refusal != bert::InterfaceRefusal::kNotApplicable,
+          "a mu- is not refused as inapplicable - QBBC never gives Bertini one, P12 owns capture");
     }
   }
 

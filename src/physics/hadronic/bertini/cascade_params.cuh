@@ -158,6 +158,26 @@ __host__ __device__ inline QbbcBertiniLookup qbbc_bertini_range(int pdg) {
       r.range = {0.0, 6000.0, DeexciteChoice::kCascade};
       r.ok = true;
       return r;
+    // Named, and named because the brief asks for them by name rather than by silence. An
+    // ANTI-NUCLEON is a species Bertini declares itself applicable to in no sense at all: INUCL
+    // has type codes for it (51 and 53) but neither 51 nor 53 is among the 34 initial states in
+    // src/data/bertini_channels.hh, so `IsApplicable` is already false one level up. QBBC gives
+    // an antiproton to FTFP and to CHIPS's annihilation, never to this model. The case is here
+    // so that a reader looking for "what about antiprotons" finds an answer instead of a
+    // default arm, and tests/test_bertini_apply.cu pins both halves.
+    case -2212:   // anti-proton
+    case -2112:   // anti-neutron
+    case -1000010020:  // anti-deuteron, anti-triton, anti-He3, anti-alpha: G4HadronicBuilder
+    case -1000010030:  // builds an FTFP/BERT chain for the light anti-nuclei and Bertini is
+    case -1000020030:  // not in it
+    case -1000020040:
+      return r;   // ok = false, by name
+    // A PHOTON is the other one worth naming: G4CascadeInterface IS applicable to it and the
+    // gamma-nucleon channel tables exist, but QBBC routes photons to G4EmExtraPhysics'
+    // gamma-nuclear (P13), not here. So "Bertini could do this" and "QBBC asks Bertini to do
+    // this" differ for exactly one species, and this is it.
+    case 22:
+      return r;   // ok = false, by name
     default:
       return r;   // ok = false: QBBC registers no Bertini for this species
   }

@@ -68,6 +68,7 @@
 #define G4GPU_BERTINI_INTRA_CASCADER_CUH
 
 #include <cmath>
+#include "physics/decay/decay.cuh"
 #include "physics/hadronic/bertini/cascade_model.cuh"
 #include "physics/hadronic/bertini/collision_output.cuh"
 #include "physics/hadronic/bertini/workspace.cuh"
@@ -85,7 +86,16 @@ enum class CascaderRefusal : int {
   kNone = 0,
   kFate,                  ///< generateParticleFate refused; its FateRefusal says which
   kOverflow,              ///< a workspace or output capacity
-  kTrappedHyperonDecay,   ///< decayTrappedParticle needs a G4DecayTable - see the note below
+  /// decayTrappedParticle's boost, in the regime where it stops being the no-op Geant4's unit
+  /// mismatch makes it - above a Bertini-GeV energy equal to the parent's Geant4-MeV mass, i.e.
+  /// 1,115.68 GeV for a lambda. Unreachable through QBBC, reachable in principle through the
+  /// model's declared 100 TeV. docs/RISK.md V136. (This slot used to be kTrappedHyperonDecay,
+  /// the refusal of the whole decay; P10c replaced it with the one arm still not transcribed.)
+  kTrappedHyperonBoost,
+  /// A decay daughter with no G4InuclParticleNames type code. Geant4 emits it as a null
+  /// secondary with a printed error; that is not representable here. Unreachable for the eleven
+  /// hyperon channels - every daughter of every one has a type code.
+  kTrappedDaughterNotInucl,
   kBulletNotUsable,       ///< neither an elementary particle nor a nucleus
   kTargetNotNucleus,      ///< the target must be a nucleus
   kNucleusRefused         ///< generateModel refused this (A, Z)
@@ -163,18 +173,131 @@ __host__ __device__ inline BalanceInitial cascader_initial(const CascadeSetup& s
   return in;
 }
 
+/// G4IntraNucleiCascader::decayTrappedParticle - a hyperon that the cascade trapped below the
+/// nuclear potential, decayed WHERE IT IS, with the daughters put back on the cascade stack.
+///
+/// **The boost is a no-op, and it is a no-op because of a unit mismatch in Geant4.** The line is
+///
+///     G4double decayEnergy = trappedP.getEnergy();
+///     daughters->Boost(decayEnergy, decayDir);
+///
+/// `G4InuclParticle::getEnergy()` returns `pDP.GetTotalEnergy()*MeV/GeV` - Bertini's GeV, a
+/// number near 1.2 for a trapped lambda. `G4DecayProducts::Boost(totalEnergy, dir)` then does
+///
+///     G4double mass = theParentParticle->GetMass();          // Geant4 MeV: 1115.68
+///     G4double totalMomentum(0);
+///     if (totalEnergy > mass) totalMomentum = sqrt((totalEnergy-mass)*(totalEnergy+mass));
+///
+/// and 1.2 is not greater than 1115.68, so `totalMomentum` stays zero, beta is zero, and the
+/// two-stage boost inside `Boost(betax,betay,betaz)` is skipped as well (its own guard is
+/// `energy - mass > DBL_MIN` on a parent that `DecayIt` built AT REST, so that arm is dead too).
+/// The daughters come out isotropic in the hyperon's rest frame and the hyperon's momentum is
+/// simply gone - absorbed into the residual, because `G4CascadeRecoilMaker` defines the residual
+/// as the negative of what came out.
+///
+/// The threshold is written out rather than folded away: the guard would first do something at
+/// a Bertini-GeV energy above the parent's MeV mass, i.e. above 1,115.68 GeV for a lambda, where
+/// QBBC's Bertini window ends at 12 GeV. Above it Geant4 would take a boost this port has not
+/// transcribed, so that case is REFUSED BY NAME rather than approximated by the no-op.
+///
+/// The daughters go onto the CASCADE stack when the species has a channel table and to the
+/// output when it does not - `G4CascadeChannelTables::GetTable(idaugEP.type())`, the same test
+/// `particleCanInteract` uses. For the eleven hyperon channels every daughter (p, n, pi+, pi-,
+/// pi0, gamma, K-, lambda, xi0, xi-) has one, so in practice all of them are propagated; the
+/// other arm is kept because the test is Geant4's and not a fact about these tables.
+template <typename Rng>
+__host__ __device__ inline bool cascader_decay_trapped(const CascadeParticle& trapped,
+                                                       CollisionOutput& out,
+                                                       BertiniWorkspace& ws, Rng& rng,
+                                                       CascaderRefusal& refusal) {
+  const int pdg = inucl_type_row(trapped.type).pdg;
+  const decay::DecayTableRow table = decay::decay_table_for(pdg);
+  if (table.count < 1) {
+    // "No decay table; cannot decay!" - Geant4 releases the trapped particle unchanged. That is
+    // the arm an ANTI-hyperon would take if one could ever get here; it cannot, because
+    // G4InuclParticleNames has no anti-hyperon code, so this is Geant4's fallback reproduced
+    // rather than a refusal of ours.
+    return co_add_particle(out, trapped.type, trapped.momentum);
+  }
+
+  // G4DecayProducts::Boost's guard, evaluated exactly as Geant4 evaluates it - the Bertini-GeV
+  // total energy against the Geant4-MeV mass. See the note above.
+  const double parent_mass_MeV = decay::particle_mass(pdg);
+  const double energy_as_passed = trapped.momentum.e;      // GeV, into a MeV parameter
+  if (energy_as_passed > parent_mass_MeV) {
+    refusal = CascaderRefusal::kTrappedHyperonBoost;
+    return false;
+  }
+
+  // `SelectADecayChannel()` takes no argument, so the parent mass is the PDG mass; `DecayIt` is
+  // then called with `GetPDGMass()` explicitly. Passing the PDG mass to both is the same choice.
+  // `at_rest = true` is what makes P4's sampler skip its boost, which is the no-op above.
+  const double dir[3] = {trapped.momentum.v.x, trapped.momentum.v.y, trapped.momentum.v.z};
+  decay::sample_decay<double>(pdg, parent_mass_MeV, 0.0, dir, true, rng, ws.trapped_decay);
+  if (ws.trapped_decay.status != decay::DecayStatus::kOK) {
+    // "No final state; cannot decay!" - released unchanged, as above.
+    return co_add_particle(out, trapped.type, trapped.momentum);
+  }
+
+  // Which species the cascade actually traps, counted rather than assumed - the question that
+  // decided which of Geant4's decay tables had to be transcribed. See the field's note.
+  {
+    const int slot = (trapped.type - kLambda) / 2;
+    if (slot >= 0 && slot < BertiniWorkspace::kNumTrappedSpecies) { ++ws.trapped_decays[slot]; }
+  }
+
+  const Vec3d decay_pos = trapped.position;
+  const int zone = trapped.current_zone;
+  const int gen = trapped.generation + 1;
+  for (int i = 0; i < ws.trapped_decay.n; ++i) {
+    const decay::DecayProduct<double>& d = ws.trapped_decay.p[i];
+    const int dtype = inucl_type_from_pdg(d.pdg);
+    // The daughter's four-momentum in Bertini's GeV. Geant4 wraps the daughter's own
+    // G4DynamicParticle in a G4InuclElementaryParticle without re-storing it, and the cascade
+    // then reads it back through `G4InuclParticle::getMomentum()`, which is
+    // `pDP.Get4Momentum()*MeV/GeV`. So the momentum modulus is Get4Momentum's
+    // `sqrt(E*E + 2*m*E)` and NOT GetTotalMomentum's `sqrt((E+2m)*E)` - the two differ in the
+    // last bit, and P4's `four_momentum()` is the one that spells it Geant4's way. No round
+    // trip through `inucl_store_momentum`: Geant4 does not re-store, and doing so would rebuild
+    // the daughter from INUCL's mass table instead of the channel's.
+    const auto p4 = d.four_momentum();
+    const LV dmom(Vec3d{p4.x * 0.001, p4.y * 0.001, p4.z * 0.001}, p4.t * 0.001);
+    if (dtype == 0) {
+      // Geant4 wraps a daughter with no INUCL type code in a G4InuclElementaryParticle anyway,
+      // puts it on the output list, and `makeDynamicParticle` later prints "ERROR:
+      // G4CascadeInterface incompatible particle type" and returns a NULL secondary. That is not
+      // a final state this port can represent, so it is refused by name instead of emitted as a
+      // type-zero particle. It is unreachable for the eleven hyperon channels - every daughter
+      // of every one of them (p, n, pi+, pi-, pi0, gamma, K-, lambda, xi0, xi-) has a type code -
+      // and the arm is here because the test is Geant4's, not a fact about these tables.
+      refusal = CascaderRefusal::kTrappedDaughterNotInucl;
+      return false;
+    }
+    if (cascader_particle_can_interact(dtype)) {
+      if (!ws_push_cascade(ws, cp_fill(dtype, dmom, decay_pos, zone, 0.0, gen))) {
+        refusal = CascaderRefusal::kOverflow;
+        return false;
+      }
+    } else {
+      if (!co_add_particle(out, dtype, dmom)) { return false; }
+    }
+  }
+  return true;
+}
+
 /// G4IntraNucleiCascader::processTrappedParticle.
 ///
 /// A nucleon becomes an exciton quasi-particle and disappears from the event - its energy is
-/// now the residual's excitation, by the recoil maker's subtraction. A hyperon is decayed in
-/// flight, which needs `G4DecayTable::SelectADecayChannel` and `DecayIt` - P4's machinery, in a
-/// different package, reached through a `G4ParticleDefinition` this module does not carry - so
-/// it is REFUSED BY NAME rather than approximated. It is reachable: a lambda or sigma produced
-/// deep in a heavy nucleus below the barrier gets here. Anything else, which in practice means a
-/// pion, is released to the output unchanged, with Geant4's own FIXME beside it.
+/// now the residual's excitation, by the recoil maker's subtraction. A hyperon is DECAYED where
+/// it stands, by `cascader_decay_trapped` above; it does NOT become an exciton and it does not
+/// touch the exciton configuration at all, which is Geant4's choice and not an omission here.
+/// Anything else, which in practice means a pion, is released to the output unchanged, with
+/// Geant4's own FIXME beside it ("non-standard should be absorbed, now released").
+template <typename Rng>
 __host__ __device__ inline bool cascader_process_trapped(const CascadeParticle& trapped,
                                                          CollisionOutput& out,
                                                          ExitonConfiguration& excitons,
+                                                         BertiniWorkspace& ws, Rng& rng,
                                                          CascaderRefusal& refusal) {
   const int xtype = trapped.type;
   if (inucl_is_nucleon(xtype)) {
@@ -182,8 +305,7 @@ __host__ __device__ inline bool cascader_process_trapped(const CascadeParticle& 
     return true;
   }
   if (inucl_names_hyperon(xtype)) {
-    refusal = CascaderRefusal::kTrappedHyperonDecay;
-    return false;
+    return cascader_decay_trapped(trapped, out, ws, rng, refusal);
   }
   return co_add_particle(out, trapped.type, trapped.momentum);
 }
@@ -237,7 +359,7 @@ __host__ __device__ inline void cascader_generate(NucleiModel& m, const NucleiMo
           if (!ws_push_cascade(ws, cp)) { res.refusal = CascaderRefusal::kOverflow; return; }
         } else {
           CascaderRefusal tr = CascaderRefusal::kNone;
-          if (!cascader_process_trapped(cp, out, excitons, tr)) {
+          if (!cascader_process_trapped(cp, out, excitons, ws, rng, tr)) {
             res.refusal = (tr != CascaderRefusal::kNone) ? tr : CascaderRefusal::kOverflow;
             return;
           }
@@ -261,7 +383,7 @@ __host__ __device__ inline void cascader_generate(NucleiModel& m, const NucleiMo
             }
           } else {
             CascaderRefusal tr = CascaderRefusal::kNone;
-            if (!cascader_process_trapped(cp, out, excitons, tr)) {
+            if (!cascader_process_trapped(cp, out, excitons, ws, rng, tr)) {
               res.refusal = (tr != CascaderRefusal::kNone) ? tr : CascaderRefusal::kOverflow;
               return;
             }

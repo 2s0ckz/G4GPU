@@ -26,6 +26,7 @@
 #include "physics/hadronic/bertini/inucl_particle.cuh"
 #include "physics/hadronic/bertini/lorentz_convertor.cuh"
 #include "physics/hadronic/bertini/nuclei_model.cuh"
+#include "physics/decay/decay_products.cuh"
 #include "physics/hadronic/deexcitation/fragment.cuh"
 
 namespace g4gpu::physics::hadronic::bert {
@@ -232,6 +233,23 @@ struct BertiniWorkspace {
   int coal_cand_idx[kMaxCoalClusters][4];
   int coal_cand_n[kMaxCoalClusters];
   bool coal_used[kMaxOutgoingParticles];
+
+  /// The daughters of a trapped hyperon's decay - `G4DecayProducts` in
+  /// `G4IntraNucleiCascader::decayTrappedParticle`, which Geant4 heap-allocates per decay and
+  /// deletes at the end of the function. Five slots because that is `G4VDecayChannel`'s own
+  /// daughter limit; every hyperon channel uses two. Here rather than on the stack for the usual
+  /// reason, and small enough that it would not have mattered - it is here so that the rule does
+  /// not need an exception.
+  decay::DecayProducts<double> trapped_decay;
+
+  /// How many trapped hyperons of each species were decayed, indexed by (INUCL type - kLambda)/2
+  /// so that lambda=0, sigma+=1, sigma0=2, sigma-=3, xi0=4, xi-=5, omega-=6. NOT cleared by
+  /// `ws_reset` - it accumulates over a whole run, because the question it answers is "which
+  /// species does the cascade actually trap", which is a property of the grid and not of an
+  /// event. The answer decided which of Geant4's decay tables had to be transcribed at all, and
+  /// it is printed by tests/test_bertini_apply.cu rather than assumed.
+  static constexpr int kNumTrappedSpecies = 7;
+  long long trapped_decays[kNumTrappedSpecies] = {0, 0, 0, 0, 0, 0, 0};
 
   /// Which capacity was exceeded, if any.
   CascadeOverflow overflow = CascadeOverflow::kNone;
