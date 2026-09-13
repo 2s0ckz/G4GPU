@@ -361,6 +361,19 @@ __host__ __device__ inline double inucl_binding_energy(int a, int z) {
   return deex::binding_energy(a, z);
 }
 
+/// G4InuclNuclei::getNucleiMass(a, z, exc) - `(G4NucleiProperties::GetNuclearMass(a,z) + exc)`
+/// converted from Geant4's MeV to Bertini's GeV. The excitation is added in MeV BEFORE the
+/// conversion, which is what makes an excited fragment's four-momentum `setVectM(p, m + E*/1000)`
+/// rather than `m + E*`.
+///
+/// Bertini calls this for a residual nucleus, for a recoil, and for every evaporation daughter,
+/// so the whole de-excitation chain's energetics hang off P3's `deex::nuclear_mass`, which is
+/// the AME12 table with Geant4's own formula fallback. `(0, 0)` is G4InuclNuclei's "dummy
+/// without definition" case and returns 0 here as GetNuclearMass does.
+__host__ __device__ inline double inucl_nuclei_mass(int a, int z, double exc_MeV = 0.0) {
+  return (deex::nuclear_mass(a, z) + exc_MeV) * 0.001;
+}
+
 /// G4InuclSpecialFunctions::bindingEnergyAsymptotic - the smooth liquid-drop formula, used only
 /// by G4Fissioner. MeV.
 __host__ __device__ inline double inucl_binding_energy_asymptotic(int a, int z) {

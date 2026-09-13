@@ -50,6 +50,15 @@ struct FinalStateConfig {
 };
 
 /// One cascade particle: G4CascadParticle reduced to its data.
+///
+/// The defaults are G4CascadParticle's DEFAULT constructor, which its own comment calls
+/// "non-functional": zone -1, path -1, `movingIn` false, generation -1. The five-argument
+/// constructor is a different set of defaults - `movingIn(true)`, `reflectionCounter(0)`,
+/// `reflected(false)`, `historyId(-1)` - and that one is what every real cascade particle is
+/// built with, so it is `cp_fill` below and not this struct's initialisers. Getting `moving_in`
+/// wrong here is invisible until the first boundary: `boundaryTransition` reads it to choose
+/// `zone-1` or `zone+1`, so a particle created with the struct default would transmit OUTWARD
+/// on its first crossing instead of inward.
 struct CascadeParticle {
   int type = 0;
   LV momentum;
@@ -62,6 +71,23 @@ struct CascadeParticle {
   int generation = -1;
   int history_id = -1;
 };
+
+/// G4CascadParticle's five-argument constructor, and `fill()`, which are the same assignment.
+__host__ __device__ inline CascadeParticle cp_fill(int type, const LV& mom, const Vec3d& pos,
+                                                   int izone, double cpath, int gen) {
+  CascadeParticle c;
+  c.type = type;
+  c.momentum = mom;
+  c.position = pos;
+  c.current_zone = izone;
+  c.current_path = cpath;
+  c.moving_in = true;        // movingIn(true) in the constructor, NOT the struct default
+  c.reflection_counter = 0;
+  c.reflected = false;
+  c.generation = gen;
+  c.history_id = -1;
+  return c;
+}
 
 /// Which buffer ran out. Every one of these is reported by name, never absorbed.
 enum class CascadeOverflow : int {
@@ -130,9 +156,26 @@ struct BertiniWorkspace {
   CascadeParticle cascade[kMaxCascadeParticles];
   int n_cascade = 0;
 
+  /// G4IntraNucleiCascader::new_cascad_particles - the buffer `generateParticleFate` fills.
+  /// Bounded exactly: a fate is either one propagated particle or the products of ONE
+  /// two-body collision, which a channel table caps at `kMaxFinalStateSize` (9).
+  CascadeParticle new_cascade[kMaxFinalStateSize];
+  int n_new_cascade = 0;
+
   /// G4NucleiModel::collisionPts.
   Vec3d collision_points[kMaxCollisionPoints];
   int n_collision_points = 0;
+
+  /// G4NucleiModel::coordinates, momentums and raw_particles - the three buffers the
+  /// NUCLEUS-projectile `initializeCascad` builds its nucleons in. Four entries exactly:
+  /// the routine's own `max_a_for_cascad` is 5 and the test is `ab < max_a_for_cascad`, so a
+  /// bullet of A = 4 is the largest that ever gets here and A >= 5 produces a compound nucleus
+  /// with no cascade particles at all.
+  static constexpr int kMaxIonBulletA = 4;
+  Vec3d ion_coordinates[kMaxIonBulletA];
+  LV ion_momenta[kMaxIonBulletA];
+  int n_ion_coordinates = 0;
+  int n_ion_momenta = 0;
 
   /// Which capacity was exceeded, if any.
   CascadeOverflow overflow = CascadeOverflow::kNone;
@@ -142,6 +185,7 @@ __host__ __device__ inline void ws_reset(BertiniWorkspace& ws) {
   ws.n_partners = 0;
   ws.n_qdeutrons = 0;
   ws.n_cascade = 0;
+  ws.n_new_cascade = 0;
   ws.n_collision_points = 0;
   ws.overflow = CascadeOverflow::kNone;
 }

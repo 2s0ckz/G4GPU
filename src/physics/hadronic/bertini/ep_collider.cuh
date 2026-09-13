@@ -108,6 +108,24 @@ enum class ColliderRefusal {
   kChannelRefused           ///< the channel table itself refused - see ChannelRefusal
 };
 
+/// Which of the twelve verdicts above are THIS PORT declining to do something, and which are
+/// Geant4 itself producing no final state.
+///
+/// The distinction matters to every caller inside the cascade: Geant4's `collide` ends with
+/// `if (particles.empty()) return;` and the cascade treats that as "the collision did not
+/// happen" - it breaks out of the partner loop and propagates the particle instead. A neutrino
+/// projectile, a missing channel table, an illegal dibaryon partner and ten failed kinematic
+/// attempts are all that case, and a cascade that stopped on them would be a different model. A
+/// muon absorption, a pi-N absorption without a nucleus, an out-of-range multiplicity and a
+/// refused channel table are not: they are places where Geant4 would have produced something
+/// and this port will not, and they have to reach the caller by name.
+__host__ __device__ inline bool collider_refusal_is_port_limit(ColliderRefusal r) {
+  return r == ColliderRefusal::kMuonAbsorption ||
+         r == ColliderRefusal::kPionNAbsorptionNucleus ||
+         r == ColliderRefusal::kMultiplicityTooLarge ||
+         r == ColliderRefusal::kChannelRefused;
+}
+
 /// One collision's output, sized by the largest final state a channel table can name.
 struct ColliderOutput {
   int n = 0;
@@ -668,10 +686,20 @@ __host__ __device__ inline void ep_generate_scm_final_state(double ekin, double 
 /// space and it is reached only from muon capture at rest, which is P12's package and whose
 /// caller does not exist in this port. The refusal is returned where the call would be, so a
 /// mu- on a dibaryon is reported rather than silently producing nothing.
+///
+/// `have_nucleus` is `G4ElementaryParticleCollider::setNucleusState` having been called: the
+/// collider is a member of G4NucleiModel's caller and the cascade sets (A, Z) on it before every
+/// collision, but the bare two-body entry point below has no nucleus to set. The ONE place it
+/// matters is `generateSCMpionNAbsorption`, which needs the residual mass
+/// `getNucleiMass(A-1, Z-(2-ntype))`; with no nucleus that arm is refused by name instead of
+/// approximated, which is what P10's oracle grid measures.
 template <typename Rng>
-__host__ __device__ inline void ep_collide(int type1, const LV& mom1, int type2, const LV& mom2,
-                                           const CascadeParams& par, ColliderOutput& out,
-                                           BertiniWorkspace& ws, Rng& rng) {
+__host__ __device__ inline void ep_collide_in_nucleus(int type1, const LV& mom1, int type2,
+                                                      const LV& mom2, int nucleus_a,
+                                                      int nucleus_z, bool have_nucleus,
+                                                      const CascadeParams& par,
+                                                      ColliderOutput& out,
+                                                      BertiniWorkspace& ws, Rng& rng) {
   out.n = 0;
   out.refusal = ColliderRefusal::kNone;
   out.channel_refusal = ChannelRefusal::kNone;
@@ -706,14 +734,28 @@ __host__ __device__ inline void ep_collide(int type1, const LV& mom1, int type2,
     if (ep_pion_nucleon_absorption(is, ekin, par, rng)) {
       // Geant4 calls generateSCMpionNAbsorption here, which needs the RESIDUAL NUCLEUS mass,
       // `G4InuclNuclei::getNucleiMass(A-1, Z-(2-ntype))`, held on the collider by
-      // `setNucleusState`. `ep_generate_scm_pion_n_absorption` below is the transcription of
-      // it and takes that mass as an argument; this entry point has no nucleus, so the arm is
-      // REFUSED BY NAME rather than approximated. Unreachable with the dumped piNAbsorption of
-      // 0 - the deviate above is still drawn, because Geant4 draws it.
-      out.refusal = ColliderRefusal::kPionNAbsorptionNucleus;
-      return;
+      // `setNucleusState`. Without a nucleus the arm is REFUSED BY NAME rather than
+      // approximated. Unreachable with the dumped piNAbsorption of 0 - the deviate above is
+      // still drawn, because Geant4 draws it.
+      if (!have_nucleus) {
+        out.refusal = ColliderRefusal::kPionNAbsorptionNucleus;
+        return;
+      }
+      // G4ElementaryParticleCollider::generateSCMpionNAbsorption's own argument:
+      // `ntype` is whichever of the pair is the nucleon, and the residual is the nucleus minus
+      // that nucleon - one proton fewer for a proton (ntype 1 -> 2-1 = 1), none for a neutron.
+      const int ntype = inucl_is_nucleon(type2) ? type2 : type1;
+      const double recoil_mass =
+          inucl_nuclei_mass(nucleus_a - 1, nucleus_z - (2 - ntype), 0.0);
+      // NOT a return: Geant4 falls through to the common `backToTheLab` loop at the end of
+      // collide(), exactly as the ordinary final state does. The routine's own
+      // `mom1.boost(-piN4.boostVector())` leaves the nucleon in the pi-N frame, which is the
+      // frame `convertToSCM` boosts out of, so the two boosts compose.
+      ep_generate_scm_pion_n_absorption(type1, mom1, type2, mom2, nucleus_a, nucleus_z,
+                                        recoil_mass, out, rng);
+    } else {
+      ep_generate_scm_final_state(ekin, etot_scm, type1, mom1, type2, mom2, par, out, ws, rng);
     }
-    ep_generate_scm_final_state(ekin, etot_scm, type1, mom1, type2, mom2, par, out, ws, rng);
   }
 
   if (qd1 || qd2) {
@@ -768,6 +810,16 @@ __host__ __device__ inline void ep_collide(int type1, const LV& mom1, int type2,
     out.kinds[j + 1] = k;
     ekin[j + 1] = e;
   }
+}
+
+/// The bare two-body entry point: `collide` on a collider whose `setNucleusState` was never
+/// called. Identical to the above in every arm except `generateSCMpionNAbsorption`, which is
+/// refused by name because it needs a residual-nucleus mass that does not exist here.
+template <typename Rng>
+__host__ __device__ inline void ep_collide(int type1, const LV& mom1, int type2, const LV& mom2,
+                                           const CascadeParams& par, ColliderOutput& out,
+                                           BertiniWorkspace& ws, Rng& rng) {
+  ep_collide_in_nucleus(type1, mom1, type2, mom2, 0, 0, false, par, out, ws, rng);
 }
 
 }  // namespace g4gpu::physics::hadronic::bert

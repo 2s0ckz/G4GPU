@@ -88,6 +88,7 @@
 #include "G4MultiBodyMomentumDist.hh"
 #include "G4Neutron.hh"
 #include "G4InuclParamAngDst.hh"
+#include "G4CascadParticle.hh"
 #include "G4NucleiModel.hh"
 #include "G4NucleiProperties.hh"
 #include "G4Nucleus.hh"
@@ -198,6 +199,48 @@ class LcgEngine : public CLHEP::HepRandomEngine {
   unsigned long long s_ = 0;
   unsigned long long n_ = 0;
 };
+
+// An engine that returns one fixed value for every draw, for a branch the cycle cannot reach.
+//
+// `G4NucleiModel::choosePointAlongTraj` has a radial-incidence shortcut,
+// `if (prang < 1e-6) posout = -pos;`, and the alternative is a rotation about `phat.cross(rhat)`
+// - which at radial incidence is the ZERO vector, so CLHEP's `HepRotation::rotate` prints
+// "zero axis" and leaves the vector alone. The two branches therefore disagree completely: one
+// gives the antipode and a chord through the whole nucleus, the other gives the entry point back
+// and a chord of zero length.
+//
+// The entry angle comes from `costh = sqrt(1 - inuclRndm())`, so the shortcut needs a deviate
+// within about 1e-12 of zero, and the eight-value cycle's smallest is 0.05 - which puts `prang`
+// at 0.2255 radians, four orders of magnitude above the cut. **Measured**: deleting the shortcut
+// from the port left all 535,692 comparisons passing. One extra pass with this engine at
+// 1e-13 reaches it; 0.5 is the control, on the same engine, so that a disagreement can be
+// attributed to the branch rather than to the engine.
+class ConstEngine : public CLHEP::HepRandomEngine {
+ public:
+  void reset(double v) { v_ = v; n_ = 0; }
+  long long draws() const { return static_cast<long long>(n_); }
+  double flat() override { ++n_; return v_; }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long, int) override {}
+  void setSeeds(const long*, int) override {}
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "ConstEngine"; }
+
+ private:
+  double v_ = 0.5;
+  unsigned long long n_ = 0;
+};
+
+// The three constants, in the order the `phase` column encodes them as 8, 9 and 10. EXACTLY zero
+// is the one that matters: it makes `costh` exactly 1, the entry point exactly (0, 0, -R) and
+// `phat.cross(rhat)` the exact zero vector, where CLHEP does nothing at all and the shortcut
+// gives the antipode. At 1e-13 the two branches differ by about 1e-13 relative - under the
+// tolerance - so a near-radial case is not enough; it has to be radial.
+const double kConstSeq[3] = {0.0, 1.0e-13, 0.5};
 
 // ---------------------------------------------------------------------------------------------
 // bertini_params.csv
@@ -1180,6 +1223,194 @@ void dump_epcollide_pass(FILE* f, int ps) {
   CLHEP::HepRandom::setTheEngine(saved);
 }
 
+// ---------------------------------------------------------------------------------------------
+// bertini_initcascad.csv and bertini_fate.csv - G4NucleiModel's cascade half, exact.
+//
+// Both entry points are public members of G4NucleiModel and neither needs a cascader around it,
+// so the same trick the collider dump uses works here: install the eight-value cycle engine and
+// the whole chain - the entry point on the surface, the trajectory sampler for a photon, the
+// partner list, the interaction lengths, the collision, Pauli blocking, the boundary transition
+// - becomes a deterministic function of (nucleus, particle, position, direction, generation,
+// phase), with the draw count beside the answer.
+//
+// **`generateParticleFate` mutates the model**, so every case calls `reset()` first. Without it
+// the proton and neutron census carried by `protonNumberCurrent`/`neutronNumberCurrent` would
+// drift down the grid and no row could be reproduced on its own; `reset()` also clears
+// `collisionPts`, which is what `passTrailing` reads.
+//
+// **The grid has to move the particle off the axes and off the surface.** docs/RISK.md V124 is
+// about exactly this file's failure mode one level up: a projectile along +z at a target at rest
+// switched off `G4LorentzConvertor::rotate` for 2,688 collider cases and nothing noticed. Here
+// the symmetries to break are three: a position on a coordinate axis (makes `pos.dot(mom)` a
+// single component and `choosePointAlongTraj`'s rotation axis degenerate), a momentum parallel
+// or antiparallel to the position (makes `prang < 1e-6` fire, which is the radial-incidence
+// shortcut, and makes `pperp2` zero in `boundaryTransition` so the `qv+qperp` arm can never be
+// the one that runs), and a generation of 0 for everything (which exempts every particle from
+// the young-secondary veto through the `current_path < 1000` sentinel). So: four radii from deep
+// inside to just under the surface along a non-axial unit vector, three directions of which one
+// IS radial so that the shortcut is measured too, and both generations.
+// ---------------------------------------------------------------------------------------------
+void dump_initcascad() {
+  FILE* f = std::fopen("bertini_initcascad.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "a,z,type,plab,phase,draws,posx,posy,posz,zone,cpath,gen,px,py,pz,e\n");
+
+  struct AZ { int a, z; };
+  static const AZ nuclei[] = {{12, 6}, {27, 13}, {56, 26}, {207, 82}};
+  static const int types[] = {proton, neutron, pionPlus, pionMinus, pionZero, photon};
+  // The last entry is BELOW G4NucleiModel::small (1e-9 GeV): that is the capture-at-rest branch,
+  // which starts the particle one zone INSIDE the surface instead of outside it.
+  static const double plabs[] = {0.2, 1.0, 3.0, 1.0e-12};
+
+  CycleEngine cyc;
+  ConstEngine con;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const AZ& n : nuclei) {
+    G4NucleiModel model(n.a, n.z);
+    for (int type : types) {
+      const double m = G4InuclElementaryParticle::getParticleMass(type);
+      for (double plab : plabs) {
+        // Phases 0-7 are the eight-value cycle; 8 and 9 are the constant engine, which is the
+        // only way to put a photon at radial incidence - see the comment on ConstEngine.
+        for (int phase = 0; phase < 11; ++phase) {
+          model.reset();
+          if (phase < 8) {
+            CLHEP::HepRandom::setTheEngine(&cyc);
+            cyc.reset(phase);
+          } else {
+            CLHEP::HepRandom::setTheEngine(&con);
+            con.reset(kConstSeq[phase - 8]);
+          }
+          G4InuclElementaryParticle bullet(
+              G4LorentzVector(0., 0., plab, std::sqrt(plab * plab + m * m)), type);
+          G4CascadParticle cp = model.initializeCascad(&bullet);
+          const G4ThreeVector& p = cp.getPosition();
+          const G4LorentzVector mom = cp.getMomentum();
+          std::fprintf(f,
+                       "%d,%d,%d,%.17g,%d,%lld,%.17g,%.17g,%.17g,%d,%.17g,%d,"
+                       "%.17g,%.17g,%.17g,%.17g\n",
+                       n.a, n.z, type, plab, phase,
+                       (phase < 8) ? cyc.draws() : con.draws(), p.x(), p.y(), p.z(),
+                       cp.getCurrentZone(), cp.getCurrentPath(), cp.getGeneration(), mom.x(),
+                       mom.y(), mom.z(), mom.e());
+        }
+      }
+    }
+  }
+
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+void dump_fate() {
+  FILE* f = std::fopen("bertini_fate.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "a,z,type,plab,dir,rad,gen,phase,draws,nout,i,otype,px,py,pz,e,"
+                  "posx,posy,posz,zone,cpath,nrefl,movingin,"
+                  "nucl1,nucl2,npcur,nncur,cposx,cposy,cposz,czone,ccpath,ogen\n");
+
+  struct AZ { int a, z; };
+  static const AZ nuclei[] = {{12, 6}, {27, 13}, {56, 26}, {207, 82}};
+  static const int types[] = {proton, neutron, pionPlus, pionMinus, pionZero, photon};
+  // The 0 is not decoration. `generateInteractionPartners` has a branch that fires only for a
+  // particle with no momentum - `fabs(path) < small` with `mom.vect().mag() <= small` - and it
+  // reaches two pieces of arithmetic nothing else does: the `path < small` disjunct that keeps a
+  // partner whose sampled length is `large`, and `propagateAlongThePath` with
+  // `Hep3Vector::unit()` of the ZERO vector, which CLHEP defines as zero and a port that
+  // normalises to +z would turn into a thousand-unit jump along the beam axis.
+  static const double plabs[] = {0.0, 0.3, 1.0, 3.0};
+
+  // Three directions. [0] is the DEGENERATE one - parallel to the position vector, so the
+  // particle is moving radially outward and `pperp2` is zero; [1] and [2] are off every axis and
+  // off the radius, one outbound and one inbound.
+  static const G4ThreeVector dirs[] = {
+      G4ThreeVector(0.4242640687119285, 0.5656854249492380, 0.7071067811865476),
+      G4ThreeVector(0.3713906763541037, -0.5570860145311556, 0.7427813527082074),
+      G4ThreeVector(-0.5883484054145521, 0.1961161351381840, -0.7844645405527361)};
+  // Fractions of the nuclear radius. 0.999 is inside the outermost zone and one step from the
+  // surface; 0.15 is inside zone 0 of every nucleus in the list.
+  static const double rads[] = {0.15, 0.45, 0.75, 0.999};
+  // The position direction, chosen with all three components different and none zero.
+  const G4ThreeVector rhat = G4ThreeVector(0.4242640687119285, 0.5656854249492380,
+                                           0.7071067811865476);
+
+  CycleEngine cyc;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&cyc);
+
+  G4ElementaryParticleCollider coll;
+  std::vector<G4CascadParticle> out;
+
+  for (const AZ& n : nuclei) {
+    G4NucleiModel model(n.a, n.z);
+    for (int type : types) {
+      const double m = G4InuclElementaryParticle::getParticleMass(type);
+      for (double plab : plabs) {
+        for (int idir = 0; idir < 3; ++idir) {
+          for (int irad = 0; irad < 4; ++irad) {
+            const G4ThreeVector pos = rhat * (rads[irad] * model.getRadius());
+            for (int gen = 0; gen < 2; ++gen) {
+              // generation 0 carries `large` in the path field, which is the sentinel that
+              // exempts the projectile from the young-secondary veto; generation 1 carries 0,
+              // which is what every real secondary carries.
+              const double cpath = (gen == 0) ? 1000. : 0.;
+              for (int phase = 0; phase < 8; ++phase) {
+                model.reset();
+                cyc.reset(phase);
+
+                G4LorentzVector mom;
+                mom.setVectM(dirs[idir] * plab, m);
+                G4InuclElementaryParticle bullet(mom, type);
+                G4CascadParticle cp(bullet, pos, model.getZone(pos.mag()), cpath, gen);
+
+                out.clear();
+                model.generateParticleFate(cp, &coll, out);
+
+                const long long draws = cyc.draws();
+                const std::pair<G4int, G4int> nucl = model.getTypesOfNucleonsInvolved();
+                const G4ThreeVector& cpos = cp.getPosition();
+
+                const int nout = static_cast<int>(out.size());
+                for (int i = 0; i < (nout > 0 ? nout : 1); ++i) {
+                  if (nout == 0) {
+                    std::fprintf(f,
+                                 "%d,%d,%d,%.17g,%d,%d,%d,%d,%lld,0,-1,0,0,0,0,0,"
+                                 "0,0,0,-1,0,0,0,%d,%d,%d,%d,%.17g,%.17g,%.17g,%d,%.17g,-1\n",
+                                 n.a, n.z, type, plab, idir, irad, gen, phase, draws,
+                                 nucl.first, nucl.second, model.getNumberOfProtons(),
+                                 model.getNumberOfNeutrons(), cpos.x(), cpos.y(), cpos.z(),
+                                 cp.getCurrentZone(), cp.getCurrentPath());
+                    continue;
+                  }
+                  const G4CascadParticle& o = out[i];
+                  const G4LorentzVector om = o.getMomentum();
+                  const G4ThreeVector& op = o.getPosition();
+                  std::fprintf(f,
+                               "%d,%d,%d,%.17g,%d,%d,%d,%d,%lld,%d,%d,%d,"
+                               "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%d,%d,"
+                               "%d,%d,%d,%d,%.17g,%.17g,%.17g,%d,%.17g,%d\n",
+                               n.a, n.z, type, plab, idir, irad, gen, phase, draws, nout, i,
+                               o.getParticle().type(), om.x(), om.y(), om.z(), om.e(), op.x(),
+                               op.y(), op.z(), o.getCurrentZone(), o.getCurrentPath(),
+                               o.getNumberOfReflections(),
+                               o.movingInsideNuclei() ? 1 : 0, nucl.first, nucl.second,
+                               model.getNumberOfProtons(), model.getNumberOfNeutrons(),
+                               cpos.x(), cpos.y(), cpos.z(), cp.getCurrentZone(),
+                               cp.getCurrentPath(), o.getGeneration());
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
 void dump_bertini(const DumpContext&) {
   dump_params();
   dump_particles();
@@ -1189,6 +1420,8 @@ void dump_bertini(const DumpContext&) {
   dump_chtables();
   dump_angdst();
   dump_epcollide();
+  dump_initcascad();
+  dump_fate();
   dump_apply();
 }
 
@@ -1201,5 +1434,6 @@ G4GPU_REGISTER_DUMP("bertini",
                     "bertini_chtables.csv bertini_chfinalstates.csv bertini_chbins.csv bertini_angchoice.csv "
                     "bertini_angdst.csv bertini_3bodydst.csv bertini_momchoice.csv "
                     "bertini_epcollide.csv "
+                    "bertini_initcascad.csv bertini_fate.csv "
                     "bertini_apply.csv bertini_apply_species.csv",
                     dump_bertini);

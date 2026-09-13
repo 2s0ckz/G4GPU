@@ -9201,3 +9201,77 @@ frame transformation.** A tolerance of 1e-12 on four-momenta hid a systematic 2e
 every photon row of this oracle for as long as the grid had no moving target (V124) and the
 storage was not transcribed. Neither the draw counts, the multiplicities, the product types nor
 the refusals said anything - all four were exact throughout.
+
+### V126: resetReflection() clears a flag and not the counter, and the two are read by different files
+
+`G4NucleiModel::boundaryTransition` has three arms. The reflecting one calls
+
+    cparticle.incrementReflectionCounter();   // { reflectionCounter++; reflected = true; }
+
+and the two transmitting ones call
+
+    cparticle.resetReflection();              // { reflected = false; }
+
+`resetReflection` does **not** touch `reflectionCounter`. So the counter is a lifetime total -
+it is zeroed only by `G4CascadParticle`'s constructor and `fill()`, i.e. only when a new particle
+is made - while the flag is per-step. The two are read in different files and for different
+purposes: `G4NucleiModel::worthToPropagate` reads the FLAG (`reflectedNow()`), because its
+question is "did this particle just bounce?", and `G4IntraNucleiCascader::generateCascade` reads
+the COUNTER against `reflection_cut` (50), because its question is "has this particle been
+rattling around long enough to give up on?". A port that zeroes the counter on every
+transmission gives a particle an unlimited budget: it can reflect forty-nine times, transmit
+once, and start again.
+
+The uncommitted transcription this package inherited did exactly that - one `n_reflections = 0`
+in each transmit arm - and **no oracle grid can see it**. `generateParticleFate` crosses at most
+one boundary per call, so every case in `ref/oracle/bertini_fate.csv` has a counter of 0 or 1
+whichever way the reset is written, and the perturbation passed all 537,804 comparisons. It is
+asserted by construction instead, in `tests/test_bertini_cascade.cu`: reflect, transmit, reflect,
+and the counter must read 2. V52's distinction again, and the second time in this package that
+the thing the grid could not see was a piece of state rather than a number (V121, V124).
+
+### V127: unit() of the zero vector is zero in CLHEP and +z in this port, and a particle at rest is where that shows
+
+`core/vec3.cuh`'s `normalize` returns `(0,0,1)` for a zero argument. That is the right answer for
+a *direction* - a caller that asks for a direction needs one - and the wrong answer for
+`Hep3Vector::unit()`, which is
+
+    double tot = mag2();
+    Hep3Vector p(x(),y(),z());
+    return tot > 0.0 ? p *= (1.0/std::sqrt(tot)) : p;
+
+and returns the zero vector. `G4CascadParticle::propagateAlongThePath` is
+`position += getMomentum().vect().unit() * path`, so for a particle with no momentum Geant4
+leaves it where it is and the port would move it by the whole sampled path - which, for a partner
+that did not interact, is `G4NucleiModel::large` = 1000 in Bertini's units, about a hundred
+nuclear radii along +z.
+
+It is reachable only through a branch that also has to be reached deliberately.
+`generateInteractionPartners` returns early for anything with momentum and a zero path; the
+surviving case is `|p| <= 1e-9 GeV` **and** `|path| < 1e-9`, i.e. a particle at rest, and there
+`generateInteractionLength` returns `large` for every partner because `pw = 1 - exp(0) = 0`. The
+first oracle grid for this package had momenta {0.3, 1, 3} GeV/c and could not see it; adding
+`plab = 0` found it, and the same row also distinguishes `path < small || spath < path` from
+`spath < path`, which is the other expression that only an at-rest particle can tell apart.
+
+QBBC never produces a cascade particle at rest - `initializeCascad` puts a stopped projectile one
+zone inside the surface and every collision product carries momentum - so this is a difference
+that would have cost nothing in production and everything in a muon-capture run (P12). The rule
+it illustrates is narrower than "check your utilities": **a utility function written for one
+meaning of a degenerate case is a landmine for the second caller**, and the way to find it is a
+grid that contains the degenerate case, not a reading.
+
+### V128: a bucket that records the worst relative error passes a column that is entirely NaN
+
+Every comparison harness in `tests/` accumulates `if (rel > b.worst) b.worst = rel;` and then
+fails the bucket when `b.worst > b.tol`. Both comparisons are false when `rel` is NaN - every
+comparison against a NaN is - so a bucket whose every entry is NaN reports **worst 0, ok**.
+
+Found by the anti-vacuity campaign, not by a failure: the perturbation that removes
+`clhep_rotate`'s zero-axis guard makes the rotation matrix `0/0` and the rotated position a NaN,
+and `tests/test_bertini_cascade.cu` reported 538,875 comparisons and 0 failures for it. The fix
+is three lines - `std::isnan(got) != std::isnan(want)` sets the bucket to infinity - and it is in
+that file only so far. **Every other bucket in `tests/` has the same hole**, including the ones
+that are green today: a transcription that produced a NaN for a whole column would be reported as
+exact. Worth carrying across at the next integration; it can only turn a pass into a failure, so
+it is safe to apply everywhere at once.

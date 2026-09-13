@@ -171,6 +171,14 @@ struct NucleiModel {
   int proton_number = 0;
   int neutron_number_current = 0;
   int proton_number_current = 0;
+  /// G4NucleiModel::current_nucl1 / current_nucl2 - which nucleon types the last
+  /// `generateParticleFate` consumed, read back by the cascader through
+  /// `getTypesOfNucleonsInvolved()` and turned into exciton holes. They are members of the model
+  /// and NOT cleared by `reset()`, so a new cascade attempt inherits the previous one's pair
+  /// until the first fate is generated; `generateParticleFate` zeroes them on both of its
+  /// no-interaction paths and on a successful collision, which is every path that returns.
+  int current_nucl1 = 0;
+  int current_nucl2 = 0;
 };
 
 /// G4NucleiModel::reset, without the trailing-effect hit list (which is the caller's, because
@@ -715,10 +723,29 @@ __host__ __device__ inline double cp_path_to_next_zone(const Vec3d& position, co
   return path;
 }
 
+/// `Hep3Vector::unit()` - and it is NOT `g4gpu::normalize`.
+///
+///     double tot = mag2();
+///     Hep3Vector p(x(),y(),z());
+///     return tot > 0.0 ? p *= (1.0/std::sqrt(tot)) : p;
+///
+/// CLHEP returns the ZERO vector for a zero argument; `core/vec3.cuh`'s `normalize` returns
+/// (0,0,1), which is the right choice for a direction that has to be a direction and the wrong
+/// one here. `propagateAlongThePath` on a particle at rest must leave it where it is, and with
+/// (0,0,1) it would move it by the whole sampled path - which for a partner that did not
+/// interact is `large`, 1000 in Bertini's units, i.e. a hundred nuclear radii along +z. It is
+/// also a reciprocal multiply and not three divisions, which is the V37 ulp.
+__host__ __device__ inline Vec3d clhep_unit(const Vec3d& v) {
+  const double tot = g4gpu::mag2(v);
+  if (!(tot > 0.0)) { return v; }
+  const double inv = 1.0 / std::sqrt(tot);
+  return Vec3d{v.x * inv, v.y * inv, v.z * inv};
+}
+
 /// G4CascadParticle::propagateAlongThePath.
 __host__ __device__ inline Vec3d cp_propagate(const Vec3d& position, const LV& mom,
                                               double path) {
-  return position + g4gpu::normalize(mom.v) * path;
+  return position + clhep_unit(mom.v) * path;
 }
 
 /// G4NucleiModel::passFermi - an outgoing NUCLEON below the local Fermi momentum blocks the
@@ -785,9 +812,19 @@ __host__ __device__ inline bool nm_worth_to_propagate(const NucleiModel& m, bool
 ///
 /// `qv = dv^2 + 2 dv E + p_r^2` uses the TOTAL energy `mom.e()`, with the more-correct
 /// `mom.m()` commented out beside it. `potentialThickness` is 1.0 and only enters `qperp`.
+///
+/// **The reflection COUNTER is never reset; only the reflection FLAG is.** Geant4's two transmit
+/// arms call `cparticle.resetReflection()`, which is `{ reflected = false; }` and nothing else,
+/// while the reflect arm calls `incrementReflectionCounter()`, which is
+/// `{ reflectionCounter++; reflected = true; }`. So `reflectionCounter` accumulates over a
+/// particle's whole life and `G4IntraNucleiCascader`'s `getNumberOfReflections() <
+/// reflection_cut` (50) is a lifetime budget, not a run-length. This function takes the two
+/// separately for that reason: `n_reflections` is only ever incremented here, `reflected_now` is
+/// what `worthToPropagate` reads and it is cleared on transmission. docs/RISK.md V126.
 __host__ __device__ inline void nm_boundary_transition(const NucleiModel& m, int ptype,
                                                        const Vec3d& pos, LV& mom, int& zone,
                                                        bool moving_inside, int& n_reflections,
+                                                       bool& reflected_now,
                                                        bool& in_zone_zero) {
   in_zone_zero = false;
   if (moving_inside && zone == 0) { in_zone_zero = true; return; }
@@ -807,17 +844,18 @@ __host__ __device__ inline void nm_boundary_transition(const NucleiModel& m, int
   bool adjust_pperp = false;
   if (qv <= 0.0 && qv + qperp <= 0.0) {
     p1r = -pr;
-    ++n_reflections;
+    ++n_reflections;          // incrementReflectionCounter(): counter AND flag
+    reflected_now = true;
   } else if (qv > 0.0) {
     p1r = std::sqrt(qv);
     if (pr < 0.0) { p1r = -p1r; }
     zone = next_zone;
-    n_reflections = 0;
+    reflected_now = false;    // resetReflection(): the FLAG only - see the comment above
   } else {
     p1r = smallish * pr;
     adjust_pperp = true;
     zone = next_zone;
-    n_reflections = 0;
+    reflected_now = false;
   }
 
   const double prr = (p1r - pr) / r;
@@ -830,6 +868,17 @@ __host__ __device__ inline void nm_boundary_transition(const NucleiModel& m, int
   } else {
     mom.v = mom.v + pos * prr;
   }
+
+  // `cparticle.updateParticleMomentum(mom)` is `theParticle.setMomentum(mom)`, so the four-
+  // vector goes through the INUCL store on its way back in - and here that is not an ulp. Only
+  // the THREE-momentum was changed above; the energy is still the one the particle had before
+  // the wall, so the vector is off the mass shell by the whole potential step, and the store's
+  // `|getMass() - mom.m()| <= 1e-5` test fails and takes the `SetMomentum(vect)` arm: the mass
+  // is forced back to the PDG value and the energy is rebuilt from it. MEASURED: without this,
+  // a 300 MeV/c neutron crossing a zone boundary in carbon comes out with an energy 2.5% wrong
+  // while its momentum, position, zone and path are all exact. docs/RISK.md V125 is the same
+  // mechanism one level down.
+  mom = inucl_store_momentum(mom, ptype);
 }
 
 }  // namespace g4gpu::physics::hadronic::bert
