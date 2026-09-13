@@ -72,6 +72,7 @@
 #include "Randomize.hh"
 
 #include "G4CascadeChannel.hh"
+#include "G4CascadeCoalescence.hh"
 #include "G4CascadeChannelTables.hh"
 #include "G4CascadeInterface.hh"
 #include "G4CollisionOutput.hh"
@@ -82,7 +83,10 @@
 #include "G4HadFinalState.hh"
 #include "G4HadSecondary.hh"
 #include "G4HadronicParameters.hh"
+#include "G4IntraNucleiCascader.hh"
 #include "G4InuclElementaryParticle.hh"
+#include "G4InuclNuclei.hh"
+#include "G4Fragment.hh"
 #include "G4InuclParticleNames.hh"
 #include "G4InuclSpecialFunctions.hh"
 #include "G4MultiBodyMomentumDist.hh"
@@ -1256,7 +1260,9 @@ void dump_initcascad() {
   std::fprintf(f, "a,z,type,plab,phase,draws,posx,posy,posz,zone,cpath,gen,px,py,pz,e\n");
 
   struct AZ { int a, z; };
-  static const AZ nuclei[] = {{12, 6}, {27, 13}, {56, 26}, {207, 82}};
+  // He-4 is one zone and Be-9 three on a GAUSSIAN density; A >= 12 are Woods-Saxon. A grid
+  // without the first two exercises only one of G4NucleiModel's three density shapes.
+  static const AZ nuclei[] = {{4, 2}, {9, 4}, {12, 6}, {27, 13}, {56, 26}, {207, 82}};
   static const int types[] = {proton, neutron, pionPlus, pionMinus, pionZero, photon};
   // The last entry is BELOW G4NucleiModel::small (1e-9 GeV): that is the capture-at-rest branch,
   // which starts the particle one zone INSIDE the surface instead of outside it.
@@ -1311,7 +1317,7 @@ void dump_fate() {
                   "nucl1,nucl2,npcur,nncur,cposx,cposy,cposz,czone,ccpath,ogen\n");
 
   struct AZ { int a, z; };
-  static const AZ nuclei[] = {{12, 6}, {27, 13}, {56, 26}, {207, 82}};
+  static const AZ nuclei[] = {{4, 2}, {9, 4}, {12, 6}, {27, 13}, {56, 26}, {207, 82}};
   static const int types[] = {proton, neutron, pionPlus, pionMinus, pionZero, photon};
   // The 0 is not decoration. `generateInteractionPartners` has a branch that fires only for a
   // particle with no momentum - `fabs(path) < small` with `mom.vect().mag() <= small` - and it
@@ -1411,6 +1417,208 @@ void dump_fate() {
   std::fclose(f);
 }
 
+// ---------------------------------------------------------------------------------------------
+// bertini_cascader.csv - G4IntraNucleiCascader::collide, exact.
+//
+// The whole intra-nuclear cascade: the entry point, every step, the coalescence into light ions,
+// the recoil bookkeeping, `setOnShell`'s rebalancing and the retry loop. `collide` is public and
+// the class is constructible on its own, so under the cycle engine the event is a deterministic
+// function of (nucleus, particle, momentum, phase) and can be compared value for value rather
+// than as a distribution.
+//
+// The row carries, besides every outgoing particle and nucleus and the recoil fragment, the
+// number of deviates the event consumed. That number is the assertion that catches a wrong
+// number of retries: a cascade that fails `finishCascade` and starts again costs another entry
+// point, another set of interaction partners and another set of collisions, so a port that
+// accepts an event Geant4 rejects diverges in the draw count before it diverges in any
+// four-vector.
+//
+// `itry` is not dumped: it is not reachable through the public interface. What stands in for it
+// is the draw count.
+// ---------------------------------------------------------------------------------------------
+void dump_cascader() {
+  FILE* f = std::fopen("bertini_cascader.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "a,z,type,plab,phase,draws,npart,nnuc,nfrag,kind,i,ptype,pa,pz,exc,"
+                  "px,py,pz_,e\n");
+
+  struct AZ { int a, z; };
+  // He-4 and Be-9 are not decoration: G4NucleiModel gives A < 5 a SINGLE zone of radius
+  // radiusForSmall*radScaleAlpha, 5 <= A < 12 three zones on a GAUSSIAN density, and A >= 12
+  // three or six on Woods-Saxon. A grid of 12, 27, 56 and 207 cascades only the last of those
+  // three shapes. He-4 is also the only target a 3 GeV projectile can eat entirely, which is
+  // the one way to reach `finishCascade` with particles still in flight - the `model->empty()`
+  // exit from generateCascade, which on a heavy nucleus never happens.
+  static const AZ nuclei[] = {{4, 2}, {9, 4}, {12, 6}, {27, 13}, {56, 26}, {207, 82}};
+  static const int types[] = {proton, neutron, pionPlus, pionMinus};
+  static const double plabs[] = {0.5, 1.5, 3.0};
+
+  CycleEngine cyc;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&cyc);
+
+  G4IntraNucleiCascader casc;
+  G4CollisionOutput out;
+
+  for (const AZ& n : nuclei) {
+    for (int type : types) {
+      const double m = G4InuclElementaryParticle::getParticleMass(type);
+      for (double plab : plabs) {
+        for (int phase = 0; phase < 8; ++phase) {
+          cyc.reset(phase);
+          G4InuclElementaryParticle bullet(
+              G4LorentzVector(0., 0., plab, std::sqrt(plab * plab + m * m)), type);
+          // (a, z) - the three-argument (ekin, a, z) form needs a fourth argument and a call
+          // with three doubles-and-ints silently binds to (a, z, exc) instead, which makes an
+          // A = 0 nucleus and throws inside G4IonTable.
+          G4InuclNuclei target(n.a, n.z);
+          out.reset();
+          casc.collide(&bullet, &target, out);
+          const long long draws = cyc.draws();
+
+          const G4int npart = out.numberOfOutgoingParticles();
+          const G4int nnuc = out.numberOfOutgoingNuclei();
+          const G4int nfrag = out.numberOfFragments();
+
+          // kind 0 = elementary particle, 1 = outgoing nucleus, 2 = recoil fragment.
+          for (G4int i = 0; i < npart; ++i) {
+            const G4InuclElementaryParticle& pp = out.getOutgoingParticles()[i];
+            const G4LorentzVector& pm = pp.getMomentum();
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%lld,%d,%d,%d,0,%d,%d,0,0,0,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         n.a, n.z, type, plab, phase, draws, npart, nnuc, nfrag, i, pp.type(),
+                         pm.x(), pm.y(), pm.z(), pm.e());
+          }
+          for (G4int i = 0; i < nnuc; ++i) {
+            const G4InuclNuclei& nn = out.getOutgoingNuclei()[i];
+            const G4LorentzVector& pm = nn.getMomentum();
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%lld,%d,%d,%d,1,%d,0,%d,%d,%.17g,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         n.a, n.z, type, plab, phase, draws, npart, nnuc, nfrag, i, nn.getA(),
+                         nn.getZ(), nn.getExitationEnergy(), pm.x(), pm.y(), pm.z(), pm.e());
+          }
+          for (G4int i = 0; i < nfrag; ++i) {
+            const G4Fragment& fr = out.getRecoilFragment(i);
+            const G4LorentzVector pm = fr.GetMomentum() / GeV;   // Bertini units
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%lld,%d,%d,%d,2,%d,0,%d,%d,%.17g,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         n.a, n.z, type, plab, phase, draws, npart, nnuc, nfrag, i,
+                         fr.GetA_asInt(), fr.GetZ_asInt(), fr.GetExcitationEnergy(), pm.x(),
+                         pm.y(), pm.z(), pm.e());
+          }
+          if (npart + nnuc + nfrag == 0) {
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%lld,0,0,0,-1,-1,0,0,0,0,0,0,0,0\n", n.a, n.z,
+                         type, plab, phase, draws);
+          }
+        }
+      }
+    }
+  }
+
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// bertini_coalescence.csv - G4CascadeCoalescence::FindClusters on hand-built final states.
+//
+// **Coalescence draws no random numbers at all**, so it needs no engine: it is a pure function
+// of the outgoing-particle list, and `FindClusters` is public and takes a G4CollisionOutput.
+// That makes a hand-built grid the right oracle, and it is the only way to reach the branches a
+// real cascade does not.
+//
+// It is needed because the 384 cascader events produce 18 deuterons, 3 tritons, one He-3 and
+// **no alpha**: four nucleons within 115 MeV/c of their common rest frame is rare, and deleting
+// the whole four-body arm from the port passed all 575,849 comparisons. The configurations below
+// reach every size, every rejection, the nucleon-content tests (pp is not a deuteron), the
+// search ORDER (an alpha is found before the deuteron that would have used one of its nucleons)
+// and the interleaving of non-nucleons.
+//
+// The momenta are written out here and in tests/test_bertini_cascade.cu as the same literals,
+// for the same reason the fate grid's directions are: a difference in the last bit would move a
+// configuration across a cut and silently change which branch is measured.
+// ---------------------------------------------------------------------------------------------
+namespace coal_grid {
+
+// One configuration: a list of (type, px, py, pz) in GeV, the particles in the order the cascade
+// would have left them.
+struct Part { int type; double px, py, pz; };
+
+// Every list shares a boost of +0.3 GeV/c along z, so that the cluster rest frame is not the lab
+// and `maxDeltaP`'s boost is actually applied - the same lesson as docs/RISK.md V124.
+const Part cfg0[] = {{1, 0.03, 0.02, 0.34}, {1, -0.02, 0.03, 0.28},
+                     {2, 0.01, -0.04, 0.31}, {2, -0.03, -0.01, 0.27}};   // -> alpha
+const Part cfg1[] = {{1, 0.18, 0.12, 0.44}, {1, -0.15, 0.19, 0.18},
+                     {2, 0.11, -0.22, 0.41}, {2, -0.14, -0.09, 0.17}};   // too fast: nothing
+const Part cfg2[] = {{1, 0.03, 0.02, 0.33}, {2, -0.02, 0.03, 0.28},
+                     {2, 0.01, -0.04, 0.30}};                            // -> triton
+const Part cfg3[] = {{1, 0.03, 0.02, 0.33}, {1, -0.02, 0.03, 0.28},
+                     {2, 0.01, -0.04, 0.30}};                            // -> He-3
+const Part cfg4[] = {{1, 0.02, 0.01, 0.31}, {2, -0.02, -0.01, 0.29}};    // -> deuteron
+const Part cfg5[] = {{1, 0.02, 0.01, 0.31}, {1, -0.02, -0.01, 0.29}};    // pp: nothing
+const Part cfg6[] = {{2, 0.02, 0.01, 0.31}, {2, -0.02, -0.01, 0.29}};    // nn: nothing
+const Part cfg7[] = {{1, 0.03, 0.02, 0.34}, {1, -0.02, 0.03, 0.28},
+                     {2, 0.01, -0.04, 0.31}, {2, -0.03, -0.01, 0.27},
+                     {1, 0.00, 0.00, 0.30}};                  // alpha, one proton left over
+const Part cfg8[] = {{1, 0.03, 0.02, 0.34}, {1, -0.02, 0.03, 0.28},
+                     {2, 0.01, -0.04, 0.31}, {2, -0.03, -0.01, 0.27},
+                     {1, 0.02, 0.01, 0.31}, {2, -0.02, -0.01, 0.29}};  // alpha then deuteron
+const Part cfg9[] = {{1, 0.03, 0.02, 0.34}, {3, 0.10, 0.10, 0.50},
+                     {1, -0.02, 0.03, 0.28}, {5, -0.10, 0.10, 0.50},
+                     {2, 0.01, -0.04, 0.31}, {2, -0.03, -0.01, 0.27}};  // pions interleaved
+// Four nucleons whose alpha cut fails but whose first three pass the triplet cut: the four-body
+// arm is tried FIRST and rejected, then the three-body arm succeeds on indices 0,1,2.
+const Part cfg10[] = {{1, 0.03, 0.02, 0.33}, {1, -0.02, 0.03, 0.28},
+                      {2, 0.01, -0.04, 0.30}, {2, 0.00, 0.00, 0.60}};
+const Part cfg11[] = {{1, 0.02, 0.01, 0.31}};                            // one nucleon: nothing
+
+struct Cfg { const Part* p; int n; };
+const Cfg cfgs[] = {{cfg0, 4}, {cfg1, 4}, {cfg2, 3}, {cfg3, 3}, {cfg4, 2}, {cfg5, 2},
+                    {cfg6, 2}, {cfg7, 5}, {cfg8, 6}, {cfg9, 6}, {cfg10, 4}, {cfg11, 1}};
+const int n_cfgs = 12;
+
+}  // namespace coal_grid
+
+void dump_coalescence() {
+  FILE* f = std::fopen("bertini_coalescence.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "cfg,npart,nnuc,kind,i,type,a,z,px,py,pz,e\n");
+
+  G4CascadeCoalescence coal;
+  G4CollisionOutput out;
+
+  for (int ic = 0; ic < coal_grid::n_cfgs; ++ic) {
+    out.reset();
+    for (int i = 0; i < coal_grid::cfgs[ic].n; ++i) {
+      const coal_grid::Part& p = coal_grid::cfgs[ic].p[i];
+      const double m = G4InuclElementaryParticle::getParticleMass(p.type);
+      G4LorentzVector mom;
+      mom.setVectM(G4ThreeVector(p.px, p.py, p.pz), m);
+      out.addOutgoingParticle(G4InuclElementaryParticle(mom, p.type));
+    }
+    coal.FindClusters(out);
+
+    const G4int npart = out.numberOfOutgoingParticles();
+    const G4int nnuc = out.numberOfOutgoingNuclei();
+    for (G4int i = 0; i < npart; ++i) {
+      const G4InuclElementaryParticle& pp = out.getOutgoingParticles()[i];
+      const G4LorentzVector& pm = pp.getMomentum();
+      std::fprintf(f, "%d,%d,%d,0,%d,%d,0,0,%.17g,%.17g,%.17g,%.17g\n", ic, npart, nnuc, i,
+                   pp.type(), pm.x(), pm.y(), pm.z(), pm.e());
+    }
+    for (G4int i = 0; i < nnuc; ++i) {
+      const G4InuclNuclei& nn = out.getOutgoingNuclei()[i];
+      const G4LorentzVector& pm = nn.getMomentum();
+      std::fprintf(f, "%d,%d,%d,1,%d,0,%d,%d,%.17g,%.17g,%.17g,%.17g\n", ic, npart, nnuc, i,
+                   nn.getA(), nn.getZ(), pm.x(), pm.y(), pm.z(), pm.e());
+    }
+    if (npart + nnuc == 0) {
+      std::fprintf(f, "%d,0,0,-1,-1,0,0,0,0,0,0,0\n", ic);
+    }
+  }
+  std::fclose(f);
+}
+
 void dump_bertini(const DumpContext&) {
   dump_params();
   dump_particles();
@@ -1422,6 +1630,8 @@ void dump_bertini(const DumpContext&) {
   dump_epcollide();
   dump_initcascad();
   dump_fate();
+  dump_cascader();
+  dump_coalescence();
   dump_apply();
 }
 
@@ -1434,6 +1644,6 @@ G4GPU_REGISTER_DUMP("bertini",
                     "bertini_chtables.csv bertini_chfinalstates.csv bertini_chbins.csv bertini_angchoice.csv "
                     "bertini_angdst.csv bertini_3bodydst.csv bertini_momchoice.csv "
                     "bertini_epcollide.csv "
-                    "bertini_initcascad.csv bertini_fate.csv "
+                    "bertini_initcascad.csv bertini_fate.csv bertini_cascader.csv bertini_coalescence.csv "
                     "bertini_apply.csv bertini_apply_species.csv",
                     dump_bertini);

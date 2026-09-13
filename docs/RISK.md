@@ -9275,3 +9275,65 @@ that file only so far. **Every other bucket in `tests/` has the same hole**, inc
 that are green today: a transcription that produced a NaN for a whole column would be reported as
 exact. Worth carrying across at the next integration; it can only turn a pass into a failure, so
 it is safe to apply everywhere at once.
+
+### V129: one constant, three meanings, and only the middle one matches its declaration
+
+`G4IntraNucleiCascader::small_ekin` is declared `0.001*MeV` - one keV - and is used three times.
+
+    theRecoilMaker->setTolerance(small_ekin);       // excTolerance
+    ...
+    if (mres-mass < -small_ekin) return false;      // mres, mass in GeV
+
+and inside the recoil maker,
+
+    if (std::abs(excitationEnergy) < excTolerance) excitationEnergy = 0.;   // MeV
+    recoilMomentum.rho() < excTolerance/GeV                                 // GeV
+
+In Geant4's unit system `MeV == 1`, so the constant's numeric value is 0.001. Against an
+excitation in MeV it means a keV, which is what it says. Against `mres - mass`, which is in
+**Bertini's GeV**, it means a **MeV** - a thousand times looser. Against a momentum divided by
+`GeV` it means 1e-6 GeV, i.e. an **eV** - a thousand times tighter. A port that carries one
+constant and converts consistently gets two of the three wrong.
+
+It was found by adding He-4 to the cascader's oracle grid, because the `mres - mass` comparison
+lives in the `afin == 1` branch - the residual is a single nucleon - and a residual of A = 1
+needs a target light enough to lose three of its four nucleons. On C, Al, Fe and Pb it never
+happens, and a grid of those four measured nothing about it.
+
+The same grid extension found the real bug next to it, which is not about units at all: the bare
+recoil nucleon is CONSTRUCTED there, `G4InuclElementaryParticle(presid, last_type, INCascader)`,
+so it goes through the INUCL store (V125) and is forced onto the nucleon mass shell. The dozen MeV
+by which the residual four-vector was heavier is discarded, the event stops balancing, `wholeEvent`
+goes false, and - with the residual now (0,0) so there is no fragment either - `setOnShell` is
+never reached and the whole cascade is regenerated. Passing the raw four-vector instead, which is
+what every other `addOutgoingParticle` in the cascader does because those particles were stored
+when they were made, made the port ACCEPT a pi+ event on He-4 that Geant4 rejects a hundred times
+and then trivialises. Draw count 128 against 6,400.
+
+The transferable part: **a grid of targets is a grid of code paths, and the light end is where
+the residual gets small enough to change kind.** Four nuclei spanning carbon to lead look like
+good coverage and reach exactly one of G4NucleiModel's three density shapes and none of its
+single-nucleon residuals.
+
+### V130: G4IntraNucleiCascader's minimum_recoil_A cannot be incremented
+
+`minimum_recoil_A` is the model's only adaptive quantity: it is meant to make a failed cascade
+retry more cheaply by abandoning the next attempt as soon as the residual drops to that mass.
+It is initialised to 0 in `initialize()` and raised in exactly one place, the last three lines of
+`finishCascade`:
+
+    if (afin <= minimum_recoil_A && minimum_recoil_A < tnuclei->getA()) ++minimum_recoil_A;
+
+`afin <= 0` cannot hold there. `!goodFragment() && !wholeEvent()` has already returned false for
+every `afin <= 0`, and `afin == 0` has already returned TRUE. So `afin >= 1 > 0` and the counter
+never moves off zero for the life of the event.
+
+Its only reader is `generateCascade`'s `if (aresid <= minimum_recoil_A) return;`, which therefore
+means "stop when the residual has no baryons left" and nothing else. That IS reachable - a light
+target can be eaten entirely - so the line is not dead, only the feedback is.
+
+Both are transcribed as written. The perturbation that deletes the raise entirely passes every
+comparison, which is the expected answer for dead code and is recorded as such rather than left
+looking like a gap in the grid. A port that "fixed" the guard to `afin <= minimum_recoil_A + 1`
+or similar would abandon cascades Geant4 runs to the end, and the first thing to move would be
+the multiplicity of every heavy-target event.

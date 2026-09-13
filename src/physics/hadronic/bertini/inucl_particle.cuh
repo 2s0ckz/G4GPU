@@ -604,15 +604,29 @@ __host__ __device__ inline void inucl_random_cos_sin(Rng& rng, double& ct, doubl
 constexpr double kInuclEnergyMRA2 = 1.0e-10;
 
 /// G4InuclParticle::setMomentum followed by getMomentum(): what an INUCL particle gives back
-/// after being handed @p mom (in GeV) as a particle of type @p type.
+/// after being handed @p mom (in GeV) as a particle whose definition installed @p mass_gev.
 ///
-/// `pdg_mass_mev` is the dynamical mass the definition installed, in Geant4's own units. The
-/// port's mass table is in GeV because every INUCL formula is, so the MeV value is the GeV one
-/// scaled - which is what the comparison `|PDGmass2 - mass2| > EnergyMRA2` is done against, and
-/// the allowance is 1e-10 MeV^2, twenty orders of magnitude above any scaling rounding.
-__host__ __device__ inline LV inucl_store_momentum(const LV& mom, int type,
-                                                   double* stored_ekin_gev = nullptr) {
-  const double mass_gev = inucl_particle_mass(type);
+/// The port's mass table is in GeV because every INUCL formula is, so the MeV value is the GeV
+/// one scaled - which is what the comparison `|PDGmass2 - mass2| > EnergyMRA2` is done against,
+/// and the allowance is 1e-10 MeV^2, twenty orders of magnitude above any scaling rounding.
+///
+/// Taking the mass rather than a type code is what lets a NUCLEUS through the same function.
+/// `G4InuclNuclei::fill` is `setDefinition(makeDefinition(a,z)); setMomentum(mom);`, and the
+/// definition's PDG mass for an ion is `G4NucleiProperties::GetNuclearMass(A, Z)`, the same
+/// number `getNucleiMass` returns. So a fragment's four-momentum is put on the ION's mass shell
+/// on the way in, which is why `G4CascadeCoalescence` has the comment "Four-momentum will not be
+/// conserved due to binding energy" beside its only call: the three nucleons that went in had
+/// more mass between them than the triton that comes out, and the difference is discarded here,
+/// not accounted anywhere.
+/// `G4InuclNuclei::fill` is `setDefinition(makeDefinition(a,z)); setMomentum(mom);`, and the
+/// definition's PDG mass for an ion is `G4NucleiProperties::GetNuclearMass(A, Z)`, the same
+/// number `getNucleiMass` returns. So a fragment's four-momentum is put on the ION's mass shell
+/// on the way in, which is why `G4CascadeCoalescence` has the comment "Four-momentum will not be
+/// conserved due to binding energy" beside its only call: the three nucleons that went in had
+/// more mass between them than the triton that comes out, and the difference is discarded here,
+/// not accounted anywhere.
+__host__ __device__ inline LV inucl_store_momentum_mass(const LV& mom, double mass_gev,
+                                                        double* stored_ekin_gev = nullptr) {
   const Vec3d p{mom.v.x * 1000.0, mom.v.y * 1000.0, mom.v.z * 1000.0};
   const double t = mom.e * 1000.0;
   const double pmod2 = g4gpu::mag2(p);
@@ -642,6 +656,12 @@ __host__ __device__ inline LV inucl_store_momentum(const LV& mom, int type,
   const double pm = std::sqrt(ekin * ekin + 2.0 * dyn * ekin);
   return LV(Vec3d{dir.x * pm * 0.001, dir.y * pm * 0.001, dir.z * pm * 0.001},
             (ekin + dyn) * 0.001);
+}
+
+/// The elementary-particle form: the mass comes from the type table.
+__host__ __device__ inline LV inucl_store_momentum(const LV& mom, int type,
+                                                   double* stored_ekin_gev = nullptr) {
+  return inucl_store_momentum_mass(mom, inucl_particle_mass(type), stored_ekin_gev);
 }
 
 /// `G4InuclParticle::getKineticEnergy()` - the STORED kinetic energy, which after the round trip
