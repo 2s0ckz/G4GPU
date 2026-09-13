@@ -189,6 +189,15 @@ struct CollisionOutput {
   /// again after de-excitation. One slot, and a second `addRecoilFragment` is an overflow.
   deex::Fragment recoil_fragment;
   bool has_recoil_fragment = false;
+  /// The exciton configuration the recoil carries.
+  ///
+  /// In Geant4 this lives ON the G4Fragment - `SetNumberOfHoles`, `SetNumberOfExcitedParticle` -
+  /// and `G4NonEquilibriumEvaporator` reads it back with `G4ExitonConfiguration config(target)`.
+  /// P3's `deex::Fragment` has no room for it (P6 carries its `Excitons` beside the fragment for
+  /// the same reason), so it travels beside the fragment here. Dropping it would not fail any
+  /// four-momentum comparison and would silently disable the whole non-equilibrium stage, whose
+  /// only entry condition is `QP + QH > 0`.
+  ExitonConfiguration recoil_excitons;
   double eex_rest = 0.0;    ///< GeV
   bool on_shell = false;
   LV mom_non_cons;
@@ -207,6 +216,7 @@ __host__ __device__ inline void co_reset(CollisionOutput& o) {
   o.n_particles = 0;
   o.n_nuclei = 0;
   o.has_recoil_fragment = false;
+  o.recoil_excitons.clear();
   o.eex_rest = 0.0;
   o.on_shell = false;
   o.mom_non_cons = LV();
@@ -255,6 +265,7 @@ __host__ __device__ inline void co_add(CollisionOutput& o, const CollisionOutput
   }
   o.recoil_fragment = r.recoil_fragment;
   o.has_recoil_fragment = r.has_recoil_fragment;
+  o.recoil_excitons = r.recoil_excitons;
   o.eex_rest = 0.0;
   o.on_shell = false;
 }
@@ -526,6 +537,7 @@ __host__ __device__ inline bool recoil_good_nucleus(const RecoilState& r) {
 /// scatter.
 __host__ __device__ inline deex::Fragment recoil_make_fragment(const RecoilState& r,
                                                                const ExitonConfiguration& ex) {
+  (void)ex;   // the excitons travel beside the fragment, in CollisionOutput::recoil_excitons
   deex::Fragment f;
   f.z = r.z;
   f.a = r.a;
@@ -533,7 +545,6 @@ __host__ __device__ inline deex::Fragment recoil_make_fragment(const RecoilState
   const LV mom = lv_set_vect_m(r.momentum.v, frag_mass);
   // `SetMomentum(fragMom*GeV)` - the fragment is in Geant4's MeV from here on.
   f.set_za_and_momentum(LV(mom.v * 1000.0, mom.e * 1000.0), r.z, r.a);
-  (void)ex;
   return f;
 }
 

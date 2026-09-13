@@ -26,6 +26,7 @@
 #include "physics/hadronic/bertini/inucl_particle.cuh"
 #include "physics/hadronic/bertini/lorentz_convertor.cuh"
 #include "physics/hadronic/bertini/nuclei_model.cuh"
+#include "physics/hadronic/deexcitation/fragment.cuh"
 
 namespace g4gpu::physics::hadronic::bert {
 
@@ -97,7 +98,10 @@ enum class CascadeOverflow : int {
   kOutgoingNuclei,      ///< G4CollisionOutput's fragments
   kCollisionPoints,     ///< the trailing-effect hit list
   kPartners,            ///< G4NucleiModel::thePartners
-  kSigmaBuffer          ///< G4CascadeSampler::sigmaBuf, i.e. kMaxChannelsPerMult
+  kSigmaBuffer,         ///< G4CascadeSampler::sigmaBuf, i.e. kMaxChannelsPerMult
+  kBigBangNucleons,     ///< G4BigBanger::momModules - a fragment with more nucleons than
+                        ///< kMaxBangA, which cannot be exploded without dropping some
+  kDeexStack            ///< the fission work list: more than kMaxDeexStack levels
 };
 
 /// Capacities.
@@ -176,6 +180,41 @@ struct BertiniWorkspace {
   LV ion_momenta[kMaxIonBulletA];
   int n_ion_coordinates = 0;
   int n_ion_momenta = 0;
+
+  /// G4BigBanger::momModules and ::scm_momentums - one entry per nucleon of the exploding
+  /// fragment. `G4CascadeDeexciteBase::explosion` lets a fragment through when `A <= 20` OR
+  /// `Z == 0`, so the bound is not 20: a pure neutron ball of any mass number qualifies, and
+  /// `G4BigBanger::deExcite` is a public entry point that will explode ANY fragment it is
+  /// handed - `ref/oracle/bertini_deexcite.csv` asks it for lead. 256 covers every nuclide in
+  /// the mass table, so the refusal below is unreachable rather than merely unlikely; the cost
+  /// is 10 kB of a per-thread workspace that already holds 512 cascade particles.
+  static constexpr int kMaxBangA = 256;
+  double bang_modules[kMaxBangA];
+  LV bang_momenta[kMaxBangA];
+  /// The parallel arrays the big bang's descending-kinetic-energy sort needs: the type is a
+  /// function of the INDEX (the first Z are protons), so it has to move with the momentum.
+  /// Measured: as locals these two cost 3 kB of a thread's stack frame on their own.
+  int bang_kinds[kMaxBangA];
+  double bang_ekin[kMaxBangA];
+
+  /// G4FissionStore's candidate list and its cumulative probabilities. The bound is exact, not
+  /// an estimate: `G4Fissioner::deExcite`'s loop is `for (i = 0; i < 50 && A1 > 30; i++)`.
+  static constexpr int kMaxFissionConfigs = 50;
+  double fission_afirst[kMaxFissionConfigs];
+  double fission_zfirst[kMaxFissionConfigs];
+  double fission_ezet[kMaxFissionConfigs];
+  double fission_ekin[kMaxFissionConfigs];
+  double fission_probs[kMaxFissionConfigs];
+
+  /// The de-excitation work list. `G4EquilibriumEvaporator::deExcite` calls ITSELF on each of
+  /// the two fission fragments; a device kernel does not recurse, so the fragments go on this
+  /// stack instead. The depth is bounded by the fission threshold: a fragment must have A >= 100
+  /// to fission at all, so a uranium residual splits into two ~120 halves, each of which can
+  /// split once more into ~60 - and 60 cannot. Eight slots is far more than the three levels
+  /// that arithmetic allows.
+  static constexpr int kMaxDeexStack = 8;
+  deex::Fragment deex_stack[kMaxDeexStack];
+  int n_deex_stack = 0;
 
   /// Which capacity was exceeded, if any.
   CascadeOverflow overflow = CascadeOverflow::kNone;

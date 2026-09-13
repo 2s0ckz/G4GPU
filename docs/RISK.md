@@ -9337,3 +9337,70 @@ comparison, which is the expected answer for dead code and is recorded as such r
 looking like a gap in the grid. A port that "fixed" the guard to `afin <= minimum_recoil_A + 1`
 or similar would abandon cascades Geant4 runs to the end, and the first thing to move would be
 the multiplicity of every heavy-target event.
+
+### V131: Z*Z/A is integer division, and it moves lead across the edge of the fission-barrier table
+
+`G4EquilibriumEvaporator::deExcite` opens its fission channel with
+
+    G4double X2 = Z * Z / A;
+    G4double X1 = 1.0 - 2.0 * Z / A;
+    G4double X  = 0.019316 * X2 / (1.0 - 1.79 * X1 * X1);
+
+`A` and `Z` are `G4int` members of `G4CascadeDeexciteBase`. The first line is therefore **integer
+arithmetic**: lead-207 gives `6724/207 = 32`, not 32.4831. The second line, one line below, has a
+double literal in front of it and does not truncate. Two adjacent expressions over the same two
+integers, and only one of them is an integer expression.
+
+The consequence is not a rounding difference. `X` is the fissility parameter, and `getQF` uses it
+to choose between a 72-point tabulated barrier and a liquid-drop formula:
+
+    if (x < XMIN || x > XMAX) { ...formula... } else { QFF = QFinterp.interpolate(x, QFREP); }
+
+with `XMIN = 0.6761`. Truncated, Pb-207 gives x = 0.6698 and takes the FORMULA; in floating point
+it gives 0.6799 and takes the TABLE. The barrier is 30.8 MeV one way and 21.0 MeV the other, and
+the fission width is exponential in `2*sqrt(AF*(E* - QF))` - a factor of **twenty-two** at 300 MeV
+of excitation.
+
+Measured as a change of outcome, not of digits. With the floating-point form the port fissioned a
+300 MeV lead residual; Geant4 chose the alpha channel, failed to sample its energy a million
+times, gave up and returned the nucleus untouched. Every other number in that case agreed: the
+same draw count for the first million deviates, the same widths for the six particle channels,
+the same everything until the one channel choice. It was found by the draw count being exactly
+twice what it should be - 4,000,218 against 2,000,001 - and by noticing that 2,000,001 is
+`1 + 1000*1000*2`, i.e. one channel choice followed by a rejection sampler exhausting both its
+loops.
+
+The general lesson is the one V120 drew about `powN(0,0)` and V37 about `boostVector`: **in a
+transcription, the type of an expression is part of the expression.** A port that writes every
+formula in double precision because "the answer is a double" is not transcribing the same
+function. Two other places in this tree do the same thing deliberately and correctly -
+`G4BigBanger::xProbability`'s `(3*a-6)/2` exponent, and `G4NucleiModel`'s `G4cbrt(G4int)` overload
+(V119's neighbour) - so the pattern is not an accident anywhere.
+
+### V132: a rejection sampler under a prescribed engine sees four trials, not a thousand
+
+`G4EquilibriumEvaporator`'s Dostrovsky sampler draws TWO deviates per trial and is capped at a
+thousand:
+
+    while (itry < itry_max) { itry++;
+      X = G4UniformRand()*TM[icase];
+      Ptest = (X/Xmax)*G4Exp(-2.*u*Xmax + 2.*std::sqrt(u*(TM[icase] - X)));
+      if (G4UniformRand() < Ptest) { S = X + V[icase]; break; }
+    }
+
+Under the eight-value cycle engine this project uses to make samplers deterministic, two draws
+per trial means the (X, test) pairs repeat with period four. **The loop has four distinct trials
+and then repeats them two hundred and fifty times.** So it either accepts in the first four or
+exhausts, and the exhaustion costs exactly 2,000,000 deviates every time.
+
+That is not a defect of the oracle - it is the same property that made `BetaKopylov`
+untestable under the cycle (V121's note) and it is why the phase-space pass uses an LCG. Here it
+is benign and useful: exhaustion is a legitimate Geant4 outcome, the port must reproduce it
+deviate for deviate, and the 2,000,001 in `ref/oracle/bertini_deexcite.csv` is a stronger
+assertion than any final state would be - it pins the channel choice, the rejection arithmetic
+and the loop bound in one number.
+
+What it is worth writing down is the diagnostic value: **an exact power of the engine's period in
+a draw count is a signature, not a coincidence.** 2,000,001 = 1 + 1000*1000*2 identified which of
+the seven channels Geant4 had chosen without any access to its internals, and that is what
+localised V131.

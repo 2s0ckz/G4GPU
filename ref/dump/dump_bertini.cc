@@ -72,7 +72,12 @@
 #include "Randomize.hh"
 
 #include "G4CascadeChannel.hh"
+#include "G4BigBanger.hh"
 #include "G4CascadeCoalescence.hh"
+#include "G4CascadeDeexcitation.hh"
+#include "G4EquilibriumEvaporator.hh"
+#include "G4Fissioner.hh"
+#include "G4NonEquilibriumEvaporator.hh"
 #include "G4CascadeChannelTables.hh"
 #include "G4CascadeInterface.hh"
 #include "G4CollisionOutput.hh"
@@ -1619,6 +1624,166 @@ void dump_coalescence() {
   std::fclose(f);
 }
 
+// ---------------------------------------------------------------------------------------------
+// bertini_deexcite.csv - Bertini's OWN de-excitation, all five entry points, exact.
+//
+// `G4CascadeDeexcitation`, `G4BigBanger`, `G4NonEquilibriumEvaporator`, `G4EquilibriumEvaporator`
+// and `G4Fissioner` are each constructible on their own and each has a public
+// `deExcite(const G4Fragment&, G4CollisionOutput&)`, so all five are dumped separately as well
+// as through the chain. Every sampler in them is bounded - the Box-Muller Gaussian, the
+// Dostrovsky rejection, the exciton Newton solve, the big bang's energy-fraction rejection - so
+// the cycle engine drives all of it and the answers are exact.
+//
+// **The exciton configuration is an INPUT and it is what decides whether the non-equilibrium
+// stage runs at all**: its entry condition is `QP + QH > 0` and nothing else. So the grid varies
+// it independently of (A, Z, E*), including the empty configuration, which is what a cascade
+// that consumed no nucleons leaves.
+//
+// The fragments are chosen to reach every arm:
+//   * A <= 20 with high excitation, and a Z = 0 neutron ball - the base class's `explosion`
+//   * A = 8, Z = 6 - explodes under the EQUILIBRIUM rule and not the base one
+//   * mid-weight, where evaporation runs and fission cannot
+//   * A >= 100 with enough excitation for the fission width to open
+//   * low excitation, where the whole chain returns the fragment unchanged
+//   * an excitation high enough that the photon chain (prob_sum < 1e-15) is the only channel
+// ---------------------------------------------------------------------------------------------
+void dump_deexcite() {
+  FILE* f = std::fopen("bertini_deexcite.csv", "w");
+  if (!f) return;
+  std::fprintf(f, "stage,a,z,eexs,qpp,qnp,qph,qnh,phase,draws,npart,nnuc,nfrag,kind,i,"
+                  "type,pa,pz,exc,px,py,pz_,e\n");
+
+  struct Frag { int a, z; double eexs; };
+  static const Frag frags[] = {
+      {10, 5, 100.0},    // base-class explosion: A <= 20 and E* above 3*BE
+      {16, 8, 200.0},    // the same, heavier
+      {8, 0, 60.0},      // a neutron ball: Z == 0 explodes at any A
+      {8, 6, 40.0},      // A < 12: explodes under the EQUILIBRIUM rule, not the base one
+      {27, 13, 60.0},    // evaporation, no fission
+      {56, 26, 100.0},
+      {56, 26, 5.0},     // low excitation: one or two emissions and stop
+      {56, 26, 0.05},    // below cut_off_energy: nothing at all
+      {200, 80, 150.0},  // heavy, fission width open
+      {207, 82, 300.0},
+      {238, 92, 200.0},  // the fissioner's own range
+      {238, 92, 20.0},   // heavy but too cold to fission
+      // Heavy and BELOW the neutron separation energy, so `TM[0] <= cut_off_energy` and the
+      // neutron width is exactly zero - which is the only way to reach the fission cap
+      // `if (W[6] > fisssion_cut*W[0]) W[6] = fisssion_cut*W[0];`, a line that switches fission
+      // OFF rather than limiting it when the channel it is measured against is closed.
+      {200, 80, 5.0},
+      // Two COLD actinides, whose fission barrier is below their neutron separation energy:
+      // Cm-244 has QF ~ 5.8 MeV against Sn ~ 6.8, Cf-252 ~ 4.0 against ~6.2. Between the two
+      // thresholds the fission channel is open and the neutron channel is shut, which is the
+      // only state in which `W[6] > fisssion_cut*W[0]` can fire - and with W[0] exactly zero it
+      // does not limit the fission width, it ZEROES it. No nucleus in the rest of this grid
+      // reaches that: on lead the two thresholds are the wrong way round.
+      {244, 96, 6.3},
+      {252, 98, 5.0}};
+
+  struct Ex { int qpp, qnp, qph, qnh; };
+  static const Ex excitons[] = {{0, 0, 0, 0}, {2, 3, 1, 2}, {1, 0, 0, 1}, {4, 4, 3, 3}};
+
+  CycleEngine cyc;
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  CLHEP::HepRandom::setTheEngine(&cyc);
+
+  G4CascadeDeexcitation chain;
+  G4BigBanger banger;
+  G4NonEquilibriumEvaporator noneq;
+  G4EquilibriumEvaporator eq;
+  G4Fissioner fissioner;
+  G4CollisionOutput out;
+
+  for (const Frag& fr : frags) {
+    for (int ie = 0; ie < 4; ++ie) {
+      const Ex& ex = excitons[ie];
+      for (int stage = 0; stage < 5; ++stage) {
+        // **The big banger is asked only for fragments the chain could actually send it.** It is
+        // a public entry point that will explode anything, but exploding lead means a thousand
+        // outer attempts over a thousand-try rejection per nucleon - four hundred million
+        // deviates for one case under a prescribed engine, and nothing physical: the base
+        // class's `explosion` only reaches it for `A <= 20 || Z == 0`. The fissioner IS asked
+        // for everything, because below A = 60 its candidate loop runs zero times and returning
+        // nothing is a row worth having.
+        if (stage == 1 && fr.a > 20 && fr.z > 0) { continue; }
+        // **Only two of the five stages read the exciton configuration.**
+        // `G4CascadeDeexciteBase::getTargetData` copies A, Z, the four-momentum and the
+        // excitation and NOTHING else; only `G4NonEquilibriumEvaporator` builds a
+        // `G4ExitonConfiguration` from the fragment, and only `G4CascadeDeexcitation` reaches it.
+        // So the big banger, the equilibrium evaporator and the fissioner give the same answer
+        // for all four configurations, and running them four times each cost more than half the
+        // runtime of this whole dump - the fissioner's 4-D minimisation is two thousand
+        // iterations per candidate and fifty candidates per call.
+        if (stage != 0 && stage != 2 && ie != 0) { continue; }
+        for (int phase = 0; phase < 8; ++phase) {
+          cyc.reset(phase);
+
+          // G4Fragment(A, Z, mom) with the mass shell set by the excitation, then the exciton
+          // counts by hand - exactly what G4CascadeRecoilMaker::makeRecoilFragment does.
+          const G4double mass =
+              G4InuclNuclei::getNucleiMass(fr.a, fr.z) + fr.eexs / GeV;
+          G4LorentzVector fmom;
+          fmom.setVectM(G4ThreeVector(0., 0., 0.), mass);
+          G4Fragment frag(fr.a, fr.z, fmom * GeV);
+          frag.SetNumberOfHoles(ex.qph + ex.qnh, ex.qph);
+          frag.SetNumberOfExcitedParticle(ex.qpp + ex.qnp, ex.qpp);
+
+          out.reset();
+          switch (stage) {
+            case 0: chain.deExcite(frag, out); break;
+            case 1: banger.deExcite(frag, out); break;
+            case 2: noneq.deExcite(frag, out); break;
+            case 3: eq.deExcite(frag, out); break;
+            default: fissioner.deExcite(frag, out); break;
+          }
+          const long long draws = cyc.draws();
+
+          const G4int npart = out.numberOfOutgoingParticles();
+          const G4int nnuc = out.numberOfOutgoingNuclei();
+          const G4int nfrag = out.numberOfFragments();
+
+          for (G4int i = 0; i < npart; ++i) {
+            const G4InuclElementaryParticle& pp = out.getOutgoingParticles()[i];
+            const G4LorentzVector& pm = pp.getMomentum();
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%d,%d,%d,%d,%lld,%d,%d,%d,0,%d,%d,0,0,0,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         stage, fr.a, fr.z, fr.eexs, ex.qpp, ex.qnp, ex.qph, ex.qnh, phase,
+                         draws, npart, nnuc, nfrag, i, pp.type(), pm.x(), pm.y(), pm.z(),
+                         pm.e());
+          }
+          for (G4int i = 0; i < nnuc; ++i) {
+            const G4InuclNuclei& nn = out.getOutgoingNuclei()[i];
+            const G4LorentzVector& pm = nn.getMomentum();
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%d,%d,%d,%d,%lld,%d,%d,%d,1,%d,0,%d,%d,%.17g,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         stage, fr.a, fr.z, fr.eexs, ex.qpp, ex.qnp, ex.qph, ex.qnh, phase,
+                         draws, npart, nnuc, nfrag, i, nn.getA(), nn.getZ(),
+                         nn.getExitationEnergy(), pm.x(), pm.y(), pm.z(), pm.e());
+          }
+          for (G4int i = 0; i < nfrag; ++i) {
+            const G4Fragment& rf = out.getRecoilFragment(i);
+            const G4LorentzVector pm = rf.GetMomentum() / GeV;
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%d,%d,%d,%d,%lld,%d,%d,%d,2,%d,0,%d,%d,%.17g,"
+                            "%.17g,%.17g,%.17g,%.17g\n",
+                         stage, fr.a, fr.z, fr.eexs, ex.qpp, ex.qnp, ex.qph, ex.qnh, phase,
+                         draws, npart, nnuc, nfrag, i, rf.GetA_asInt(), rf.GetZ_asInt(),
+                         rf.GetExcitationEnergy(), pm.x(), pm.y(), pm.z(), pm.e());
+          }
+          if (npart + nnuc + nfrag == 0) {
+            std::fprintf(f, "%d,%d,%d,%.17g,%d,%d,%d,%d,%d,%lld,0,0,0,-1,-1,0,0,0,0,0,0,0,0\n",
+                         stage, fr.a, fr.z, fr.eexs, ex.qpp, ex.qnp, ex.qph, ex.qnh, phase,
+                         draws);
+          }
+        }
+      }
+    }
+  }
+
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
 void dump_bertini(const DumpContext&) {
   dump_params();
   dump_particles();
@@ -1632,6 +1797,7 @@ void dump_bertini(const DumpContext&) {
   dump_fate();
   dump_cascader();
   dump_coalescence();
+  dump_deexcite();
   dump_apply();
 }
 
@@ -1644,6 +1810,6 @@ G4GPU_REGISTER_DUMP("bertini",
                     "bertini_chtables.csv bertini_chfinalstates.csv bertini_chbins.csv bertini_angchoice.csv "
                     "bertini_angdst.csv bertini_3bodydst.csv bertini_momchoice.csv "
                     "bertini_epcollide.csv "
-                    "bertini_initcascad.csv bertini_fate.csv bertini_cascader.csv bertini_coalescence.csv "
+                    "bertini_initcascad.csv bertini_fate.csv bertini_cascader.csv bertini_coalescence.csv bertini_deexcite.csv "
                     "bertini_apply.csv bertini_apply_species.csv",
                     dump_bertini);
