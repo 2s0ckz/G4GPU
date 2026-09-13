@@ -50,9 +50,15 @@
 #include "physics/hadronic/bertini/cascade_params.cuh"
 #include "physics/hadronic/bertini/channel_tables.cuh"
 #include "physics/hadronic/bertini/inucl_particle.cuh"
+#include "physics/hadronic/bertini/nuclei_model.cuh"
+#include "physics/hadronic/bertini/workspace.cuh"
 
 using namespace g4gpu;
 using namespace g4gpu::physics::hadronic;
+using bert::BertiniWorkspace;
+using bert::LV;
+using bert::NucleiModel;
+using bert::Vec3d;
 
 /// The deliverable is device code, and a `__host__ __device__` template instantiated only from
 /// the host is never compiled for the device at all. These kernels are never launched - this
@@ -61,7 +67,8 @@ using namespace g4gpu::physics::hadronic;
 /// header, no `std::` call without a device overload, no namespace-scope table a device function
 /// cannot read. `-Xptxas -v` on this translation unit is where the register and stack numbers in
 /// the package report come from.
-__global__ void bertini_tables_probe(double ke, int is, int mult, double* out, int* kinds) {
+__global__ void bertini_tables_probe(double ke, int is, int mult, double* out, int* kinds,
+                                    bert::BertiniWorkspace* ws) {
   Philox<double> rng(1u, 2u, 3u);
   const bert::ChannelTable t = bert::channel_table(is);
   bool fell = false;
@@ -69,8 +76,56 @@ __global__ void bertini_tables_probe(double ke, int is, int mult, double* out, i
   out[1] = bert::channel_cross_section_sum(t, ke);
   out[2] = double(bert::channel_multiplicity(t, ke, rng, fell));
   int chan = -1;
-  bert::outgoing_particle_types(t, mult, ke, rng, kinds, chan, fell);
+  bert::outgoing_particle_types(t, mult, ke, rng, kinds, chan, fell, ws->sigma_buf);
   out[3] = double(chan);
+}
+
+/// The nucleus model, built on the device from (A, Z) and then read the way a propagating
+/// particle reads it. `NucleiModel` is 700-odd bytes and lives behind a pointer for the reason
+/// workspace.cuh gives; building it into a LOCAL here would be the mistake that file exists to
+/// prevent, so the probe takes it by pointer too.
+__global__ void bertini_nucleus_probe(int a, int z, NucleiModel* m, BertiniWorkspace* ws,
+                                      double* out) {
+  Philox<double> rng(7u, 8u, 9u);
+  const bert::CascadeParams par = bert::default_cascade_params();
+  const bert::NucleiModelParams nmp = bert::nuclei_model_params(par);
+  out[0] = double(static_cast<int>(bert::nm_generate_model(*m, a, z, nmp)));
+  out[1] = m->nuclei_radius;
+  out[2] = m->nuclei_volume;
+  out[3] = bert::nm_density(*m, bert::kProton, 0);
+  out[4] = bert::nm_fermi_momentum(*m, bert::kNeutron, 0);
+  out[5] = bert::nm_potential(*m, bert::kLambda, 0);
+  out[6] = bert::nm_fermi_kinetic(*m, bert::kProton, 0);
+  out[7] = double(bert::nm_zone(*m, m->nuclei_radius * 0.5));
+  out[8] = bert::nm_current_density(*m, bert::kUnboundPN, 0);
+  bool refused = false;
+  out[9] = bert::nm_total_cross_section(1.5, bert::kProton * bert::kProton, nmp, refused);
+  out[10] = bert::nm_absorption_cross_section(0.2, bert::kPionPlus, nmp, refused);
+  const LV nucleon = bert::nm_generate_nucleon_momentum(*m, bert::kProton, 0, rng);
+  out[11] = nucleon.e;
+  int dtype = 0;
+  const LV qd = bert::nm_generate_quasideuteron(*m, bert::kProton, bert::kNeutron, 0, dtype, rng);
+  out[12] = qd.e + double(dtype);
+  const LV bullet = bert::lv_set_vect_m(Vec3d{0.0, 0.0, 2.0}, bert::inucl_particle_mass(1));
+  out[13] = bert::nm_inverse_mean_free_path(*m, bert::kProton, bullet, bert::kNeutron, nucleon,
+                                            0, nmp, refused);
+  out[14] = bert::nm_generate_interaction_length(1.0, out[13], false, 0.0, rng);
+  bert::CascadeParticle cp;
+  cp.type = bert::kProton;
+  cp.momentum = bullet;
+  cp.position = Vec3d{0.0, 0.0, m->nuclei_radius * 0.9};
+  cp.current_zone = m->number_of_zones - 1;
+  bool in_zero = false;
+  bert::nm_boundary_transition(*m, cp.type, cp.position, cp.momentum, cp.current_zone, false,
+                              cp.reflection_counter, in_zero);
+  out[15] = cp.momentum.e + double(cp.current_zone);
+  out[16] = bert::nm_worth_to_propagate(*m, true, cp.type, 0, 0.1) ? 1.0 : 0.0;
+  bool moving_in = false;
+  out[17] = bert::cp_path_to_next_zone(cp.position, cp.momentum, cp.current_zone,
+                                       bert::nm_radius(*m, 0), m->nuclei_radius, moving_in);
+  out[18] = double(ws->n_cascade);
+  bert::ws_push_cascade(*ws, cp);
+  out[19] = double(static_cast<int>(ws->overflow));
 }
 
 __global__ void bertini_angdst_probe(double ekin, double pcm, int is, int fs, int kw,
@@ -320,7 +375,7 @@ void check_params() {
 // 2. bertini_particles.csv and bertini_quasideuteron.csv
 // ---------------------------------------------------------------------------------------------
 void check_particles() {
-  const int bm = new_bucket("InuclParticleMass", 1e-15);
+  const int bm = new_bucket("InuclParticleMass", 0.0);
   const int bi = new_bucket("InuclParticleFlags", 0.0);
   const std::vector<std::string> lines = read_lines("bertini_particles.csv");
   for (std::size_t i = 1; i < lines.size(); ++i) {
@@ -466,8 +521,8 @@ void check_finalstates() {
 // 5. bertini_channels.csv - getCrossSection / getCrossSectionSum on the grid
 // ---------------------------------------------------------------------------------------------
 void check_channel_xsec() {
-  const int b = new_bucket("ChannelGetCrossSection", 1e-14);
-  const int bs = new_bucket("ChannelGetCrossSectionSum", 1e-14);
+  const int b = new_bucket("ChannelGetCrossSection", 0.0);
+  const int bs = new_bucket("ChannelGetCrossSectionSum", 0.0);
   const std::vector<std::string> lines = read_lines("bertini_channels.csv");
   for (std::size_t i = 1; i < lines.size(); ++i) {
     const std::vector<std::string> f = split(lines[i]);
@@ -487,6 +542,9 @@ void check_channel_xsec() {
 // 6. bertini_chsample.csv - the two samplers under the cycle
 // ---------------------------------------------------------------------------------------------
 void check_chsample() {
+  // One workspace for the whole check, as a cascade would have: the sigma buffer is a data
+  // member in Geant4 and a workspace field here, not a local (see workspace.cuh).
+  static bert::BertiniWorkspace ws;
   const int bm = new_bucket("ChannelMultiplicitySample", 0.0);
   const int bmd = new_bucket("ChannelMultiplicityDraws", 0.0);
   const int bf = new_bucket("ChannelFinalStateSample", 0.0);
@@ -521,7 +579,7 @@ void check_chsample() {
     int kinds[bert::kMaxFinalStateSize];
     int chan = -1;
     const bert::ChannelRefusal r =
-        bert::outgoing_particle_types(t, fs_mult, ke, rng, kinds, chan, fell);
+        bert::outgoing_particle_types(t, fs_mult, ke, rng, kinds, chan, fell, ws.sigma_buf);
     if (r != bert::ChannelRefusal::kNone) {
       cmp_int(bf, static_cast<int>(r), 0,
               std::string(w) + " m" + std::to_string(fs_mult) + " refused");
@@ -553,7 +611,7 @@ void check_chsample() {
     for (int m = 3; m <= 9; ++m) {
       rng.reset(0);
       const bert::ChannelRefusal r =
-          bert::outgoing_particle_types(mu, m, 1.0, rng, kinds, chan, fell);
+          bert::outgoing_particle_types(mu, m, 1.0, rng, kinds, chan, fell, ws.sigma_buf);
       cmp_int(bref, static_cast<int>(r),
               static_cast<int>(bert::ChannelRefusal::kSingleChannelAboveMult2),
               "mu- p mult " + std::to_string(m));
@@ -561,7 +619,7 @@ void check_chsample() {
     // Multiplicity 2 is the one that is in bounds, and it must still work.
     rng.reset(0);
     const bert::ChannelRefusal r2 =
-        bert::outgoing_particle_types(mu, 2, 1.0, rng, kinds, chan, fell);
+        bert::outgoing_particle_types(mu, 2, 1.0, rng, kinds, chan, fell, ws.sigma_buf);
     cmp_int(bref, static_cast<int>(r2), 0, "mu- p mult 2 allowed");
   }
 
@@ -675,7 +733,7 @@ void check_dispatchers() {
 // 8. bertini_angdst.csv - the thirteen two-body distributions under the cycle
 // ---------------------------------------------------------------------------------------------
 void check_angdst() {
-  const int b = new_bucket("AngDstCosTheta", 1e-13);
+  const int b = new_bucket("AngDstCosTheta", 0.0);
   const int bd = new_bucket("AngDstDraws", 0.0);
 
   // Map the oracle's name string to (kind, index), which is how a row identifies its object.
@@ -724,9 +782,9 @@ void check_angdst() {
 // 9. bertini_3bodydst.csv - GetMomentum and the three-body GetCosTheta
 // ---------------------------------------------------------------------------------------------
 void check_3body() {
-  const int bm = new_bucket("ParamMomGetMomentum", 1e-13);
+  const int bm = new_bucket("ParamMomGetMomentum", 0.0);
   const int bmd = new_bucket("ParamMomDraws", 0.0);
-  const int ba = new_bucket("ParamAngCosTheta", 1e-13);
+  const int ba = new_bucket("ParamAngCosTheta", 0.0);
   const int bad = new_bucket("ParamAngDraws", 0.0);
 
   std::map<std::string, int> mom_by_name, ang_by_name;
@@ -772,6 +830,186 @@ void check_3body() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// 10. bertini_nuclei.csv, bertini_zonelookup.csv, bertini_potfold.csv, bertini_quasideuteron.csv
+//     and bertini_nucxsec.csv - G4NucleiModel's whole deterministic half
+// ---------------------------------------------------------------------------------------------
+void check_nuclei_model() {
+  const bert::CascadeParams par = bert::default_cascade_params();
+  const bert::NucleiModelParams nmp = bert::nuclei_model_params(par);
+
+  const int bz = new_bucket("NucleiModelZones", 0.0);
+  const int br = new_bucket("NucleiModelRadii", 0.0);
+  const int bv = new_bucket("NucleiModelVolumes", 0.0);
+  const int bd = new_bucket("NucleiModelDensities", 0.0);
+  const int bf = new_bucket("NucleiModelFermiMomenta", 0.0);
+  const int bp = new_bucket("NucleiModelPotentials", 0.0);
+  const int bk = new_bucket("NucleiModelFermiKinetic", 0.0);
+  const int bb = new_bucket("NucleiModelBindingEnergies", 0.0);
+
+  const std::vector<std::string> lines = read_lines("bertini_nuclei.csv");
+  for (std::size_t i = 1; i < lines.size(); ++i) {
+    const std::vector<std::string> f = split(lines[i]);
+    if (f.size() < 21) { continue; }
+    const int a = iv(f, 0);
+    const int z = iv(f, 1);
+    bert::NucleiModel m;
+    const bert::NucleiModelRefusal r = bert::nm_generate_model(m, a, z, nmp);
+    if (r != bert::NucleiModelRefusal::kNone) {
+      cmp_int(bz, static_cast<int>(r), 0, "A=" + std::to_string(a));
+      continue;
+    }
+    char w[96];
+    const int iz = iv(f, 7);
+    std::snprintf(w, sizeof w, "A=%d Z=%d zone %d", a, z, iz);
+    cmp_int(bz, m.number_of_zones, iv(f, 2), w);
+    cmp(br, m.nuclei_radius, dv(f, 3), std::string(w) + " nuclei_radius");
+    cmp(bv, m.nuclei_volume, dv(f, 4), std::string(w) + " nuclei_volume");
+    cmp(bb, m.binding_energies[0], dv(f, 5), std::string(w) + " be proton");
+    cmp(bb, m.binding_energies[1], dv(f, 6), std::string(w) + " be neutron");
+    cmp(br, bert::nm_radius(m, iz), dv(f, 8), std::string(w) + " radius");
+    cmp(bv, bert::nm_volume(m, iz), dv(f, 9), std::string(w) + " volume");
+    cmp(bd, bert::nm_density(m, bert::kProton, iz), dv(f, 10), std::string(w) + " dens p");
+    cmp(bd, bert::nm_density(m, bert::kNeutron, iz), dv(f, 11), std::string(w) + " dens n");
+    cmp(bf, bert::nm_fermi_momentum(m, bert::kProton, iz), dv(f, 12), std::string(w) + " pf p");
+    cmp(bf, bert::nm_fermi_momentum(m, bert::kNeutron, iz), dv(f, 13), std::string(w) + " pf n");
+    cmp(bp, bert::nm_potential(m, bert::kProton, iz), dv(f, 14), std::string(w) + " vp p");
+    cmp(bp, bert::nm_potential(m, bert::kNeutron, iz), dv(f, 15), std::string(w) + " vp n");
+    cmp(bk, bert::nm_fermi_kinetic(m, bert::kProton, iz), dv(f, 16), std::string(w) + " ek p");
+    cmp(bk, bert::nm_fermi_kinetic(m, bert::kNeutron, iz), dv(f, 17), std::string(w) + " ek n");
+    cmp(bp, bert::nm_potential(m, bert::kPionPlus, iz), dv(f, 18), std::string(w) + " vp pi");
+    cmp(bp, bert::nm_potential(m, bert::kKaonPlus, iz), dv(f, 19), std::string(w) + " vp K");
+    cmp(bp, bert::nm_potential(m, bert::kLambda, iz), dv(f, 20), std::string(w) + " vp Y");
+  }
+
+  // getZone(r), including the boundary radii themselves - `r < zone_radii[iz]` is strict, so a
+  // particle exactly on a boundary is in the OUTER zone, and that is what the probes at
+  // r == zone_radii[iz] check.
+  const int bzl = new_bucket("NucleiModelGetZone", 0.0);
+  const std::vector<std::string> zl = read_lines("bertini_zonelookup.csv");
+  for (std::size_t i = 1; i < zl.size(); ++i) {
+    const std::vector<std::string> f = split(zl[i]);
+    if (f.size() < 4) { continue; }
+    bert::NucleiModel m;
+    bert::nm_generate_model(m, iv(f, 0), iv(f, 1), nmp);
+    char w[96];
+    std::snprintf(w, sizeof w, "A=%d Z=%d r=%.17g", iv(f, 0), iv(f, 1), dv(f, 2));
+    cmp_int(bzl, bert::nm_zone(m, dv(f, 2)), iv(f, 3), w);
+  }
+
+  // getPotential's five-slot fold over all 44 type codes and every zone, including the
+  // out-of-range zone that returns 0.
+  const int bpf = new_bucket("NucleiModelPotentialFold", 0.0);
+  const std::vector<std::string> pf = read_lines("bertini_potfold.csv");
+  bert::NucleiModel fe;
+  bert::nm_generate_model(fe, 56, 26, nmp);
+  for (std::size_t i = 1; i < pf.size(); ++i) {
+    const std::vector<std::string> f = split(pf[i]);
+    if (f.size() < 5) { continue; }
+    char w[96];
+    std::snprintf(w, sizeof w, "type %d zone %d", iv(f, 2), iv(f, 3));
+    cmp(bpf, bert::nm_potential(fe, iv(f, 2), iv(f, 3)), dv(f, 4), w);
+  }
+
+  // useQuasiDeuteron's whole truth table.
+  const int bq = new_bucket("UseQuasiDeuteron", 0.0);
+  const std::vector<std::string> qd = read_lines("bertini_quasideuteron.csv");
+  for (std::size_t i = 1; i < qd.size(); ++i) {
+    const std::vector<std::string> f = split(qd[i]);
+    if (f.size() < 3) { continue; }
+    char w[96];
+    std::snprintf(w, sizeof w, "ptype %d qdtype %d", iv(f, 0), iv(f, 1));
+    cmp_int(bq, bert::nm_use_quasideuteron(iv(f, 0), iv(f, 1)) ? 1 : 0, iv(f, 2), w);
+  }
+
+  // totalCrossSection and absorptionCrossSection.
+  const int bt = new_bucket("NucleiModelTotalXsec", 0.0);
+  const int ba = new_bucket("NucleiModelAbsorptionXsec", 0.0);
+  const std::vector<std::string> nx = read_lines("bertini_nucxsec.csv");
+  for (std::size_t i = 1; i < nx.size(); ++i) {
+    const std::vector<std::string> f = split(nx[i]);
+    if (f.size() < 5) { continue; }
+    const std::string kind = sv(f, 0);
+    const int bullet = iv(f, 1);
+    const int target = iv(f, 2);
+    const double ke = dv(f, 3);
+    char w[128];
+    std::snprintf(w, sizeof w, "%s bullet %d target %d ke %.6g", kind.c_str(), bullet, target,
+                  ke);
+    bool refused = false;
+    if (kind == "total") {
+      const double v = bert::nm_total_cross_section(ke, bullet * target, nmp, refused);
+      cmp_int(bt, refused ? 1 : 0, 0, std::string(w) + " refused");
+      cmp(bt, v, dv(f, 4), w);
+    } else {
+      const double v = bert::nm_absorption_cross_section(ke, bullet, nmp, refused);
+      cmp_int(ba, refused ? 1 : 0, 0, std::string(w) + " refused");
+      cmp(ba, v, dv(f, 4), w);
+    }
+  }
+
+  // The trailing effect is OFF with the dumped parameters, and the reason is a strict `<`
+  // against a zero radius. Pinned by construction: a repeat hit at exactly the same point must
+  // still pass. If radiusTrailing ever becomes non-zero this assertion is where it shows.
+  const int btr = new_bucket("PassTrailingIsOff", 0.0);
+  const bert::Vec3d hits[2] = {bert::Vec3d{1.0, 2.0, 3.0}, bert::Vec3d{0.0, 0.0, 0.0}};
+  cmp_int(btr, bert::nm_pass_trailing(hits, 2, hits[0], nmp.r_nucleon) ? 1 : 0, 1,
+          "repeat hit at the same point passes with r_nucleon = 0");
+  cmp(btr, nmp.r_nucleon, 0.0, "r_nucleon");
+  // ... and that it CAN reject, so the loop above is not vacuous.
+  cmp_int(btr, bert::nm_pass_trailing(hits, 2, hits[0], 1.0) ? 1 : 0, 0,
+          "repeat hit rejected at r_nucleon = 1");
+
+  // Two things the oracle grid cannot reach, pinned by construction instead. Both were
+  // perturbations that went uncaught, and both are V52's "is the input read at all?" question
+  // rather than a hole.
+  //
+  // `crossSectionUnits` multiplies both cross sections and is 1.0 in the install, so dropping
+  // the multiplication changes nothing on any dumped row. It is checked by CHANGING the
+  // parameter: xsecScale is settable from G4NUCMODEL_XSEC_SCALE, so a run that sets it has to
+  // be reproducible, and the linearity is the whole of what the parameter does.
+  const int bxs = new_bucket("CrossSectionUnitsScaling", 0.0);
+  bert::NucleiModelParams scaled = nmp;
+  scaled.cross_section_units = 2.0;
+  bool ref1 = false, ref2 = false;
+  const int state = bert::kProton * bert::kProton;
+  for (double ke : {0.05, 0.5, 2.0, 6.0}) {
+    const double one = bert::nm_total_cross_section(ke, state, nmp, ref1);
+    const double two = bert::nm_total_cross_section(ke, state, scaled, ref2);
+    cmp(bxs, two, 2.0 * one, "total xsec scaling at ke " + std::to_string(ke));
+  }
+  bert::NucleiModelParams qd_scaled = nmp;
+  qd_scaled.gamma_qd_scale = 3.0;
+  for (double ke : {0.005, 0.05, 0.5}) {
+    const double one = bert::nm_absorption_cross_section(ke, bert::kPhoton, nmp, ref1);
+    const double two = bert::nm_absorption_cross_section(ke, bert::kPhoton, qd_scaled, ref2);
+    cmp(bxs, two, 3.0 * one, "gammaQD scaling at ke " + std::to_string(ke));
+  }
+
+  // The `csec < 0` floor in absorptionCrossSection. On the dumped grid it never fires: the pion
+  // parametrisation is positive everywhere on (0, 0.3) - its resonance term alone is at least
+  // 2 millibarn there - and above 1 GeV neither branch assigns anything, so csec stays exactly
+  // 0. The only way to a negative value is the PHOTON table extrapolated BELOW its first bin,
+  // where bins[0] = 0 and xsec[1] = 0.7 make the linear extrapolation negative. No caller can
+  // get there - `getKinEnergyInTheTRS` returns `e - m`, which is non-negative - so the guard is
+  // dead under physical input. It is pinned here rather than left as a reading: at ke = -0.001
+  // the unfloored extrapolation is about -0.29 mb and the function must return exactly 0.
+  const int bfl = new_bucket("AbsorptionNegativeFloor", 0.0);
+  bool refn = false;
+  cmp(bfl, bert::nm_absorption_cross_section(-0.001, bert::kPhoton, nmp, refn), 0.0,
+      "photon absorption floored at ke = -0.001");
+  cmp_int(bfl, refn ? 1 : 0, 0, "photon is an absorptive projectile");
+  // The unfloored value, computed here from the same table, has to be negative for the line
+  // above to be a test of the floor and not of a coincidence.
+  const double unfloored =
+      bert::interp_value(-0.001, bert::nm_gamma_qd_bins(), bert::nm_gamma_qd_xsec(), 30);
+  cmp_int(bfl, (unfloored < 0.0) ? 1 : 0, 1, "unfloored extrapolation is negative");
+  // And a non-absorptive projectile is refused by name rather than given a zero.
+  bool refp = false;
+  bert::nm_absorption_cross_section(0.1, bert::kProton, nmp, refp);
+  cmp_int(bfl, refp ? 1 : 0, 1, "proton refused by absorptionCrossSection");
+}
+
 }  // namespace
 
 int main() {
@@ -785,6 +1023,7 @@ int main() {
   check_dispatchers();
   check_angdst();
   check_3body();
+  check_nuclei_model();
 
   std::printf("%-34s %12s %14s\n", "bucket", "points", "worst rel");
   long long total = 0;

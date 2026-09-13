@@ -262,10 +262,19 @@ __host__ __device__ inline int channel_multiplicity(const ChannelTable& t, doubl
 /// Writes `mult` type codes into `kinds` and returns the refusal, if any. The
 /// `stop - start <= 1` arm is where Geant4 mixes an absolute index into a per-multiplicity
 /// array; this refuses instead, for the one channel where the two differ (see note 2).
+/// `sigma_buf` must have room for `kMaxChannelsPerMult` doubles and comes from the caller's
+/// workspace, not from this function's stack.
+///
+/// That is not style. Written with a local `double buf[96]`, this function gave
+/// `bertini_tables_probe` a **992-byte stack frame** under `-Xptxas -v`; with the buffer passed
+/// in it is 224 bytes. A cascade at 5 GeV has hundreds of particles in flight and every one of
+/// them calls this, so 768 bytes of per-thread local memory is 768 bytes of L1 that the nucleus
+/// model's tables wanted - and `sigmaBuf` is a `std::vector` data member in Geant4 for the same
+/// reason, reused across calls rather than reallocated.
 template <typename Rng>
 __host__ __device__ inline ChannelRefusal outgoing_particle_types(
     const ChannelTable& t, int mult, double ke, Rng& rng, int* kinds, int& out_channel,
-    bool& fell_off) {
+    bool& fell_off, double* sigma_buf) {
   fell_off = false;
   out_channel = -1;
   if (!t.valid()) { return ChannelRefusal::kNoTable; }
@@ -286,12 +295,11 @@ __host__ __device__ inline ChannelRefusal outgoing_particle_types(
     channel = start;
   } else {
     if (stop - start > kMaxChannelsPerMult) { return ChannelRefusal::kBufferTooSmall; }
-    double buf[kMaxChannelsPerMult];
     const double pos = interp_get_bin(ke, t.bins, t.def->ne);
     for (int i = start; i < stop; ++i) {
-      buf[i - start] = interp_apply(pos, t.xs + i * t.def->ne, t.def->ne);
+      sigma_buf[i - start] = interp_apply(pos, t.xs + i * t.def->ne, t.def->ne);
     }
-    channel = sample_flat(buf, stop - start, rng.uniform(), fell_off);
+    channel = sample_flat(sigma_buf, stop - start, rng.uniform(), fell_off);
   }
 
   const signed char* block = t.fs[mult - 2];
