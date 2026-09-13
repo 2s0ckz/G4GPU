@@ -9444,6 +9444,23 @@ appeared. Conditioning on presence makes the variance of a rare fragment nearly 
 always exactly one when it is there - and the band collapses. The first version of the yield
 comparison did that and reported 8.3 sigma for a difference of 0.07 against 0.09 per event.
 
+A third form, which is the one the finished campaign still lives with, and it is worth stating
+because it is what "five sigma" is doing in the remaining outliers. **A band in units of the
+standard error assumes the SAMPLE MEAN is Gaussian, and for a heavily skewed spectrum at a few
+hundred counts it is not.** The worst asserted comparison in the 95-case run is the deuteron's
+mean kinetic energy from a 1.5 GeV neutron on carbon: 39.2 MeV against 24.1, which the pooled
+error calls 4.90 sigma. The oracle's own second moment for that row gives a standard deviation of
+51.6 MeV on a mean of 24.1 - the distribution is an evaporation peak with a coalescence tail, so
+sigma/mean is better than two - and the sample is 585 deuterons. The central limit theorem has not
+finished at that skewness and that count, and the true tail probability at "4.9 sigma" is orders
+of magnitude larger than the Gaussian one. Two checks that the outlier is the statistic and not
+the physics: Geant4's OWN neighbouring cases disagree by nearly as much (a 1.5 GeV proton on the
+same carbon gives 29.6 against the neutron's 24.1, on the same 51.6 spread), and the port's 39.2
+is an ordinary value one energy step up (Geant4 gives 37.9 and 41.1 at 3 GeV). The honest form of
+the statement is that this comparison has a resolution of about 20%, not of 5 sigma, and a port
+error smaller than that would not be visible here - it would have to be found one level down,
+where the cascade and the de-excitation are compared value for value.
+
 ### V134: a stack frame measured on the whole kernel is not a measurement of any part of it
 
 The rule this port works to is that per-thread state lives in a workspace passed by pointer, never
@@ -9525,3 +9542,127 @@ Three things follow, and the third is the one that generalises:
      events. It took a projectile that IS a hyperon to make the refusal visible, and that case
      existed only because the second de-excitation arm needed covering. V124 again, in the currency
      of refusals: **a grid that cannot see a refusal is not a measurement of what the refusal costs.**
+
+### V136: a trapped hyperon decays at rest in Geant4, and the reason is GeV passed to a MeV parameter
+
+`G4IntraNucleiCascader::decayTrappedParticle` is the one place in the Bertini cascade where a
+particle decays inside the nucleus. It is reached often enough to matter - 18% of the events of a
+500 MeV K- on iron, 47% of a 1 GeV lambda on lead (V135) - and its three operative lines are
+
+    G4double decayEnergy = trappedP.getEnergy();
+    G4ThreeVector decayDir = trappedP.getMomentum().vect().unit();
+    daughters->Boost(decayEnergy, decayDir);
+
+`G4InuclParticle::getEnergy()` is `pDP.GetTotalEnergy()*MeV/GeV` - **Bertini's GeV**, about 1.2 for
+a trapped lambda. `G4DecayProducts::Boost(G4double totalEnergy, const G4ThreeVector&)` opens with
+
+    G4double mass = theParentParticle->GetMass();      // Geant4 MeV: 1115.68 for a lambda
+    G4double totalMomentum(0);
+    if ( totalEnergy > mass ) { totalMomentum = std::sqrt((totalEnergy-mass)*(totalEnergy+mass)); }
+
+1.2 is not greater than 1115.68. `totalMomentum` stays zero, all three betas are zero, and the
+inner `Boost(betax,betay,betaz)` has a second guard - `energy - mass > DBL_MIN` on a parent that
+`DecayIt` constructed AT REST - which is false as well. So the daughters are emitted isotropically
+in the hyperon's rest frame and the hyperon's momentum simply disappears.
+
+It does not disappear from the event, which is why nothing downstream notices: `G4CascadeRecoilMaker`
+defines the residual as the NEGATIVE of everything that came out, so the missing momentum is
+assigned to the residual nucleus. A trapped hyperon therefore hands its entire momentum to the
+nucleus and its rest mass to two isotropic daughters - which is not an unreasonable physical
+picture, and is arrived at by an arithmetic accident rather than by choosing it.
+
+**Transcribed as written, with the guard evaluated rather than folded away.** The port computes
+`totalMomentum` from the same two numbers in the same two unit systems, and REFUSES BY NAME
+(`CascaderRefusal::kTrappedHyperonBoost`) if it is ever nonzero, because the boost Geant4 would
+then perform is a code path this port has not transcribed. The threshold is worth recording: it
+is a Bertini-GeV total energy above the parent's MeV mass, i.e. **1,115.68 GeV for a lambda**,
+where `G4CascadeInterface` declares 100 TeV and QBBC's kaon/hyperon instance stops at 6 GeV. So
+the refusal is unreachable through any QBBC path and reachable in principle through the model's
+own declared range - which is exactly the case a "this cannot happen" comment would have got
+wrong.
+
+The general form, and it is not the same as V131's integer division even though both are unit
+accidents: **a function that takes a bare `G4double` and reads a unit off a member cannot be
+checked by its caller.** `Boost` gets its scale from `theParentParticle`, which the caller never
+passes and cannot see; `getEnergy()` divides by GeV as the whole cascade package does. Both sides
+are locally right. The only place the mismatch is visible is the one line that joins them, and it
+compiles.
+
+### V137: a refusal masked a second bug, and only removing the refusal could find it
+
+`G4CascadeCheckBalance::okay()` is four tests, and the port had five. The header says so in a
+comment the transcription read past:
+
+    // Global check, used by G4CascadeInterface validation loop
+    // NOTE:  Strangeness is not required to be conserved in final state
+    G4bool okay() const { return (energyOkay() && momentumOkay() &&
+                                  baryonOkay() && chargeOkay()); }
+
+`strangeOkay()` is declared, defined, and **called from nowhere in the cascade package** - dead
+code of the same kind as `minimum_recoil_A` (V130), and added in 2012 "useful for Omega- beam"
+according to the file's own change log. The port's `CascadeBalance::okay()` included it, and the
+comment above it asserted, wrongly, that Geant4 does too.
+
+**Every test in the package passed with the extra term in place, and none of them could have
+failed.** Strangeness is conserved by every strong process in the cascade, so `deltaS()` is zero
+in every event the port could complete - and the one process that does NOT conserve it, a trapped
+hyperon's weak decay, was the sub-case P10b had refused by name for want of a decay table. The
+refusal removed the only events that could see the bug. Wiring `decayTrappedParticle` in P10c is
+what made them reachable: a trapped lambda going to p + pi- changes the event's strangeness by
+one, and with the fifth test in place every such event would have failed `retryInelasticNucleus`
+twenty times over and ended at `throwNonConservationFailure` - a thrown event where Geant4 has an
+ordinary one, in 18% of a K- case.
+
+Two things worth carrying, and the second is the general one:
+
+  * **Geant4's comment was the evidence, and a transcription that reads the code without the
+    comment loses it.** Nothing about the four-term expression looks incomplete; the reason
+    strangeness is absent is a physics statement written in English one line above it.
+  * **A refusal is a mask.** A sub-case refused by name is not merely absent from the results -
+    it removes from the test grid every event that would have exercised the code around it. The
+    port had a wrong `okay()` for as long as it had a refusal in front of it, and no amount of
+    statistics on the remaining events could have found it. The rule that follows is narrow and
+    checkable: **when a refusal is lifted, the code paths that were downstream of it have never
+    been tested, whatever the coverage numbers say, and they should be re-read against the source
+    before the new campaign is trusted to judge them.** Re-reading is how this one was found -
+    not by a failing test, because the failing test came second.
+
+### V138: a saved diff of a perturbed tree is a perturbation, and it comes back when you apply it
+
+The anti-vacuity discipline says to restore every perturbation before committing. This is the
+failure one step to the left of that: **a perturbation was restored correctly and then reintroduced
+from a patch file made while it was in place.**
+
+The sequence, because the shape matters more than the incident. A perturbation campaign was
+running, one perturbation per iteration, each backing the file up, editing it, building, running
+and restoring. A comment was added to one of those files by hand, mid-campaign. To keep the comment
+across the harness's restore, it was saved with `git diff <file> > comment.patch` - and the file at
+that moment held the campaign's perturbation as well, so the patch held both. `git apply` brought
+back the comment and, silently, `if (fragment.a <= 1000)` where the source says `<= 1`, which turns
+off de-excitation for every fragment there is.
+
+**It survived four subsequent checks.** `git status` showed the file modified, which it was meant
+to be. `git diff --stat` showed twelve lines added, which the comment accounts for. Two test suites
+were re-run green - `test_bertini_cascade` and `test_bertini_deex`, neither of which calls
+de-excitation through the interface. And four perturbation verdicts were recorded as CAUGHT against
+a baseline that was already broken, so they are not evidence of anything and were re-run.
+
+What found it was arithmetic that did not depend on any test: a twelve-event probe printing the
+event's conservation, showing `B = -20` - twenty missing baryons, the whole residual nucleus - on
+every event of a case that has no hyperons in it and could not be affected by the work in progress.
+The bisection then took four builds, and the last one had nothing left to revert but a comment.
+
+Three rules, and the third is the one that generalises past this project:
+
+  * **Never save a diff of a file while a perturbation harness owns it.** Keep the edit out of the
+    tree until the campaign is finished, or hand the harness the edit so that its own backup
+    contains it.
+  * **`git diff` of a source file is not a review.** Twelve added lines of comment hid a one-token
+    change to a guard because the change was in the same hunk. Reviewing the hunk means reading the
+    non-comment lines, and `grep -v '^+//'` on the diff is a three-second habit that would have
+    shown it.
+  * **A green test suite is evidence only about what it exercises.** Both suites that were re-run
+    pass through none of the code the perturbation disabled. The check that found it was not a
+    test at all: it was one conserved quantity, printed, on an event chosen because it should have
+    been boring. **When a change is supposed to affect nothing outside its own path, measure
+    something on the path it is not supposed to affect.**
