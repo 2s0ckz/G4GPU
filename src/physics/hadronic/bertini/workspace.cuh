@@ -216,6 +216,23 @@ struct BertiniWorkspace {
   deex::Fragment deex_stack[kMaxDeexStack];
   int n_deex_stack = 0;
 
+  /// G4CascadeCoalescence::clusters / usedNucleons - the candidate list the four nested index
+  /// loops build and the mark set that strikes a nucleon out of every later combination. The
+  /// bound is one cluster per two nucleons because the smallest cluster is a deuteron.
+  ///
+  /// MEASURED, and the two numbers disagree for a reason worth writing down. A probe over
+  /// `cascader_collide` alone - the cascade arm, which reaches coalescence and never reaches
+  /// precompound - falls from a 6,672-byte stack frame to 1,232 when these three move here, the
+  /// 5,440 bytes they declare (256 x 4 ints + 256 ints + 512 bools, rounded up). In the FULL
+  /// apply probe the same move is worth 16 bytes: ptxas overlaps disjoint live ranges, and the
+  /// precompound arm's own 10,160-byte frame (measured on a probe that calls nothing else) is
+  /// the larger of the two, so the union does not move. The cascade-only number is the honest
+  /// one, because a kernel that runs Bertini's own de-excitation never allocates precompound's.
+  static constexpr int kMaxCoalClusters = kMaxOutgoingParticles / 2;
+  int coal_cand_idx[kMaxCoalClusters][4];
+  int coal_cand_n[kMaxCoalClusters];
+  bool coal_used[kMaxOutgoingParticles];
+
   /// Which capacity was exceeded, if any.
   CascadeOverflow overflow = CascadeOverflow::kNone;
 };

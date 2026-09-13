@@ -587,6 +587,7 @@ void check_coalescence() {
   const bert::CascadeParams par = bert::default_cascade_params();
   const bert::CoalescenceCuts cuts = bert::coalescence_cuts(par);
   bert::CollisionOutput* out = new bert::CollisionOutput();
+  BertiniWorkspace* cws = new BertiniWorkspace();
 
   for (int ic = 0; ic < 12; ++ic) {
     bert::co_reset(*out);
@@ -598,7 +599,7 @@ void check_coalescence() {
           bert::inucl_store_momentum(bert::lv_set_vect_m(Vec3d{p.px, p.py, p.pz}, m), p.type));
     }
     const int before = out->n_particles;
-    bert::coal_find_clusters(*out, cuts);
+    bert::coal_find_clusters(*out, cuts, *cws);
 
     const std::string where = "cfg" + std::to_string(ic);
     int want_npart = -1, want_nnuc = -1;

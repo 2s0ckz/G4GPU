@@ -90,6 +90,10 @@ struct ApplyResult {
   bool trivialised = false;         ///< the collider gave up and returned bullet + target
   InterfaceRefusal refusal = InterfaceRefusal::kNone;
   CascaderRefusal cascader_refusal = CascaderRefusal::kNone;
+  /// When `cascader_refusal` is `kFate`, WHICH fate refusal. The cascader forwards
+  /// G4NucleiModel's own outcome and the two enumerations are separate, so a campaign that
+  /// recorded only the cascader's kFate could not say what the model had refused.
+  FateRefusal fate_refusal = FateRefusal::kNone;
   DeexciteRefusal deexcite_refusal = DeexciteRefusal::kNone;
   CascadeBalance balance;           ///< what checkFinalResult measured, in Bertini's GeV
 };
@@ -234,6 +238,7 @@ __host__ __device__ inline void inucl_collider_collide(
     if (cres.refusal != CascaderRefusal::kNone) {
       res.refusal = InterfaceRefusal::kCascader;
       res.cascader_refusal = cres.refusal;
+      res.fate_refusal = cres.fate_refusal;
       return;
     }
     res.n_collider_tries = cres.n_tries;

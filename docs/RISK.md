@@ -9256,10 +9256,19 @@ first oracle grid for this package had momenta {0.3, 1, 3} GeV/c and could not s
 
 QBBC never produces a cascade particle at rest - `initializeCascad` puts a stopped projectile one
 zone inside the surface and every collision product carries momentum - so this is a difference
-that would have cost nothing in production and everything in a muon-capture run (P12). The rule
-it illustrates is narrower than "check your utilities": **a utility function written for one
-meaning of a degenerate case is a landmine for the second caller**, and the way to find it is a
-grid that contains the degenerate case, not a reading.
+that would have cost nothing in production and everything in a muon-capture run (P12).
+
+**And it had already been found once, in another package, and the finding did not travel.** P3's
+`deexcitation/excitation_handler.cuh` carries its own `clhep_unit` with a comment that says the
+same thing in the same words - "which is the safer choice everywhere else in this port and the
+wrong one here" - because `G4UnstableFragmentBreakUp` takes the unit vector of a fragment that is
+usually at rest. Two packages, two independent discoveries, two private copies of a four-line
+function; this package now has a third in `bertini/nuclei_model.cuh`. The rule it illustrates is
+narrower than "check your utilities": **a utility function written for one meaning of a
+degenerate case is a landmine for the second caller**, and the way to find it is a grid that
+contains the degenerate case, not a reading. The way to stop finding it a fourth time is to put
+`clhep_unit` beside `normalize` in `core/vec3.cuh` with both meanings named, which is a one-file
+change for the lead at integration and is not this package's to make.
 
 ### V128: a bucket that records the worst relative error passes a column that is entirely NaN
 
@@ -9404,3 +9413,115 @@ What it is worth writing down is the diagnostic value: **an exact power of the e
 a draw count is a signature, not a coincidence.** 2,000,001 = 1 + 1000*1000*2 identified which of
 the seven channels Geant4 had chosen without any access to its internals, and that is what
 localised V131.
+
+### V133: a five-sigma band on a conserved quantity is a band of zero width
+
+The statistical oracle for `ApplyYourself` dumps the mean of everything it can measure, including
+the total energy and the total z-momentum of the final state. Comparing those the way every other
+moment is compared - a difference divided by the pooled standard error of the two samples -
+produced **1,970 sigma** for a pair of numbers that both printed as 3136.47 MeV.
+
+The reason is that they are not random variables. The final state's energy is the initial energy
+plus Bertini's own non-conservation, which is parts in 1e9; its event-to-event spread is therefore
+rounding, not physics, and dividing a six-digit agreement by it gives a number with no meaning.
+The same is true of the momentum, more so: `mean_dp` is 1e-12 MeV in most cases, so the spread
+of `mean_pz` is at the limit of double precision.
+
+The fix is to compare a conserved quantity RELATIVELY, against the scale it is conserving, and to
+let the quantity that IS random - the non-conservation itself - carry the statistical band. Both
+are in `ref/oracle/bertini_apply.csv`; using the wrong one of the pair is what the first run did.
+
+The general form, which applies to any statistical comparison in this project: **before dividing
+by a sample standard deviation, ask whether the quantity has one.** A conservation identity, a
+count that is fixed by the geometry, a yield of a species that is always produced exactly once -
+each has a sample variance that is zero or nearly so, and each will manufacture an arbitrary
+number of sigma from an exact agreement. The tell is a worst-case line whose `got` and `want`
+print identically.
+
+A second form of the same mistake, found in the same test and fixed the same day: a per-event
+yield's variance must be accumulated over ALL events, not over the events in which the species
+appeared. Conditioning on presence makes the variance of a rare fragment nearly zero - it is
+always exactly one when it is there - and the band collapses. The first version of the yield
+comparison did that and reported 8.3 sigma for a difference of 0.07 against 0.09 per event.
+
+### V134: a stack frame measured on the whole kernel is not a measurement of any part of it
+
+The rule this port works to is that per-thread state lives in a workspace passed by pointer, never
+in a local array, and the way it is checked is `-Xptxas -v` on a probe that instantiates the code.
+`G4CascadeCoalescence` was ported with its candidate list and its used-nucleon mark set as locals -
+`int cand_idx[256][4]`, `int cand_n[256]`, `bool used[512]`, 5,440 bytes after alignment - and the
+apply probe reported an 11,856-byte frame. Moving all three into `BertiniWorkspace` and
+re-measuring the SAME probe gave **11,840 bytes: a saving of sixteen**.
+
+The arrays had not become free. `ptxas` allocates local memory by live range, and the largest
+single consumer in that kernel is the precompound arm of the de-excitation - a probe that calls
+`preco::deexcite` and nothing else reports 10,160 bytes on its own. The coalescence scratch and the
+precompound frame are never live at the same time, so their storage overlaps and the union is the
+larger of the two. A probe over `cascader_collide` alone - the cascade arm, which reaches
+coalescence and never reaches precompound - shows the real number: **6,672 bytes as locals, 1,232
+bytes with the same three arrays in the workspace.**
+
+Both measurements are true and only one of them answers the question. The general form:
+**a resource measured on a union tells you about the union, and a term that is dominated is
+invisible in it.** It is the same shape as V124 - a grid that cannot see a term is not a test of
+that term - in a different currency. Three consequences for this project:
+
+  * A probe whose purpose is to measure one package should call THAT package and stop. The
+    all-in-one apply probe is the right thing to report for occupancy, and the wrong thing to
+    optimise against.
+  * A frame that does not move when state is removed is evidence that something else is larger,
+    not evidence that the removal was pointless. The removal is still correct: a kernel that runs
+    Bertini's own de-excitation (`DeexciteChoice::kCascade`) never allocates precompound's frame,
+    and there the 5,440 bytes are the whole story.
+  * The number worth carrying to integration is the precompound one. 10,160 bytes of frame per
+    thread is 10 MB at 1,024 resident threads, and it belongs to P6's package rather than this
+    one, so it is recorded here and not acted on.
+
+### V135: a refusal is not a missing event, it is a condition on every event that is left
+
+`G4IntraNucleiCascader::decayTrappedParticle` needs a `G4DecayTable` and a decay generator, which
+are P4's package, so this port refuses it by name. The refusal drops the event. The first
+statistical campaign - nucleons and pions on five targets - refused 932 of 140,000 events, 0.67%,
+and that looked like a rounding error on the sample size.
+
+It is not a sample-size effect, and the grid that showed it was the one that had not been run yet.
+Adding QBBC's THIRD Bertini instance to the oracle - K+, K- and lambda, which use the cascade's own
+de-excitation and had no top-level case at all - moved the refusal rate to **18% of a K- case and
+up to 47% of a lambda one**, because a hyperon is trapped exactly when the cascade made strangeness
+and the residual caught it. And the surviving events are not a smaller sample of the same thing:
+
+  * lambda yield 0.754 per event against Geant4's 0.394. The port KEEPS the lambda it cannot decay.
+  * pi- yield 0.108 against 0.226, and pi- mean kinetic energy 188 MeV against 96. Geant4's trapped
+    lambda decays inside the nucleus and adds a soft pion; the port's surviving events have only
+    the fast cascade pions, so both the count and the spectrum move.
+  * photon mean energy 1.8 MeV against 3.0-4.1. The decay deposits its Q-value as excitation, and
+    the de-excitation that follows is harder than the one the port's events see.
+
+The port's sample is conditioned on "no hyperon was trapped"; the oracle's is not. Comparing them
+measures the conditioning, not the model.
+
+**The measurement that establishes this, rather than asserting it, is the correlation.** The test
+prints each case's worst deviation beside its refused fraction, binned:
+
+      0.00% to   0.10%   32 cases  mean worst   2.59 sigma  worst   4.90
+      0.10% to   0.50%   21 cases  mean worst   2.67 sigma  worst   4.24
+      0.50% to   2.00%   21 cases  mean worst   2.89 sigma  worst   4.82
+      2.00% to   5.00%    5 cases  mean worst   2.70 sigma  worst   2.91
+      5.00% to 101.00%   16 cases  mean worst  10.00 sigma  worst  21.96
+
+Flat to 5% and then a factor of four. That break is in the data, not chosen: the 79 cases below it
+are asserted at five sigma and pass, and the 16 above it are reported in their own bucket with the
+reason printed per case. A threshold picked to make a test pass would have had to sit somewhere in
+the flat region, and there is nothing there to pick.
+
+Three things follow, and the third is the one that generalises:
+
+  1. **A refusal's cost is measured per case, not per package.** 0.67% overall was the average of
+     0.0% and 47%, and the average was the useless number.
+  2. **A refusal that correlates with the physics cannot be corrected for.** There is no reweighting
+     that recovers Geant4's sample from the port's, because the missing events differ in kind.
+  3. **The way to find out whether a refusal matters is a grid that contains what it refuses.** The
+     nucleon-and-pion grid could not: it reaches the trapped-hyperon path in half a percent of its
+     events. It took a projectile that IS a hyperon to make the refusal visible, and that case
+     existed only because the second de-excitation arm needed covering. V124 again, in the currency
+     of refusals: **a grid that cannot see a refusal is not a measurement of what the refusal costs.**

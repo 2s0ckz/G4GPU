@@ -629,14 +629,17 @@ __host__ __device__ inline bool coal_good_cluster(const CollisionOutput& o, cons
 /// (an invalid Z for the size), and a nucleon in a refused candidate has to go back on the output
 /// list rather than vanish.
 __host__ __device__ inline void coal_find_clusters(CollisionOutput& o,
-                                                   const CoalescenceCuts& cuts) {
-  // At most one cluster per four nucleons, and the output list is bounded, so the candidate
-  // list is bounded by a quarter of it. `used` is a bitmask over the particle list.
-  constexpr int kMaxClusters = kMaxOutgoingParticles / 2;
-  int cand_idx[kMaxClusters][4];
-  int cand_n[kMaxClusters];
+                                                   const CoalescenceCuts& cuts,
+                                                   BertiniWorkspace& ws) {
+  // At most one cluster per two nucleons, and the output list is bounded, so the candidate list
+  // is bounded by half of it. These three live in the workspace rather than on the stack: as
+  // locals they took a probe over cascader_collide from 1,232 bytes of stack frame to 6,672,
+  // measured with -Xptxas -v both ways.
+  constexpr int kMaxClusters = BertiniWorkspace::kMaxCoalClusters;
+  auto* cand_idx = ws.coal_cand_idx;
+  int* cand_n = ws.coal_cand_n;
   int n_cand = 0;
-  bool used[kMaxOutgoingParticles];
+  bool* used = ws.coal_used;
   for (int i = 0; i < o.n_particles; ++i) { used[i] = false; }
 
   const int nh = o.n_particles;

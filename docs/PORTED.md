@@ -1197,16 +1197,24 @@ interaction list, 320 excited strings and P11's 53,816-byte string-decay workspa
 TRACK in flight and every byte behind a pointer. That is six times P11's and it is the number to
 look at before this runs on a device: docs/RISK.md V101.
 
-#### 2.1.12 The Bertini cascade: the INUCL tables, the nucleus model and the two-body collider (P10)
+#### 2.1.12 The Bertini cascade: the whole INUCL tree (P10, P10b)
 
-`G4CascadeInterface` and the INUCL tree under it, as QBBC configures it. **Partial**: this
-subsection covers the tables, `G4NucleiModel`'s deterministic half, `G4LorentzConvertor` and the
-hadron-hadron collider. The intra-nuclear cascade (`G4IntraNucleiCascader`,
-`G4CascadeRecoilMaker`, `G4CascadeCoalescence`), Bertini's own de-excitation
-(`G4NonEquilibriumEvaporator`, `G4EquilibriumEvaporator`, `G4Fissioner`, `G4BigBanger`) and
-`G4CascadeInterface::ApplyYourself` itself are **not here yet** and are listed as `-` below; the
-oracle for the last of them (`bertini_apply.csv`, `bertini_apply_species.csv`) is already dumped
-and waiting.
+`G4CascadeInterface` and the INUCL tree under it, as QBBC configures it, end to end: the tables,
+`G4NucleiModel` in both halves, `G4LorentzConvertor`, the hadron-hadron collider, the
+intra-nuclear cascade with coalescence and the recoil bookkeeping, Bertini's own de-excitation,
+and `ApplyYourself` with its retry loops. The entry point is
+`bert::apply_yourself(HadProjectile, HadNucleus, HadFinalState, ...)`.
+
+**Four oracles at four levels, and the reason there are four.** Each piece of the tree is
+separately constructible in Geant4 and has a public entry point, so each is compared value for
+value under a prescribed eight-value engine: the tables and the collider (P10), one cascade step
+and one whole cascade (`bertini_initcascad.csv`, `bertini_fate.csv`, `bertini_cascader.csv`,
+`bertini_coalescence.csv`), and the five de-excitation entry points (`bertini_deexcite.csv`).
+The ASSEMBLY cannot be: `ApplyYourself` runs up to twenty collider attempts, each up to a hundred
+cascader attempts, each up to a hundred cascades, and under a prescribed engine every rejection
+sampler in that stack exhausts rather than samples (docs/RISK.md V132). So the top level is
+compared as a distribution, against `bertini_apply.csv` and `bertini_apply_species.csv`, and the
+exactness lives one level down where it can.
 
 **QBBC contains Bertini three times, in two configurations.** `G4HadronInelasticQBBC` builds one
 instance for p and n over 1-6 GeV and one for pi+ and pi- over 1-12 GeV, and calls
@@ -1238,7 +1246,7 @@ in `tests/test_bertini_collide.cu`.
 | G4CascadeFinalStateAlgorithm, G4CascadeFinalStateGenerator, G4HadDecayGenerator, G4VHadDecayAlgorithm | yes | **V** | same file. `IsDecayAllowed` is the only thing that stops a final state heavier than the collision, and it is two base classes up in `hadronic/util` - docs/RISK.md V122. A final state generated on the tenth attempt is DISCARDED by `generateSCMfinalState`'s exit test; no oracle case succeeds on its tenth pass, so the grid cannot see the off-by-one and `fs_retry_exhausted` is asserted directly instead - docs/RISK.md V121. `FillUsingKopylov` is off by default and is measured anyway, through a second oracle pass with `/process/had/cascade/usePhaseSpace true` |
 | **G4IntraNucleiCascader** (`collide`, `initialize`, `newCascade`, `setupCascade`, `generateCascade`, `finishCascade`, `finalize`, `processTrappedParticle`, `particleCanInteract`), **G4CascadParticle**, **G4CollisionOutput**, **G4InuclNuclei**, **G4CascadeCheckBalance**, **G4CascadeRecoilMaker**, **G4CascadeCoalescence** | yes | **P** | `bertini/intra_cascader.cuh` and `bertini/collision_output.cuh`. 861,952 comparisons against four oracle files, of which 576 whole events (`bertini_cascader.csv`) and twelve hand-built coalescence states: draw counts, multiplicities, product types, the residual's (A, Z) and excitation all **exact**, four-momenta worst 8.4e-15 per step and 1.4e-10 for a whole Pb cascade (one particle in the longest of 576 events - see the tolerance note in the test). The nuclei are 4, 9, 12, 27, 56 and 207 because G4NucleiModel has three density shapes and the first two are the only way to reach two of them; He-4 is also what found the bare-recoil-nucleon store and the three meanings of `small_ekin` - docs/RISK.md V129. `minimum_recoil_A` is dead code in 11.1.1 - V130. **Refused by name:** `decayTrappedParticle` (a trapped hyperon needs P4's decay tables), `rescatter`/`preloadCascade`/`processSecondary`/`releaseSecondary` (the `Propagate` entry, P11's), and every buffer capacity. `G4CascadeHistory` changes no result and is not ported (`showHistory` is 0) |
 | **G4CascadeDeexcitation**, **G4NonEquilibriumEvaporator**, **G4EquilibriumEvaporator**, **G4Fissioner** (+ G4FissionStore, G4FissionConfiguration), **G4BigBanger**, **G4CascadeDeexciteBase** | yes | **V** | `bertini/deexcite.cuh`. 19,822 comparisons against `bertini_deexcite.csv` - 15 fragments x 4 exciton configurations x 5 entry points x 8 phases, each entry point dumped on its own because each is separately constructible in Geant4. Draw counts, multiplicities, product types and the residual's (A, Z) **exact**; four-momenta worst 2.2e-13, excitations 6.0e-13. Reached by the kaon/hyperon instance; p, n, pi+ and pi- de-excite through P6 (docs/RISK.md V118) and both arms are wired. **`Z*Z/A` in the fission width is INTEGER division** and it moves lead from the tabulated barrier to the liquid-drop one - a factor of 22 in the fission width and a different channel - docs/RISK.md V131. `explosion()` is two different functions with the same name, one on the base class and one on the evaporator, and they disagree in both directions. The equilibrium evaporator's recursion into its own fission fragments is flattened onto a workspace stack, depth 3 by the fission threshold. **Refused by name:** `G4FissionStore::generateConfiguration`'s off-the-end read, a big bang with more nucleons than the workspace holds, and every capacity. `G4BigBanger`'s own "No bang! Don't know why" exhaustion is Geant4's outcome, not a refusal, and is reproduced |
-| **G4CascadeInterface** (`ApplyYourself`, `createBullet`, `createTarget`, `copyOutputToHadronicResult`, `checkFinalResult`, `retryInelasticProton`/`Nucleus`) | yes | **-** | not yet. The oracle is dumped: `bertini_apply.csv` and `bertini_apply_species.csv` |
+| **G4CascadeInterface** (`ApplyYourself`, `IsApplicable`, `createBullet`, `createTarget`, `copyOutputToHadronicResult`, `makeDynamicParticle`, `checkFinalResult`, `retryInelasticProton`/`Nucleus`, `coulombBarrierViolation`, `NoInteraction`), **G4InuclCollider** (`collide`, `deexcite`, both de-excitation choices), **G4PreCompoundDeexcitation** | yes | **P** | `bertini/cascade_interface.cuh`, entry point `bert::apply_yourself(HadProjectile, HadNucleus, HadFinalState, ...)` with P5's shapes. Compared STATISTICALLY - three nested retry loops mean no prescribed engine survives to the top - against `bertini_apply.csv` and `bertini_apply_species.csv`: **21,981 comparisons over 95 cases and 190,000 events**, worst 2.3 sigma on the multiplicity, 4.9 on one low-count fragment spectrum and 4.8 on one fragment angle. Energy and z-momentum are compared relatively (they are conservation identities, not random variables - docs/RISK.md V133) and agree to 7e-7; the oracle's momentum-non-conservation column is `mean_pz` minus a constant and is asserted as that identity, which holds to 3.3e-14 and checks the mass table on the way. Both de-excitation arms are wired AND both are in the grid: p, n, pi+, pi- to P6's `preco::deexcite`, K+, K-, lambda to the cascade's own evaporators, selected by `qbbc_bertini_range(pdg)` - docs/RISK.md V118. The kaon and hyperon cases were added after the first grid, which had nucleons and pions only and therefore never ran `bertini/deexcite.cuh` above the level of its own oracle - docs/RISK.md V124, and they are what measured V135. **Refused by name:** `G4LightTargetCollider` (a photon on A < 3 - P13's), hyper-nuclear targets, `throwNonConservationFailure` (a kernel cannot throw: `ApplyResult::would_throw` carries it out and the campaign compares the count against the oracle's `thrown` column), and every capacity. `Propagate`/`rescatter` is P11's entry and is not ported. **The one refusal that costs events is `decayTrappedParticle`** (P4's decay tables), 8,095 of 190,000 - and it is not spread evenly: 0.1% of a K+ case, 18-47% of a K- or lambda one, because a hyperon is trapped exactly when the cascade made strangeness. Those 16 cases are REPORTED rather than asserted, and the correlation that justifies the line is printed by the test - docs/RISK.md V135 |
 | photonuclear and muon-capture entry points, hyper-nuclei | - | **-** | refused by name. `G4CascadeInterface` serves P13 and P12 through the same class, but their callers are not this package's |
 
 Tests: `test_bertini_data.cu` - 865,049 exact comparisons, worst 0 in all 47 buckets;
@@ -1246,13 +1254,21 @@ Tests: `test_bertini_data.cu` - 865,049 exact comparisons, worst 0 in all 47 buc
 `test_bertini_cascade.cu` - 861,952 comparisons over the cascade half, the whole intra-nuclear
 cascader and coalescence, worst 1.4e-10 (one particle of the longest of 576 events; everything
 per-step is at 8.4e-15 and every discrete quantity - draw counts, multiplicities, product types,
-zones, generations, the nucleon census - is exact). Device probes: `bertini_tables_probe` 68
-registers / 288 bytes, `bertini_nucleus_probe` 60 / 208, `bertini_angdst_probe` 56 / 200,
-`bertini_collide_probe` 158 / 416, `bertini_fate_probe` 224 / 496, `bertini_deexcite_probe`
-214 / 784, no spills, 1,811,852 bytes of gmem for the tables. The de-excitation probe was 6,784
-bytes of stack until the big bang's two sort arrays and the fissioner's fifty candidates moved
-into the workspace - 6 kB of a thread's frame for two buffers that are the caller's in Geant4
-too.
+zones, generations, the nucleon census - is exact); `test_bertini_deex.cu` - 19,822 comparisons,
+worst 2.2e-13; `test_bertini_apply.cu` - 21,981 statistical comparisons over 95 cases and 190,000
+events, every asserted bucket inside its band, and a species-coverage bucket that walks the PORT's
+species rather than the oracle's so that a species Geant4 never made would be visible (16,225
+points, none). Device probes: `bertini_tables_probe` 68 registers / 288 bytes,
+`bertini_nucleus_probe` 60 / 208, `bertini_angdst_probe` 56 / 200, `bertini_collide_probe`
+158 / 416, `bertini_fate_probe` 224 / 496, `bertini_deexcite_probe` 214 / 784, all without spills,
+and `bertini_apply_probe` - the whole model in one kernel - 255 registers, 11,840-byte stack
+frame, 208 bytes of spill stores. 1,811,852 bytes of gmem for the tables. The de-excitation probe
+was 6,784 bytes of stack until the big bang's two sort arrays and the fissioner's fifty candidates
+moved into the workspace - 6 kB of a thread's frame for two buffers that are the caller's in
+Geant4 too. The apply probe's frame is 10,160 bytes of P6's `preco::deexcite` and about 1,700 of
+everything else: moving `G4CascadeCoalescence`'s scratch into the workspace took the CASCADE arm
+from 6,672 bytes to 1,232 and the combined probe from 11,856 to 11,840, because `ptxas` overlaps
+live ranges and the precompound arm is larger - docs/RISK.md V134.
 
 ### 2.2 What QBBC needs and is not there
 

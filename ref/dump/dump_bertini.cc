@@ -101,6 +101,9 @@
 #include "G4NucleiModel.hh"
 #include "G4NucleiProperties.hh"
 #include "G4Nucleus.hh"
+#include "G4KaonMinus.hh"
+#include "G4KaonPlus.hh"
+#include "G4Lambda.hh"
 #include "G4PionMinus.hh"
 #include "G4PionPlus.hh"
 #include "G4Proton.hh"
@@ -991,7 +994,13 @@ void dump_apply() {
   std::fprintf(s, "projectile,ke_MeV,A,Z,events,pdg,count,mean_ke_MeV,mean_ke2_MeV2,"
                   "mean_cos,mean_cos2\n");
 
-  struct Case { const char* name; G4ParticleDefinition* pd; double ke_MeV; int a, z; };
+  // `preco` selects which of QBBC's two Bertini CONFIGURATIONS runs the case, and it is not a
+  // property of the case: `G4HadronInelasticQBBC` calls `usePreCompoundDeexcitation()` on the
+  // nucleon and pion instances and `G4HadronicBuilder::BuildFTFP_BERT` does not call it on the
+  // kaon/hyperon one. Both are here because the two arms are DIFFERENT CODE - P6's
+  // `G4PreCompoundModel` against the cascade's own `G4CascadeDeexcitation` - and a grid of
+  // nucleons and pions alone exercises exactly one of them at the top level. docs/RISK.md V124.
+  struct Case { const char* name; G4ParticleDefinition* pd; double ke_MeV; int a, z; bool preco; };
   static const int kN = 2000;   // the port's campaigns run 20,000; the oracle is the cheap half
 
   std::vector<Case> cases;
@@ -999,27 +1008,39 @@ void dump_apply() {
   G4ParticleDefinition* nn = G4Neutron::Neutron();
   G4ParticleDefinition* pip_ = G4PionPlus::PionPlus();
   G4ParticleDefinition* pim_ = G4PionMinus::PionMinus();
+  G4ParticleDefinition* kp_ = G4KaonPlus::KaonPlus();
+  G4ParticleDefinition* km_ = G4KaonMinus::KaonMinus();
+  G4ParticleDefinition* lam_ = G4Lambda::Lambda();
 
   struct AZ { int a, z; };
   static const AZ targets[] = {{12, 6}, {16, 8}, {27, 13}, {56, 26}, {207, 82}};
   static const double nucleonKE[] = {1500., 3000., 5000.};
   static const double pionKE[] = {200., 1000., 3000., 8000.};
+  // The kaon/hyperon instance's window is 0 to 6 GeV; 500 MeV is below anything the pion grid
+  // reaches and is where a K- stops being a projectile and starts being an absorption.
+  static const double kaonKE[] = {500., 3000.};
 
   for (const AZ& t : targets) {
     for (double ke : nucleonKE) {
-      cases.push_back({"proton", pp, ke, t.a, t.z});
-      cases.push_back({"neutron", nn, ke, t.a, t.z});
+      cases.push_back({"proton", pp, ke, t.a, t.z, true});
+      cases.push_back({"neutron", nn, ke, t.a, t.z, true});
     }
     for (double ke : pionKE) {
-      cases.push_back({"pi+", pip_, ke, t.a, t.z});
-      cases.push_back({"pi-", pim_, ke, t.a, t.z});
+      cases.push_back({"pi+", pip_, ke, t.a, t.z, true});
+      cases.push_back({"pi-", pim_, ke, t.a, t.z, true});
     }
+    for (double ke : kaonKE) {
+      cases.push_back({"kaon+", kp_, ke, t.a, t.z, false});
+      cases.push_back({"kaon-", km_, ke, t.a, t.z, false});
+    }
+    cases.push_back({"lambda", lam_, 1000., t.a, t.z, false});
   }
 
-  // QBBC's configuration: PreCompound de-excitation, as G4HadronInelasticQBBC sets it for
-  // nucleons and pions.
+  // Two instances, because `usePreCompoundDeexcitation()` is a one-way switch on the object and
+  // QBBC really does build one of each.
   G4CascadeInterface bert;
   bert.usePreCompoundDeexcitation();
+  G4CascadeInterface bert_casc;     // the kaon/hyperon instance: the cascade's own evaporators
 
   for (const Case& c : cases) {
     CLHEP::HepRandom::setTheSeed(20260911);
@@ -1042,7 +1063,8 @@ void dump_apply() {
       // compared against it rather than against zero.
       G4HadFinalState* fs = nullptr;
       try {
-        fs = bert.ApplyYourself(proj, nucleus);
+        fs = c.preco ? bert.ApplyYourself(proj, nucleus)
+                     : bert_casc.ApplyYourself(proj, nucleus);
       } catch (...) {
         ++thrown;
         continue;
@@ -1785,6 +1807,12 @@ void dump_deexcite() {
 }
 
 void dump_bertini(const DumpContext&) {
+  // Regenerating one file rather than fourteen: `dump_deexcite` alone takes eight minutes and
+  // `dump_apply` twenty, so extending one grid and re-running the whole package costs half an
+  // hour of dumps that did not change. The variable is read rather than a #define so the
+  // checked-in program is the one that produces the checked-in oracle: with it unset this runs
+  // everything, which is what ref/oracle/run.bat does.
+  if (std::getenv("G4GPU_BERTINI_APPLY_ONLY")) { dump_apply(); return; }
   dump_params();
   dump_particles();
   dump_nuclei();

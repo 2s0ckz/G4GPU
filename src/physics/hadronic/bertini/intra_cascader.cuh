@@ -323,7 +323,7 @@ __host__ __device__ inline bool cascader_finish(NucleiModel& m, const CascadePar
   ws.n_cascade = 0;
 
   if (par.do_coalescence) {
-    coal_find_clusters(out, coalescence_cuts(par));
+    coal_find_clusters(out, coalescence_cuts(par), ws);
     if (out.overflow != CascadeOverflow::kNone) {
       res.refusal = CascaderRefusal::kOverflow;
       return false;
@@ -384,7 +384,16 @@ __host__ __device__ inline bool cascader_finish(NucleiModel& m, const CascadePar
   }
 
   if (recoil_good_nucleus(recoil)) {
+    // `theRecoilMaker->addExcitonConfiguration(theExitonConfiguration)` immediately before
+    // `makeRecoilFragment()`, which writes the counts onto the G4Fragment with
+    // `SetNumberOfHoles` and `SetNumberOfExcitedParticle`. That is the ONLY channel by which
+    // the cascade tells the de-excitation how excited the residual is in exciton terms, and
+    // both de-excitation arms read it: `G4NonEquilibriumEvaporator` will not run at all with
+    // an empty configuration, and `G4PreCompoundModel` starts its exciton walk from it.
+    // MEASURED: leaving it empty changed the proton yield of an 8 GeV pi- on lead from 8.97
+    // per event to 8.31, and nothing else in the event said so.
     out.recoil_fragment = recoil_make_fragment(recoil, excitons);
+    out.recoil_excitons = excitons;
     out.has_recoil_fragment = true;
   }
 
