@@ -1189,6 +1189,9 @@ void write_imr_collision() {
 /// distances. The grid therefore sweeps the transverse offset from 0 to 5 fm, which brackets
 /// `sqrt(500 mb/pi)` = 1.26 fm and `sqrt(200 mb/pi)` = 0.80 fm, and includes a target BEHIND the
 /// projectile so the negative-time exit is exercised.
+/// Defined below, beside the measurement that explains why it has to be a leak.
+G4Scatterer& imr_scatterer();
+
 void write_imr_scatterer() {
   FILE* f = std::fopen("bic_imr_scatterer.csv", "w");
   std::fprintf(f,
@@ -1233,7 +1236,9 @@ void write_imr_scatterer() {
   const double kT[] = {2.0,   5.0,   12.0,  20.0,  60.0,   150.0,  400.0,
                        900.0, 1010.0, 1100.0, 1500.0};
 
-  G4Scatterer scatterer;
+  // The leaked singleton, not a local: destroying a G4Scatterer empties the static channel
+  // list for every one that follows it. docs/RISK.md V155.
+  G4Scatterer& scatterer = imr_scatterer();
 
   for (const Pair& pr : pairs) {
     for (int along_z = 0; along_z < 2; ++along_z) {
@@ -2300,7 +2305,7 @@ void write_imr_decay() {
   // entirely would agree everywhere.
   FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv "
                     "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
-                    "bic_imr_kdecay.csv", "w");
+                    "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2702,6 +2707,126 @@ void write_imr_kdecay() {
   std::fclose(f);
 }
 
+// G4Scatterer::Scatter - the whole collision tree end to end, from two tracks to their products.
+//
+// The leaves are already compared one at a time elsewhere in this file; what only this dump can
+// see is the DISPATCH: which of G4CollisionNN's eight components a uniform lands in, which of the
+// nine middle composites under two of them, which of the 306 concrete channels under that, and
+// how many uniforms the whole path consumed. The product identities name the concrete channel and
+// the draw count names the depth, so the two together pin the path without needing access to any
+// of the private caches.
+/// The one G4Scatterer this file uses, and it is DELIBERATELY NEVER DESTROYED.
+///
+/// `G4Scatterer::~G4Scatterer` deletes every registered collision and clears the static
+/// `G4Scatterer::collisions`, and does NOT reset the file-scope `setupDone` that guards the
+/// registration. So the first G4Scatterer to be destroyed empties the channel list for every
+/// G4Scatterer that will ever be constructed afterwards, in the same process. See
+/// `write_imr_scatterlife` below, which measures it, and docs/RISK.md V155.
+///
+/// This dump found it the hard way: `write_imr_scatterer` had a local `G4Scatterer scatterer;`,
+/// and every one of the 648 rows `write_imr_scatter` produced after that function returned had a
+/// cross section of exactly zero and drew no random at all.
+G4Scatterer& imr_scatterer() {
+  static G4Scatterer* s = new G4Scatterer();  // never deleted, on purpose
+  return *s;
+}
+
+/// The lifetime bug itself, in three measurements on the same pair: from a scatterer built while
+/// the list is intact, then after ONE scatterer somewhere else has been destroyed, then from a
+/// freshly constructed one. The second and third are the same number and it is zero.
+void write_imr_scatterlife() {
+  FILE* f = std::fopen("bic_imr_scatterlife.csv", "w");
+  std::fprintf(f, "step,sigma_mb,time_ns\n");
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const double m = p->GetPDGMass();
+  const double e1 = 200.0 + m;
+  const G4LorentzVector q1(G4ThreeVector(0, 0, std::sqrt(e1 * e1 - m * m)), e1);
+  const G4LorentzVector q2(G4ThreeVector(0, 0, 0), m);
+  G4KineticTrack t1(p, 0.0, G4ThreeVector(0, 0, 0), q1);
+  G4KineticTrack t2(p, 0.0, G4ThreeVector(0.5 * fermi, 0, 3.0 * fermi), q2);
+  auto row = [&](const char* step, const G4Scatterer& sc) {
+    const double t = sc.GetTimeToInteraction(t1, t2);
+    std::fprintf(f, "%s,%.17g,%.17g\n", step, sc.GetCrossSection(t1, t2) / millibarn,
+                 (t < DBL_MAX) ? t : -1.0);
+  };
+  row("intact", imr_scatterer());
+  { G4Scatterer doomed; row("before_destruction", doomed); }
+  row("after_destruction", imr_scatterer());
+  { G4Scatterer fresh; row("freshly_constructed", fresh); }
+  std::fclose(f);
+}
+
+void write_imr_scatter() {
+
+  FILE* f = std::fopen("bic_imr_scatter.csv", "w");
+  std::fprintf(f, "pair,ekin_MeV,phase,n,i,pdg,px,py,pz,e,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  const G4ParticleDefinition* pip = G4PionPlus::PionPlusDefinition();
+  const G4ParticleDefinition* pim = G4PionMinus::PionMinusDefinition();
+  const G4ParticleDefinition* pi0 = G4PionZero::PionZeroDefinition();
+  struct Pair { const char* name; const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+  const Pair pairs[] = {{"pp", p, p},   {"nn", n, n},     {"np", n, p},     {"pn", p, n},
+                        {"pip_p", pip, p}, {"pim_p", pim, p}, {"pi0_p", pi0, p},
+                        {"pip_n", pip, n}, {"pim_n", pim, n}};
+
+  // Energies chosen so that every one of the eight nucleon components is reachable somewhere:
+  // elastic only below the pion threshold, N-Delta from about 800 MeV, and the Delta* and N*
+  // families as sqrt(s) climbs past their thresholds.
+  const double kT[] = {50.0, 200.0, 500.0, 800.0, 1000.0, 1400.0, 2000.0, 3000.0, 5000.0};
+
+  G4Scatterer& scatterer = imr_scatterer();
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (const Pair& pr : pairs) {
+    for (double ekin : kT) {
+      const double m1 = pr.a->GetPDGMass();
+      const double m2 = pr.b->GetPDGMass();
+      const double e1 = ekin + m1;
+      // A tilted projectile and a target with its own momentum, so the boosts and the rotations
+      // in every leaf are live - with both tracks along +z the rotations are the identity and a
+      // composed inverse cannot be told from a composed forward (docs/RISK.md V75).
+      G4ThreeVector v1(0, 0, std::sqrt(e1 * e1 - m1 * m1));
+      v1.rotateY(0.35);
+      v1.rotateZ(1.1);
+      const G4LorentzVector q1(v1, e1);
+      const G4ThreeVector v2(37.0, -29.0, 19.0);
+      const G4LorentzVector q2(v2, std::sqrt(v2.mag2() + m2 * m2));
+      for (int phase = 0; phase < 8; ++phase) {
+        G4KineticTrack t1(pr.a, 0.0, G4ThreeVector(0, 0, 0), q1);
+        G4KineticTrack t2(pr.b, 0.0, G4ThreeVector(0, 0, 0), q2);
+        CLHEP::HepRandom::setTheEngine(eng);
+        eng->reset(phase);
+        const double diag_sigma = scatterer.GetCrossSection(t1, t2);
+        G4KineticTrackVector* products = scatterer.Scatter(t1, t2);
+        const int np = (products != nullptr) ? static_cast<int>(products->size()) : 0;
+        if (np == 0) {
+          std::fprintf(f, "%s,%.17g,%d,0,-1,0,%.17g,0,0,0,%d\n", pr.name, ekin, phase,
+                       diag_sigma / millibarn, eng->draws());
+        }
+        for (int i = 0; i < np; ++i) {
+          const G4KineticTrack* q = (*products)[i];
+          const G4LorentzVector& p4 = q->Get4Momentum();
+          std::fprintf(f, "%s,%.17g,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d\n", pr.name, ekin,
+                       phase, np, i, q->GetDefinition()->GetPDGEncoding(), p4.x(), p4.y(), p4.z(),
+                       p4.t(), eng->draws());
+        }
+        if (products != nullptr) {
+          for (auto* q : *products) { delete q; }
+          delete products;
+        }
+        CLHEP::HepRandom::setTheEngine(saved);
+      }
+    }
+  }
+  delete eng;
+  std::fclose(f);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -2809,6 +2934,8 @@ void dump_bic(const DumpContext&) {
   write_imr_decayfs();
   write_imr_absorb();
   write_imr_kdecay();
+  write_imr_scatter();
+  write_imr_scatterlife();
 }
 
 }  // namespace

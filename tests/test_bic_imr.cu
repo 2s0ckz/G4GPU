@@ -105,6 +105,13 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_scatter      G4Scatterer::Scatter end to end over 9 pairs x 9 energies from 50 MeV
+//                        to 5 GeV x 8 phases - the product identities name which of the 306
+//                        concrete channels the three nested uniforms landed on, and the draw
+//                        count names how deep the path went.
+//   bic_imr_scatterlife  four cross sections on one pair, before and after a G4Scatterer is
+//                        destroyed. It is not a comparison - the port has no such static - it is
+//                        the measurement behind docs/RISK.md V155.
 //   bic_imr_kdecay       G4DecayKineticTracks at the LIST level, through the contract header
 //                        bic/kinetic_decay.cuh, over 7 lists x 8 phases. What this file checks
 //                        that no per-decay comparison can is the ORDER the survivors come back
@@ -140,6 +147,7 @@
 #include "physics/hadronic/bic/im_r/angular.cuh"
 #include "physics/hadronic/bic/im_r/channels.cuh"
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
+#include "physics/hadronic/bic/im_r/collision_final_state.cuh"
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
@@ -219,6 +227,25 @@ __global__ void bic_imr_decay_probe(double* out, int pdg, double actual_mass) {
   out[5] = (d.n > 0) ? d.prod[0].p.e : 0.0;
   out[6] = (d.n > 0) ? d.prod[0].p.v.z : 0.0;
   out[7] = static_cast<double>(d.channel);
+}
+
+/// `G4Scatterer::Scatter` on the device: the whole dispatch, from two tracks to their products.
+/// The channel table and the buffers come in by pointer because they are the caller's - which is
+/// also why the port cannot have docs/RISK.md V155's lifetime bug.
+__global__ void bic_imr_scatter_probe(double* out, const imr::ConcreteChannel* chans, int n_chan,
+                                      const imr::NNChannelBuffers* buf, double t) {
+  CycleRngDev rng;
+  imr::ScatterRefusal ref;
+  const double mp = 938.272013;
+  const double e1 = t + mp;
+  const imr::LorentzVector p1(deex::Vec3d{0.0, 0.0, std::sqrt(e1 * e1 - mp * mp)}, e1);
+  const imr::LorentzVector p2(deex::Vec3d{0.0, 0.0, 0.0}, mp);
+  const imr::ScatterFinalState fs = imr::nn_scatter_final_state(
+      chans, n_chan, 2212, 2212, p1, p2, mp, mp, mp, mp, mp, 939.56536, 139.5701, *buf, rng, ref);
+  out[0] = static_cast<double>(fs.n);
+  out[1] = static_cast<double>(fs.component);
+  out[2] = static_cast<double>(fs.concrete);
+  out[3] = (fs.n > 0) ? fs.p[0].e : 0.0;
 }
 
 /// The CONTRACT header's own probe, so that the entry point an outside caller will use is proved
@@ -1960,6 +1987,114 @@ int main() {
       cmp_int(b_kdb, list[i].parent_resonance_pdg, iv(r, 10), where + " parent pdg");
       cmp_int(b_kdb, list[i].parent_resonance_id, iv(r, 11), where + " parent id");
       cmp_int(b_kdb, list[i].creator_model_id, iv(r, 12), where + " creator model id");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3p. G4Scatterer::Scatter - the whole collision tree from two tracks to their products. The
+  //     leaves are compared on their own above; this is the DISPATCH, and what it checks that no
+  //     leaf comparison can is which component, which middle composite and which of the 306
+  //     concrete channels each uniform lands in, and how many uniforms the path consumed.
+  // -------------------------------------------------------------------------------------------
+  const int b_scfs = new_bucket("ScatterFinalState", 5e-15);
+  const int b_scid = new_bucket("ScatterProductsAndOrder", 0.0);
+  const int b_scdr = new_bucket("ScatterDraws", 0.0);
+  {
+    const double m_pip = 139.5701;
+    const double m_pi0 = 134.9766;
+    static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
+    imr::ResonanceTableRefusal tref0;
+    const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
+    auto mass_of = [&](int pdg) {
+      if (pdg == 2212) { return mp; }
+      if (pdg == 2112) { return mn; }
+      if (pdg == 111) { return m_pi0; }
+      return m_pip;
+    };
+    auto iso3_of = [](int pdg) {
+      if (pdg == 2212) { return 1; }
+      if (pdg == 2112) { return -1; }
+      if (pdg == 211) { return 2; }
+      if (pdg == -211) { return -2; }
+      return 0;
+    };
+    struct SPair { const char* name; int a; int b; };
+    const SPair kPairs[] = {{"pp", 2212, 2212},  {"nn", 2112, 2112},  {"np", 2112, 2212},
+                            {"pn", 2212, 2112},  {"pip_p", 211, 2212}, {"pim_p", -211, 2212},
+                            {"pi0_p", 111, 2212}, {"pip_n", 211, 2112}, {"pim_n", -211, 2112}};
+    // One buffer set per pair of definitions, exactly as G4CollisionComposite caches one.
+    static imr::NNChannelBuffers nbuf[4];
+    static imr::MesonBaryonBuffers mbuf[5];
+    for (int k = 0; k < 4; ++k) {
+      imr::ResonanceTableRefusal tr;
+      imr::build_nn_channel_buffers(chans, n_chan, kPairs[k].a, kPairs[k].b, mass_of(kPairs[k].a),
+                                    mass_of(kPairs[k].b), nbuf[k], tr);
+    }
+    for (int k = 0; k < 5; ++k) {
+      const SPair& q = kPairs[4 + k];
+      imr::AnnihRefusal ar;
+      imr::build_meson_baryon_buffers(q.a, q.b, mass_of(q.a), mass_of(q.b), iso3_of(q.a),
+                                      iso3_of(q.b), m_pip, mp, mbuf[k], ar);
+    }
+    const auto rows = read_csv("bic_imr_scatter.csv");
+    std::string last_key;
+    imr::ScatterFinalState fs;
+    int draws = 0;
+    for (const auto& r : rows) {
+      int idx = -1;
+      for (int k = 0; k < 9; ++k) {
+        if (sv(r, 0) == kPairs[k].name) { idx = k; }
+      }
+      if (idx < 0) { continue; }
+      const std::string key = sv(r, 0) + "|" + sv(r, 1) + "|" + sv(r, 2);
+      if (key != last_key) {
+        last_key = key;
+        const int pa = kPairs[idx].a;
+        const int pb = kPairs[idx].b;
+        const double m1 = mass_of(pa);
+        const double m2 = mass_of(pb);
+        const double e1 = dv(r, 1) + m1;
+        // The dump's tilt: rotateY(0.35) then rotateZ(1.1) on a +z momentum.
+        const double pmag = std::sqrt(e1 * e1 - m1 * m1);
+        double vx = pmag * std::sin(0.35);
+        double vy = 0.0;
+        const double vz = pmag * std::cos(0.35);
+        const double cz = std::cos(1.1), sz = std::sin(1.1);
+        const double nx = vx * cz - vy * sz;
+        const double ny = vx * sz + vy * cz;
+        vx = nx;
+        vy = ny;
+        const imr::LorentzVector q1(deex::Vec3d{vx, vy, vz}, e1);
+        const deex::Vec3d v2{37.0, -29.0, 19.0};
+        const imr::LorentzVector q2(v2, std::sqrt(g4gpu::mag2(v2) + m2 * m2));
+        CycleRng rng;
+        rng.reset(iv(r, 2));
+        imr::ScatterRefusal sref;
+        if (idx < 4) {
+          fs = imr::nn_scatter_final_state(chans, n_chan, pa, pb, q1, q2, m1, m2, m1, m2, mp, mn,
+                                           m_pip, nbuf[idx], rng, sref);
+        } else {
+          fs = imr::meson_scatter_final_state(pa, pb, q1, q2, m1, m2, m1, m2, m1, m2, m_pip, mp,
+                                              iso3_of(pa), iso3_of(pb), mbuf[idx - 4], rng, sref);
+        }
+        draws = rng.n;
+        if (sref.any()) {
+          std::printf("REFUSED scatter %s\n", key.c_str());
+          ++fails;
+        }
+      }
+      const std::string where = sv(r, 0) + " T=" + sv(r, 1) + " phase=" + sv(r, 2) +
+                                " i=" + sv(r, 4);
+      cmp_int(b_scid, fs.n, iv(r, 3), where + " n");
+      cmp_int(b_scdr, draws, iv(r, 10), where + " draws");
+      const int i = iv(r, 4);
+      if (i < 0 || i >= fs.n) { continue; }
+      cmp_int(b_scid, fs.pdg[i], iv(r, 5), where + " pdg");
+      const double scale = dv(r, 9);
+      cmp_scaled(b_scfs, fs.p[i].v.x, dv(r, 6), scale, where + " px");
+      cmp_scaled(b_scfs, fs.p[i].v.y, dv(r, 7), scale, where + " py");
+      cmp_scaled(b_scfs, fs.p[i].v.z, dv(r, 8), scale, where + " pz");
+      cmp_scaled(b_scfs, fs.p[i].e, dv(r, 9), scale, where + " e");
     }
   }
 

@@ -10247,3 +10247,61 @@ absorbed on two protons and a pi- on two neutrons, and it is correct. MEASURED: 
 the partner in 1,749 collisions, and the first version of the oracle - which offered only a proton
 spectator - scheduled no absorption at all for a pi+ on a proton in 427 rows, because the filter
 had nothing left to choose.
+
+### V155: destroying one G4Scatterer leaves every later one with no collision channels at all
+
+`G4Scatterer` keeps the two channels it can handle in a STATIC vector, registered once behind a
+file-scope flag:
+
+```
+namespace { G4Mutex collisions_mutex = G4MUTEX_INITIALIZER;  G4bool setupDone = false; }
+typedef GROUP2(G4CollisionNN, G4CollisionMesonBaryon) theChannels;
+G4CollisionVector G4Scatterer::collisions;
+
+G4Scatterer::G4Scatterer()
+{ G4AutoLock l(&collisions_mutex);
+  if ( ! setupDone ) { Register aR; G4ForEach<theChannels>::Apply(&aR, &collisions); setupDone = true; } }
+
+G4Scatterer::~G4Scatterer()
+{ G4AutoLock l(&collisions_mutex);
+  std::for_each(collisions.begin(), collisions.end(), G4Delete());
+  collisions.clear(); }
+```
+
+The destructor empties the shared list and deletes the channel objects. **It does not reset
+`setupDone`.** So the first `G4Scatterer` to be destroyed takes the channel list away from every
+`G4Scatterer` that will ever be constructed afterwards in that process: the constructor sees
+`setupDone == true`, registers nothing, and `FindCollision` returns 0 for every pair. After that
+`GetCrossSection` returns 0, `GetTimeToInteraction` returns DBL_MAX, and `Scatter` returns NULL -
+silently. A binary cascade in that state schedules no collisions and every projectile passes
+through the nucleus untouched.
+
+MEASURED, in `ref/dump/dump_bic.cc`, on one proton-proton pair at 200 MeV and an impact parameter
+that collides:
+
+```
+step                  sigma (mb)   time (ns)
+intact                24.392205    1.7675e-14
+before_destruction    24.392205    1.7675e-14     a SECOND scatterer, list still intact
+after_destruction     0            none           after ONE scatterer was destroyed
+freshly_constructed   0            none           a brand-new one is dead too
+```
+
+**`G4BinaryCascade` builds two of them and deletes both.** Its constructor is
+`G4Scatterer* aSc = new G4Scatterer; theH1Scatterer = new G4Scatterer;` and its destructor deletes
+everything in `theImR` and then `theH1Scatterer`. So a process that constructs a second
+`G4BinaryCascade` after destroying the first - a physics list rebuilt, a `G4BinaryLightIonReaction`
+and a `G4BinaryCascade` whose lifetimes do not nest, a test harness that makes one per call - gets
+a cascade that cannot collide. QBBC builds one per thread and keeps it for the run, so it does not
+bite there; nothing warns, and nothing in the interface says the object has process-wide state.
+
+This is how the port's own oracle found it. `ref/dump/dump_bic.cc` had a local `G4Scatterer` in one
+dump function and another in the next; every one of the 648 rows the second function produced had a
+cross section of exactly zero and drew no random number at all. The dump now uses one leaked
+instance, `imr_scatterer()`, with the reason written beside it.
+
+Not reproduced, and it cannot be: the port has no static channel registry - `nn_scatter_final_state`
+and `meson_scatter_final_state` take the channel table and the buffers as arguments, and a caller
+that owns them cannot have them deleted out from under it by an unrelated object's destructor. The
+behaviour is recorded here rather than carried, because a port that reproduced it would be
+reproducing a lifetime bug and not a physics decision.
