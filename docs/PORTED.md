@@ -1289,6 +1289,63 @@ everything else: moving `G4CascadeCoalescence`'s scratch into the workspace took
 from 6,672 bytes to 1,232 and the combined probe from 11,856 to 11,840, because `ptxas` overlaps
 live ranges and the precompound arm is larger - docs/RISK.md V134.
 
+#### 2.1.13 The at-rest processes: what a stopped negative particle does (P12)
+
+`G4StoppingPhysics` and everything under it, as QBBC configures it: which species get which model,
+the Fermi-Teller element selection, the atomic cascade down to the K shell, the muon's
+capture-versus-decay-in-orbit competition, and the hand-over to a nuclear model. The entry point is
+`stopping::at_rest(HadProjectile, MaterialComposition, HadFinalState, ...)` in P5's shapes.
+
+**QBBC's stopping configuration, read from `G4StoppingPhysics::ConstructProcess` rather than
+assumed.** `QBBC.cc` does `new G4StoppingPhysics(ver)`, which delegates to the two-argument
+constructor and leaves `useMuonMinusCapture` at its default **true**; there is no `useTimeCut` in
+this constructor. The gate on every other species is
+`GetPDGCharge() <= 0.0 && GetPDGMass() > 130 MeV && !IsShortLived()`, and then:
+
+| species | process | nuclear model | de-excitation |
+|---|---|---|---|
+| mu- | `G4MuonMinusCapture` | Bertini, **bare** `G4CascadeInterface` | the cascade's own evaporators |
+| pi-, K-, Sigma-, Xi-, Omega- | `G4HadronicAbsorptionBertini` | Bertini, `SetMinEnergy(0)` | P6's PreCompound |
+| anti-p, anti-n, anti-Lambda, anti-Sigma0, anti-Sigma+, anti-Xi0, anti-nuclei (B < -1) | `G4HadronicAbsorptionFritiof` | FTFP + P6 | P6's PreCompound |
+| neutron, proton, pi+, everything else | none | - | - |
+
+Three of the Fritiof species are NEUTRAL, and they pass because the gate is `<= 0.0`; the BASE
+class's own `IsApplicable` is `< 0.0` strictly and is consulted only on the Bertini process's
+generic path, so a neutral antiparticle is stopped by a process whose base class says it is not
+applicable to it. A neutron is neutral, heavy and long-lived and still gets nothing - it matches
+neither explicit list and falls to the `else` that prints a warning and adds no process.
+
+**The muon's Bertini is not the others' Bertini, and that is a FOURTH instance in a THIRD
+configuration.** `G4HadronicAbsorptionBertini`'s constructor calls `SetMinEnergy(0.)` and
+`usePreCompoundDeexcitation()`; `G4MuonMinusCapture`'s does `new G4CascadeInterface()` and nothing
+else. So muon capture de-excites with the cascade's own evaporators and the other five with P6,
+after the nucleon, pion and kaon/hyperon instances section 2.1.12 describes. The file's change log
+says why: "20121002 K. Genser -- Replaced G4MuMinusCapturePrecompound with G4CascadeInterface
+(Bertini)". `G4MuMinusCapturePrecompound` is still in the package, is wired to nothing QBBC builds,
+and is named here rather than transcribed.
+
+| Geant4 class | QBBC | | Where |
+|---|:--:|:--:|---|
+| **G4StoppingPhysics** (`ConstructProcess`, the species split, `useMuonMinusCapture`) | yes | **V** | `stopping/stopping_process.cuh`'s `stopping_arm(pdg)` and `stopping_deexcite_choice`; 19 pins in `tests/test_stopping.cu`, worst 0 |
+| **G4ElementSelector** (`SelectZandA`) | yes | **V** | `stopping/element_selector.cuh`; the Fermi-Teller Z with the halogen (0.66) and oxygen (0.56) exceptions, 92 comparisons at worst 0 against `stopping_select.csv`, and the CONSEQUENCE measured through the assembly: water captures on oxygen 69.0% of the time where the bare Z-law gives 80.0%. One uniform for the element and one for the isotope, and NEITHER is drawn when there is only one of them. **Refused by name:** `kAbundanceShort`, the isotope loop running off the end when relative abundances sum below the uniform - Geant4 reads `GetIsotope(ni)` past the vector and what it finds there is not defined by the source |
+| **G4EmCaptureCascade** (the K-level table, `ApplyYourself`, `AddNewParticle`) | yes | **V** | `stopping/em_capture_cascade.cuh`; 43 elements x 8 phases against `stopping_emcascade.csv` - draw counts, multiplicities and product kinds **exact at 0**, kinetic energies worst 1.4e-15, and the telescoping invariant (the transitions sum to the K-shell energy) at 1.4e-16, which is one ulp. Every captured particle is treated as a MUON - `fMuMass`, and `ApplyYourself` never reads the projectile - so a pionic or kaonic atom gets muonic level energies; that is the class, not the port. The "local energy deposit" is the binding energy RELEASED, is carried by the secondaries, and is never deposited. At most 14 secondaries, which is the loop's exact bound rather than a margin |
+| **G4MuonMinusBoundDecay** (`ApplyYourself`, `GetMuonCaptureRate`, `GetMuonDecayRate`, `GetMuonZeff`) | yes | **V** | `stopping/muon_bound_decay.cuh`; 200 (Z, A) pairs against `stopping_murates.csv`, both rates and the effective charge **exact at 0**, and the grid is PAIRED - every Z with a tabulated A and an untabulated one - so the early exit that sends a listed Z with an unlisted A to Goulard-Primakoff is measured rather than read. The decay-rate table has one row and its lookup is commented out in the source, so the formula always runs; the binding energy is subtracted TWICE from the bound Michel electron, once through the boost and once explicitly. Decay-in-orbit fraction measured against the analytic ratio at four Z: 0.9197/0.9227 (C), 0.3912/0.3935 (Al), 0.0925/0.0913 (Fe), 0.0291/0.0280 (Pb) |
+| **G4HadronStoppingProcess** (`AtRestGetPhysicalInteractionLength`, `AtRestDoIt`, `IsApplicable`), **G4HadronicAbsorptionBertini**, **G4HadronicAbsorptionFritiof**, **G4MuonMinusCapture** | yes | **P** | `stopping/stopping_process.cuh`, entry `stopping::at_rest`. The at-rest length is ZERO and NotForced, which is why capture pre-empts `G4Decay` every time and why P4's `decay_at_rest_competitor` says what it says - the two now agree and both are pinned. Compared as a distribution: 8 species x 5 materials x 20,000 events. **Refused by name:** the Fritiof arm (200,000 calls, every one refused - P11's `ftf::apply_yourself` has no workspace builder outside its own model tests, so `DecayStrongResonances` is not reached at all yet), `kReentryExhausted` (AtRestDoIt's 100-attempt loop, which Geant4 answers with a FatalException a kernel cannot throw), `kTrappedDaughterNotInucl`, and `kSecondaryOverflow`. Probe `stopping_at_rest_probe`: 255 registers, 13,456-byte stack frame, 284 bytes of spill stores - down from 34,000 when a `HadFinalState` was still a local, docs/RISK.md V144 |
+| **G4ElementaryParticleCollider::generateSCMmuonAbsorption** + **G4GDecay3** | yes | **V** | `bertini/ep_collider.cuh`, and it is the one refusal in this port that has been REDEEMED rather than described: P10 refused it by name as P12's, and P12 arrived. Three `mum` pairs in `bertini_epcollide.csv` - diproton, unboundPN, dineutron - compared like every other pair, part of the 189,206 comparisons at worst 2.47e-14. Its own "Illegal absorption" arm is unreachable, because `useQuasiDeuteron(mum, nn)` rejects the pair one level earlier; G4GDecay3's `loopMax` is stored and never used |
+| G4MuMinusCapturePrecompound, G4MuonMinusAtomicCapture, G4MuonicAtomDecay, G4HadronicAbsorptionFritiofWithBinaryCascade | n | **-** | in the release; QBBC's `G4StoppingPhysics` constructs none of them. The first was replaced by Bertini in 2012 and its file is still there |
+
+Tests: `test_stopping.cu` - 8,883 comparisons, 0 failures, plus the 40-row campaign table. The
+seven tests this package owns or touches were all rebuilt and re-run for the final report:
+`test_bertini_data` 865,049 / 0, `test_bertini_collide` 189,206 / 0, `test_bertini_cascade`
+861,952 / 0, `test_bertini_deex` 19,822 / 0, `test_bertini_apply` 22,535 / 0, `test_decay` PASSED,
+`test_stopping` 8,883 / 0.
+
+**Where the stepper will call it.** `stopping::at_rest` belongs in `physics/stepper.cuh`'s at-rest
+branch beside the decay one, gated as P8b gated hadElastic: a stopped track whose species
+`stopping_arm(pdg)` does not answer `kNone` goes here INSTEAD of to `G4Decay`, because the at-rest
+length is zero and a zero at-rest length pre-empts. The wiring is P15's and is not done here; the
+note is in the entry point's header so the call site is not guessed at.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |

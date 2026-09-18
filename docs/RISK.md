@@ -9856,3 +9856,40 @@ was already a function, already named the distinction, and was already used else
 this. **If a comment can be turned into a predicate, it should be, and the assertion should call
 the predicate.** What cannot be turned into one is a sign that the comment is doing work the code
 cannot check, and that is worth knowing too.
+
+### V144: the biggest thing on a thread's stack looked like a temporary
+
+The workspace discipline in this port says per-thread state lives in a struct passed by pointer and
+never in a local array, and the way it is checked is `-Xptxas -v` on a probe that instantiates the
+code. Every violation found so far has looked like one: `int cand_idx[256][4]`, `double
+bang_modules[256]`, arrays with a capacity in the declaration. This one did not.
+
+`stopping::at_rest` wraps `bert::apply_yourself`, and `bert::apply_yourself` opens with
+`fs.clear()`. So the nuclear model cannot be pointed at the final state that already holds the
+atomic cascade's electrons and gammas, and the first version of the wrapper wrote
+
+    HadFinalState<real_t, kCap> nucfs;
+
+two lines from where it was used, looking exactly like the temporary it was meant to be. The probe
+measured **255 registers and a 34,000-byte stack frame** - three times the 11,872 of the entire
+Bertini entry point inside it, and more than every buffer in `BertiniWorkspace` put together.
+`HadFinalState<double, 256>` is 256 `HadSecondary` structs of 72 bytes each: 18 kB in one
+declaration with no number anywhere in it. Passing the caller's second buffer instead took the
+frame to **13,456 bytes**, which is the Bertini entry point plus about 1,600 for the at-rest chain
+around it.
+
+Three things worth carrying:
+
+  * **A type parameter is a capacity.** `HadFinalState<real_t, kCap>` has its size in a template
+    argument that the declaration does not mention, so `grep` for a bracketed constant does not
+    find it and neither does reading. The port's own type - the one it uses for every final state -
+    is the one that hid.
+  * **A wrapper inherits its callee's contract and can violate its own.** Nothing was wrong with
+    `apply_yourself`; the wrapper needed a second buffer only because the callee clears the first,
+    and that requirement is invisible from either side alone. Any function that adapts between two
+    buffer-owning APIs should be measured, not reviewed.
+  * **The probe has to be re-measured when the wrapper changes, not only when the model does.**
+    This frame was measured once, at the end, and the measurement is the only reason the number is
+    13,456 rather than 34,000 in the integrated branch. Which is the same lesson as the stale
+    `test_bertini_data.cu` two entries up, in a different currency: **a probe that is not re-run is
+    not a measurement, and a test that is not rebuilt is not a test.**
