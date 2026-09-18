@@ -1818,6 +1818,7 @@ void dump_bertini(const DumpContext&) {
   // hour of dumps that did not change. The variable is read rather than a #define so the
   // checked-in program is the one that produces the checked-in oracle: with it unset this runs
   // everything, which is what ref/oracle/run.bat does.
+  if (std::getenv("G4GPU_BERTINI_SKIP")) { return; }
   if (std::getenv("G4GPU_BERTINI_APPLY_ONLY")) { dump_apply(); return; }
   if (std::getenv("G4GPU_BERTINI_EPCOLLIDE_ONLY")) { dump_epcollide(); return; }
   dump_params();

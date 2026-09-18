@@ -1,0 +1,331 @@
+// The at-rest processes against ref/oracle/stopping_*.csv.
+//
+// Three exact comparisons and one statistical one, arranged the way the Bertini package is: every
+// piece that Geant4 exposes on its own is driven under the eight-value cycle engine and compared
+// value for value, and the assembly - which runs a nuclear model with its own retry loops and
+// cannot survive a prescribed engine - is compared as a distribution.
+//
+//   stopping_emcascade.csv  G4EmCaptureCascade over 43 elements x 8 phases: the draw count, the
+//                           number of secondaries, every kind and every kinetic energy.
+//   stopping_murates.csv    G4MuonMinusBoundDecay's capture and decay rates and the effective
+//                           charge. PURE FUNCTIONS of (Z, A) - no engine - so these are exact by
+//                           construction and the tolerance is 1e-15, not a band.
+//   stopping_select.csv     G4ElementSelector's Fermi-Teller weight for Z = 1..92.
+//
+// **The invariant the EM cascade has and nothing else in this port does.** Its transition
+// energies telescope: the level-14 electron carries `level[13]`, every later step carries
+// `level[i] - level[n]`, and the sum over a cascade that ends at level 0 is exactly `level[0]` -
+// the K-shell energy. So `ebound` must equal `k_level_energy(Z)` for every element and every
+// phase, at ZERO tolerance, independently of which branches the cascade took. That is asserted
+// here rather than observed, because it is the one check that does not care about the sampling at
+// all: a port that got the Auger/photon split wrong, or the level ordering wrong, or the
+// interpolation wrong, would still pass every energy comparison ONLY if it also got this right.
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "core/rng.cuh"
+#include "physics/hadronic/stopping/em_capture_cascade.cuh"
+#include "physics/hadronic/stopping/element_selector.cuh"
+#include "physics/hadronic/stopping/muon_bound_decay.cuh"
+#include "physics/hadronic/stopping/stopping_process.cuh"
+
+using namespace g4gpu;
+using namespace g4gpu::physics::hadronic;
+
+namespace {
+
+int fails = 0;
+
+__host__ __device__ inline const double* cycle_seq() {
+  static const double s[8] = {0.05, 0.37, 0.63, 0.91, 0.12, 0.78, 0.29, 0.55};
+  return s;
+}
+
+/// The same engine the dump installed, so that a sampler is a deterministic function of phase.
+struct CycleRng {
+  int phase = 0;
+  long long n = 0;
+  void reset(int p) { phase = p; n = 0; }
+  double uniform() {
+    ++n;
+    const unsigned i = static_cast<unsigned>(n - 1) + static_cast<unsigned>(phase);
+    return cycle_seq()[i % 8u];
+  }
+};
+
+struct Bucket {
+  const char* name;
+  long long n = 0;
+  double worst = 0.0;
+  std::string where;
+  double tol = 1e-13;
+};
+
+std::vector<Bucket> buckets;
+
+int new_bucket(const char* name, double tol) {
+  Bucket b;
+  b.name = name;
+  b.tol = tol;
+  buckets.push_back(b);
+  return static_cast<int>(buckets.size()) - 1;
+}
+
+void cmp_rel(int bi, double got, double want, const std::string& where) {
+  Bucket& b = buckets[bi];
+  ++b.n;
+  const double scale = (std::fabs(want) > 0.0) ? std::fabs(want) : 1.0;
+  const double rel = std::fabs(got - want) / scale;
+  if (rel > b.worst) {
+    b.worst = rel;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, " got %.17g want %.17g", got, want);
+    b.where = where + buf;
+  }
+}
+
+void cmp_int(int bi, long long got, long long want, const std::string& where) {
+  Bucket& b = buckets[bi];
+  ++b.n;
+  if (got != want && b.worst < 1.0) {
+    b.worst = 1.0;
+    char buf[96];
+    std::snprintf(buf, sizeof buf, " got %lld want %lld", got, want);
+    b.where = where + buf;
+  }
+}
+
+std::string oracle_dir() {
+  const char* e = std::getenv("G4GPU_ORACLE");
+  return (e != nullptr) ? std::string(e) : std::string("ref/oracle");
+}
+
+struct Csv {
+  std::vector<std::string> head;
+  std::vector<std::vector<std::string>> rows;
+  int col(const char* name) const {
+    for (std::size_t i = 0; i < head.size(); ++i) {
+      if (head[i] == name) { return static_cast<int>(i); }
+    }
+    return -1;
+  }
+  double num(std::size_t r, int c) const { return std::atof(rows[r][c].c_str()); }
+  long long i64(std::size_t r, int c) const { return std::atoll(rows[r][c].c_str()); }
+};
+
+bool load_csv(const std::string& path, Csv& out) {
+  std::FILE* f = std::fopen(path.c_str(), "r");
+  if (!f) { return false; }
+  std::vector<char> line(1 << 16);
+  bool first = true;
+  while (std::fgets(line.data(), int(line.size()), f)) {
+    std::string s(line.data());
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) { s.pop_back(); }
+    if (s.empty()) { continue; }
+    std::vector<std::string> cells;
+    std::string cur;
+    for (char ch : s) {
+      if (ch == ',') { cells.push_back(cur); cur.clear(); } else { cur.push_back(ch); }
+    }
+    cells.push_back(cur);
+    if (first) { out.head = cells; first = false; } else { out.rows.push_back(cells); }
+  }
+  std::fclose(f);
+  return true;
+}
+
+}  // namespace
+
+int main() {
+  const std::string dir = oracle_dir();
+  Csv emc, murates, select;
+  if (!load_csv(dir + "/stopping_emcascade.csv", emc) ||
+      !load_csv(dir + "/stopping_murates.csv", murates) ||
+      !load_csv(dir + "/stopping_select.csv", select)) {
+    std::printf("cannot read %s/stopping_*.csv - run ref/dump/build.bat then ref/oracle/run.bat"
+                " tables\n", dir.c_str());
+    return 1;
+  }
+
+  // ============================================================================================
+  // 1. The Fermi-Teller weight, and the two exceptions that are the whole point of it.
+  // ============================================================================================
+  {
+    const int b = new_bucket("SelectorWeight", 0.0);
+    const int c_z = select.col("Z");
+    const int c_w = select.col("weight_over_Z");
+    int n_halogen = 0, n_oxygen = 0;
+    for (std::size_t r = 0; r < select.rows.size(); ++r) {
+      const int z = int(select.i64(r, c_z));
+      const double want = select.num(r, c_w) * double(z);
+      cmp_rel(b, stopping::element_capture_weight(z), want, "Z " + std::to_string(z));
+      if (select.rows[r][select.col("note")] == "halogen") { ++n_halogen; }
+      if (select.rows[r][select.col("note")] == "oxygen") { ++n_oxygen; }
+    }
+    std::printf("  element weights: %d halogens at 0.66, %d oxygen at 0.56, the rest Fermi-Teller"
+                " - and water is 2 H to 1 O, so the oxygen line moves pi- capture there from"
+                " 80.0%% to %.1f%%\n", n_halogen, n_oxygen,
+                100.0 * stopping::element_capture_weight(8) /
+                    (stopping::element_capture_weight(8) + 2.0 * stopping::element_capture_weight(1)));
+  }
+
+  // ============================================================================================
+  // 2. The muon's two rates and the effective charge. Pure functions; zero tolerance in spirit,
+  //    1e-15 in practice because the oracle is printed at 17 digits and re-parsed.
+  // ============================================================================================
+  {
+    const int bc = new_bucket("MuonCaptureRate", 1e-15);
+    const int bd = new_bucket("MuonDecayRate", 1e-15);
+    const int bz = new_bucket("MuonZeff", 0.0);
+    const int c_z = murates.col("Z");
+    const int c_a = murates.col("A");
+    const int c_tab = murates.col("tabulated");
+    const int c_cap = murates.col("cap_rate_per_ns");
+    const int c_dec = murates.col("decay_rate_per_ns");
+    const int c_zeff = murates.col("zeff");
+    const int c_m = murates.col("nucl_mass_MeV");
+    long long n_tab = 0, n_formula = 0;
+    for (std::size_t r = 0; r < murates.rows.size(); ++r) {
+      const int z = int(murates.i64(r, c_z));
+      const int a = int(murates.i64(r, c_a));
+      const std::string w = "Z " + std::to_string(z) + " A " + std::to_string(a);
+      cmp_rel(bc, stopping::muon_capture_rate(z, a), murates.num(r, c_cap), w);
+      cmp_rel(bd, stopping::muon_decay_rate(z, 105.6583715, murates.num(r, c_m)),
+              murates.num(r, c_dec), w);
+      cmp_rel(bz, stopping::muon_zeff(z), murates.num(r, c_zeff), w);
+      if (murates.i64(r, c_tab) != 0) { ++n_tab; } else { ++n_formula; }
+    }
+    std::printf("  muon rates: %lld (Z,A) from the measured table and %lld from Goulard-Primakoff"
+                " - the pairing is what shows a listed Z with an unlisted A takes the formula\n",
+                n_tab, n_formula);
+  }
+
+  // ============================================================================================
+  // 3. The EM capture cascade, exact under the cycle, and the telescoping invariant.
+  // ============================================================================================
+  {
+    const int bd = new_bucket("EmCascadeDraws", 0.0);
+    const int bn = new_bucket("EmCascadeMultiplicity", 0.0);
+    const int bk = new_bucket("EmCascadeKinds", 0.0);
+    const int be = new_bucket("EmCascadeEnergies", 1e-13);
+    const int bb = new_bucket("EmCascadeBoundEnergy", 1e-14);
+    // The telescoping invariant is exact in exact arithmetic and holds to ONE ULP in doubles:
+    // the cascade sums thirteen differences in the order the sampling produced them, and
+    // `level[0]` is the same total summed once. Measured worst 1.4e-16 over 344 cases, which is
+    // 2^-53 and not a tolerance chosen to fit. Asserting 0.0 here failed on the first run, and
+    // the honest fix is to say "one ulp" rather than either to pretend it is exact or to widen
+    // the band until the number stops mattering.
+    const int bi = new_bucket("EmCascadeTelescopes", 4e-16);
+
+    const int c_z = emc.col("Z");
+    const int c_a = emc.col("A");
+    const int c_ph = emc.col("phase");
+    const int c_dr = emc.col("draws");
+    const int c_n = emc.col("n");
+    const int c_i = emc.col("i");
+    const int c_pdg = emc.col("pdg");
+    const int c_ek = emc.col("ekin_MeV");
+    const int c_eb = emc.col("ebound_MeV");
+
+    // The oracle is one row per secondary; group by (Z, phase).
+    std::size_t r = 0;
+    long long n_cases = 0, n_auger = 0, n_gamma = 0;
+    int max_n = 0;
+    while (r < emc.rows.size()) {
+      const int z = int(emc.i64(r, c_z));
+      const int a = int(emc.i64(r, c_a));
+      const int phase = int(emc.i64(r, c_ph));
+      const long long want_draws = emc.i64(r, c_dr);
+      const int want_n = int(emc.i64(r, c_n));
+      const double want_eb = emc.num(r, c_eb);
+      const std::string w = "Z" + std::to_string(z) + " ph" + std::to_string(phase);
+
+      CycleRng rng;
+      rng.reset(phase);
+      stopping::EmCascadeResult got;
+      // The nuclear mass the dump used: G4NucleiProperties::GetNuclearMass(A, Z). P3's table is
+      // the same one, and the murates file carries it, so it is not re-derived here.
+      stopping::em_capture_cascade(z, deex::nuclear_mass(a, z), rng, got);
+
+      cmp_int(bd, rng.n, want_draws, "draws " + w);
+      cmp_int(bn, got.n, want_n, "n " + w);
+      cmp_rel(bb, got.e_bound, want_eb, "ebound " + w);
+      // THE INVARIANT: the transitions telescope to the K-shell energy, whatever path was taken.
+      cmp_rel(bi, got.e_bound, stopping::k_level_energy(z), "telescope " + w);
+      if (got.n > max_n) { max_n = got.n; }
+      ++n_cases;
+
+      for (int i = 0; i < want_n && r < emc.rows.size(); ++i, ++r) {
+        if (int(emc.i64(r, c_i)) != i) { break; }
+        const std::string wi = w + " p" + std::to_string(i);
+        if (i < got.n) {
+          cmp_int(bk, got.p[i].pdg, emc.i64(r, c_pdg), "kind " + wi);
+          cmp_rel(be, got.p[i].kin_energy, emc.num(r, c_ek), "ekin " + wi);
+          if (got.p[i].pdg == 11) { ++n_auger; } else { ++n_gamma; }
+        }
+      }
+    }
+    std::printf("  EM cascade: %lld cases, %lld electrons and %lld gammas, most secondaries %d of"
+                " the %d the bound allows\n", n_cases, n_auger, n_gamma, max_n,
+                stopping::kMaxEmCascadeSecondaries);
+  }
+
+  // ============================================================================================
+  // 4. Pinned by construction: the species map, and the at-rest length that makes it matter.
+  // ============================================================================================
+  {
+    const int b = new_bucket("PinnedByConstruction", 0.0);
+    auto pin = [&](bool ok, const char* what) {
+      Bucket& bb = buckets[b];
+      ++bb.n;
+      if (!ok) { bb.worst = 1.0; bb.where = what; std::printf("  FAIL pin: %s\n", what); }
+    };
+    using stopping::NuclearArm;
+    pin(stopping::at_rest_interaction_length() == 0.0,
+        "the at-rest length is ZERO - which is why capture pre-empts G4Decay every time");
+    pin(stopping::stopping_arm(13) == NuclearArm::kMuonCapture, "mu- -> G4MuonMinusCapture");
+    pin(stopping::stopping_arm(-211) == NuclearArm::kBertini, "pi- -> Bertini");
+    pin(stopping::stopping_arm(-321) == NuclearArm::kBertini, "K- -> Bertini");
+    pin(stopping::stopping_arm(3112) == NuclearArm::kBertini, "Sigma- -> Bertini");
+    pin(stopping::stopping_arm(3312) == NuclearArm::kBertini, "Xi- -> Bertini");
+    pin(stopping::stopping_arm(3334) == NuclearArm::kBertini, "Omega- -> Bertini");
+    pin(stopping::stopping_arm(-2212) == NuclearArm::kFritiof, "anti-p -> Fritiof");
+    pin(stopping::stopping_arm(-2112) == NuclearArm::kFritiof,
+        "anti-n -> Fritiof, and it is NEUTRAL: the gate is charge <= 0, not < 0");
+    pin(stopping::stopping_arm(-3122) == NuclearArm::kFritiof, "anti-Lambda -> Fritiof");
+    pin(stopping::stopping_arm(-3212) == NuclearArm::kFritiof, "anti-Sigma0 -> Fritiof");
+    pin(stopping::stopping_arm(-3222) == NuclearArm::kFritiof, "anti-Sigma+ -> Fritiof");
+    pin(stopping::stopping_arm(-3322) == NuclearArm::kFritiof, "anti-Xi0 -> Fritiof");
+    pin(stopping::stopping_arm(-1000010020) == NuclearArm::kFritiof,
+        "an anti-deuteron -> Fritiof, by baryon number < -1");
+    pin(stopping::stopping_arm(2112) == NuclearArm::kNone,
+        "a NEUTRON gets nothing - neutral, heavy, long-lived, and in neither list");
+    pin(stopping::stopping_arm(2212) == NuclearArm::kNone, "a proton gets nothing");
+    pin(stopping::stopping_arm(211) == NuclearArm::kNone, "a pi+ gets nothing - charge > 0");
+    // **The muon's Bertini is not the others' Bertini.** G4HadronicAbsorptionBertini calls
+    // usePreCompoundDeexcitation(); G4MuonMinusCapture constructs a bare G4CascadeInterface.
+    pin(stopping::stopping_deexcite_choice(NuclearArm::kMuonCapture) ==
+            bert::DeexciteChoice::kCascade,
+        "mu- capture de-excites with the CASCADE's own evaporators");
+    pin(stopping::stopping_deexcite_choice(NuclearArm::kBertini) ==
+            bert::DeexciteChoice::kPreCompound,
+        "and the other five with P6's PreCompound - a fourth instance in a third configuration");
+  }
+
+  long long total = 0;
+  std::printf("%-34s %10s %14s\n", "bucket", "points", "worst rel");
+  for (const Bucket& b : buckets) {
+    total += b.n;
+    const bool ok = !(b.worst > b.tol);
+    if (!ok) { ++fails; }
+    std::printf("%-34s %10lld %14.3g %-4s %s\n", b.name, b.n, b.worst, ok ? "ok" : "FAIL",
+                b.where.c_str());
+  }
+  std::printf("%lld comparisons, %d failures\n", total, fails);
+  return (fails == 0) ? 0 : 1;
+}

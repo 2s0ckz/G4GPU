@@ -48,6 +48,7 @@
 
 #include <cmath>
 
+#include "core/units.cuh"
 #include "physics/hadronic/deexcitation/fragment.cuh"
 #include "physics/hadronic/process.cuh"
 
@@ -68,9 +69,14 @@ __host__ __device__ inline deex::Vec3d clhep_unit3(const deex::Vec3d& v) {
 /// in 1/ns the way `cRate / microsecond` does in Geant4's unit system.
 __host__ __device__ inline constexpr double bd_microsecond_ns() { return 1.0e3; }
 
-/// CLHEP's fine_structure_const.
+/// CLHEP's `fine_structure_const`, which is DERIVED as `elm_coupling/hbarc` and is not the
+/// CODATA number anyone would type. `core/units.cuh` already pins it, and this file asks for it
+/// there rather than repeating it: the first version of this line carried 7.2973525693e-3 - CODATA
+/// 2018, off in the eleventh digit - and the muon decay rate at Z = 77 came out 1.1e-10 wrong,
+/// which the oracle caught. docs/RISK.md V8 is the entry about hand-typed constants; this is the
+/// same mistake in a package written eight months later.
 __host__ __device__ inline constexpr double bd_fine_structure() {
-  return 7.2973525693e-3;
+  return units::fine_structure_const<double>();
 }
 
 /// The 93 measured muon capture rates, Suzuki/Measday/Roalsvig Phys. Rev. C35 (1987) 2212, with

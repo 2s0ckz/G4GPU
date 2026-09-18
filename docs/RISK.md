@@ -9784,3 +9784,75 @@ evidence the number is right**, and every input it cannot resolve needs an exact
 down or it has no test at all. That is why this package has four exact oracles under one statistical
 one, and why a NOT CAUGHT verdict is followed to the level that catches it rather than recorded as
 a gap.
+
+### V142: a refusal deferred to a package is a debt, and it came due in one line
+
+P10 refused `G4ElementaryParticleCollider::generateSCMmuonAbsorption` by name, with the reason
+written beside it: "it is reached only from muon capture at rest, which is P12's package and whose
+caller does not exist in this port". That was correct and it was the right call. What it did not
+say - because nothing knew yet - is how much of P12 it would take with it.
+
+The first end-to-end run of the at-rest chain, a mu- stopped in carbon, 2,000 events:
+
+    refused = 154, decayed-in-orbit = 1841
+
+154 refusals out of 159 muons that did NOT decay in orbit. Every single muon that got as far as
+nuclear capture was lost, and the refusal chain read `kBertiniRefused -> kCascader -> kFate ->
+kColliderRefused` down to the line P10 had left. The package was not partly working; its entire
+nuclear half was a no-op, and the only reason the number looked survivable at first glance is that
+92% of muons in carbon decay in orbit and never reach the refusal at all.
+
+**The deferred refusal was three functions deep and two packages away from the thing it disabled.**
+Nothing in P12's own transcription was wrong. Nothing in P10's was wrong either - the refusal was
+accurate, named, and reported rather than silently producing nothing. The failure mode is that the
+DISTANCE between a refusal and its consequence is not bounded by anything, and a package can be
+written, reviewed and committed while the physics it exists to compute is switched off somewhere
+else entirely.
+
+What made it visible in minutes rather than at integration was that the at-rest entry point
+carries its refusal out by name and the probe printed the count. Had the chain answered "no
+secondaries" instead of "refused, kColliderRefused", the mu- row of the campaign would have been a
+plausible-looking spectrum of EM-cascade electrons with no nuclear products, and the missing half
+would have had to be noticed by someone who knew what a muon capture is supposed to look like.
+
+Three rules:
+
+  * **A refusal that names another package is an entry in that package's todo list, and it should
+    be written down as one.** `grep -rn 'P1[0-9]' src/` finds eleven of them in this port. The one
+    that bit here was findable by grep and nobody had run the grep.
+  * **Count refusals per species and per case, always.** The aggregate was 0.67% of events on the
+    Bertini grid (V135) and 97% of captures here, and both numbers came out of the same counter.
+    The aggregate is the useless one.
+  * **Redeeming a refusal changes assertions, and the ones it changes are the evidence it was
+    real.** `tests/test_bertini_collide.cu` asserted "mu- on a dibaryon is refused"; that assertion
+    had to be replaced by a comparison against the oracle, and the oracle grid had to grow three
+    rows to have anything to compare against. A refusal whose removal changes no test was never
+    doing anything.
+
+### V143: an assertion narrower than its own comment passes until the grid grows
+
+Beside V142, from the same hour. `tests/test_bertini_collide.cu` checked every empty final state in
+its grid with
+
+    // Nothing may be refused for a reason this grid is not allowed to produce: every empty
+    // case here must be the kinematics retry loop giving up, not a missing table or a capacity.
+    cmp_int(br, int(out.refusal), int(ColliderRefusal::kKinematicsFailed), ...);
+
+The comment states a property - "Geant4 itself produced nothing, rather than this port declining
+to" - and the code asserts an instance of it, because at the time every empty case in the grid did
+come from the kinematics loop. Adding `mu-` on a dineutron broke it: that pair is empty for a
+completely legitimate and completely different reason, `G4NucleiModel::useQuasiDeuteron(mum, nn)`
+admitting pi0, pi+ and gamma and no muon, so `collide` returns before the absorption arm is
+entered.
+
+The test failed, correctly, for a case that was correct. That is the cheapest possible way to
+learn it and it still cost the ten minutes of deciding which side was wrong.
+
+**The rule is about where the specification lives.** When a comment states a property and the line
+under it tests a particular consequence of that property, the comment is the specification and the
+code is an approximation to it - and the approximation is only as good as the grid that was in
+front of the author. The fix is to test the property: `!collider_refusal_is_port_limit(refusal)`
+was already a function, already named the distinction, and was already used elsewhere for exactly
+this. **If a comment can be turned into a predicate, it should be, and the assertion should call
+the predicate.** What cannot be turned into one is a sign that the comment is doing work the code
+cannot check, and that is worth knowing too.
