@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -97,7 +98,10 @@
 #include "G4HadSecondary.hh"
 #include "G4HadronicInteractionRegistry.hh"
 #include "G4IonTable.hh"
+#include "G4DecayTable.hh"
 #include "G4KineticTrack.hh"
+#include "G4SampleResonance.hh"
+#include "G4VDecayChannel.hh"
 #include "G4KineticTrackVector.hh"
 #include "G4Neutron.hh"
 #include "G4NuclearFermiDensity.hh"
@@ -2101,6 +2105,211 @@ void write_imr_annih() {
 
 /// G4CollisionMesonBaryon's two partial cross sections and the selection between them - the whole
 /// of what a pion in the binary cascade does, once G4Scatterer has found the channel.
+// G4KineticTrack's resonance machinery, layer one: the DECAY TABLES themselves and the two
+// quantities built directly on them.
+//
+// Geant4 does not hold these in an array a transcription could copy - `G4ShortLivedConstructor`
+// builds them out of `G4ExcitedBaryonConstructor` at run time, channel by channel - so they are
+// dumped from Geant4's own `G4DecayTable` and the port's copy is checked against this file. That
+// is the same standing the isospin list in bic_imr_species.csv has.
+//
+// The species set is a TRANSITIVE CLOSURE, not a list: it starts from the 25 resonance multiplets
+// G4CollisionMesonBaryonToResonance and the 306 G4Concrete* channels can produce, plus the pions
+// and nucleons, and follows every decay daughter until nothing new appears. A port that carried
+// only the produced set would find a daughter it has no table for the first time a resonance
+// decays to another resonance, which N(1520) -> Delta pi does immediately.
+void write_imr_decay() {
+  FILE* f = std::fopen("bic_imr_decaytable.csv", "w");
+  std::fprintf(f, "pdg,name,mass,width,shortlived,charge,baryon,min_mass,n_channels,channel,br,"
+                  "n_daughters,d0,d1,d2,d3\n");
+  FILE* g = std::fopen("bic_imr_actualwidth.csv", "w");
+  std::fprintf(g, "pdg,actual_mass,n_channels,channel,actual_width,total_width\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+  G4SampleResonance sampler;
+
+  // The seeds: both nucleons, the three pions, and every charge state of the 25 multiplets.
+  const int kSeeds[] = {
+      2212, 2112, 211, -211, 111,
+      1114, 2114, 2214, 2224,
+      31114, 32114, 32214, 32224,  1112, 1212, 2122, 2222,
+      11114, 12114, 12214, 12224,  11112, 11212, 12122, 12222,
+      1116, 1216, 2126, 2226,      21112, 21212, 22122, 22222,
+      21114, 22114, 22214, 22224,  11116, 11216, 12126, 12226,
+      1118, 2118, 2218, 2228,
+      12212, 12112, 2124, 1214, 22212, 22112, 32212, 32112, 2216, 2116,
+      12216, 12116, 22124, 21214, 42212, 42112, 32124, 31214, 42124, 41214,
+      12218, 12118, 52214, 52114, 2128, 1218, 100002210, 100002110,
+      100012210, 100012110};
+
+  std::vector<int> order;
+  std::set<int> seen;
+  std::vector<int> queue(std::begin(kSeeds), std::end(kSeeds));
+  while (!queue.empty()) {
+    const int code = queue.front();
+    queue.erase(queue.begin());
+    if (seen.count(code) != 0) { continue; }
+    seen.insert(code);
+    order.push_back(code);
+    const G4ParticleDefinition* d = ptable->FindParticle(code);
+    if (d == nullptr) { continue; }
+    const G4DecayTable* table = d->GetDecayTable();
+    if (table == nullptr) { continue; }
+    for (int c = 0; c < table->entries(); ++c) {
+      G4VDecayChannel* ch = const_cast<G4DecayTable*>(table)->GetDecayChannel(c);
+      for (int j = 0; j < ch->GetNumberOfDaughters(); ++j) {
+        const G4ParticleDefinition* dd = ch->GetDaughter(j);
+        if (dd != nullptr && seen.count(dd->GetPDGEncoding()) == 0) {
+          queue.push_back(dd->GetPDGEncoding());
+        }
+      }
+    }
+  }
+
+  for (int code : order) {
+    const G4ParticleDefinition* d = ptable->FindParticle(code);
+    if (d == nullptr) {
+      std::fprintf(f, "%d,MISSING,0,0,0,0,0,0,0,-1,0,0,0,0,0,0\n", code);
+      continue;
+    }
+    // GetMinimumMass recurses over the daughters' own tables, keeping only channels whose
+    // branching ratio is above 0.10 - and falling back to the single most probable channel when
+    // none is. It is dumped for every species, stable ones included, because for those it is
+    // simply the PDG mass and a port that recursed there anyway would be caught here.
+    const double min_mass = sampler.GetMinimumMass(d);
+    const G4DecayTable* table = d->GetDecayTable();
+    const int n = (table != nullptr) ? table->entries() : 0;
+    if (n == 0) {
+      std::fprintf(f, "%d,%s,%.17g,%.17g,%d,%d,%d,%.17g,0,-1,0,0,0,0,0,0\n", code,
+                   d->GetParticleName().c_str(), d->GetPDGMass(), d->GetPDGWidth(),
+                   d->IsShortLived() ? 1 : 0, G4lrint(d->GetPDGCharge() / CLHEP::eplus),
+                   d->GetBaryonNumber(), min_mass);
+      continue;
+    }
+    for (int c = 0; c < n; ++c) {
+      G4VDecayChannel* ch = const_cast<G4DecayTable*>(table)->GetDecayChannel(c);
+      const int nd = ch->GetNumberOfDaughters();
+      int dcode[4] = {0, 0, 0, 0};
+      for (int j = 0; j < nd && j < 4; ++j) {
+        const G4ParticleDefinition* dd = ch->GetDaughter(j);
+        dcode[j] = (dd != nullptr) ? dd->GetPDGEncoding() : 0;
+      }
+      std::fprintf(f, "%d,%s,%.17g,%.17g,%d,%d,%d,%.17g,%d,%d,%.17g,%d,%d,%d,%d,%d\n", code,
+                   d->GetParticleName().c_str(), d->GetPDGMass(), d->GetPDGWidth(),
+                   d->IsShortLived() ? 1 : 0, G4lrint(d->GetPDGCharge() / CLHEP::eplus),
+                   d->GetBaryonNumber(), min_mass, n, c, ch->GetBR(), nd, dcode[0],
+                   dcode[1], dcode[2], dcode[3]);
+    }
+  }
+
+  // Layer two: theActualWidth[], built in the G4KineticTrack constructor by integrating a
+  // Breit-Wigner over each channel's short-lived daughters with G4Integrator::Simpson at 100
+  // iterations. GetActualWidth() and GetnChannels() are public, so this reads the array Geant4
+  // built rather than a quantity derived from it.
+  for (int code : order) {
+    const G4ParticleDefinition* d = ptable->FindParticle(code);
+    if (d == nullptr || d->GetDecayTable() == nullptr) { continue; }
+    // kaon0 is NOT a function of its arguments here. The G4KineticTrack constructor replaces a
+    // K0 or an anti-K0 with K0S or K0L on a coin flip before it reads any decay table, so a
+    // track built from 311 reports whichever of the two the flip landed on - six channels or
+    // two - and consumes one uniform doing it. It is dumped as the substitution it is, below.
+    if (code == 311 || code == -311) { continue; }
+    const double pole = d->GetPDGMass();
+    const double w = d->GetPDGWidth();
+    // Actual masses from well below the pole to well above it. The Breit-Wigner tail is what the
+    // integrals see, and the width ratio is sensitive to the phase space closing: at an actual
+    // mass below the sum of a channel's daughter masses the channel's momentum ratio is zero.
+    const double kFrac[] = {0.70, 0.80, 0.90, 0.95, 1.00, 1.05, 1.10, 1.25, 1.50};
+    for (double fr : kFrac) {
+      double m = pole * fr;
+      if (w > 0.0 && fr != 1.00) { m = pole + (fr - 1.0) * 6.0 * w; }
+      if (m < 1.0) { continue; }
+      const G4LorentzVector q(G4ThreeVector(0, 0, 0), m);
+      G4KineticTrack kt(d, 0.0, G4ThreeVector(0, 0, 0), q);
+      const int n = kt.GetnChannels();
+      const G4double* aw = kt.GetActualWidth();
+      double total = 0.0;
+      for (int c = n - 1; c >= 0; --c) { total += aw[c]; }
+      for (int c = 0; c < n; ++c) {
+        std::fprintf(g, "%d,%.17g,%d,%d,%.17g,%.17g\n", code, kt.GetActualMass(), n, c, aw[c],
+                     total);
+      }
+    }
+  }
+
+  // The K0 substitution itself, under the prescribed engine, so that the one uniform it draws
+  // and the identity it lands on are both exact. G4KineticTrack.cc:
+  //
+  //     if (G4KaonZero::KaonZero() == theDefinition || G4AntiKaonZero::AntiKaonZero() == ...)
+  //     { if (G4UniformRand()<0.5) theDefinition = KaonZeroShort; else KaonZeroLong; }
+  //
+  // The cascade reaches it: N(1650)0, N(1710)0, N(1720)0 and N(1990)0 all have a Lambda K0
+  // channel, so a K0 becomes a cascade track the moment one of those decays.
+  FILE* k = std::fopen("bic_imr_k0flip.csv", "w");
+  std::fprintf(k, "pdg,phase,result_pdg,n_channels,draws\n");
+  {
+    auto* eng = new ImrCycleEngine();
+    CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+    CLHEP::HepRandom::setTheEngine(eng);
+    for (int code : {311, -311}) {
+      const G4ParticleDefinition* d = ptable->FindParticle(code);
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        const G4LorentzVector q(G4ThreeVector(0, 0, 0), d->GetPDGMass());
+        G4KineticTrack kt(d, 0.0, G4ThreeVector(0, 0, 0), q);
+        std::fprintf(k, "%d,%d,%d,%d,%d\n", code, phase,
+                     kt.GetDefinition()->GetPDGEncoding(), kt.GetnChannels(), eng->draws());
+      }
+    }
+    CLHEP::HepRandom::setTheEngine(saved);
+    delete eng;
+  }
+  std::fclose(k);
+
+  // SampleResidualLifetime, which is what G4BinaryCascade schedules a G4BCDecay at. It is
+  // hbar_Planck * (-1/totalWidth) * log(uniform) * the4Momentum.gamma(), so it needs a MOVING
+  // track: with the resonance at rest the Lorentz factor is 1 and a port that dropped it
+  // entirely would agree everywhere.
+  FILE* t = std::fopen("bic_imr_lifetime.csv", "w");
+  std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
+  {
+    auto* eng = new ImrCycleEngine();
+    CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+    const int kRes[] = {2214, 2224, 1114, 2114, 12212, 2124, 22212, 32212, 12216, 22124,
+                        42212, 32124, 2218, 2128, 100012210};
+    for (int code : kRes) {
+      const G4ParticleDefinition* d = ptable->FindParticle(code);
+      if (d == nullptr) { continue; }
+      const double pole = d->GetPDGMass();
+      for (double fr : {0.90, 1.00, 1.15}) {
+        const double m = pole * fr;
+        for (double pz : {0.0, 300.0, 1500.0}) {
+          const G4LorentzVector q(G4ThreeVector(0, 0, pz), std::sqrt(pz * pz + m * m));
+          G4KineticTrack kt(d, 0.0, G4ThreeVector(0, 0, 0), q);
+          double total = 0.0;
+          const G4double* aw = kt.GetActualWidth();
+          for (int c = kt.GetnChannels() - 1; c >= 0; --c) { total += aw[c]; }
+          CLHEP::HepRandom::setTheEngine(eng);
+          for (int phase = 0; phase < 8; ++phase) {
+            eng->reset(phase);
+            const double life = kt.SampleResidualLifetime();
+            std::fprintf(t, "%d,%.17g,%.17g,%.17g,%.17g,%d,%.17g,%.17g,%d\n", code,
+                         kt.GetActualMass(), q.z(), q.t(), q.gamma(), phase, life, total,
+                         eng->draws());
+          }
+          CLHEP::HepRandom::setTheEngine(saved);
+        }
+      }
+    }
+    delete eng;
+  }
+  std::fclose(t);
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -2204,6 +2413,7 @@ void dump_bic(const DumpContext&) {
   write_imr_resonance_fs();
   write_imr_annih();
   write_imr_mbselect();
+  write_imr_decay();
 }
 
 }  // namespace
@@ -2221,5 +2431,7 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_resxsec.csv bic_imr_species.csv "
                     "bic_imr_nnpartial.csv bic_imr_nnselect.csv bic_imr_nnbuffer.csv "
                     "bic_imr_resfs.csv bic_imr_annihfs.csv bic_imr_annih.csv "
-                    "bic_imr_mbpartial.csv bic_imr_mbselect.csv",
+                    "bic_imr_mbpartial.csv bic_imr_mbselect.csv "
+                    "bic_imr_decaytable.csv bic_imr_actualwidth.csv bic_imr_k0flip.csv "
+                    "bic_imr_lifetime.csv",
                     dump_bic);

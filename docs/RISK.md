@@ -10007,3 +10007,95 @@ and charge exactly on the 7,563 events that produced a final state, and `A_proj 
 A_proj` on the 300 that took the fallback with an ion beam. A test that asserted the law there
 would have to be switched off, and a switched-off test is worth less than one that says what the
 code does and why that is not what the physics says.
+
+### V148: ten species' branching ratios do not sum to one, and two of them are cascade resonances
+
+`G4DecayTable` holds a branching ratio per channel and nothing normalises them. Summed over the 94
+species in the binary cascade's transitive closure (`src/physics/hadronic/bic/im_r/decay_tables.hh`),
+ten do not come to 1:
+
+```
+delta(1950)++   0.99      N(1535)+   1.001      eta      0.99260      kaon+   0.99981
+delta(1950)-    0.99      N(1535)0   1.001      omega    0.997        kaon0L  0.9964
+lambda          0.997                                                 kaon0S  0.99890
+```
+
+The two Delta(1950) states are the interesting pair. `G4ExcitedDeltaConstructor::bRatio` gives the
+multiplet five modes - N gamma 0.01, N pi 0.44, N rho 0.15, Delta pi 0.20, N* pi 0.20 - and
+`G4ExcitedBaryonConstructor::CreateDecayTable` builds one channel per charge state per mode. A
+Delta(1950)++ or a Delta(1950)- has NO N gamma final state, because the charge cannot be balanced,
+so that mode produces no channel for them and **the 0.01 is dropped rather than redistributed**.
+The two middle charge states keep it and sum to 1. It is the same class of asymmetry as the
+delta- width in V108: a multiplet's extreme states are not the same particle as its middle ones.
+
+It does not bias which channel `G4KineticTrack::Decay` chooses, because that draw is
+`theTotalActualWidth * G4UniformRand()` against the running sum of the same array and the
+normalisation divides out. It does change `EvaluateTotalActualWidth`, and therefore
+`SampleResidualLifetime`, by that per cent: a Delta(1950)++ lives 1.01 times as long as a
+Delta(1950)+ of the same mass, for no physical reason.
+
+Reproduced. `tools/extract_bic_decay.pl` asserts the exact set of ten and the exact sum each one
+reaches, so a release that renormalises any of them - or that breaks a channel on one of the
+eighty-four that are currently whole - fails at extraction.
+
+### V149: two of the four branches of the resonance-width machinery cannot be reached
+
+`G4KineticTrack`'s constructor computes each decay channel's actual width by a different route
+depending on how many of the channel's daughters are short-lived: a closed form when none is, one
+Simpson integral over the daughter's Breit-Wigner when one is, and `IntegrateCMMomentum2` - a
+100-iteration Simpson whose integrand runs a second 100-iteration Simpson, 40,401 evaluations -
+when both are. Three-body channels split the same way.
+
+MEASURED over all 563 channels of the cascade's closure: of the 491 two-body channels, 159 have no
+short-lived daughter and 332 have exactly one, and **none has two**; of the 70 three-body channels,
+**all 70 have none**. `G4ParticleDefinition::IsShortLived` is true for the baryon resonances and for
+the rho and the omega, and false for the pion, the nucleon, the eta, the kaons and the lambda, and
+every channel in the closure pairs at most one short-lived daughter with long-lived ones. So the
+two-resonance branch and the three-body `nShortLived >= 1` branch are dead code.
+
+That matters because both carry a defect that has therefore never been exercised.
+`IntegrateCMMomentum2` reads `theActualMass` for its upper limit and never the file-scope
+`G4KineticTrack_Gmass` that its caller sets:
+
+```
+G4KineticTrack_Gmass = theActualMass;  theActualMom = IntegrateCMMomentum2();
+G4KineticTrack_Gmass = thePoleMass;    thePoleMom   = IntegrateCMMomentum2();
+...
+const G4double theUpperLimit = theActualMass;      // inside IntegrateCMMomentum2, both times
+```
+
+so the "pole" integral would be taken over the actual mass's range with the pole mass inside the
+integrand - where the one-resonance branch passes `poleMass` explicitly and uses it for both. And
+`IntegrandFunction3` has no `std::max(...,0.0)` under its square root where `IntegrandFunction1`
+and `2` do, so past the pole its inner limit `mass - xmass` goes negative and Simpson integrates
+backwards over a radicand that can be negative.
+
+Both are transcribed as written. MEASURED: replacing the upper limit with `Gmass` - the obvious fix
+- changes none of the 15,147 compared widths, which is the same statement as "never entered". The
+port asserts the channel census itself in `tests/test_bic_imr.cu`, so a release that adds a
+resonance-to-two-resonances channel fails there rather than quietly running code nothing has
+checked.
+
+### V150: constructing a kinetic track from a K0 consumes a random number and changes the particle
+
+The first thing `G4KineticTrack`'s `(definition, time, position, momentum)` constructor does, before
+it has looked at a decay table:
+
+```
+if (G4KaonZero::KaonZero() == theDefinition || G4AntiKaonZero::AntiKaonZero() == theDefinition)
+{ if (G4UniformRand()<0.5) theDefinition = G4KaonZeroShort::KaonZeroShort();
+  else                     theDefinition = G4KaonZeroLong::KaonZeroLong(); }
+```
+
+A K0 track is a K0S track or a K0L track from the moment it is built - two decay channels or six,
+different daughters, a different lifetime - and one uniform has been drawn out of the stream to
+decide which. The cascade reaches it: N(1650)0, N(1710)0, N(1720)0 and N(1990)0 each have a
+Lambda K0 channel, so the substitution runs the first time one of those resonances decays.
+
+Two consequences the port has to carry. The identity change means a K0's own decay table - its two
+one-daughter channels into K0S and K0L - is never read by a kinetic track, so it cannot be dumped as
+a function of its arguments; `ref/dump/dump_bic.cc` skips 311 and -311 in the width sweep and dumps
+the substitution separately under the prescribed engine instead. And the draw means a port that
+skipped the flip would leave every subsequent random in the event one place out of step.
+
+Reproduced as `kinetic_track_substitute_k0`, asserted over 8 phases and both signs.

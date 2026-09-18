@@ -89,6 +89,17 @@
 //                        which is wrong, passed 1,500 of 1,500 on the short range.
 //   bic_imr_mbselect     which of the two components one prescribed uniform lands in, 8 phases
 //                        per energy.
+//   bic_imr_decaytable   every decay channel of all 94 species in the cascade's transitive
+//                        closure, with G4SampleResonance::GetMinimumMass beside each. This is
+//                        also the source tools/extract_bic_decay.pl generates the port's table
+//                        from, so the comparison is of a TRANSFORM and not of a copy.
+//   bic_imr_actualwidth  theActualWidth[] of every channel of every species with a decay table,
+//                        at nine actual masses spread six widths either side of the pole.
+//   bic_imr_k0flip       the K0 -> K0S/K0L coin flip in the G4KineticTrack constructor, 8 phases
+//                        and both signs, with the number of uniforms it consumes.
+//   bic_imr_lifetime     SampleResidualLifetime over 15 resonances x 3 masses x 3 momenta x 8
+//                        phases. The momenta are what make the Lorentz dilation observable: at
+//                        rest the factor is 1 and dropping it entirely would agree everywhere.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -108,6 +119,7 @@
 #include "physics/hadronic/bic/im_r/channels.cuh"
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
+#include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_fs.cuh"
 #include "physics/hadronic/bic/im_r/xsec_annihilation.cuh"
@@ -162,9 +174,26 @@ __global__ void bic_imr_meson_probe(double* out, const imr::MesonBaryonBuffers* 
   out[3] = imr::meson_baryon_select(partial, rng);
 }
 
+/// The decay machinery's probe. `compute_min_mass` is deliberately NOT in it: it is a recursion,
+/// the cascade never calls it - it reads the cached column, as Geant4 does after its first call -
+/// and putting it here would report a stack frame the kernel does not pay for.
+__global__ void bic_imr_decay_probe(double* out, int pdg, double actual_mass) {
+  CycleRngDev rng;
+  imr::DecayRefusal ref;
+  double w[16];
+  const int n = imr::kinetic_track_actual_widths(imr::kinetic_track_substitute_k0(pdg, rng),
+                                                 actual_mass, w, 16, ref);
+  const double total = imr::evaluate_total_actual_width(w, n);
+  out[0] = total;
+  out[1] = imr::sample_residual_lifetime(total, 1.5, rng);
+  out[2] = imr::species_min_mass(pdg, ref);
+  out[3] = static_cast<double>(n);
+}
+
 namespace {
 
 int fails = 0;
+
 
 // ---------------------------------------------------------------------------------------------
 // Comparison bookkeeping - the same shape tests/test_bic_nucleus.cu uses
@@ -1492,12 +1521,156 @@ int main() {
   }
 
   // -------------------------------------------------------------------------------------------
+  // -------------------------------------------------------------------------------------------
+  // 3l. G4KineticTrack's resonance machinery: the decay tables themselves, G4SampleResonance's
+  //     minimum-mass recursion, theActualWidth[] with its Simpson integrals, and
+  //     SampleResidualLifetime - which is what schedules every G4BCDecay in the cascade.
+  // -------------------------------------------------------------------------------------------
+  const int b_dtab = new_bucket("DecayTableContents", 0.0);
+  const int b_dmin = new_bucket("SampleResonanceMinMass", 1e-15);
+  const int b_dwid = new_bucket("KineticTrackActualWidth", 1e-13);
+  const int b_dk0 = new_bucket("KaonZeroSubstitution", 0.0);
+  const int b_dlife = new_bucket("ResidualLifetime", 1e-15);
+  {
+    // The generated table against the dump it came from, field by field. This is not circular:
+    // tools/extract_bic_decay.pl transforms the CSV - it reorders channels into one flat array,
+    // drops the placeholder rows and resolves each species to an index - and a transformation is
+    // exactly the kind of thing that silently loses a row.
+    const auto rows = read_csv("bic_imr_decaytable.csv");
+    for (const auto& r : rows) {
+      const int pdg = iv(r, 0);
+      const int idx = imr::decay_species_index(pdg);
+      cmp_int(b_dtab, (idx >= 0) ? 1 : 0, 1, "species " + sv(r, 0) + " is in the table");
+      if (idx < 0) { continue; }
+      const std::string where = sv(r, 1) + " (" + sv(r, 0) + ")";
+      cmp_scaled(b_dtab, imr::decay_species_mass()[idx], dv(r, 2), 1e-12, where + " mass");
+      cmp_scaled(b_dtab, imr::decay_species_width()[idx], dv(r, 3), 1e-30, where + " width");
+      cmp_int(b_dtab, imr::decay_species_shortlived()[idx], iv(r, 4), where + " shortlived");
+      cmp_int(b_dtab, imr::decay_species_charge()[idx], iv(r, 5), where + " charge");
+      cmp_int(b_dtab, imr::decay_species_baryon()[idx], iv(r, 6), where + " baryon");
+      cmp_int(b_dtab, imr::decay_species_n_channels()[idx], iv(r, 8), where + " n_channels");
+      const int c = iv(r, 9);
+      if (c < 0) { continue; }
+      const int ch = imr::decay_species_first_channel()[idx] + c;
+      cmp_scaled(b_dtab, imr::decay_channel_br()[ch], dv(r, 10), 1e-12,
+                 where + " channel " + sv(r, 9) + " br");
+      cmp_int(b_dtab, imr::decay_channel_n_daughters()[ch], iv(r, 11),
+              where + " channel " + sv(r, 9) + " n_daughters");
+      for (int j = 0; j < iv(r, 11); ++j) {
+        cmp_int(b_dtab, imr::decay_channel_daughters()[ch * imr::kDecayMaxDaughters + j],
+                iv(r, 12 + j), where + " channel " + sv(r, 9) + " daughter "
+                                     + std::to_string(j));
+      }
+      // The recursion, against the column Geant4 cached. Every species, stable ones included.
+      imr::DecayRefusal dref;
+      const double got_min = imr::compute_min_mass(pdg, dref);
+      cmp_scaled(b_dmin, got_min, dv(r, 7), 1e-12, where + " GetMinimumMass");
+      if (dref.any()) {
+        std::printf("REFUSED min mass for %s (pdg %d)\n", where.c_str(), dref.refused_pdg);
+        ++fails;
+      }
+    }
+  }
+  {
+    // theActualWidth[], per channel and summed. The two-resonance branch runs a Simpson inside a
+    // Simpson - 201 x 201 = 40,401 evaluations per channel - so this is the most arithmetic in
+    // the file behind a single number.
+    const auto rows = read_csv("bic_imr_actualwidth.csv");
+    int last_pdg = 0;
+    double last_mass = -1.0;
+    double w[16];
+    int nw = 0;
+    for (const auto& r : rows) {
+      const int pdg = iv(r, 0);
+      const double am = dv(r, 1);
+      if (pdg != last_pdg || am != last_mass) {
+        imr::DecayRefusal dref;
+        nw = imr::kinetic_track_actual_widths(pdg, am, w, 16, dref);
+        last_pdg = pdg;
+        last_mass = am;
+        if (dref.any()) {
+          std::printf("REFUSED actual widths for %d\n", dref.refused_pdg);
+          ++fails;
+          nw = -1;
+        }
+      }
+      if (nw < 0) { continue; }
+      const std::string where = sv(r, 0) + " m=" + sv(r, 1) + " ch=" + sv(r, 3);
+      cmp_int(b_dwid, nw, iv(r, 2), where + " n_channels");
+      const int c = iv(r, 3);
+      if (c >= 0 && c < nw) {
+        cmp_scaled(b_dwid, w[c], dv(r, 4), 1e-12, where + " actual width");
+      }
+      cmp_scaled(b_dwid, imr::evaluate_total_actual_width(w, nw), dv(r, 5), 1e-12,
+                 where + " total");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_k0flip.csv");
+    for (const auto& r : rows) {
+      CycleRng rng;
+      rng.reset(iv(r, 1));
+      const int got = imr::kinetic_track_substitute_k0(iv(r, 0), rng);
+      cmp_int(b_dk0, got, iv(r, 2), "K0 phase " + sv(r, 1));
+      cmp_int(b_dk0, rng.n, iv(r, 4), "K0 phase " + sv(r, 1) + " draws");
+      const int idx = imr::decay_species_index(got);
+      cmp_int(b_dk0, (idx >= 0) ? imr::decay_species_n_channels()[idx] : -1, iv(r, 3),
+              "K0 phase " + sv(r, 1) + " channels after the flip");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_lifetime.csv");
+    for (const auto& r : rows) {
+      CycleRng rng;
+      rng.reset(iv(r, 5));
+      // The Lorentz factor is e/mass, which is what G4LorentzVector::gamma() returns; the test
+      // takes it from the dumped four-momentum rather than the dumped gamma so that the round
+      // trip through the energy is the port's own.
+      const double gamma = dv(r, 3) / dv(r, 1);
+      const double got = imr::sample_residual_lifetime(dv(r, 7), gamma, rng);
+      cmp_scaled(b_dlife, got, dv(r, 6), 1e-30,
+                 sv(r, 0) + " m=" + sv(r, 1) + " pz=" + sv(r, 2) + " phase=" + sv(r, 5));
+      cmp_int(b_dlife, rng.n, iv(r, 8), sv(r, 0) + " lifetime draws");
+    }
+  }
+
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
   //    are the invariants the sampling depends on, checked on the port's own copy so that a
   //    mis-sliced table fails here rather than as a wrong angle 4,000 rows later.
   // -------------------------------------------------------------------------------------------
   const int b_tab = new_bucket("TableInvariants", 0.0);
   {
+    // The two dead branches of the G4KineticTrack constructor, asserted rather than assumed.
+    // Nothing in the 563 channels pairs two short-lived daughters, and no three-body channel has
+    // even one - so `IntegrateCMMomentum2` with its Simpson-inside-a-Simpson, and the three-body
+    // `nShortLived >= 1` path, are unreachable. This is why perturbing either changes nothing,
+    // and it is the only thing that would catch a release adding such a channel.
+    int two_body[3] = {0, 0, 0};
+    int three_body[4] = {0, 0, 0, 0};
+    for (int sidx = 0; sidx < imr::kDecaySpeciesCount; ++sidx) {
+      const int first = imr::decay_species_first_channel()[sidx];
+      for (int c = 0; c < imr::decay_species_n_channels()[sidx]; ++c) {
+        const int ch = first + c;
+        const int nd = imr::decay_channel_n_daughters()[ch];
+        int n_short = 0;
+        for (int j = 0; j < nd; ++j) {
+          const int d = imr::decay_channel_daughters()[ch * imr::kDecayMaxDaughters + j];
+          const int di = imr::decay_species_index(d);
+          if (di >= 0 && imr::decay_species_shortlived()[di] != 0) { ++n_short; }
+        }
+        if (nd == 2) { ++two_body[n_short]; }
+        if (nd == 3) { ++three_body[n_short]; }
+      }
+    }
+    cmp_int(b_tab, two_body[0], 159, "two-body channels with no short-lived daughter");
+    cmp_int(b_tab, two_body[1], 332, "two-body channels with one short-lived daughter");
+    cmp_int(b_tab, two_body[2], 0, "two-body channels with TWO - the dead branch");
+    cmp_int(b_tab, three_body[0], 70, "three-body channels with no short-lived daughter");
+    cmp_int(b_tab, three_body[1] + three_body[2] + three_body[3], 0,
+            "three-body channels with any - the other dead branch");
+  }
+  {
+
     for (int j = 0; j < imr::kAngularNpEnergies; ++j) {
       const float last = imr::angular_np_sig()[j * imr::kAngularAngles + imr::kAngularAngles - 1];
       cmp_int(b_tab, (std::fabs(static_cast<double>(last) - 1.0) < 2e-5) ? 1 : 0, 1,
