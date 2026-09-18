@@ -105,6 +105,11 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_kdecay       G4DecayKineticTracks at the LIST level, through the contract header
+//                        bic/kinetic_decay.cuh, over 7 lists x 8 phases. What this file checks
+//                        that no per-decay comparison can is the ORDER the survivors come back
+//                        in, the RECURSION (a daughter that is itself short-lived), and the
+//                        parent bookkeeping Geant4 stamps on every daughter.
 //   bic_imr_absorb       G4MesonAbsorption's scheduling over 8 pairs x 7 energies x 61 impact
 //                        parameters in 0.025 fm steps. The cross section is private, so the scan
 //                        measures it through the verdict it decides - and the pair (proton, pi-)
@@ -138,6 +143,7 @@
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
+#include "physics/hadronic/bic/kinetic_decay.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_fs.cuh"
 #include "physics/hadronic/bic/im_r/xsec_annihilation.cuh"
@@ -213,6 +219,17 @@ __global__ void bic_imr_decay_probe(double* out, int pdg, double actual_mass) {
   out[5] = (d.n > 0) ? d.prod[0].p.e : 0.0;
   out[6] = (d.n > 0) ? d.prod[0].p.v.z : 0.0;
   out[7] = static_cast<double>(d.channel);
+}
+
+/// The CONTRACT header's own probe, so that the entry point an outside caller will use is proved
+/// to be device code and measured on its own rather than through this package's internals.
+__global__ void bic_kinetic_decay_probe(double* out, bic::DecayTrack* list, int n, int capacity) {
+  CycleRngDev rng;
+  bic::KineticDecayRefusal ref;
+  int m = n;
+  out[0] = static_cast<double>(bic::decay_kinetic_tracks(list, m, capacity, rng, ref));
+  out[1] = (m > 0) ? list[0].momentum.e : 0.0;
+  out[2] = static_cast<double>(ref.any() ? 1 : 0);
 }
 
 namespace {
@@ -1870,19 +1887,99 @@ int main() {
     }
   }
 
+  // -------------------------------------------------------------------------------------------
+  // 3o. G4DecayKineticTracks through the CONTRACT header - the list-level pass both the binary
+  //     cascade and the Fritiof string model open with. See src/physics/hadronic/bic/
+  //     kinetic_decay.cuh; this block is the only place the port is exercised the way an outside
+  //     caller will use it, list in and list out.
+  // -------------------------------------------------------------------------------------------
+  const int b_kdn = new_bucket("KineticDecayListShape", 0.0);
+  const int b_kdp = new_bucket("KineticDecayProducts", 5e-15);
+  const int b_kdb = new_bucket("KineticDecayBookkeeping", 0.0);
+  {
+    struct Entry { int pdg; double pz; };
+    const Entry kSets[7][6] = {
+        {{2212, 500}, {2214, 300}, {2124, 100}, {0, 0}, {0, 0}, {0, 0}},
+        {{2214, 0}, {2212, 900}, {1114, 250}, {2112, 50}, {0, 0}, {0, 0}},
+        {{211, 400}, {113, 600}, {223, 200}, {-211, 100}, {0, 0}, {0, 0}},
+        {{225, 800}, {115, 300}, {2212, 0}, {0, 0}, {0, 0}, {0, 0}},
+        {{333, 150}, {313, 450}, {3214, 200}, {321, 300}, {0, 0}, {0, 0}},
+        {{2224, 700}, {12212, 350}, {32124, 150}, {2112, 250}, {22124, 80}, {2212, 600}},
+        {{2212, 100}, {2112, 200}, {211, 300}, {0, 0}, {0, 0}, {0, 0}}};
+    const auto rows = read_csv("bic_imr_kdecay.csv");
+    int last_set = -1, last_phase = -1;
+    bic::DecayTrack list[64];
+    int n_out = 0;
+    int draws = 0;
+    for (const auto& r : rows) {
+      const int set = iv(r, 0);
+      const int phase = iv(r, 1);
+      if (set != last_set || phase != last_phase) {
+        last_set = set;
+        last_phase = phase;
+        int n = 0;
+        for (int k = 0; k < 6; ++k) {
+          const int pdg = kSets[set][k].pdg;
+          if (pdg == 0) { continue; }
+          const int si = imr::decay_species_index(pdg);
+          if (si < 0) {
+            std::printf("REFUSED kdecay species %d\n", pdg);
+            ++fails;
+            continue;
+          }
+          const double m = imr::decay_species_mass()[si];
+          const double pz = kSets[set][k].pz;
+          list[n] = bic::DecayTrack{};
+          list[n].pdg = pdg;
+          list[n].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, pz},
+                                                std::sqrt(pz * pz + m * m));
+          list[n].creator_model_id = 70 + k;
+          ++n;
+        }
+        CycleRng rng;
+        rng.reset(phase);
+        bic::KineticDecayRefusal kref;
+        n_out = bic::decay_kinetic_tracks(list, n, 64, rng, kref);
+        draws = rng.n;
+        if (kref.any()) {
+          std::printf("REFUSED kdecay set %d phase %d (pdg %d)\n", set, phase, kref.refused_pdg);
+          ++fails;
+        }
+      }
+      const std::string where = "set " + sv(r, 0) + " phase " + sv(r, 1) + " i " + sv(r, 4);
+      cmp_int(b_kdn, n_out, iv(r, 3), where + " n_out");
+      cmp_int(b_kdn, draws, iv(r, 13), where + " draws");
+      const int i = iv(r, 4);
+      if (i < 0 || i >= n_out) { continue; }
+      cmp_int(b_kdn, list[i].pdg, iv(r, 5), where + " pdg");
+      const double scale = dv(r, 9);
+      cmp_scaled(b_kdp, list[i].momentum.v.x, dv(r, 6), scale, where + " px");
+      cmp_scaled(b_kdp, list[i].momentum.v.y, dv(r, 7), scale, where + " py");
+      cmp_scaled(b_kdp, list[i].momentum.v.z, dv(r, 8), scale, where + " pz");
+      cmp_scaled(b_kdp, list[i].momentum.e, dv(r, 9), scale, where + " e");
+      cmp_int(b_kdb, list[i].parent_resonance_pdg, iv(r, 10), where + " parent pdg");
+      cmp_int(b_kdb, list[i].parent_resonance_id, iv(r, 11), where + " parent id");
+      cmp_int(b_kdb, list[i].creator_model_id, iv(r, 12), where + " creator model id");
+    }
+  }
+
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
   //    are the invariants the sampling depends on, checked on the port's own copy so that a
   //    mis-sliced table fails here rather than as a wrong angle 4,000 rows later.
   // -------------------------------------------------------------------------------------------
   const int b_tab = new_bucket("TableInvariants", 0.0);
   {
-    // The two dead branches of the G4KineticTrack constructor, asserted rather than assumed.
-    // Nothing in the 563 channels pairs two short-lived daughters, and no three-body channel has
-    // even one - so `IntegrateCMMomentum2` with its Simpson-inside-a-Simpson, and the three-body
-    // `nShortLived >= 1` path, are unreachable. This is why perturbing either changes nothing,
-    // and it is the only thing that would catch a release adding such a channel.
+    // The channel census the width machinery branches on, asserted rather than assumed. Over the
+    // 638 channels of the UNION closure - the binary cascade's species and FTFP's 27, see
+    // docs/HADRONIC_PLAN.md section 9.3 - no two-body channel has TWO short-lived daughters, so
+    // `IntegrateCMMomentum2` with its Simpson-inside-a-Simpson is unreachable; two three-body
+    // channels DO have one, so that branch is live, and it was not when the closure held only
+    // the cascade's own species. docs/RISK.md V149. A release that adds a
+    // resonance-to-two-resonances channel fails here rather than running code nothing has checked.
     int two_body[3] = {0, 0, 0};
     int three_body[4] = {0, 0, 0, 0};
+    int four_body[5] = {0, 0, 0, 0, 0};
+    int one_body = 0;
     for (int sidx = 0; sidx < imr::kDecaySpeciesCount; ++sidx) {
       const int first = imr::decay_species_first_channel()[sidx];
       for (int c = 0; c < imr::decay_species_n_channels()[sidx]; ++c) {
@@ -1894,16 +1991,25 @@ int main() {
           const int di = imr::decay_species_index(d);
           if (di >= 0 && imr::decay_species_shortlived()[di] != 0) { ++n_short; }
         }
+        if (nd == 1) { ++one_body; }
         if (nd == 2) { ++two_body[n_short]; }
         if (nd == 3) { ++three_body[n_short]; }
+        if (nd == 4) { ++four_body[n_short]; }
       }
     }
-    cmp_int(b_tab, two_body[0], 159, "two-body channels with no short-lived daughter");
-    cmp_int(b_tab, two_body[1], 332, "two-body channels with one short-lived daughter");
+    cmp_int(b_tab, one_body, 4, "one-daughter channels");
+    cmp_int(b_tab, two_body[0], 220, "two-body channels with no short-lived daughter");
+    cmp_int(b_tab, two_body[1], 335, "two-body channels with one short-lived daughter");
     cmp_int(b_tab, two_body[2], 0, "two-body channels with TWO - the dead branch");
-    cmp_int(b_tab, three_body[0], 70, "three-body channels with no short-lived daughter");
-    cmp_int(b_tab, three_body[1] + three_body[2] + three_body[3], 0,
-            "three-body channels with any - the other dead branch");
+    cmp_int(b_tab, three_body[0], 75, "three-body channels with no short-lived daughter");
+    cmp_int(b_tab, three_body[1], 2, "three-body channels with one - a2(1320)0's two");
+    cmp_int(b_tab, three_body[2] + three_body[3], 0, "three-body channels with two or three");
+    cmp_int(b_tab, four_body[0], 2, "four-body channels - f2(1270) to 4 pi");
+    cmp_int(b_tab, four_body[1] + four_body[2] + four_body[3] + four_body[4], 0,
+            "four-body channels with a short-lived daughter");
+    cmp_int(b_tab, one_body + two_body[0] + two_body[1] + three_body[0] + three_body[1] +
+                       four_body[0],
+            imr::kDecayChannelCount, "the census accounts for every channel");
   }
   {
 

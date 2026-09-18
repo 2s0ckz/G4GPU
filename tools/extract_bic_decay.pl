@@ -69,7 +69,7 @@ close $fh;
 
 # ---------------------------------------------------------------------------- assertions
 my $nsp = scalar @order;
-die "expected 94 species in the transitive closure, found $nsp\n" unless $nsp == 94;
+die "expected 126 species in the transitive closure, found $nsp\n" unless $nsp == 126;
 
 my $nchan_total = 0;
 my $max_chan    = 0;
@@ -85,7 +85,7 @@ for my $pdg (@order) {
     my $sum = 0.0;
     for my $c (@$list) {
         die "$s->{name}: a channel index is missing\n" unless defined $c;
-        die "$s->{name}: $c->{nd} daughters, this port carries at most 3\n" if $c->{nd} > 3;
+        die "$s->{name}: $c->{nd} daughters, this port carries at most 4\n" if $c->{nd} > 4;
         $sum += $c->{br};
 
         # Charge and baryon number, looked up in this same file - which is what makes the
@@ -100,7 +100,7 @@ for my $pdg (@order) {
         die "$s->{name}: channel charge $q against parent $s->{charge}\n" unless $q == $s->{charge};
         die "$s->{name}: channel baryon $b against parent $s->{baryon}\n" unless $b == $s->{baryon};
     }
-    # TEN species' branching ratios do not sum to one, and the set is asserted exactly rather
+    # FIFTEEN species' branching ratios do not sum to one, and the set is asserted exactly rather
     # than tolerated. Two of them are in the cascade's own production set: delta(1950)++ and
     # delta(1950)- come to 0.99, because G4ExcitedDeltaConstructor gives the multiplet an N gamma
     # mode with bRatio 0.01 and the two extreme charge states have no N gamma final state to put
@@ -118,10 +118,15 @@ die "expected 13 channels at most, found $max_chan\n" unless $max_chan == 13;
 my %kOffSum = (
     221   => 0.9926,   # eta
     321   => 0.99981,  # kaon+
+    -321  => 0.99981,  # kaon-
     130   => 0.9964,   # kaon0L
     310   => 0.99890,  # kaon0S
     223   => 0.997,    # omega
+    333   => 0.985,    # phi          - the largest deficit in the set, 1.5%
     3122  => 0.997,    # lambda
+    -3122 => 0.997,    # anti_lambda
+    3222  => 0.999,    # sigma+
+    -3222 => 0.999,    # anti_sigma+
     2228  => 0.99,     # delta(1950)++  - the dropped N gamma mode
     1118  => 0.99,     # delta(1950)-   - the same
     22212 => 1.001,    # N(1535)+
@@ -183,7 +188,7 @@ HDR2
 printf $o "inline constexpr int kDecaySpeciesCount = %d;\n", $nsp;
 printf $o "inline constexpr int kDecayChannelCount = %d;\n", $nchan_total;
 printf $o "inline constexpr int kDecayMaxChannels = %d;\n", $max_chan;
-print $o "inline constexpr int kDecayMaxDaughters = 3;\n\n";
+print $o "inline constexpr int kDecayMaxDaughters = 4;\n\n";
 
 sub emit_int {
     my ($name, $vals, $per) = @_;
@@ -223,7 +228,7 @@ for my $pdg (@order) {
     for my $c (@{ $chan{$pdg} }) {
         push @cbr, $c->{br};
         push @cnd, $c->{nd};
-        push @cd, $c->{d}[0], $c->{d}[1], $c->{d}[2];
+        push @cd, $c->{d}[0], $c->{d}[1], $c->{d}[2], $c->{d}[3];
         ++$cursor;
     }
 }
@@ -248,7 +253,8 @@ emit_int("decay_species_first_channel", \@first, 16);
 emit_int("decay_species_n_channels", \@nch, 16);
 emit_dbl("decay_channel_br", \@cbr, 4);
 emit_int("decay_channel_n_daughters", \@cnd, 16);
-print $o "/// Three slots per channel, zero where unused. Nothing in the closure has four.\n";
+print $o "/// FOUR slots per channel, zero where unused. Only f2(1270) uses the fourth, and it is\n";
+print $o "/// in the closure because FTFP produces it - docs/HADRONIC_PLAN.md section 9.3.\n";
 emit_int("decay_channel_daughters", \@cd, 12);
 
 print $o "}  // namespace g4gpu::bic::imr\n\n#endif\n";

@@ -10038,7 +10038,7 @@ Reproduced. `tools/extract_bic_decay.pl` asserts the exact set of ten and the ex
 reaches, so a release that renormalises any of them - or that breaks a channel on one of the
 eighty-four that are currently whole - fails at extraction.
 
-### V149: two of the four branches of the resonance-width machinery cannot be reached
+### V149: one branch of the resonance-width machinery cannot be reached, and it was two until FTFP's species joined the table
 
 `G4KineticTrack`'s constructor computes each decay channel's actual width by a different route
 depending on how many of the channel's daughters are short-lived: a closed form when none is, one
@@ -10046,12 +10046,21 @@ Simpson integral over the daughter's Breit-Wigner when one is, and `IntegrateCMM
 100-iteration Simpson whose integrand runs a second 100-iteration Simpson, 40,401 evaluations -
 when both are. Three-body channels split the same way.
 
-MEASURED over all 563 channels of the cascade's closure: of the 491 two-body channels, 159 have no
-short-lived daughter and 332 have exactly one, and **none has two**; of the 70 three-body channels,
-**all 70 have none**. `G4ParticleDefinition::IsShortLived` is true for the baryon resonances and for
-the rho and the omega, and false for the pion, the nucleon, the eta, the kaons and the lambda, and
-every channel in the closure pairs at most one short-lived daughter with long-lived ones. So the
-two-resonance branch and the three-body `nShortLived >= 1` branch are dead code.
+MEASURED over all 638 channels of the UNION closure - the binary cascade's species together with
+the 27 that docs/HADRONIC_PLAN.md section 9.3 measured FTFP producing, because the engine is
+shared: of the 555 two-body channels, 220 have no short-lived daughter and 335 have exactly one,
+and **none has two**; of the 77 three-body channels, 75 have none and **2 have one**; both
+four-body channels have none. `G4ParticleDefinition::IsShortLived` is true for the baryon
+resonances and for the rho, the omega, the phi, the K*, the f2 and the a2, and false for the pion,
+the nucleon, the eta, the kaons and the lambda. So the two-resonance branch is dead code and the
+three-body `nShortLived >= 1` branch is not.
+
+**And it was dead until FTFP's species joined the table.** Over the binary cascade's own 563
+channels the three-body count with a short-lived daughter is zero; the two that make it non-zero
+are both a2(1320)0's omega-pi-pi channels, and a2(1320)0 is 0.06% of FTFP's short-lived tracks. A
+port that had refused that branch on the cascade's evidence alone would have been right for one
+caller and wrong for the other - which is the argument for building the engine once over the
+union rather than twice over two subsets.
 
 That matters because both carry a defect that has therefore never been exercised.
 `IntegrateCMMomentum2` reads `theActualMass` for its upper limit and never the file-scope
@@ -10071,7 +10080,8 @@ and `2` do, so past the pole its inner limit `mass - xmass` goes negative and Si
 backwards over a radicand that can be negative.
 
 Both are transcribed as written. MEASURED: replacing the upper limit with `Gmass` - the obvious fix
-- changes none of the 15,147 compared widths, which is the same statement as "never entered". The
+- changes none of the 17,118 compared widths, which is the same statement as "never entered" for
+that branch. The
 port asserts the channel census itself in `tests/test_bic_imr.cu`, so a release that adds a
 resonance-to-two-resonances channel fails there rather than quietly running code nothing has
 checked.

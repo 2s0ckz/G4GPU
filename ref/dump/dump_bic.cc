@@ -99,6 +99,7 @@
 #include "G4HadSecondary.hh"
 #include "G4HadronicInteractionRegistry.hh"
 #include "G4IonTable.hh"
+#include "G4DecayKineticTracks.hh"
 #include "G4DecayTable.hh"
 #include "G4KineticTrack.hh"
 #include "G4SampleResonance.hh"
@@ -1662,6 +1663,7 @@ void write_imr_resonance_xsec() {
       12216, 12116, 22124, 21214, 42212, 42112, 32124, 31214, 42124, 41214,
       12218, 12118, 52214, 52114, 2128, 1218, 100002210, 100002110,
       100012210, 100012110};
+
   for (int code : kSpecies) {
     const G4ParticleDefinition* d = ptable->FindParticle(code);
     if (d == nullptr) {
@@ -2143,11 +2145,34 @@ void write_imr_decay() {
       12212, 12112, 2124, 1214, 22212, 22112, 32212, 32112, 2216, 2116,
       12216, 12116, 22124, 21214, 42212, 42112, 32124, 31214, 42124, 41214,
       12218, 12118, 52214, 52114, 2128, 1218, 100002210, 100002110,
-      100012210, 100012110};
+      100012210, 100012110,
+      // FTFP's 27 short-lived species, from docs/HADRONIC_PLAN.md section 9.3, measured by P11c
+      // over 14,000 ftf::apply_yourself events: 14.3% of all tracks and 72.6% of all events.
+      // The engine these tables feed is shared - G4DecayKineticTracks is G4KineticTrack::Decay
+      // in a loop, and both G4DecayStrongResonances::Propagate and
+      // G4GeneratorPrecompoundInterface::Propagate open with it - so the species set has to be
+      // the UNION. Sixteen of the 27 are already above; the eleven that are not bring the
+      // K*, the Sigma(1385), the Xi(1530), the phi, the f2(1270), the a2(1320) and the
+      // anti-Deltas, and with them the first four-body channels in this file.
+      113, 213, -213, 223, 313, 323, -313, -323, 333, 225, 115,
+      3114, 3214, 3224, -3114, -3214, -3224, 3314, 3324,
+      -1114, -2114, -2214, -2224};
 
   std::vector<int> order;
   std::set<int> seen;
   std::vector<int> queue(std::begin(kSeeds), std::end(kSeeds));
+  // WIDENING THIS SEED LIST, for a caller outside the binary cascade. The engine these tables
+  // feed is shared - `G4DecayKineticTracks`, which the Fritiof string model runs over its own
+  // products, is `G4KineticTrack::Decay` in a loop - so the species set has to cover whatever
+  // that caller produces as well. Add the codes to `kSeeds` above; the closure does the rest.
+  //
+  // The obvious shortcut, seeding from `G4ParticleTable` with every definition whose
+  // `IsShortLived()` is true, does NOT work and was tried: the closure grows from 94 species to
+  // at least 117, reaches the ANTI-baryon resonances, and the dumper dies part-way through
+  // `anti_N(2250)0`, mid-`fprintf`, with nothing on stderr. Whatever is wrong there is upstream
+  // of this file and is not worth chasing to widen a table; an explicit list of the codes a
+  // caller actually produces is both safer and a better record of who needs what.
+
   while (!queue.empty()) {
     const int code = queue.front();
     queue.erase(queue.begin());
@@ -2274,7 +2299,8 @@ void write_imr_decay() {
   // track: with the resonance at rest the Lorentz factor is 1 and a port that dropped it
   // entirely would agree everywhere.
   FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv "
-                    "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv", "w");
+                    "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
+                    "bic_imr_kdecay.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2332,7 +2358,16 @@ void write_imr_decayfs() {
   const int kRes[] = {2214, 2224, 1114, 2114,
                       12212, 12112, 2124, 1214, 22212, 22112, 32212, 32112,
                       2216, 12216, 22124, 42212, 32124, 42124, 12218, 52214,
-                      2128, 100002210, 100012210, 2218, 2226, 12126, 1112, 32224};
+                      2128, 100002210, 100012210, 2218, 2226, 12126, 1112, 32224,
+                      // FTFP's species, docs/HADRONIC_PLAN.md section 9.3. They are not decoration:
+                      // f2(1270) is the ONLY parent with four-body channels in the whole closure,
+                      // so it is the only thing that reaches ManyBodyDecayIt; a2(1320)0 owns both
+                      // of the two three-body channels with a short-lived daughter, which is the
+                      // branch that was dead until FTFP's species joined the table; and phi has
+                      // the rho0 pi0 channel that needs SampleMass on a resonance daughter.
+                      113, 213, -213, 223, 313, 323, -313, -323, 333, 225, 115,
+                      3114, 3214, 3224, -3114, -3214, -3224, 3314, 3324,
+                      -1114, -2114, -2214, -2224};
 
   auto* eng = new ImrCycleEngine();
   CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
@@ -2588,6 +2623,85 @@ void write_imr_absorb() {
   std::fclose(h);
 }
 
+// G4DecayKineticTracks at the LIST level - the transitive pass the Fritiof model and the binary
+// cascade both open with.
+//
+// The four-momenta are already compared decay by decay in bic_imr_decayfs.csv; what this file is
+// for is everything the list-level loop adds on top of them, none of which any per-decay
+// comparison can see:
+//
+//   * the ORDER the survivors come back in. The loop walks a list that GROWS, appends daughters
+//     at the end, nulls the parent's slot and compacts afterwards - so the output is the
+//     non-decaying originals in their original order, then the daughters generation by
+//     generation. A port that rebuilt the list any other way would agree on every momentum and
+//     put every later random number in the event out of step.
+//   * the RECURSION. A daughter that is itself short-lived is decayed when the walk reaches it,
+//     with no recursive call - N(1520)+ -> delta++ pi- is in the sets below for that reason.
+//   * that a short-lived track whose Decay() returns nothing SURVIVES, because the null-slot
+//     bookkeeping only runs when daughters came back.
+//   * the parent bookkeeping: CreatorModelID inherited, ParentResonanceDef set to the parent's
+//     definition and ParentResonanceID to round(parent 4-momentum .mag() / keV).
+void write_imr_kdecay() {
+  FILE* f = std::fopen("bic_imr_kdecay.csv", "w");
+  std::fprintf(f, "set,phase,n_in,n_out,i,pdg,px,py,pz,e,parent_pdg,parent_id,creator,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+
+  // Seven lists. Each entry is (pdg, pz in MeV). The stable tracks are there to fix the order
+  // the survivors have to come back in, and they are deliberately NOT all at the front.
+  struct Entry { int pdg; double pz; };
+  const Entry kSets[7][6] = {
+      {{2212, 500}, {2214, 300}, {2124, 100}, {0, 0}, {0, 0}, {0, 0}},
+      {{2214, 0}, {2212, 900}, {1114, 250}, {2112, 50}, {0, 0}, {0, 0}},
+      {{211, 400}, {113, 600}, {223, 200}, {-211, 100}, {0, 0}, {0, 0}},
+      {{225, 800}, {115, 300}, {2212, 0}, {0, 0}, {0, 0}, {0, 0}},
+      {{333, 150}, {313, 450}, {3214, 200}, {321, 300}, {0, 0}, {0, 0}},
+      {{2224, 700}, {12212, 350}, {32124, 150}, {2112, 250}, {22124, 80}, {2212, 600}},
+      {{2212, 100}, {2112, 200}, {211, 300}, {0, 0}, {0, 0}, {0, 0}}};
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (int set = 0; set < 7; ++set) {
+    for (int phase = 0; phase < 8; ++phase) {
+      CLHEP::HepRandom::setTheEngine(eng);
+      eng->reset(phase);
+      G4KineticTrackVector* list = new G4KineticTrackVector;
+      int n_in = 0;
+      for (int k = 0; k < 6; ++k) {
+        if (kSets[set][k].pdg == 0) { continue; }
+        const G4ParticleDefinition* d = ptable->FindParticle(kSets[set][k].pdg);
+        if (d == nullptr) { continue; }
+        const double m = d->GetPDGMass();
+        const double pz = kSets[set][k].pz;
+        const G4LorentzVector q(G4ThreeVector(0, 0, pz), std::sqrt(pz * pz + m * m));
+        G4KineticTrack* t = new G4KineticTrack(d, 0.0, G4ThreeVector(0, 0, 0), q);
+        t->SetCreatorModelID(70 + k);
+        list->push_back(t);
+        ++n_in;
+      }
+      G4DecayKineticTracks decay(list);
+      const int n_out = static_cast<int>(list->size());
+      for (int i = 0; i < n_out; ++i) {
+        const G4KineticTrack* t = (*list)[i];
+        const G4LorentzVector& p = t->Get4Momentum();
+        const G4ParticleDefinition* par = t->GetParentResonanceDef();
+        std::fprintf(f, "%d,%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d\n", set, phase,
+                     n_in, n_out, i, t->GetDefinition()->GetPDGEncoding(), p.x(), p.y(), p.z(),
+                     p.t(), (par != nullptr) ? par->GetPDGEncoding() : 0,
+                     t->GetParentResonanceID(), t->GetCreatorModelID(), eng->draws());
+      }
+      for (auto* t : *list) { delete t; }
+      delete list;
+      CLHEP::HepRandom::setTheEngine(saved);
+    }
+  }
+  delete eng;
+  std::fclose(f);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -2694,6 +2808,7 @@ void dump_bic(const DumpContext&) {
   write_imr_decay();
   write_imr_decayfs();
   write_imr_absorb();
+  write_imr_kdecay();
 }
 
 }  // namespace
