@@ -201,7 +201,8 @@ struct BertiniArmState {
 template <typename real_t, int kCap, typename Rng, typename FtfInvoke, typename NuclearMassFn>
 __host__ __device__ inline AtRestResult at_rest(
     const HadProjectile<real_t>& projectile, const MaterialComposition<real_t>& material,
-    HadFinalState<real_t, kCap>& fs, const bert::CascadeParams& par,
+    HadFinalState<real_t, kCap>& fs, HadFinalState<real_t, kCap>* nuclear_fs,
+    const bert::CascadeParams& par,
     const bert::InterfaceLimits& lim, const BertiniArmState& bert_state,
     const data::LevelTable& lt, const deex::FermiPool& pool, const preco::PrecoWorkspace& pws,
     const NuclearMassFn& nuclear_mass, const FtfInvoke& ftf_invoke, int emc_model_id,
@@ -299,7 +300,13 @@ __host__ __device__ inline AtRestResult at_rest(
     if (r.refusal != StoppingRefusal::kNone) { return r; }
   } else {
     // Bertini, with the de-excitation the instance was BUILT with - see the header.
-    HadFinalState<real_t, kCap> nucfs;
+    // `nucfs` is the CALLER's second buffer and not a local, and the reason is measured: a
+    // `HadFinalState<double, 256>` is 256 HadSecondary structs, and as a local here it put
+    // **34,000 bytes** on the device probe's stack frame against 11,872 for the whole Bertini
+    // entry point it wraps. `bert::apply_yourself` begins with `fs.clear()`, so the nuclear
+    // model cannot be pointed at the same buffer that already holds the atomic cascade's
+    // electrons and gammas - hence two, and hence this parameter rather than a temporary.
+    HadFinalState<real_t, kCap>& nucfs = *nuclear_fs;
     r.bertini = bert::apply_yourself(
         stopped, nuc, nucfs, stopping_deexcite_choice(r.arm), par, lim, *bert_state.model,
         *bert_state.global_out, *bert_state.out, *bert_state.dex_out, *bert_state.tmp,

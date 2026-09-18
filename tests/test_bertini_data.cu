@@ -116,6 +116,12 @@ __global__ void bertini_nucleus_probe(int a, int z, NucleiModel* m, BertiniWorks
   cp.position = Vec3d{0.0, 0.0, m->nuclei_radius * 0.9};
   cp.current_zone = m->number_of_zones - 1;
   bool in_zero = false;
+  // `reflected_now` is the eighth argument and it is not optional. docs/RISK.md V126: Geant4's
+  // `resetReflection()` clears the FLAG and not the counter, and the two are read by different
+  // files, so the port carries them separately and `boundaryTransition` has to say which one it
+  // just set. This probe passes `cp.reflected` so that the device kernel it instantiates is the
+  // same call the cascade makes - a probe that called an older signature would not compile, and
+  // for a week this one did not, because it was never rebuilt after the signature changed.
   bert::nm_boundary_transition(*m, cp.type, cp.position, cp.momentum, cp.current_zone, false,
                               cp.reflection_counter, cp.reflected, in_zero);
   out[15] = cp.momentum.e + double(cp.current_zone);

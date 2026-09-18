@@ -172,7 +172,7 @@ struct MatDef {
 
 void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
                   const preco::PrecoWorkspace& pws, stopping::BertiniArmState& bs,
-                  HadFinalState<double, 256>& fs) {
+                  HadFinalState<double, 256>& fs, HadFinalState<double, 256>& nucfs) {
   const MatDef mats[5] = {{"H2O", 2, {1, 8}, {2.0, 1.0}, {1, 16}},
                           {"C", 1, {6, 0}, {1.0, 0.0}, {12, 0}},
                           {"Al", 1, {13, 0}, {1.0, 0.0}, {27, 0}},
@@ -216,7 +216,8 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
         p.mass = species[si].mass;
         p.kin_energy = 0.0;
         const stopping::AtRestResult r = stopping::at_rest(
-            p, mat, fs, bert::default_cascade_params(), bert::default_interface_limits(), bs, lt,
+            p, mat, fs, &nucfs, bert::default_cascade_params(),
+            bert::default_interface_limits(), bs, lt,
             pool, pws, NuclearMassMeV(), ftf, 1, 2, 3, rng);
         if (r.element_index >= 0 && r.element_index < 2) { ++non_z[r.element_index]; }
         if (r.refusal != stopping::StoppingRefusal::kNone) {
@@ -479,7 +480,9 @@ int main() {
       bs.epo = new bert::ColliderOutput();
       auto* fs = new HadFinalState<double, 256>();
 
-      run_campaign(lt, pool, pws, bs, *fs);
+      auto* nfs = new HadFinalState<double, 256>();
+      run_campaign(lt, pool, pws, bs, *fs, *nfs);
+      delete nfs;
       delete fs;
     }
   }
