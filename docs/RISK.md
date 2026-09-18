@@ -10305,3 +10305,46 @@ and `meson_scatter_final_state` take the channel table and the buffers as argume
 that owns them cannot have them deleted out from under it by an unrelated object's destructor. The
 behaviour is recorded here rather than carried, because a port that reproduced it would be
 reproducing a lifetime bug and not a physics decision.
+
+### V156: a resonance entering the nucleus is charged as a proton and leaving as a neutron
+
+`G4BinaryCascade::CorrectBarionsOnBoundary` pays for a baryon crossing the nuclear surface out of
+the nucleus's own mass. It totals the crossing tracks' masses, works out what the nucleus weighed
+before and after the crossing, and shares the difference equally:
+
+```
+in:   correction = secondaryMass_in  + mass_initial - mass_final
+out:  correction = mass_initial - mass_final - secondaryMass_out
+if (secondaries > 1) correction /= secondaries
+if (e + correction > actualMass) UpdateTrackingMomentum(e + correction)
+```
+
+The two totals are built by the same seven lines with one word different:
+
+```
+in:   if (neutron || proton) secondaryMass_in  += definition->GetPDGMass();
+      else                   secondaryMass_in  += G4Proton::Proton()->GetPDGMass();
+out:  if (neutron || proton) secondaryMass_out += definition->GetPDGMass();
+      else                   secondaryMass_out += G4Neutron::Neutron()->GetPDGMass();
+```
+
+A resonance's own mass is never used on either side - a Delta at 1232 MeV is charged at a nucleon
+mass, which is the intent, since what the nucleus gains or loses is one baryon. But which nucleon
+differs by direction: **938.272 MeV going in and 939.565 going out**, a 1.293 MeV asymmetry in a
+term that is then divided by the number of simultaneous crossings and added to each crossing
+track's energy. A Delta that enters and later leaves is charged 1.293 MeV more on the way out than
+it was credited on the way in, and the difference is not returned to the nucleus - it is simply
+not in the energy the track carries.
+
+MEASURED over 4 nuclei x 2 directions x 5 crossing sets: taking the outgoing branch's fallback to
+be the proton mass as well - the symmetric reading - moves the correction by 9.0e-2 relative on
+Pb208 with a Delta++ crossing out, and by less on lighter targets where the ion-mass difference
+itself is larger. Reproduced.
+
+Two more things in the same function, both reproduced and neither an asymmetry. When the
+correction is not enough to lift a track over its own mass, the two branches undo the Coulomb
+barrier in OPPOSITE directions - both under the comment "Undo correction for Colomb Barrier" - the
+one that cannot get in has it ADDED and is sent to `miss_nucleus`, the one that cannot get out has
+it SUBTRACTED and is `captured`. And only a proton or a neutron is captured that way: a pion or a
+resonance that cannot get out is left entirely alone, uncorrected, with its state still
+`gone_out`, which is the source's `else` containing nothing but a debug print.

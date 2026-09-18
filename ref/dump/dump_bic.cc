@@ -3020,7 +3020,81 @@ void write_imr_capture() {
   std::fclose(h);
 }
 
+// G4BinaryCascade::CorrectBarionsOnBoundary, re-expressed from G4IonTable::GetIonMass and
+// G4RKPropagation::GetBarrier, both public - see write_imr_pauli for why that is faithful.
+//
+// The formula and the branch are what this compares; the two ingredients are already compared in
+// bic_imr_ionmass.csv and bic_field.csv. The sets below cross a proton, a neutron and a Delta++
+// in both directions, one at a time and together, so that the 1/secondaries share-out and the
+// PROTON-in/NEUTRON-out asymmetry (docs/RISK.md V156) both show.
+void write_imr_boundary() {
+  FILE* f = std::fopen("bic_imr_boundary.csv", "w");
+  std::fprintf(f, "a,z,dir,set,n_cross,mass_secondary,mass_initial,mass_final,correction,"
+                  "a_after,z_after,barrier_p,barrier_n\n");
+
+  G4IonTable* it = G4ParticleTable::GetParticleTable()->GetIonTable();
+  const double mp = G4Proton::Proton()->GetPDGMass();
+  const double mn = G4Neutron::Neutron()->GetPDGMass();
+  struct Target { int a; int z; };
+  const Target kT[] = {{12, 6}, {27, 13}, {56, 26}, {208, 82}};
+  // Each set is a list of (baryon, charge, is_nucleon, pdg_mass) crossings.
+  struct Cross { int baryon; int charge; int is_nucleon; double pdg_mass; };
+  const Cross kSets[5][3] = {
+      {{1, 1, 1, 0.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},          // one proton
+      {{1, 0, 1, 0.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},          // one neutron
+      {{1, 2, 0, 1232.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},       // one Delta++
+      {{1, 1, 1, 0.0}, {1, 0, 1, 0.0}, {0, 0, 0, 0.0}},          // a proton and a neutron
+      {{1, 1, 1, 0.0}, {1, 2, 0, 1232.0}, {1, 0, 1, 0.0}}};      // proton, Delta++, neutron
+
+  auto ionmass = [&](int z, int a) {
+    if (z > 0 && a >= z) { return it->GetIonMass(z, a); }
+    if (a > 0 && z > 0) { return it->GetIonMass(a, a); }
+    if (a >= 0 && z <= 0) { return a * mn; }
+    return 0.0;
+  };
+
+  for (const Target& t : kT) {
+    CLHEP::HepRandom::setTheSeed(930000L + t.a);
+    auto* nucleus = new G4Fancy3DNucleus;
+    nucleus->Init(t.a, t.z);
+    G4RKPropagation prop;
+    prop.Init(nucleus);
+    for (int dir = 0; dir < 2; ++dir) {   // 0 = in, 1 = out
+      for (int set = 0; set < 5; ++set) {
+        int n = 0, barions = 0, charge = 0;
+        double mass_secondary = 0.0;
+        for (int k = 0; k < 3; ++k) {
+          const Cross& c = kSets[set][k];
+          if (c.baryon == 0 && c.charge == 0 && c.is_nucleon == 0) { break; }
+          ++n;
+          charge += c.charge;
+          barions += c.baryon;
+          if (c.is_nucleon != 0) {
+            mass_secondary += (c.charge == 1) ? mp : mn;
+          } else {
+            // The whole point: a resonance going IN counts as a proton and going OUT as a
+            // neutron. Its own PDG mass is never used.
+            mass_secondary += (dir == 0) ? mp : mn;
+          }
+        }
+        const double mass_initial = ionmass(t.z, t.a);
+        const int a_after = (dir == 0) ? (t.a + barions) : (t.a - barions);
+        const int z_after = (dir == 0) ? (t.z + charge) : (t.z - charge);
+        const double mass_final = ionmass(z_after, a_after);
+        double correction = (dir == 0) ? (mass_secondary + mass_initial - mass_final)
+                                       : (mass_initial - mass_final - mass_secondary);
+        if (n > 1) { correction /= n; }
+        std::fprintf(f, "%d,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d,%.17g,%.17g\n", t.a, t.z,
+                     dir, set, n, mass_secondary, mass_initial, mass_final, correction, a_after,
+                     z_after, prop.GetBarrier(2212), prop.GetBarrier(2112));
+      }
+    }
+  }
+  std::fclose(f);
+}
+
 void write_imr_mbselect() {
+
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
   FILE* g = std::fopen("bic_imr_mbselect.csv", "w");
@@ -3132,6 +3206,7 @@ void dump_bic(const DumpContext&) {
   write_imr_ionmass();
   write_imr_pauli();
   write_imr_capture();
+  write_imr_boundary();
 }
 
 }  // namespace
@@ -3155,5 +3230,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
                     "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
                     "bic_imr_ionmass.csv bic_imr_pauli.csv "
-                    "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv",
+                    "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv "
+                    "bic_imr_boundary.csv",
                     dump_bic);

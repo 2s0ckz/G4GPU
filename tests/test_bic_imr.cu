@@ -105,6 +105,11 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_boundary     G4BinaryCascade::CorrectBarionsOnBoundary over 4 nuclei x 2
+//                        directions x 5 crossing sets: the mass totals, the correction and the
+//                        (A, Z) either side of the crossing. The sets cross a proton, a neutron
+//                        and a Delta++ one at a time and together, so the share-out and the
+//                        PROTON-in/NEUTRON-out asymmetry of docs/RISK.md V156 both show.
 //   bic_imr_capture      G4BinaryCascade::Capture's decision over 4 nuclei x 8 synthetic
 //                        secondary lists, with the per-entry nuclear field in
 //                        bic_imr_capturefield.csv so the test drives the gate with the field
@@ -169,6 +174,7 @@
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/cascade_capture.cuh"
+#include "physics/hadronic/bic/cascade_step.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
 #include "physics/hadronic/bic/kinetic_decay.cuh"
@@ -2300,6 +2306,97 @@ int main() {
         cmp_int(b_abs, bic::will_be_absorbed(pdg, ekin + m, m, bic::cut_on_p_absorb()) ? 1 : 0, 0,
                 "no pion is absorbed at the threshold Geant4 sets");
       }
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3t. G4BinaryCascade::CorrectBarionsOnBoundary - the energy a baryon crossing the nuclear
+  //     surface is paid out of the nucleus's mass, and the PROTON-in/NEUTRON-out asymmetry the
+  //     two branches differ by. Private, so the dump re-expresses it; see write_imr_boundary.
+  // -------------------------------------------------------------------------------------------
+  const int b_bnd = new_bucket("BoundaryCorrection", 1e-13);
+  const int b_bndc = new_bucket("BoundaryCounters", 0.0);
+  {
+    struct Cross { int baryon; int charge; int is_nucleon; double pdg_mass; };
+    const Cross kSets[5][3] = {
+        {{1, 1, 1, 0.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},
+        {{1, 0, 1, 0.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},
+        {{1, 2, 0, 1232.0}, {0, 0, 0, 0.0}, {0, 0, 0, 0.0}},
+        {{1, 1, 1, 0.0}, {1, 0, 1, 0.0}, {0, 0, 0, 0.0}},
+        {{1, 1, 1, 0.0}, {1, 2, 0, 1232.0}, {1, 0, 1, 0.0}}};
+    struct StubProp {
+      double bp = 0.0;
+      double bn = 0.0;
+      double barrier(int pdg) const { return (pdg == 2212) ? bp : bn; }
+    };
+    static bic::CascadeTrack pool[64];
+    const auto rows = read_csv("bic_imr_boundary.csv");
+    for (const auto& r : rows) {
+      const int a = iv(r, 0);
+      const int z = iv(r, 1);
+      const int dir = iv(r, 2);
+      const int set = iv(r, 3);
+      bic::BicCascadeState st;
+      st.lists.pool = pool;
+      st.lists.capacity = 64;
+      st.lists.n_pool = 0;
+      st.current_a = a;
+      st.current_z = z;
+      int idx[3];
+      int n = 0;
+      for (int k = 0; k < 3; ++k) {
+        const Cross& c = kSets[set][k];
+        if (c.baryon == 0 && c.charge == 0 && c.is_nucleon == 0) { break; }
+        bic::CascadeTrack t;
+        t.baryon = c.baryon;
+        t.charge = c.charge;
+        if (c.is_nucleon != 0) {
+          t.pdg = (c.charge == 1) ? 2212 : 2112;
+          t.pdg_mass = (c.charge == 1) ? mp : mn;
+        } else {
+          t.pdg = 2224;
+          t.pdg_mass = c.pdg_mass;
+        }
+        // A kinetic energy far above anything the correction can push it below, so that the
+        // `e + correction > actualMass` branch is the one taken and the correction is visible
+        // as an energy change rather than as a redirection.
+        const double pz = 800.0;
+        t.momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, pz},
+                                        std::sqrt(pz * pz + t.pdg_mass * t.pdg_mass));
+        t.state = (dir == 0) ? bic::kOutside : bic::kInside;
+        idx[n] = st.lists.add(t, bic::kListSecondary);
+        ++n;
+      }
+      StubProp prop;
+      prop.bp = dv(r, 11);
+      prop.bn = dv(r, 12);
+      double e_before[3];
+      for (int k = 0; k < n; ++k) { e_before[k] = pool[idx[k]].momentum.e; }
+      imr::CollisionList dummy;
+      (void)dummy;
+      bic::CascadeRefusal cref;
+      const bic::BoundaryFailures fail =
+          (dir == 0) ? bic::correct_barions_on_boundary(st, idx, n, nullptr, 0, prop, mp, mn, cref)
+                     : bic::correct_barions_on_boundary(st, nullptr, 0, idx, n, prop, mp, mn,
+                                                        cref);
+      const std::string where = "A=" + sv(r, 0) + " dir=" + sv(r, 2) + " set=" + sv(r, 3);
+      cmp_int(b_bndc, n, iv(r, 4), where + " n_cross");
+      cmp_int(b_bndc, st.current_a, iv(r, 9), where + " A after");
+      cmp_int(b_bndc, st.current_z, iv(r, 10), where + " Z after");
+      cmp_int(b_bndc, fail.n, 0, where + " nothing was redirected");
+      if (cref.any()) {
+        std::printf("REFUSED boundary %s\n", where.c_str());
+        ++fails;
+      }
+      // Every crossing track gets the SAME correction, and the dumped column is what it should
+      // be. Comparing each track's energy change to it checks the share-out as well as the sum.
+      for (int k = 0; k < n; ++k) {
+        cmp_scaled(b_bnd, pool[idx[k]].momentum.e - e_before[k], dv(r, 8), 1e-6,
+                   where + " correction on track " + std::to_string(k));
+      }
+      cmp_scaled(b_bnd, bic::get_ion_mass(z, a, mn), dv(r, 6), 1e-6, where + " mass_initial");
+      cmp_scaled(b_bnd, bic::get_ion_mass(iv(r, 10), iv(r, 9), mn), dv(r, 7), 1e-6,
+                 where + " mass_final");
     }
   }
 

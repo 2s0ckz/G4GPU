@@ -63,6 +63,22 @@
 
 namespace g4gpu::bic {
 
+/// Which of `G4BinaryCascade`'s four `G4KineticTrackVector`s a track is currently in.
+///
+/// Geant4 moves a `G4KineticTrack*` from one vector to another and identity is the pointer. The
+/// port keeps every track in ONE pool and moves it by changing this tag, so that identity is the
+/// pool index and stays valid for the whole cascade. That is not cosmetic: `G4CollisionManager`
+/// holds a primary and a target for every scheduled collision and `RemoveTracksCollisions` finds
+/// them by pointer, so a list that shifted its elements on removal would invalidate every
+/// scheduled collision in it.
+enum TrackList : int {
+  kListNone = 0,       ///< removed from the cascade altogether (Geant4 deletes the track)
+  kListSecondary = 1,  ///< theSecondaryList
+  kListTarget = 2,     ///< theTargetList
+  kListCaptured = 3,   ///< theCapturedList
+  kListFinal = 4       ///< theFinalState
+};
+
 /// One track of the cascade. `state` is `G4KineticTrack::CascadeState`, the enum in
 /// `kinetic_track.cuh`, which also has the class this shape comes from and the note on why its two
 /// momenta are the same four-vector (docs/RISK.md V69).
@@ -80,6 +96,8 @@ struct CascadeTrack {
   int creator_model_id = -1;
   int parent_resonance_pdg = 0;
   int parent_resonance_id = 0;
+  int list = kListNone;      ///< which of the four G4KineticTrackVectors; see `TrackList`
+  bool hit = false;          ///< `G4KineticTrack::Hit()`, which marks the G4Nucleon
 
   /// `G4KineticTrack::GetActualMass` - `sqrt(|the4Momentum.mag2()|)`.
   __host__ __device__ double actual_mass() const {
@@ -99,22 +117,31 @@ struct CascadeRefusal {
   }
 };
 
-/// The four lists and the counters, all caller-owned. A cascade on a lead nucleus holds 208
-/// target nucleons plus whatever it makes, so the capacities are the caller's problem and
-/// `CascadeRefusal::capacity` says when one was not enough.
+/// The one pool the four lists are views of, caller-owned. A cascade on a lead nucleus holds 208
+/// target nucleons plus whatever it makes, so the capacity is the caller's problem and
+/// `CascadeRefusal::capacity` says when it was not enough.
+///
+/// The four `n_*` counters are not sizes - they are recomputed by `count_list` - they are the
+/// running totals `Propagate` reads, kept so that a caller can see them without a scan.
 struct CascadeLists {
-  CascadeTrack* secondary = nullptr;
-  int n_secondary = 0;
-  int cap_secondary = 0;
-  CascadeTrack* target = nullptr;
-  int n_target = 0;
-  int cap_target = 0;
-  CascadeTrack* captured = nullptr;
-  int n_captured = 0;
-  int cap_captured = 0;
-  CascadeTrack* final_state = nullptr;
-  int n_final = 0;
-  int cap_final = 0;
+  CascadeTrack* pool = nullptr;
+  int n_pool = 0;
+  int capacity = 0;
+
+  /// Append a track and return its pool index, or -1 when the pool is full.
+  __host__ __device__ int add(const CascadeTrack& t, int list) {
+    if (n_pool >= capacity) { return -1; }
+    pool[n_pool] = t;
+    pool[n_pool].list = list;
+    return n_pool++;
+  }
+  __host__ __device__ int count(int list) const {
+    int n = 0;
+    for (int i = 0; i < n_pool; ++i) {
+      if (pool[i].list == list) { ++n; }
+    }
+    return n;
+  }
 };
 
 /// Everything `Propagate` carries between its helpers. It is NOT `G4KineticTrack::CascadeState`,
@@ -166,7 +193,6 @@ __host__ __device__ inline void build_target_list(Nucleus3D& nucleus, BicCascade
                                                   double proton_mass, double neutron_mass,
                                                   CascadeRefusal& ref) {
   if (!nucleus.start_loop()) { return; }
-  st.lists.n_target = 0;
   st.initial_z = nucleus.charge();
   st.initial_a = nucleus.mass_number();
   st.initial_nuclear_mass = get_ion_mass(st.initial_z, st.initial_a, neutron_mass);
@@ -176,12 +202,7 @@ __host__ __device__ inline void build_target_list(Nucleus3D& nucleus, BicCascade
   Nucleon* nucleon = nullptr;
   while ((nucleon = nucleus.next_nucleon()) != nullptr) {
     if (nucleon->hit) { continue; }
-    if (st.lists.n_target >= st.lists.cap_target) {
-      ref.capacity = true;
-      return;
-    }
-    CascadeTrack& t = st.lists.target[st.lists.n_target];
-    t = CascadeTrack{};
+    CascadeTrack t;
     t.pdg = nucleon->pdg();
     t.pdg_mass = nucleon->pdg_mass();
     t.charge = nucleon->charge();
@@ -191,8 +212,11 @@ __host__ __device__ inline void build_target_list(Nucleus3D& nucleus, BicCascade
         nucleon->momentum.v,
         std::sqrt(g4gpu::mag2(nucleon->momentum.v) + t.pdg_mass * t.pdg_mass));
     t.state = kInside;
-    t.nucleon_index = st.lists.n_target;
-    ++st.lists.n_target;
+    t.nucleon_index = nucleus.current - 1;
+    if (st.lists.add(t, kListTarget) < 0) {
+      ref.capacity = true;
+      return;
+    }
     ++st.current_a;
     if (t.charge > 0) { ++st.current_z; }
   }
@@ -235,12 +259,10 @@ __host__ __device__ inline bool build_late_particle_collisions(CascadeTrack* sec
       // The track stays where the caller put it; `find_late_particle_collision` schedules it.
       continue;
     }
-    if (st.lists.n_secondary >= st.lists.cap_secondary) {
+    if (st.lists.add(secondaries[i], kListSecondary) < 0) {
       ref.capacity = true;
       return false;
     }
-    st.lists.secondary[st.lists.n_secondary] = secondaries[i];
-    ++st.lists.n_secondary;
     st.projectile_4mom = st.projectile_4mom + secondaries[i].momentum;
     st.projectile_a += secondaries[i].baryon;
     st.projectile_z += secondaries[i].charge;
@@ -258,7 +280,9 @@ __host__ __device__ inline bool build_late_particle_collisions(CascadeTrack* sec
 /// `Propagate` into `CorrectFinalPandE`.
 __host__ __device__ inline imr::LorentzVector get_final_4momentum(const BicCascadeState& st) {
   imr::LorentzVector f = st.initial_4mom + st.projectile_4mom;
-  for (int i = 0; i < st.lists.n_final; ++i) { f = f - st.lists.final_state[i].momentum; }
+  for (int i = 0; i < st.lists.n_pool; ++i) {
+    if (st.lists.pool[i].list == kListFinal) { f = f - st.lists.pool[i].momentum; }
+  }
   if (f.e > 0.0 && st.current_a > 0) {
     const deex::Vec3d beta = (1.0 / f.e) * f.v;
     if (std::sqrt(g4gpu::mag2(beta)) > 1.0) {
@@ -276,8 +300,10 @@ __host__ __device__ inline imr::LorentzVector get_final_4momentum(const BicCasca
 /// `precompoundLorentzboost` is the one that takes a precompound product BACK.
 __host__ __device__ inline imr::LorentzVector get_final_nucleus_momentum(BicCascadeState& st) {
   imr::LorentzVector captured(deex::Vec3d{0.0, 0.0, 0.0}, 0.0);
-  for (int i = 0; i < st.lists.n_captured; ++i) {
-    captured = captured + st.lists.captured[i].momentum;
+  for (int i = 0; i < st.lists.n_pool; ++i) {
+    if (st.lists.pool[i].list == kListCaptured) {
+      captured = captured + st.lists.pool[i].momentum;
+    }
   }
   imr::LorentzVector nucleus = get_final_4momentum(st);
   if (nucleus.e > 0.0) {
