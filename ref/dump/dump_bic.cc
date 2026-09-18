@@ -100,6 +100,7 @@
 #include "G4HadronicInteractionRegistry.hh"
 #include "G4IonTable.hh"
 #include "G4DecayKineticTracks.hh"
+#include "G4IonTable.hh"
 #include "G4DecayTable.hh"
 #include "G4KineticTrack.hh"
 #include "G4SampleResonance.hh"
@@ -2305,7 +2306,8 @@ void write_imr_decay() {
   // entirely would agree everywhere.
   FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv "
                     "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
-                    "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv", "w");
+                    "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
+                    "bic_imr_ionmass.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2827,6 +2829,30 @@ void write_imr_scatter() {
   std::fclose(f);
 }
 
+// G4BinaryCascade::GetIonMass's first arm, which is G4IonTable::GetIonMass(Z,A).
+//
+// The other three arms - charge above the mass number, an all-neutral remnant, an empty nucleus -
+// are branches on (Z, A) and not table lookups, so they are asserted in the test against the
+// arithmetic the source writes. This file is the one arm that reads a table, and it reads it for
+// every (Z, A) a cascade can leave behind: the residual of a spallation on a QBBC target walks
+// down in both, so the grid is the whole triangle up to the heaviest target and not a list.
+void write_imr_ionmass() {
+  FILE* f = std::fopen("bic_imr_ionmass.csv", "w");
+  std::fprintf(f, "z,a,mass\n");
+  G4IonTable* it = G4ParticleTable::GetParticleTable()->GetIonTable();
+  for (int a = 1; a <= 240; ++a) {
+    for (int z = 1; z <= a && z <= 94; ++z) {
+      // Only the cells a cascade can reach: within 30 nucleons of the beta-stable line, which
+      // covers every residual a 1.5 GeV projectile can leave, plus the light corner in full.
+      const int zstable = (a <= 4) ? z : static_cast<int>(a / (1.98 + 0.0155 * std::pow(
+                                          static_cast<double>(a), 2.0 / 3.0)) + 0.5);
+      if (a > 20 && (z < zstable - 15 || z > zstable + 15)) { continue; }
+      std::fprintf(f, "%d,%d,%.17g\n", z, a, it->GetIonMass(z, a));
+    }
+  }
+  std::fclose(f);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -2936,6 +2962,7 @@ void dump_bic(const DumpContext&) {
   write_imr_kdecay();
   write_imr_scatter();
   write_imr_scatterlife();
+  write_imr_ionmass();
 }
 
 }  // namespace

@@ -105,6 +105,10 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_ionmass      G4IonTable::GetIonMass over the whole (Z, A) triangle a cascade can
+//                        leave behind - 6,670 cells within 15 of the stable line up to A = 240.
+//                        It is the first arm of G4BinaryCascade::GetIonMass; the other three are
+//                        branches on (Z, A) and are asserted against the source's arithmetic.
 //   bic_imr_scatter      G4Scatterer::Scatter end to end over 9 pairs x 9 energies from 50 MeV
 //                        to 5 GeV x 8 phases - the product identities name which of the 306
 //                        concrete channels the three nested uniforms landed on, and the draw
@@ -151,6 +155,7 @@
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
+#include "physics/hadronic/bic/cascade_state.cuh"
 #include "physics/hadronic/bic/kinetic_decay.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_fs.cuh"
@@ -2096,6 +2101,36 @@ int main() {
       cmp_scaled(b_scfs, fs.p[i].v.z, dv(r, 8), scale, where + " pz");
       cmp_scaled(b_scfs, fs.p[i].e, dv(r, 9), scale, where + " e");
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3q. G4BinaryCascade::GetIonMass and the cascade state's bookkeeping. The first arm reads
+  //     G4IonTable; the other three are branches on (Z, A) and are asserted against the
+  //     arithmetic the source writes, because there is no table behind them to compare with.
+  // -------------------------------------------------------------------------------------------
+  const int b_ionm = new_bucket("CascadeIonMass", 1e-15);
+  const int b_ionb = new_bucket("CascadeIonMassBranches", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_ionmass.csv");
+    for (const auto& r : rows) {
+      const int z = iv(r, 0);
+      const int a = iv(r, 1);
+      cmp_scaled(b_ionm, bic::get_ion_mass(z, a, mn), dv(r, 2), 1e-9,
+                 "Z=" + sv(r, 0) + " A=" + sv(r, 1));
+    }
+    // `Z > A` returns the mass of A PROTONS - "will happen for light nuclei with pions involved".
+    cmp_scaled(b_ionb, bic::get_ion_mass(3, 2, mn), bic::get_ion_mass(2, 2, mn), 1e-9,
+               "Z>A falls back to (A,A)");
+    cmp_scaled(b_ionb, bic::get_ion_mass(0, 5, mn), 5.0 * mn, 1e-9, "neutral remnant is A m_n");
+    cmp_scaled(b_ionb, bic::get_ion_mass(0, 0, mn), 0.0, 1e-9, "empty nucleus is zero");
+    cmp_scaled(b_ionb, bic::get_ion_mass(-1, 3, mn), 3.0 * mn, 1e-9,
+               "negative charge takes the neutral arm, not the throw");
+    // theCutOnP: the mass-in-MeV reading, which is docs/RISK.md V72 - every nucleus that exists
+    // is above 120 MeV, so the constant is always 45 and the three branches above it are dead.
+    cmp_scaled(b_ionb, bic::cut_on_p(bic::get_ion_mass(6, 12, mn)), 45.0, 1e-12, "C12 cut is 45");
+    cmp_scaled(b_ionb, bic::cut_on_p(bic::get_ion_mass(82, 208, mn)), 45.0, 1e-12,
+               "Pb208 cut is 45");
+    cmp_scaled(b_ionb, bic::cut_on_p(mn), 45.0, 1e-12, "even one neutron is above 120 MeV");
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
