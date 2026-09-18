@@ -410,7 +410,7 @@ FTFP is blocked on exactly one thing. Its 96-point generality sweep - `apply_you
 energies inside every FTFP row of `ref/oracle/ftf_windows.csv`, on carbon and on lead - runs 44
 points and refuses 52, **and all 52 are the same refusal**:
 `preco::GeneratorRefusal::short_lived_track`, which is P6's by-name refusal of
-`G4DecayKineticTracks` (docs/RISK.md V112). It also costs 80% of ion events and 32% of sub-GeV
+`G4DecayKineticTracks` (docs/RISK.md V100). It also costs 80% of ion events and 32% of sub-GeV
 anti-nucleon ones. The Binary cascade reaches the same code through the same door, and its
 cascade makes the same Deltas and N*, so the engine belongs under `bic/` behind a contract
 header in the shape of `bic/nucleus/nucleus_model.cuh`: plain structs in, plain structs out, no

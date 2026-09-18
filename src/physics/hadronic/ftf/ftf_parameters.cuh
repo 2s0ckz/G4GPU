@@ -325,7 +325,7 @@ struct FtfParameters {
   /// left them INDETERMINATE, and one of them decides physics: an indeterminate
   /// `enable_diff_dissociation_for_b_greater_10` that happened to be non-zero kept projectile
   /// and target diffraction ON for every target with A > 10, where Geant4 switches both off.
-  /// docs/RISK.md V116.
+  /// docs/RISK.md V104.
   real_t proc_params[5][7] = {};
 
   real_t delta_prob_at_quark_exchange;

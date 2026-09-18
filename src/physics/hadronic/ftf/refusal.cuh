@@ -145,7 +145,7 @@ enum class FtfRefusal : int {
   /// anti-species changes downstream is the PDG code the SPLITABLE carries. A flag on the model
   /// workspace and a sign at the one place the splitable is made replace it, and the four
   /// anti-nuclei QBBC constructs build their strings. They still stop at the hand-over, on P6's
-  /// own `GeneratorRefusal::anti_nucleus`. docs/RISK.md V121. An anti-NUCLEON (baryon number -1)
+  /// own `GeneratorRefusal::anti_nucleus`. docs/RISK.md V117. An anti-NUCLEON (baryon number -1)
   /// was never refused here: it needs no projectile nucleus at all.
   kAntiNucleusProjectile,
 

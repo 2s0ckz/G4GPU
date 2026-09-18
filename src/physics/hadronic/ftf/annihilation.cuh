@@ -33,7 +33,7 @@
 //
 // `SetFirstParton`/`SetSecondParton` each `delete` a parton and `new` another, and a
 // `G4Parton` constructor draws a colour and (for a non-zero `GetPDGiSpin()`) a spin
-// projection - docs/RISK.md V110. Channel (a) calls them six times and also constructs an
+// projection - docs/RISK.md V98. Channel (a) calls them six times and also constructs an
 // `AdditionalString` with the DEFAULT `G4DiffractiveSplitableHadron` constructor, which makes a
 // d and an anti-d before they are replaced: 4 more. None of those values is ever read. The
 // draw-count column of ref/oracle/ftf_annih.csv is the only thing that can check them, and the
@@ -91,7 +91,7 @@ __host__ __device__ inline void ftf_annih_unpack_baryon(int id_pdg, int* q1, int
 }
 
 /// `G4DiffractiveSplitableHadron::SetFirstParton` / `SetSecondParton`, with the deviates the
-/// replacement `G4Parton` spends (docs/RISK.md V110) and nothing else - the parton's colour and
+/// replacement `G4Parton` spends (docs/RISK.md V98) and nothing else - the parton's colour and
 /// spin are never read.
 template <typename Rng>
 __host__ __device__ inline void ftf_set_first_parton(SplitableHadron* h, int pdg,

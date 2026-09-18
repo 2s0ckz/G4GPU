@@ -33,7 +33,7 @@
 //   ftf_modelstat_*    the statistical half: 24 cases x 20,000 events of the whole model, IN
 //                      TWO PASSES. The string counters come from Init + GetStrings and the
 //                      hadron ones from Scatter, because that is what the dump does and because
-//                      Scatter's rejection loop is a conditioning - docs/RISK.md V117.
+//                      Scatter's rejection loop is a conditioning - docs/RISK.md V105.
 //   ftf_nucstat.csv    P9's nucleus measured the way FTF's geometry uses it, and
 //   ftf_aaradius.csv   the impact-parameter range of an AA collision, which is the contracted
 //                      projectile's outer radius plus the target's plus 2 fm.
@@ -1145,7 +1145,7 @@ int main(int argc, char** argv) {
         // beam it fires on 1.6% of attempts and the difference hides; for C12 on carbon it fires
         // on 7.2%, and measuring the port's string counters through `ftf_scatter` while the
         // oracle measured them without it read as a 12.8-sigma disagreement in the participant
-        // count that was in neither model. docs/RISK.md V117.
+        // count that was in neither model. docs/RISK.md V105.
         for (int ev = 0; ev < n_events; ++ev) {
           Philox<double> rng(static_cast<uint32_t>(ev), 7u);
           ws->model.report = ftf::FtfModelReport();
@@ -1548,7 +1548,7 @@ int main(int argc, char** argv) {
   // -------------------------------------------------------------------------------------------
   // 6d. ftf_prescatter.csv - the model WITHOUT the rejection loop around it
   //
-  // docs/RISK.md V117. `G4VPartonStringModel::Scatter` re-samples a whole event whose nuclear
+  // docs/RISK.md V105. `G4VPartonStringModel::Scatter` re-samples a whole event whose nuclear
   // residual is unphysical, and that rejection is a conditioning: it removes the attempts with
   // the most hit nucleons. This table is `Init` + `GetStrings` with none of that, and it carries
   // the rejection's OWN inputs - the proton and neutron hit counts of both nuclei - and the
@@ -1754,7 +1754,7 @@ int main(int argc, char** argv) {
         const ftf::Vec4 primary(0.0, 0.0, c.plab, c.kin + c.pmass);
         // The same two passes as the 20,000-event section, for the same reason: `dump_modelbig`
         // measures the string counters from `Init` + `GetStrings` and the multiplicity from
-        // `Scatter`, under two different seeds. docs/RISK.md V117.
+        // `Scatter`, under two different seeds. docs/RISK.md V105.
         for (int ev = 0; ev < n_events; ++ev) {
           Philox<double> rng(static_cast<uint32_t>(ev), 11u);
           ws->model.report = ftf::FtfModelReport();
@@ -1883,7 +1883,7 @@ int main(int argc, char** argv) {
                        ws->report.generator.any() || ws->report.low_energy_dummy) {
               ++n_refused;
               // A positive code is an `FtfRefusal`; -1 is P6's `Propagate` refusing (which for
-              // FTFP is almost always `short_lived_track`, docs/RISK.md V112); -2 is the
+              // FTFP is almost always `short_lived_track`, docs/RISK.md V100); -2 is the
               // charm/bottom or hypernucleus dummy branch below 100 MeV.
               int code = static_cast<int>(ws->report.refused);
               if (code == 0) { code = static_cast<int>(ws->report.model.refused); }

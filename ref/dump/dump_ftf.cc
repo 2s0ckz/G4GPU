@@ -2235,7 +2235,7 @@ void dump_nucstat() {
 //
 // It exists because C12 on carbon disagreed - 3.7% fewer participants and 2.3% larger impact
 // parameter - while the nucleus, the FTF parameters and the replayed GetList all agreed
-// exactly. That is the same shape of question docs/RISK.md V111 answered by adding three
+// exactly. That is the same shape of question docs/RISK.md V99 answered by adding three
 // counters that localise rather than detect.
 void dump_aaradius() {
   FILE* f = std::fopen("ftf_aaradius.csv", "w");
