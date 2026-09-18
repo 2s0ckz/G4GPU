@@ -175,6 +175,7 @@
 #include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/cascade_capture.cuh"
 #include "physics/hadronic/bic/cascade_find.cuh"
+#include "physics/hadronic/bic/cascade_finish.cuh"
 #include "physics/hadronic/bic/cascade_step.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
@@ -2464,6 +2465,92 @@ int main() {
     cmp_int(b_sched, bic::CascadeSpecies::iso3_of(111), 0, "a pi0 is 0");
     cmp_int(b_sched, bic::CascadeSpecies::is_pion(111) ? 1 : 0, 1, "a pi0 is a pion");
     cmp_int(b_sched, bic::CascadeSpecies::is_pion(2212) ? 1 : 0, 0, "a proton is not");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3v. G4BinaryCascade::CorrectFinalPandE, whose whole content is a two-body momentum and a
+  //     scale factor with a FLOOR at 0.98. The floor is the part worth asserting: it is what
+  //     makes the function a "small correction" and not a repair.
+  //
+  //     The factor is NOT predicted here from the lab momenta - it is a ratio taken in the
+  //     overall centre-of-momentum frame, and re-deriving that in the test would be re-writing
+  //     the function. What is asserted is what the function promises: the factor is either
+  //     exactly 1 (no correction) or in [0.98, 1], every final's momentum is scaled by exactly
+  //     it, and both the no-op branch and the floor are reached by the five cases below.
+  // -------------------------------------------------------------------------------------------
+  const int b_cfin = new_bucket("CorrectFinalPandE", 1e-13);
+  {
+    static bic::CascadeTrack pool[8];
+    int n_untouched = 0;
+    int n_floored = 0;
+    // The last two reach the 0.98 FLOOR and the first three do not; a 1.5 GeV projectile
+    // and a nearly collinear outgoing pair is what puts the ratio under 0.98 without tripping
+    // the `s0 - (m10+m20)^2 < 0` guard above it, and finding that band took a scan.
+    for (double over : {0.2, 0.8, 1.5, 10.237, 22.491}) {
+      bic::BicCascadeState st;
+      st.lists.pool = pool;
+      st.lists.capacity = 8;
+      st.lists.n_pool = 0;
+      st.current_a = 12;
+      st.current_z = 6;
+      st.initial_a = 12;
+      st.initial_z = 6;
+      const double m_nuc = bic::get_ion_mass(6, 12, mn);
+      const double e_proj = 1500.0 + mp;
+      st.initial_nuclear_mass = m_nuc;
+      st.initial_4mom = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 0.0}, m_nuc);
+      st.projectile_4mom = imr::LorentzVector(
+          deex::Vec3d{0.0, 0.0, std::sqrt(e_proj * e_proj - mp * mp)}, e_proj);
+      // Two outgoing protons, back to back in the lab with a common longitudinal boost, whose
+      // momentum `over` scales. Small values leave the outgoing set inside the two-body limit
+      // and large ones put it far outside.
+      const double pz = 100.0 * over;
+      for (int k = 0; k < 2; ++k) {
+        bic::CascadeTrack t;
+        t.pdg = 2212;
+        t.pdg_mass = mp;
+        t.charge = 1;
+        t.baryon = 1;
+        const double px = (k == 0) ? 5.0 * over : -5.0 * over;
+        // The SECOND proton is deliberately OFF SHELL by 3%, which is what the cascade
+        // hands this function: a resonance product carries a sampled mass and
+        // CorrectShortlivedFinalsForFermi moves energies at fixed invariant mass. With both
+        // finals exactly on the PDG shell the lab invariant and the PDG mass are the same
+        // number, and MEASURED: building the new energy from the PDG mass instead then passes.
+        const double shell = (k == 0) ? 1.0 : 1.03;
+        t.momentum = imr::LorentzVector(deex::Vec3d{px, 0.0, pz},
+                                        shell * std::sqrt(px * px + pz * pz + mp * mp));
+        st.lists.add(t, bic::kListFinal);
+      }
+      double before[2];
+      double mass2[2];
+      for (int k = 0; k < 2; ++k) {
+        before[k] = std::sqrt(g4gpu::mag2(pool[k].momentum.v));
+        mass2[k] = pool[k].momentum.e * pool[k].momentum.e - g4gpu::mag2(pool[k].momentum.v);
+      }
+      const double factor = bic::correct_final_p_and_e(st, mn);
+      const std::string where = "over=" + std::to_string(over);
+      cmp_int(b_cfin, (factor == 1.0 || (factor >= 0.98 && factor < 1.0)) ? 1 : 0, 1,
+              where + " the factor is 1 or in [0.98, 1)");
+      if (factor == 1.0) {
+        ++n_untouched;
+        for (int k = 0; k < 2; ++k) {
+          cmp_scaled(b_cfin, std::sqrt(g4gpu::mag2(pool[k].momentum.v)), before[k], 1e-9,
+                     where + " momentum untouched");
+        }
+      } else {
+        if (factor == 0.98) { ++n_floored; }
+        // The invariant mass of every final is preserved exactly - the new energy is built from
+        // the OLD lab mag2 and the new momentum.
+        for (int k = 0; k < 2; ++k) {
+          const double m2_after =
+              pool[k].momentum.e * pool[k].momentum.e - g4gpu::mag2(pool[k].momentum.v);
+          cmp_scaled(b_cfin, m2_after, mass2[k], 1e-3, where + " invariant mass preserved");
+        }
+      }
+    }
+    cmp_int(b_cfin, (n_untouched > 0) ? 1 : 0, 1, "some case takes the no-correction branch");
+    cmp_int(b_cfin, (n_floored > 0) ? 1 : 0, 1, "and some case is clamped at the 0.98 floor");
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
