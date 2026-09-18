@@ -29,6 +29,8 @@
 #include <vector>
 
 #include "core/rng.cuh"
+#include "data/level_data.cuh"
+#include "host/g4data.cuh"
 #include "physics/hadronic/stopping/em_capture_cascade.cuh"
 #include "physics/hadronic/stopping/element_selector.cuh"
 #include "physics/hadronic/stopping/muon_bound_decay.cuh"
@@ -137,6 +139,121 @@ bool load_csv(const std::string& path, Csv& out) {
   }
   std::fclose(f);
   return true;
+}
+
+/// P11's FTF entry point is not yet callable from a test - no workspace builder exists outside
+/// its own model tests - so the anti-baryon arm is REFUSED BY NAME and counted, which is what the
+/// brief asks for until P11d lands. The count is printed per species, so "the Fritiof arm did not
+/// run" is a number rather than a silence.
+struct FtfNotYet {
+  mutable long long calls = 0;
+  template <typename P, typename N, typename F, typename R>
+  stopping::StoppingRefusal operator()(const P&, const N&, F&, R&) const {
+    ++calls;
+    return stopping::StoppingRefusal::kFtfRefused;
+  }
+};
+
+struct NuclearMassMeV {
+  double operator()(int a, int z) const { return deex::nuclear_mass(a, z); }
+};
+
+/// The five materials the brief names. Only the RELATIVE number densities matter to the element
+/// selector - the Fermi-Teller weight multiplies them and the total cancels in the draw - so
+/// water is written as its stoichiometry, 2 H to 1 O, rather than as a density times a mass
+/// fraction. Everything else is one element.
+struct MatDef {
+  const char* name;
+  int n;
+  int z[2];
+  double dens[2];
+  int a[2];
+};
+
+void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
+                  const preco::PrecoWorkspace& pws, stopping::BertiniArmState& bs,
+                  HadFinalState<double, 256>& fs) {
+  const MatDef mats[5] = {{"H2O", 2, {1, 8}, {2.0, 1.0}, {1, 16}},
+                          {"C", 1, {6, 0}, {1.0, 0.0}, {12, 0}},
+                          {"Al", 1, {13, 0}, {1.0, 0.0}, {27, 0}},
+                          {"Fe", 1, {26, 0}, {1.0, 0.0}, {56, 0}},
+                          {"Pb", 1, {82, 0}, {1.0, 0.0}, {207, 0}}};
+  struct Sp { int pdg; double mass; const char* name; };
+  const Sp species[8] = {{-211, 139.57061, "pi-"},   {-321, 493.677, "K-"},
+                         {3112, 1197.449, "Sigma-"}, {3312, 1321.71, "Xi-"},
+                         {3334, 1672.45, "Omega-"},  {13, 105.6583715, "mu-"},
+                         {-2212, 938.272013, "anti-p"}, {-2112, 939.56536, "anti-n"}};
+  const long long kN = 20000;
+
+  std::printf("\n  == stopping::at_rest, %lld events per (species, material) ==\n", kN);
+  std::printf("  %-8s %-5s %9s %8s %8s %8s %9s %9s %s\n", "species", "mat", "mean nsec",
+              "mean EM", "mean nuc", "refused", "dio frac", "mean Edep", "captured on");
+  FtfNotYet ftf;
+  for (int si = 0; si < 8; ++si) {
+    for (int mi = 0; mi < 5; ++mi) {
+      const MatDef& m = mats[mi];
+      int offs[2] = {0, 1};
+      int nis[2] = {1, 1};
+      bool nab[2] = {true, true};
+      double abun[2] = {1.0, 1.0};
+      MaterialComposition<double> mat;
+      mat.n_elements = m.n;
+      mat.element_z = m.z;
+      mat.n_atoms_per_volume = m.dens;
+      mat.n_isotopes = nis;
+      mat.isotope_offset = offs;
+      mat.natural_abundance = nab;
+      mat.isotope_a = m.a;
+      mat.isotope_abundance = abun;
+
+      Philox<double> rng(0xA7u, static_cast<unsigned>(si), static_cast<unsigned>(mi));
+      long long nsec = 0, nem = 0, nref = 0, ndio = 0, ndone = 0, non_z[2] = {0, 0};
+      double edep = 0.0;
+      std::map<int, long long> refkind;
+      for (long long ev = 0; ev < kN; ++ev) {
+        HadProjectile<double> p;
+        p.pdg = species[si].pdg;
+        p.mass = species[si].mass;
+        p.kin_energy = 0.0;
+        const stopping::AtRestResult r = stopping::at_rest(
+            p, mat, fs, bert::default_cascade_params(), bert::default_interface_limits(), bs, lt,
+            pool, pws, NuclearMassMeV(), ftf, 1, 2, 3, rng);
+        if (r.element_index >= 0 && r.element_index < 2) { ++non_z[r.element_index]; }
+        if (r.refusal != stopping::StoppingRefusal::kNone) {
+          ++nref;
+          ++refkind[static_cast<int>(r.refusal)];
+          continue;
+        }
+        ++ndone;
+        if (r.decayed_in_orbit) { ++ndio; }
+        nsec += fs.n_secondaries;
+        nem += r.n_em_cascade;
+        edep += r.local_deposit_MeV;
+      }
+      const double d = (ndone > 0) ? double(ndone) : 1.0;
+      char cap[64];
+      if (m.n > 1) {
+        std::snprintf(cap, sizeof cap, "Z%d %.1f%% / Z%d %.1f%%", m.z[0],
+                      100.0 * double(non_z[0]) / double(kN), m.z[1],
+                      100.0 * double(non_z[1]) / double(kN));
+      } else {
+        std::snprintf(cap, sizeof cap, "Z%d", m.z[0]);
+      }
+      std::printf("  %-8s %-5s %9.3f %8.3f %8.3f %8lld %9.4f %9.4g %s\n", species[si].name,
+                  m.name, double(nsec) / d, double(nem) / d,
+                  (double(nsec) - double(nem)) / d, nref, double(ndio) / d, edep / d, cap);
+      if (nref > 0) {
+        std::printf("        refusals:");
+        for (const auto& kv : refkind) {
+          std::printf(" kind %d x %lld", kv.first, kv.second);
+        }
+        std::printf("\n");
+      }
+    }
+  }
+  std::printf("  the Fritiof arm was asked %lld times and refused every one: P11's"
+              " ftf::apply_yourself has no workspace builder outside its own model tests yet,"
+              " so anti-p and anti-n are counted rather than approximated\n", ftf.calls);
 }
 
 }  // namespace
@@ -315,6 +432,56 @@ int main() {
     pin(stopping::stopping_deexcite_choice(NuclearArm::kBertini) ==
             bert::DeexciteChoice::kPreCompound,
         "and the other five with P6's PreCompound - a fourth instance in a third configuration");
+  }
+
+  // ============================================================================================
+  // 5. The assembly: `stopping::at_rest` for every species QBBC gives an at-rest process, in
+  //    every material, 20,000 events each. Reported, not compared - there is no oracle column
+  //    for it yet, and what it is for is to show the entry point RUNS for every species and to
+  //    put numbers on what each arm does. The exact comparisons above are where correctness
+  //    lives; this is where coverage does.
+  // ============================================================================================
+  {
+    const std::string pe = host::g4photon_evaporation_dir();
+    if (pe.empty()) {
+      std::printf("  (campaign skipped: no PhotonEvaporation dataset)\n");
+    } else {
+      data::LevelTableStorage lts;
+      data::read_all_level_data(
+          lts, pe, data::kLevelZMax,
+          [](int Z, int A) { return deex::shell_correction(A, Z); },
+          [](int Z, int A) { return deex::level_manager_level_density(Z, A); });
+      const data::LevelTable lt = lts.view();
+      deex::FermiPoolStorage ps;
+      deex::build_fermi_pool(ps, lt);
+      const deex::FermiPool pool = ps.view();
+      std::vector<deex::Fragment> evap(4096), results(1024), step(512);
+      std::vector<deex::DeexProduct> dpv(1024), ppv(1024);
+      preco::PrecoWorkspace pws;
+      pws.deex.evap_list = evap.data();
+      pws.deex.evap_capacity = 4096;
+      pws.deex.results = results.data();
+      pws.deex.results_capacity = 1024;
+      pws.deex.step = step.data();
+      pws.deex.step_capacity = 512;
+      pws.deex.products = dpv.data();
+      pws.deex.products_capacity = 1024;
+      pws.products = ppv.data();
+      pws.products_capacity = 1024;
+
+      stopping::BertiniArmState bs;
+      bs.model = new bert::NucleiModel();
+      bs.ws = new bert::BertiniWorkspace();
+      bs.global_out = new bert::CollisionOutput();
+      bs.out = new bert::CollisionOutput();
+      bs.dex_out = new bert::CollisionOutput();
+      bs.tmp = new bert::CollisionOutput();
+      bs.epo = new bert::ColliderOutput();
+      auto* fs = new HadFinalState<double, 256>();
+
+      run_campaign(lt, pool, pws, bs, *fs);
+      delete fs;
+    }
   }
 
   long long total = 0;
