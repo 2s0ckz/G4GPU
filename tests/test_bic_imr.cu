@@ -100,6 +100,11 @@
 //   bic_imr_lifetime     SampleResidualLifetime over 15 resonances x 3 masses x 3 momenta x 8
 //                        phases. The momenta are what make the Lorentz dilation observable: at
 //                        rest the factor is 1 and dropping it entirely would agree everywhere.
+//   bic_imr_decayfs      G4KineticTrack::Decay over 28 resonances x 3 masses x 2 momenta x 8
+//                        phases - every product's identity, four-momentum and position in the
+//                        returned list, plus the number of uniforms the whole decay consumed.
+//                        The list ORDER is compared because it is the order the cascade's track
+//                        list takes and therefore the order of every later random: V151.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -188,6 +193,13 @@ __global__ void bic_imr_decay_probe(double* out, int pdg, double actual_mass) {
   out[1] = imr::sample_residual_lifetime(total, 1.5, rng);
   out[2] = imr::species_min_mass(pdg, ref);
   out[3] = static_cast<double>(n);
+  const imr::LorentzVector parent(deex::Vec3d{0.0, 0.0, 700.0},
+                                  std::sqrt(700.0 * 700.0 + actual_mass * actual_mass));
+  const imr::DecayResult d = imr::kinetic_track_decay(pdg, actual_mass, parent, w, n, rng, ref);
+  out[4] = static_cast<double>(d.n);
+  out[5] = (d.n > 0) ? d.prod[0].p.e : 0.0;
+  out[6] = (d.n > 0) ? d.prod[0].p.v.z : 0.0;
+  out[7] = static_cast<double>(d.channel);
 }
 
 namespace {
@@ -1631,6 +1643,60 @@ int main() {
       cmp_scaled(b_dlife, got, dv(r, 6), 1e-30,
                  sv(r, 0) + " m=" + sv(r, 1) + " pz=" + sv(r, 2) + " phase=" + sv(r, 5));
       cmp_int(b_dlife, rng.n, iv(r, 8), sv(r, 0) + " lifetime draws");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3m. G4KineticTrack::Decay - the channel draw, the daughter masses and the phase-space
+  //     kinematics, boosted into the lab and returned in Geant4's own order.
+  // -------------------------------------------------------------------------------------------
+  const int b_dfs = new_bucket("DecayFinalState", 5e-15);
+  const int b_dfsn = new_bucket("DecayProductsAndOrder", 0.0);
+  const int b_dfsd = new_bucket("DecayDraws", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_decayfs.csv");
+    int last_pdg = 0;
+    double last_mass = -1.0, last_pz = -1.0;
+    int last_phase = -1;
+    imr::DecayResult res;
+    for (const auto& r : rows) {
+      const int pdg = iv(r, 0);
+      const double am = dv(r, 1);
+      const double pz = dv(r, 2);
+      const int phase = iv(r, 3);
+      if (pdg != last_pdg || am != last_mass || pz != last_pz || phase != last_phase) {
+        last_pdg = pdg; last_mass = am; last_pz = pz; last_phase = phase;
+        double w[16];
+        imr::DecayRefusal dref;
+        CycleRng rng;
+        rng.reset(phase);
+        const int n = imr::kinetic_track_actual_widths(pdg, am, w, 16, dref);
+        const imr::LorentzVector parent(deex::Vec3d{0.0, 0.0, pz},
+                                        std::sqrt(pz * pz + am * am));
+        res = imr::kinetic_track_decay(pdg, am, parent, w, n, rng, dref);
+        res.loops = rng.n;  // reuse the field to carry the draw count for the comparison below
+        if (dref.any()) {
+          std::printf("REFUSED decay of %d at %g\n", pdg, am);
+          ++fails;
+        }
+      }
+      const std::string where = sv(r, 0) + " m=" + sv(r, 1) + " pz=" + sv(r, 2) +
+                                " phase=" + sv(r, 3) + " i=" + sv(r, 5);
+      cmp_int(b_dfsn, res.n, iv(r, 4), where + " n_products");
+      cmp_int(b_dfsd, res.loops, iv(r, 11), where + " draws");
+      const int i = iv(r, 5);
+      if (i < 0 || i >= res.n) { continue; }
+      cmp_int(b_dfsn, res.prod[i].pdg, iv(r, 6), where + " product pdg");
+      // Each component is judged against the product's own ENERGY, not against itself. A decay
+      // product's lab momentum crosses zero as the boost cancels the CM momentum - N(1520)+ at
+      // 1666.5 MeV with pz = 700 gives its proton a lab pz of -1.7376 MeV out of terms of about
+      // 700 - and a relative comparison there divides an ulp of the operands by the
+      // cancellation. Normalised to the four-vector's own size, that row is 1.1e-16.
+      const double scale = dv(r, 10);
+      cmp_scaled(b_dfs, res.prod[i].p.v.x, dv(r, 7), scale, where + " px");
+      cmp_scaled(b_dfs, res.prod[i].p.v.y, dv(r, 8), scale, where + " py");
+      cmp_scaled(b_dfs, res.prod[i].p.v.z, dv(r, 9), scale, where + " pz");
+      cmp_scaled(b_dfs, res.prod[i].p.e, dv(r, 10), scale, where + " e");
     }
   }
 

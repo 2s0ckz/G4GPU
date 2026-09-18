@@ -10099,3 +10099,49 @@ the substitution separately under the prescribed engine instead. And the draw me
 skipped the flip would leave every subsequent random in the event one place out of step.
 
 Reproduced as `kinetic_track_substitute_k0`, asserted over 8 phases and both signs.
+
+### V151: a decay hands back its products in the reverse of the order it made them
+
+`G4KineticTrack::Decay` builds its products with `G4GeneralPhaseSpaceDecay::DecayIt`, which
+`PushProducts` them onto a `G4DecayProducts` in the order it computes them, and then empties that
+container with
+
+```
+for (G4int i=dEntries; i > 0; --i) { theDynamicParticle = theDecayProducts->PopProducts(); ... }
+```
+
+`G4DecayProducts::PopProducts` takes `theProductVector->back()`. So the `G4KineticTrackVector` the
+cascade receives is the push order REVERSED: a two-body decay comes back as (daughter 1, daughter
+0), and a three-body one - pushed 0, 2, 1 by `ThreeBodyDecayIt` - comes back as (1, 2, 0).
+
+Nothing in the physics of one decay depends on it. Everything downstream does. `G4BinaryCascade`
+pushes these tracks onto `theSecondaryList` in the order it gets them, and the order of that list
+decides which pair `FindCollisions` considers first, which collision wins a tie in
+`G4CollisionManager::GetNextCollision` (V93 measured that the tie-break is a strict `>`, so the
+first of equal times wins), and therefore the order of every subsequent random number in the
+event. A port that returned the products in the natural order would agree on every four-momentum
+in this file and diverge from Geant4 on the second collision of every event that contains a decay.
+
+Reproduced, and MEASURED: returning them in push order instead moves 5,658 product identities and
+the four-momenta of 11,316 components by up to a factor of 8.
+
+### V152: two normalisations inside the three-body phase space divide by one
+
+`G4GeneralPhaseSpaceDecay::ThreeBodyDecayIt` builds its third daughter's direction as
+
+```
+direction2.setX( sinthetan*cosphin*costheta*cosphi - sinthetan*sinphin*sinphi + costhetan*sintheta*cosphi);
+direction2.setY( sinthetan*cosphin*costheta*sinphi + sinthetan*sinphin*cosphi + costhetan*sintheta*sinphi);
+direction2.setZ( -sinthetan*cosphin*sintheta + costhetan*costheta);
+Etotal=std::sqrt( daughtermass[2]*daughtermass[2] + daughtermomentum[2]*daughtermomentum[2]/direction2.mag2());
+daughterparticle = new G4DynamicParticle( G4MT_daughters[2],Etotal, direction2*(daughtermomentum[2]/direction2.mag()));
+```
+
+- dividing by the magnitude twice, once under a square and once not, as though `direction2` were
+not normalised. It is: those three components are the rotation by (theta, phi) of the unit vector
+(sin(thetan)cos(phin), sin(thetan)sin(phin), cos(thetan)), so the magnitude is 1 to within an ulp.
+
+MEASURED: dropping the division from the energy changes none of the 11,316 compared components.
+Both divisions are transcribed anyway - the rounding they carry is real, and a release that
+changed how `direction2` is built would make them load-bearing overnight. Recorded because a
+reader who removes them as dead weight would be making a judgement the code does not support.

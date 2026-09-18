@@ -2272,7 +2272,7 @@ void write_imr_decay() {
   // hbar_Planck * (-1/totalWidth) * log(uniform) * the4Momentum.gamma(), so it needs a MOVING
   // track: with the resonance at rest the Lorentz factor is 1 and a port that dropped it
   // entirely would agree everywhere.
-  FILE* t = std::fopen("bic_imr_lifetime.csv", "w");
+  FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2308,6 +2308,73 @@ void write_imr_decay() {
   std::fclose(t);
   std::fclose(f);
   std::fclose(g);
+}
+
+// G4KineticTrack::Decay under the prescribed engine: the channel it chooses, the daughter masses
+// it samples and the phase-space momenta it builds, all as functions of their arguments.
+//
+// The products are dumped IN THE ORDER Decay returns them, which is the order the cascade pushes
+// them onto its track list - G4DecayProducts::PopProducts pops from the back, so it is the phase
+// space's push order reversed. A port that returned them the other way round would agree on
+// every four-momentum and disagree on every subsequent random number in the event.
+void write_imr_decayfs() {
+  FILE* f = std::fopen("bic_imr_decayfs.csv", "w");
+  std::fprintf(f, "pdg,actual_mass,pz,phase,n_products,i,prod_pdg,px,py,pz_out,e,draws\n");
+
+  G4ShortLivedConstructor shortLived;
+  shortLived.ConstructParticle();
+  G4ParticleTable* ptable = G4ParticleTable::GetParticleTable();
+
+  // Resonances with two-body channels only, resonances with three-body channels, and both charge
+  // states of several multiplets so that the isospin split of the branching ratios is exercised.
+  const int kRes[] = {2214, 2224, 1114, 2114,
+                      12212, 12112, 2124, 1214, 22212, 22112, 32212, 32112,
+                      2216, 12216, 22124, 42212, 32124, 42124, 12218, 52214,
+                      2128, 100002210, 100012210, 2218, 2226, 12126, 1112, 32224};
+
+  auto* eng = new ImrCycleEngine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+
+  for (int code : kRes) {
+    const G4ParticleDefinition* d = ptable->FindParticle(code);
+    if (d == nullptr) { continue; }
+    const double pole = d->GetPDGMass();
+    for (double fr : {0.95, 1.00, 1.10}) {
+      const double m = pole * fr;
+      for (double pz : {0.0, 700.0}) {
+        for (int phase = 0; phase < 8; ++phase) {
+          const G4LorentzVector q(G4ThreeVector(0, 0, pz), std::sqrt(pz * pz + m * m));
+          CLHEP::HepRandom::setTheEngine(eng);
+          eng->reset(phase);
+          // The track is CONSTRUCTED inside the engine's scope on purpose: for these species the
+          // constructor draws nothing (only a K0 does), and the dump asserts that by comparing
+          // the draw count against the port, which builds its widths without an engine at all.
+          G4KineticTrack kt(d, 0.0, G4ThreeVector(0, 0, 0), q);
+          G4KineticTrackVector* products = kt.Decay();
+          const int n = (products != nullptr) ? static_cast<int>(products->size()) : 0;
+          for (int i = 0; i < n; ++i) {
+            const G4KineticTrack* p = (*products)[i];
+            const G4LorentzVector& p4 = p->Get4Momentum();
+            std::fprintf(f, "%d,%.17g,%.17g,%d,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d\n", code,
+                         kt.GetActualMass(), pz, phase, n, i,
+                         p->GetDefinition()->GetPDGEncoding(), p4.x(), p4.y(), p4.z(), p4.t(),
+                         eng->draws());
+          }
+          if (n == 0) {
+            std::fprintf(f, "%d,%.17g,%.17g,%d,0,-1,0,0,0,0,0,%d\n", code, kt.GetActualMass(),
+                         pz, phase, eng->draws());
+          }
+          if (products != nullptr) {
+            for (auto* p : *products) { delete p; }
+            delete products;
+          }
+          CLHEP::HepRandom::setTheEngine(saved);
+        }
+      }
+    }
+  }
+  delete eng;
+  std::fclose(f);
 }
 
 void write_imr_mbselect() {
@@ -2414,6 +2481,7 @@ void dump_bic(const DumpContext&) {
   write_imr_annih();
   write_imr_mbselect();
   write_imr_decay();
+  write_imr_decayfs();
 }
 
 }  // namespace

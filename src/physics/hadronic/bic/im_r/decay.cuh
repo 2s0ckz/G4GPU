@@ -92,9 +92,13 @@ struct DecayRefusal {
   bool unknown_species = false;   ///< a PDG code that is not in the closure
   bool too_many_daughters = false;///< a four-body channel; see the file header
   bool too_many_channels = false; ///< more channels than the caller's array can hold
+  bool below_threshold = false;   ///< Pmx would have thrown: the daughters do not fit
+  bool phase_space_failed = false;///< ThreeBodyDecayIt's rejection loop hit 10,000
+  bool no_channel_chosen = false; ///< the cumulative search fell off the end
   int refused_pdg = 0;
   __host__ __device__ bool any() const {
-    return unknown_species || too_many_daughters || too_many_channels;
+    return unknown_species || too_many_daughters || too_many_channels || below_threshold ||
+           phase_space_failed || no_channel_chosen;
   }
 };
 
@@ -462,6 +466,375 @@ __host__ __device__ inline double sample_residual_lifetime(double total_actual_w
   const double hbar = u::hbarc<double>() / u::c_light<double>();
   const double tau = hbar * (-1.0 / total_actual_width);
   return tau * std::log(rng.uniform()) * lorentz_gamma;
+}
+
+// ==============================================================================================
+// G4KineticTrack::Decay - the channel draw, the daughter masses and the phase-space kinematics.
+// ==============================================================================================
+
+/// `G4SampleResonance::SampleMass(poleMass, gamma, minMass, maxMass)`.
+///
+/// NOT the same function as `G4VScatteringCollision::SampleResonanceMass` in `resonance_fs.cuh`,
+/// though both invert the same Breit-Wigner integral with the same `BrWigInt0` and `BrWigInv`.
+/// Three differences, and they are the reason both are carried:
+///
+///   * an empty window is CLAMPED here (`protectedMinMass = maxMass`) where the other subtracts a
+///     pion mass, tries again, and then allows zero;
+///   * the zero-width shortcut fires at `gamma < DBL_EPSILON`, 2.2e-16, where the other's fires at
+///     `1e-10*GeV` = 1e-7 MeV - twenty-five orders of magnitude larger;
+///   * the shortcut uses the UNPROTECTED `minMass`, so it can return a mass above `maxMass` on
+///     exactly the input the line above it was written to protect against.
+template <typename Rng>
+__host__ __device__ inline double g4sample_resonance_mass(double pole_mass, double gamma,
+                                                          double min_mass, double max_mass,
+                                                          Rng& rng) {
+  double protected_min = min_mass;
+  if (min_mass > max_mass) { protected_min = max_mass; }
+  if (gamma < 2.2204460492503131e-16) {  // DBL_EPSILON
+    const double hi = (max_mass < pole_mass) ? max_mass : pole_mass;
+    return (min_mass > hi) ? min_mass : hi;
+  }
+  const double fmin = brwig_int0(protected_min, gamma, pole_mass);
+  const double fmax = brwig_int0(max_mass, gamma, pole_mass);
+  const double f = fmin + (fmax - fmin) * rng.uniform();
+  return brwig_inv(f, gamma, pole_mass);
+}
+
+/// `G4GeneralPhaseSpaceDecay::Pmx` - the two-body CM momentum, written as a product of four
+/// factors rather than as the usual difference of squares.
+///
+/// It THROWS when `e - p1 - p2 < 0`, which is why `Decay`'s retry loop exists at all: the loop
+/// resamples the daughter masses until their sum is below the parent's, and only then builds the
+/// phase-space decay. `pmx_below_threshold` reports what the throw would have been.
+__host__ __device__ inline double pmx(double e, double p1, double p2, bool& below_threshold) {
+  if (e - p1 - p2 < 0.0) {
+    below_threshold = true;
+    return 0.0;
+  }
+  const double ppp = (e + p1 + p2) * (e + p1 - p2) * (e - p1 + p2) * (e - p1 - p2) / (4.0 * e * e);
+  return (ppp > 0.0) ? std::sqrt(ppp) : -1.0;
+}
+
+/// `G4DynamicParticle(definition, totalEnergy, momentum)` followed by `Get4Momentum()`.
+///
+/// This is not the identity, and the difference is not always in the last bits. The constructor
+/// keeps the DIRECTION and the total energy, decides on a dynamical mass, and stores a kinetic
+/// energy; `Get4Momentum` then rebuilds the momentum as `sqrt(T^2 + 2 m T)`. Which mass it uses
+/// is a three-way test against `EnergyMomentumRelationAllowance = 1e-2 keV`:
+///
+///   * `E^2 - p^2 < (1e-5 MeV)^2`   -> the particle is treated as MASSLESS, T = E;
+///   * `|m_PDG^2 - (E^2-p^2)| > (1e-5 MeV)^2` -> the dynamical mass is `sqrt(E^2-p^2)`, which is
+///     the sampled resonance mass, and the momentum comes back unchanged to rounding;
+///   * otherwise the PDG mass is kept and **the momentum is rebuilt from it**, so a daughter
+///     whose sampled mass is within 1e-5 MeV of its pole has its momentum quietly moved onto the
+///     pole-mass shell.
+///
+/// Every decay product in the cascade goes through it, so the port does too - and MEASURED: for
+/// the 11,316 compared components it is a no-op to within 5e-15, because the energy and momentum
+/// handed to it were built consistently from the same mass in the first place. It is kept because
+/// it is not a no-op in general: the third branch REBUILDS the momentum from the PDG mass, so a
+/// daughter whose sampled mass is within 1e-5 MeV of its pole is quietly moved onto the pole
+/// shell, and a release that widened the allowance would move every resonance daughter with it.
+__host__ __device__ inline LorentzVector dynamic_particle_4momentum(double pdg_mass,
+                                                                    double total_energy,
+                                                                    const Vec3d& p) {
+  const double allow = 1.0e-2 * u::keV<double>();
+  const double allow2 = allow * allow;
+  const double p2 = g4gpu::mag2(p);
+  double m = pdg_mass;
+  double ke = 0.0;
+  Vec3d dir{1.0, 0.0, 0.0};
+  if (p2 > 0.0) {
+    const double mass2 = total_energy * total_energy - p2;
+    dir = g4gpu::normalize(p);
+    if (mass2 < allow2) {
+      m = 0.0;
+      ke = total_energy;
+    } else if (std::fabs(pdg_mass * pdg_mass - mass2) > allow2) {
+      m = std::sqrt(mass2);
+      ke = total_energy - m;
+    } else {
+      ke = total_energy - m;
+    }
+  }
+  const double mom = std::sqrt(ke * ke + 2.0 * m * ke);
+  return LorentzVector(dir * mom, ke + m);
+}
+
+/// One outgoing track of `G4KineticTrack::Decay`.
+struct DecayProduct {
+  int pdg = 0;
+  LorentzVector p;
+};
+
+/// What `Decay()` produced. `n == 0` is Geant4's NULL return - a track with no decay table or a
+/// total actual width of zero.
+struct DecayResult {
+  int n = 0;
+  int channel = -1;
+  double parent_mass = 0.0;
+  int loops = 0;          ///< how many times the below-threshold retry went round
+  DecayProduct prod[3];
+};
+
+/// `G4GeneralPhaseSpaceDecay::TwoBodyDecayIt`, in the parent's rest frame.
+///
+/// Two uniforms: `costheta = 2u-1` and `phi = twopi*u`. The second daughter takes the opposite
+/// momentum, and both go through the `G4DynamicParticle` round trip above.
+template <typename Rng>
+__host__ __device__ inline void two_body_decay(double parent_mass, const double* masses,
+                                               const int* dpdg, Rng& rng, DecayResult& out,
+                                               DecayRefusal& ref) {
+  bool below = false;
+  const double q = pmx(parent_mass, masses[0], masses[1], below);
+  if (below) {
+    ref.below_threshold = true;
+    return;
+  }
+  const double costheta = 2.0 * rng.uniform() - 1.0;
+  const double sintheta = std::sqrt((1.0 - costheta) * (1.0 + costheta));
+  const double phi = u::twopi<double>() * rng.uniform();
+  const Vec3d dir{sintheta * std::cos(phi), sintheta * std::sin(phi), costheta};
+  double etot = std::sqrt(masses[0] * masses[0] + q * q);
+  out.prod[0].pdg = dpdg[0];
+  out.prod[0].p = dynamic_particle_4momentum(masses[0], etot, dir * q);
+  etot = std::sqrt(masses[1] * masses[1] + q * q);
+  out.prod[1].pdg = dpdg[1];
+  out.prod[1].p = dynamic_particle_4momentum(masses[1], etot, dir * (-1.0 * q));
+  out.n = 2;
+}
+
+/// `G4GeneralPhaseSpaceDecay::ThreeBodyDecayIt` - "originally written in GDECA3 of GEANT3".
+///
+/// The rejection loop draws TWO uniforms per attempt and orders them, so the number of randoms it
+/// consumes is data-dependent; the oracle dumps the count for that reason. The products are
+/// pushed in the order 0, 2, 1, which is not the order they are computed in and not the order
+/// they come back out in either - see `kinetic_track_decay`.
+template <typename Rng>
+__host__ __device__ inline void three_body_decay(double parent_mass, const double* masses,
+                                                 const int* dpdg, Rng& rng, DecayResult& out,
+                                                 DecayRefusal& ref) {
+  const double sum_mass = masses[0] + masses[1] + masses[2];
+  double q[3] = {0.0, 0.0, 0.0};
+  double momentum_max = 0.0;
+  double momentum_sum = 0.0;
+  int loop = 0;
+  do {
+    double rd1 = rng.uniform();
+    double rd2 = rng.uniform();
+    if (rd2 > rd1) {
+      const double t = rd1;
+      rd1 = rd2;
+      rd2 = t;
+    }
+    momentum_max = 0.0;
+    momentum_sum = 0.0;
+    double energy = rd2 * (parent_mass - sum_mass);
+    q[0] = std::sqrt(energy * energy + 2.0 * energy * masses[0]);
+    if (q[0] > momentum_max) { momentum_max = q[0]; }
+    momentum_sum += q[0];
+    energy = (1.0 - rd1) * (parent_mass - sum_mass);
+    q[1] = std::sqrt(energy * energy + 2.0 * energy * masses[1]);
+    if (q[1] > momentum_max) { momentum_max = q[1]; }
+    momentum_sum += q[1];
+    energy = (rd1 - rd2) * (parent_mass - sum_mass);
+    q[2] = std::sqrt(energy * energy + 2.0 * energy * masses[2]);
+    if (q[2] > momentum_max) { momentum_max = q[2]; }
+    momentum_sum += q[2];
+  } while ((momentum_max > momentum_sum - momentum_max) && ++loop < 10000);
+  if (loop >= 10000) {
+    ref.phase_space_failed = true;
+    return;
+  }
+  const double costheta = 2.0 * rng.uniform() - 1.0;
+  const double sintheta = std::sqrt((1.0 - costheta) * (1.0 + costheta));
+  const double phi = u::twopi<double>() * rng.uniform();
+  const double sinphi = std::sin(phi);
+  const double cosphi = std::cos(phi);
+  const Vec3d dir0{sintheta * cosphi, sintheta * sinphi, costheta};
+  double etot = std::sqrt(masses[0] * masses[0] + q[0] * q[0]);
+  // Push order 0, then 2, then 1.
+  out.prod[0].pdg = dpdg[0];
+  out.prod[0].p = dynamic_particle_4momentum(masses[0], etot, dir0 * q[0]);
+
+  const double costhetan = (q[1] * q[1] - q[2] * q[2] - q[0] * q[0]) / (2.0 * q[2] * q[0]);
+  const double sinthetan = std::sqrt((1.0 - costhetan) * (1.0 + costhetan));
+  const double phin = u::twopi<double>() * rng.uniform();
+  const double sinphin = std::sin(phin);
+  const double cosphin = std::cos(phin);
+  Vec3d dir2{
+      sinthetan * cosphin * costheta * cosphi - sinthetan * sinphin * sinphi +
+          costhetan * sintheta * cosphi,
+      sinthetan * cosphin * costheta * sinphi + sinthetan * sinphin * cosphi +
+          costhetan * sintheta * sinphi,
+      -sinthetan * cosphin * sintheta + costhetan * costheta};
+  // Geant4 divides by `direction2`'s magnitude twice - once inside the energy under a SQUARE,
+  // `q2^2/direction2.mag2()`, and once outside it, `direction2*(q2/direction2.mag())` - as though
+  // the vector were not normalised. It is: the three components above are a rotation applied to
+  // (sin(thetan)cos(phin), sin(thetan)sin(phin), cos(thetan)), which is a unit vector, so the
+  // magnitude is 1 to within an ulp. MEASURED: dropping the division from the energy changes none
+  // of the 11,316 compared components. Both divisions are transcribed, because the rounding they
+  // carry is real and because a release that changed the construction of `direction2` would make
+  // them matter.
+  const double dir2_mag2 = g4gpu::mag2(dir2);
+  const double dir2_mag = std::sqrt(dir2_mag2);
+  etot = std::sqrt(masses[2] * masses[2] + q[2] * q[2] / dir2_mag2);
+  out.prod[1].pdg = dpdg[2];
+  out.prod[1].p = dynamic_particle_4momentum(masses[2], etot, dir2 * (q[2] / dir2_mag));
+
+  const Vec3d mom = -1.0 * (dir0 * q[0] + dir2 * (q[2] / dir2_mag));
+  etot = std::sqrt(masses[1] * masses[1] + g4gpu::mag2(mom));
+  out.prod[2].pdg = dpdg[1];
+  out.prod[2].p = dynamic_particle_4momentum(masses[1], etot, mom);
+  out.n = 3;
+}
+
+/// `G4KineticTrack::Decay`.
+///
+/// `widths` is `theActualWidth[]` from `kinetic_track_actual_widths` and `n_channels` its length;
+/// `parent` is the track's four-momentum in the lab. Returns the products already boosted into
+/// the lab, in the order Geant4 hands them back.
+///
+/// **The product order is the phase-space push order REVERSED.** `G4DecayProducts::PopProducts`
+/// pops from the BACK, and `Decay`'s loop pops `dEntries` times - so a two-body decay comes back
+/// as (daughter 1, daughter 0) and a three-body one, pushed 0, 2, 1, comes back as (1, 2, 0).
+/// Nothing in the physics depends on it and everything in the random stream downstream does,
+/// because the cascade pushes these onto its track list in this order.
+///
+/// The retry loop around the channel draw is A.R.'s of 16 Aug 2016: it redraws the channel AND
+/// the daughter masses until the daughters fit inside the parent, up to 10,000 times, and then
+/// goes ahead anyway - at which point `Pmx` throws. `DecayRefusal::below_threshold` is that exit.
+template <typename Rng>
+__host__ __device__ inline DecayResult kinetic_track_decay(int pdg, double actual_mass,
+                                                           const LorentzVector& parent,
+                                                           const double* widths, int n_channels,
+                                                           Rng& rng, DecayRefusal& ref) {
+  DecayResult out;
+  out.parent_mass = actual_mass;
+  const int si = decay_species_index(pdg);
+  if (si < 0) {
+    ref.unknown_species = true;
+    ref.refused_pdg = pdg;
+    return out;
+  }
+  if (n_channels == 0) { return out; }
+  const double total = evaluate_total_actual_width(widths, n_channels);
+  if (total == 0.0) { return out; }
+  const int first = decay_species_first_channel()[si];
+
+  int chosen = -1;
+  double masses[4] = {0.0, 0.0, 0.0, 0.0};
+  int dpdg[3] = {0, 0, 0};
+  int nd = 0;
+  bool below_threshold = true;
+  int loop = 0;
+  do {
+    // The cumulative array is built BACKWARDS, so `cum[index]` is the sum from `index` to the
+    // end and `cum[0]` is the total. The search then walks from the last channel down and takes
+    // the first index whose cumulative exceeds the draw.
+    double cum[kDecayMaxChannels];
+    double running = 0.0;
+    for (int index = n_channels - 1; index >= 0; --index) {
+      running += widths[index];
+      cum[index] = running;
+    }
+    const double r = total * rng.uniform();
+    chosen = -1;
+    for (int index = n_channels - 1; index >= 0; --index) {
+      if (r < cum[index]) {
+        chosen = index;
+        break;
+      }
+    }
+    if (chosen < 0) {
+      ref.no_channel_chosen = true;
+      return out;
+    }
+    const int ch = first + chosen;
+    nd = decay_channel_n_daughters()[ch];
+    for (int i = 0; i < 4; ++i) { masses[i] = 0.0; }
+    int shortlived[4];
+    int n_short = 0;
+    double sum_long = 0.0;
+    for (int j = 0; j < nd && j < 3; ++j) {
+      dpdg[j] = decay_channel_daughters()[ch * kDecayMaxDaughters + j];
+      const int dj = decay_species_index(dpdg[j]);
+      if (dj < 0) {
+        ref.unknown_species = true;
+        ref.refused_pdg = dpdg[j];
+        return out;
+      }
+      masses[j] = decay_species_mass()[dj];
+      if (decay_species_shortlived()[dj] != 0) {
+        shortlived[n_short] = j;
+        ++n_short;
+      } else {
+        sum_long += decay_species_mass()[dj];
+      }
+    }
+    if (nd == 2 || nd == 3) {
+      if (n_short == 1) {
+        const int j = shortlived[0];
+        const int dj = decay_species_index(dpdg[j]);
+        const double massmax = actual_mass - sum_long;
+        masses[j] = g4sample_resonance_mass(decay_species_mass()[dj], decay_species_width()[dj],
+                                            decay_species_min_mass()[dj], massmax, rng);
+      } else if (n_short == 2 && nd == 2) {
+        // Dead in 11.1.1 - no channel in the closure has two short-lived daughters, docs/RISK.md
+        // V149 - but it draws an extra uniform before either mass, so a release that woke it up
+        // would move the whole stream and not just this decay.
+        const int zero = (rng.uniform() > 0.5) ? 0 : 1;
+        const int one = 1 - zero;
+        const int jz = shortlived[zero];
+        const int jo = shortlived[one];
+        const int dz = decay_species_index(dpdg[jz]);
+        const int do_ = decay_species_index(dpdg[jo]);
+        double massmax = actual_mass - decay_species_min_mass()[do_];
+        masses[jz] = g4sample_resonance_mass(decay_species_mass()[dz], decay_species_width()[dz],
+                                             decay_species_min_mass()[dz], massmax, rng);
+        massmax = actual_mass - masses[jz];
+        masses[jo] = g4sample_resonance_mass(decay_species_mass()[do_],
+                                             decay_species_width()[do_],
+                                             decay_species_min_mass()[do_], massmax, rng);
+      }
+    }
+    double sum_daughters = 0.0;
+    for (int i = 0; i < 4; ++i) { sum_daughters += masses[i]; }
+    below_threshold = !(actual_mass - sum_daughters > 0.0);
+  } while (below_threshold && ++loop < 10000);
+  out.loops = loop;
+  out.channel = chosen;
+
+  if (nd == 1) {
+    // OneBodyDecayIt: the daughter is created AT REST and draws nothing.
+    out.prod[0].pdg = dpdg[0];
+    out.prod[0].p = LorentzVector(Vec3d{0.0, 0.0, 0.0}, masses[0]);
+    out.n = 1;
+  } else if (nd == 2) {
+    two_body_decay(actual_mass, masses, dpdg, rng, out, ref);
+  } else if (nd == 3) {
+    three_body_decay(actual_mass, masses, dpdg, rng, out, ref);
+  } else {
+    ref.too_many_daughters = true;
+    return out;
+  }
+  if (out.n == 0) { return out; }
+
+  // PopProducts pops from the BACK, so the list comes back reversed.
+  DecayProduct rev[3];
+  for (int i = 0; i < out.n; ++i) { rev[i] = out.prod[out.n - 1 - i]; }
+  // `G4LorentzRotation toMoving(Get4Momentum().boostVector())` - a pure boost out of the rest
+  // frame, applied to each product as a 4x4 matrix and not as HepLorentzVector::boost.
+  const LorentzRotation to_moving = LorentzRotation::from_boost(parent.boost_vector());
+  for (int i = 0; i < out.n; ++i) {
+    out.prod[i].p = to_moving * rev[i].p;
+    // Each product is then made into a G4KineticTrack, and THAT constructor is where the K0
+    // substitution lives - so a Lambda K0 channel draws one more uniform here, after the
+    // kinematics, and hands back a K0S or a K0L. docs/RISK.md V150. MEASURED: without this the
+    // N(1650)0 rows report product 310 against 311 and the draw count 3 against 4.
+    out.prod[i].pdg = kinetic_track_substitute_k0(rev[i].pdg, rng);
+  }
+  return out;
 }
 
 }  // namespace g4gpu::bic::imr
