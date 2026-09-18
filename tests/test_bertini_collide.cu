@@ -362,11 +362,18 @@ void check_collide() {
       ++n_empty;
       if (out.refusal == ColliderRefusal::kKinematicsFailed) { ++n_kin_failed; }
       // Nothing may be refused for a reason this grid is not allowed to produce: every empty
-      // case here must be the kinematics retry loop giving up, not a missing table or a
-      // capacity.
-      cmp_int(br, static_cast<int>(out.refusal),
-              static_cast<int>(ColliderRefusal::kKinematicsFailed),
-              std::string("refusal ") + w);
+      // case here must be Geant4 ITSELF producing no final state, not a missing table or a
+      // capacity or anything this port declines to do.
+      //
+      // **This used to assert `kKinematicsFailed` exactly, and the assertion was narrower than
+      // the comment above it.** It held while every empty case in the grid came from the
+      // kinematics retry loop; P12 added `mu-` on a dineutron, which Geant4 rejects one level
+      // EARLIER - `useQuasiDeuteron(mum, nn)` admits pi0, pi+ and gamma and no muon, so
+      // `collide` prints "can only collide pi,mu,gamma with dibaryons" and returns before
+      // `generateSCMmuonAbsorption` is ever called. That is still Geant4 producing nothing, and
+      // it is still not a port limit, so what is asserted is the property the comment names.
+      cmp_int(br, collider_refusal_is_port_limit(out.refusal) ? 1 : 0, 0,
+              std::string("refusal ") + w + " is Geant4's own, not a port limit");
       continue;
     }
     if (bert::inucl_is_quasideuteron(c.type1) || bert::inucl_is_quasideuteron(c.type2)) {
@@ -464,17 +471,47 @@ void check_refusals() {
           "pi- p at the dumped piNAbsorption is a normal collision");
   cmp_int(b, (rng.n > 1) ? 1 : 0, 1, "and it still paid for the absorption deviate");
 
-  // 2. The muon-on-dibaryon arm - G4ElementaryParticleCollider::generateSCMmuonAbsorption, which
-  // is muon capture and belongs to P12. It is refused by name at the point the call would be.
+  // 2. The muon-on-dibaryon arm - G4ElementaryParticleCollider::generateSCMmuonAbsorption.
+  //
+  // **This assertion used to say the opposite.** It read "mu- on a dibaryon is refused by name,
+  // because muon capture is P12's", and it was right until P12 arrived and transcribed the two
+  // channels. What is asserted now is what Geant4 does, case by case, from the `mum` rows the
+  // collider dump grew: mu- + diproton -> p n nu_mu, mu- + unboundPN -> n n nu_mu, and mu- +
+  // dineutron -> NOTHING, which is Geant4's "Illegal absorption" - an empty final state and a
+  // pass-through, not a refusal this port invented. The three-body comparisons themselves are in
+  // the main grid loop above; what is pinned here is the classification, because an empty final
+  // state and a refused one are the same length and completely different things.
   const double mmu = bert::inucl_particle_mass(bert::kMuonMinus);
   const LV mu(Vec3d{0.0, 0.0, 0.0}, mmu);
   const LV pn(Vec3d{0.0, 0.0, 0.0}, bert::inucl_particle_mass(bert::kUnboundPN));
   rng.reset(0);
   bert::ws_reset(*ws);
   bert::ep_collide(bert::kMuonMinus, mu, bert::kUnboundPN, pn, par, out, *ws, rng);
-  cmp_int(b, static_cast<int>(out.refusal), static_cast<int>(ColliderRefusal::kMuonAbsorption),
-          "mu- on a dibaryon");
-  cmp_int(b, out.n, 0, "mu- absorption produces nothing");
+  cmp_int(b, static_cast<int>(out.refusal), static_cast<int>(ColliderRefusal::kNone),
+          "mu- on an unbound pn is absorbed, not refused");
+  cmp_int(b, out.n, 3, "mu- + pn -> three bodies");
+  cmp_int(b, out.kinds[0] + out.kinds[1] + out.kinds[2], bert::kNeutron + bert::kNeutron +
+          bert::kMuonNu, "mu- + pn -> n n nu_mu");
+  {
+    const LV nn(Vec3d{0.0, 0.0, 0.0}, bert::inucl_particle_mass(bert::kDineutron));
+    rng.reset(0);
+    bert::ws_reset(*ws);
+    bert::ep_collide(bert::kMuonMinus, mu, bert::kDineutron, nn, par, out, *ws, rng);
+    // **And `generateSCMmuonAbsorption`'s own "Illegal absorption" arm is UNREACHABLE.** The
+    // guard that stops a mu- on a dineutron is one level earlier: `useQuasiDeuteron(mum, nn)`
+    // admits pi0, pi+ and gamma and not the muon, so `collide` returns with
+    // "can only collide pi,mu,gamma with dibaryons" and the absorption function is never
+    // entered. The only two type products that reach it are exactly the two it handles, which
+    // is why the else-branch is transcribed and cannot fire - the same shape as G4GDecay3's
+    // `loopMax`. What is pinned here is the classification the port gives the pair, and that it
+    // is Geant4's own empty final state rather than a port limit.
+    cmp_int(b, static_cast<int>(out.refusal),
+            static_cast<int>(ColliderRefusal::kIllegalDibaryonPartner),
+            "mu- on a dineutron is stopped by useQuasiDeuteron, not by the absorption arm");
+    cmp_int(b, out.n, 0, "and Geant4 answers with an empty final state");
+    cmp_int(b, collider_refusal_is_port_limit(out.refusal) ? 1 : 0, 0,
+            "which is NOT a port limit - the cascade passes the bullet through");
+  }
   // useQuasiDeuteron admits the muon, so the refusal above is the muon test firing and not the
   // partner test. A proton on the same dibaryon is refused for the other reason, which is what
   // makes the two distinguishable.
