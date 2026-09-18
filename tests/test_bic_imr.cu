@@ -105,6 +105,11 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_pauli        G4BinaryCascade::CheckPauliPrinciple over 5 nuclei x 12 radii x 2
+//                        nucleons x 10 momenta. The function is private, so the dump
+//                        re-expresses it from the three public ingredients the source names -
+//                        G4FermiMomentum, the nuclear density and the Coulomb barrier - in the
+//                        arithmetic the source writes. 366 of the 1,200 rows are blocked.
 //   bic_imr_ionmass      G4IonTable::GetIonMass over the whole (Z, A) triangle a cascade can
 //                        leave behind - 6,670 cells within 15 of the stable line up to A = 240.
 //                        It is the first arm of G4BinaryCascade::GetIonMass; the other three are
@@ -155,6 +160,7 @@
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
+#include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
 #include "physics/hadronic/bic/kinetic_decay.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
@@ -2131,6 +2137,63 @@ int main() {
     cmp_scaled(b_ionb, bic::cut_on_p(bic::get_ion_mass(82, 208, mn)), 45.0, 1e-12,
                "Pb208 cut is 45");
     cmp_scaled(b_ionb, bic::cut_on_p(mn), 45.0, 1e-12, "even one neutron is above 120 MeV");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3r. G4BinaryCascade::CheckPauliPrinciple, re-expressed in the dump from the three public
+  //     ingredients the source names - see ref/dump/dump_bic.cc's write_imr_pauli.
+  // -------------------------------------------------------------------------------------------
+  const int b_pau = new_bucket("PauliEnergyThreshold", 1e-14);
+  const int b_pauv = new_bucket("PauliVerdict", 0.0);
+  const int b_pauf = new_bucket("FermiCorrectionSpecies", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_pauli.csv");
+    int last_a = -1, last_z = -1;
+    bic::NuclearDensity density;
+    bic::FermiMomentum fermi;
+    double coulomb = 0.0;
+    for (const auto& r : rows) {
+      const int a = iv(r, 0);
+      const int z = iv(r, 1);
+      if (a != last_a || z != last_z) {
+        last_a = a;
+        last_z = z;
+        // `G4Fancy3DNucleus::Init` picks the shell-model density below A = 17 and the Fermi one
+        // at and above it; the Pauli block reads whichever the nucleus was built with.
+        density = (a < 17) ? bic::make_shell_model_density(a, z) : bic::make_fermi_density(a, z);
+        fermi.init(a, z);
+        coulomb = (1.44 / 1.14) * g4gpu::units::MeV<double>() * static_cast<double>(z) /
+                  (1.0 + g4gpu::data::g4pow_z13<double>(a));
+      }
+      const int pdg = iv(r, 3);
+      const double pz = dv(r, 4);
+      const double m = (pdg == 2212) ? mp : mn;
+      bic::CascadeTrack t;
+      t.pdg = pdg;
+      t.charge = (pdg == 2212) ? 1 : 0;
+      t.position = deex::Vec3d{dv(r, 2) * 1.e-12, 0.0, 0.0};
+      t.momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, pz}, std::sqrt(pz * pz + m * m));
+      const std::string where = "A=" + sv(r, 0) + " r=" + sv(r, 2) + " pdg=" + sv(r, 3) +
+                                " pz=" + sv(r, 4);
+      cmp_scaled(b_pau, density.density(t.position), dv(r, 5), 1e30, where + " density");
+      cmp_scaled(b_pau, fermi.fermi_momentum(density.density(t.position)), dv(r, 6), 1e-6,
+                 where + " pFermi");
+      cmp_scaled(b_pau, coulomb, dv(r, 7), 1e-9, where + " Coulomb barrier");
+      const bool blocked = !bic::check_pauli_principle(&t, 1, a, z, density, coulomb);
+      cmp_int(b_pauv, blocked ? 1 : 0, iv(r, 9), where + " blocked");
+    }
+    // The species test the two Fermi corrections branch on, which is on the CODE and not on
+    // IsShortLived: abs(pdg) > 1000 and neither nucleon. A pion is not one; an ANTI-nucleon is,
+    // because the two exclusions are the positive codes only; a lambda is.
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(2214) ? 1 : 0, 1, "delta+ is short-lived");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(12212) ? 1 : 0, 1, "N(1440)+ is");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(2212) ? 1 : 0, 0, "a proton is not");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(2112) ? 1 : 0, 0, "a neutron is not");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(211) ? 1 : 0, 0, "a pi+ is not");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(-2212) ? 1 : 0, 1,
+            "an ANTI-proton is, because the exclusions are the positive codes only");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(-2112) ? 1 : 0, 1, "and so is an anti-neutron");
+    cmp_int(b_pauf, bic::is_shortlived_for_fermi(3122) ? 1 : 0, 1, "a lambda is");
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they

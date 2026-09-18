@@ -569,7 +569,37 @@ struct RkPropagation {
     }
   }
 
+  /// `G4RKPropagation::GetField(encoding, pos)`, which is a map lookup with a default of ZERO:
+  ///
+  ///     iter = theFieldMap->find(encoding);
+  ///     if(iter == theFieldMap->end()) return 0;
+  ///     return (*theFieldMap)[encoding]->GetField(pos);
+  ///
+  /// That zero is load-bearing rather than a fallback. No RESONANCE has an entry in the map, so
+  /// every Delta and every N* has a field of exactly zero - which is why
+  /// `G4BinaryCascade::CorrectShortlivedPrimaryForFermi` substitutes the NEUTRON's field for one
+  /// instead of asking for its own.
+  ///
+  /// `refused` is set, if the caller passes one, for the nine species `nuclear_field.cuh` refuses
+  /// by name - the antiproton, the three kaons and the three sigmas, whose fields Geant4 DOES
+  /// build - so that one of those cannot be quietly taken for a resonance and given zero.
+  __host__ __device__ double field(int pdg, const Vec3d& pos, bool* refused = nullptr) const {
+    const SpeciesField* sf = find_field(pdg);
+    if (sf != nullptr) { return sf->field(pos, density); }
+    if (refused != nullptr) {
+      switch (pdg) {
+        case -2212: case 321: case -321: case 311: case 3222: case 3112: case 3212:
+          *refused = true;
+          break;
+        default:
+          break;
+      }
+    }
+    return 0.0;
+  }
+
   /// `G4RKPropagation::GetSphereIntersectionTimes(const G4KineticTrack*, t1, t2)`.
+
   ///
   /// The sphere is `theOuterRadius + 3 fermi` - the "safety of 3 fermi" the source names - and
   /// NOT the outer radius, so a particle is "inside" out to three femtometres beyond the

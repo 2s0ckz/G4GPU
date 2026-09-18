@@ -2304,10 +2304,7 @@ void write_imr_decay() {
   // hbar_Planck * (-1/totalWidth) * log(uniform) * the4Momentum.gamma(), so it needs a MOVING
   // track: with the resonance at rest the Lorentz factor is 1 and a port that dropped it
   // entirely would agree everywhere.
-  FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv "
-                    "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
-                    "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
-                    "bic_imr_ionmass.csv", "w");
+  FILE* t = std::fopen("bic_imr_lifetime.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2853,6 +2850,77 @@ void write_imr_ionmass() {
   std::fclose(f);
 }
 
+// G4BinaryCascade::CheckPauliPrinciple and the field its two Fermi corrections read.
+//
+// CheckPauliPrinciple is private, so this dump re-expresses it from the three public ingredients
+// the source names - G4FermiMomentum::GetFermiMomentum, G4V3DNucleus::GetNuclearDensity()->
+// GetDensity and G4V3DNucleus::CoulombBarrier - in the order and the arithmetic the source
+// writes:
+//
+//     eFermi = sqrt( sqr(fermiMom.GetFermiMomentum(density->GetDensity(pos))) + p4.mag2() );
+//     if (proton) eFermi -= the3DNucleus->CoulombBarrier();
+//     blocked if ( mom.e() < eFermi )
+//
+// That is not a weaker oracle than calling the function: every term in it comes from Geant4 and
+// the composition is three lines of the source quoted above. What it cannot check is the loop
+// around it, which the test asserts structurally instead.
+//
+// G4RKPropagation::GetField(encoding, pos) IS public - an inline in the header - so the two
+// Fermi corrections' one ingredient is dumped directly, including its ZERO for a resonance,
+// which is the whole reason CorrectShortlivedPrimaryForFermi substitutes the neutron's field.
+void write_imr_pauli() {
+  FILE* f = std::fopen("bic_imr_pauli.csv", "w");
+  std::fprintf(f, "a,z,r_fm,pdg,pz,rho,pfermi,coulomb,efermi,blocked\n");
+  FILE* g = std::fopen("bic_imr_field.csv", "w");
+  std::fprintf(g, "a,z,r_fm,pdg,field\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Target { int a; int z; };
+  const Target kT[] = {{12, 6}, {16, 8}, {27, 13}, {56, 26}, {208, 82}};
+  const double kR[] = {0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0};
+  const double kPz[] = {50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 600.0, 1000.0};
+  const int kField[] = {2212, 2112, 211, -211, 111, 2214, 12212, 3122};
+
+  for (const Target& t : kT) {
+    // The nucleus is LEAKED and the propagator is a local, which is the pattern
+    // `write_field_and_rk` above uses and the only one that survives. `G4RKPropagation::Init`
+    // stores the nucleus pointer and keeps reading it, so a nucleus on the stack that goes out
+    // of scope each iteration takes the propagator's field map with it - the dump died there
+    // with nothing on stderr, twice, before this was the shape.
+    CLHEP::HepRandom::setTheSeed(910000L + t.a);
+    auto* nucleus = new G4Fancy3DNucleus;
+    nucleus->Init(t.a, t.z);
+    G4FermiMomentum fermiMom;
+    fermiMom.Init(t.a, t.z);
+    const G4VNuclearDensity* density = nucleus->GetNuclearDensity();
+    const double coulomb = nucleus->CoulombBarrier();
+    G4RKPropagation prop;
+    prop.Init(nucleus);
+    for (double r : kR) {
+      const G4ThreeVector pos(r * fermi, 0, 0);
+      const double rho = density->GetDensity(pos);
+      const double pf = fermiMom.GetFermiMomentum(rho);
+      for (int code : kField) {
+        std::fprintf(g, "%d,%d,%.17g,%d,%.17g\n", t.a, t.z, r, code, prop.GetField(code, pos));
+      }
+      for (const G4ParticleDefinition* d : {p, n}) {
+        const double m = d->GetPDGMass();
+        for (double pz : kPz) {
+          const G4LorentzVector mom(G4ThreeVector(0, 0, pz), std::sqrt(pz * pz + m * m));
+          double efermi = std::sqrt(pf * pf + mom.mag2());
+          if (d == p) { efermi -= coulomb; }
+          std::fprintf(f, "%d,%d,%.17g,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", t.a, t.z, r,
+                       d->GetPDGEncoding(), pz, rho, pf, coulomb, efermi,
+                       (mom.e() < efermi) ? 1 : 0);
+        }
+      }
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -2963,6 +3031,7 @@ void dump_bic(const DumpContext&) {
   write_imr_scatter();
   write_imr_scatterlife();
   write_imr_ionmass();
+  write_imr_pauli();
 }
 
 }  // namespace
@@ -2982,5 +3051,8 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_resfs.csv bic_imr_annihfs.csv bic_imr_annih.csv "
                     "bic_imr_mbpartial.csv bic_imr_mbselect.csv "
                     "bic_imr_decaytable.csv bic_imr_actualwidth.csv bic_imr_k0flip.csv "
-                    "bic_imr_lifetime.csv",
+                    "bic_imr_lifetime.csv bic_imr_decayfs.csv "
+                    "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
+                    "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
+                    "bic_imr_ionmass.csv bic_imr_pauli.csv",
                     dump_bic);
