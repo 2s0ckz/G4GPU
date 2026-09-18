@@ -3082,7 +3082,7 @@ void write_imr_capture() {
 // in both directions, one at a time and together, so that the 1/secondaries share-out and the
 // PROTON-in/NEUTRON-out asymmetry (docs/RISK.md V156) both show.
 void write_imr_boundary() {
-  FILE* f = std::fopen("bic_imr_boundary.csv bic_imr_fps.csv", "w");
+  FILE* f = std::fopen("bic_imr_boundary.csv", "w");
   std::fprintf(f, "a,z,dir,set,n_cross,mass_secondary,mass_initial,mass_final,correction,"
                   "a_after,z_after,barrier_p,barrier_n\n");
 
