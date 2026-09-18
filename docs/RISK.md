@@ -10348,3 +10348,40 @@ one that cannot get in has it ADDED and is sent to `miss_nucleus`, the one that 
 it SUBTRACTED and is `captured`. And only a proton or a neutron is captured that way: a pion or a
 resonance that cannot get out is left entirely alone, uncorrected, with its state still
 `gone_out`, which is the source's `else` containing nothing but a debug print.
+
+### V157: a rejection sampler with no iteration guard, and a prescribed sequence that hangs it
+
+`G4FermiPhaseSpaceDecay::BetaKopylov` samples `chi` from `chi^N (1-chi)` by rejection:
+
+```
+G4double Fmax = std::sqrt(g4calc->powN(xN/xN1,N)/xN1);
+do { chi = rndmEngine->flat();
+     F = std::sqrt(g4calc->powN(chi,N)*(1-chi));
+     // Loop checking, 05-Aug-2015, Vladimir Ivanchenko
+   } while ( Fmax*rndmEngine->flat() > F);
+return chi;
+```
+
+The comment says the loop was checked; there is no counter in it. With a real engine it terminates
+with probability 1 and the expected number of attempts is small. With a PRESCRIBED sequence it
+need not terminate at all: the loop draws TWO uniforms per attempt, so an eight-value cycle offers
+it exactly four distinct `(chi, test)` pairs, and if `Fmax*test > F(chi)` for all four it spins
+forever inside Geant4 with nothing printed.
+
+MEASURED, and not deduced: `ref/dump/dump_bic.cc`'s eight-value `ImrCycleEngine` - the engine every
+other sweep in this package uses, and the thing that makes 540,000 comparisons exact rather than
+statistical - drove this sampler for 338 rows and then hung on the five-body case at threshold. The
+process had to be killed. The fix in the dump is a 64-value ladder, `(2i+1)/128`, which walks the
+whole of (0, 1) and so puts some attempt near the mode of `chi^N(1-chi)` whatever N is; it is used
+by that one sweep and nothing else, because a longer sequence everywhere would weaken the
+phase-by-phase comparisons the rest rely on.
+
+The port has a guard at 10,000 attempts, which Geant4 does not. That is a deliberate difference and
+it is the only one: for any sequence that terminates, the two agree bitwise - 3,584 four-momentum
+components and 896 draw counts over six body counts from two to eight, four parent masses each and
+eight ladder phases.
+
+Worth naming beyond this port: `G4FermiPhaseSpaceDecay` is instantiated by exactly one class in
+11.1.1, `G4BinaryCascade`, for an all-neutron residual nucleus. Anyone driving Geant4 from a
+quasi-random or stratified source - a variance-reduction study, a replay harness, a regression
+oracle like this one - can reach the same hang through that one door.

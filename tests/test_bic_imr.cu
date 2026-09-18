@@ -105,6 +105,10 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_fps          G4FermiPhaseSpaceDecay::Decay over 6 body counts from two to eight x
+//                        4 parent masses x 8 phases. Driven by the 64-VALUE LADDER and not the
+//                        eight-value cycle: BetaKopylov's rejection loop has no iteration guard
+//                        and the cycle hangs it - the dump ran 338 rows and stopped dead. V157.
 //   bic_imr_boundary     G4BinaryCascade::CorrectBarionsOnBoundary over 4 nuclei x 2
 //                        directions x 5 crossing sets: the mass totals, the correction and the
 //                        (A, Z) either side of the crossing. The sets cross a proton, a neutron
@@ -175,6 +179,7 @@
 #include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/cascade_capture.cuh"
 #include "physics/hadronic/bic/cascade_find.cuh"
+#include "physics/hadronic/bic/cascade_deexcite.cuh"
 #include "physics/hadronic/bic/cascade_finish.cuh"
 #include "physics/hadronic/bic/cascade_step.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
@@ -396,7 +401,25 @@ std::string sv(const std::vector<std::string>& f, std::size_t i) {
 // drew as many uniforms as Geant4 did.
 // ---------------------------------------------------------------------------------------------
 
+/// The SIXTY-FOUR-value ladder the dump drives `G4FermiPhaseSpaceDecay` with, `(2i+1)/128`.
+///
+/// The eight-value cycle cannot drive it: `BetaKopylov` is a rejection sampler with no iteration
+/// guard, it draws TWO uniforms per attempt, and four distinct pairs are not enough - MEASURED,
+/// the dump hung inside Geant4 on the five-body case (docs/RISK.md V157). Only that one sweep
+/// uses this; a longer sequence everywhere would weaken the phase-by-phase comparisons.
+struct Cycle64Rng {
+  int n = 0;
+  int phase = 0;
+  void reset(int p) { phase = p; n = 0; }
+  __host__ __device__ double uniform() {
+    const int k = (n + phase) % 64;
+    ++n;
+    return (2.0 * k + 1.0) / 128.0;
+  }
+};
+
 struct CycleRng {
+
   int n = 0;
   int phase = 0;
   void reset(int p) { phase = p; n = 0; }
@@ -2551,6 +2574,58 @@ int main() {
     }
     cmp_int(b_cfin, (n_untouched > 0) ? 1 : 0, 1, "some case takes the no-correction branch");
     cmp_int(b_cfin, (n_floored > 0) ? 1 : 0, 1, "and some case is clamped at the 0.98 floor");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3w. G4FermiPhaseSpaceDecay::Decay - Kopylov's n-body sampling, which G4BinaryCascade is the
+  //     only class in Geant4 to instantiate. The class is public, so this is a DIRECT comparison
+  //     and not a re-expression. It is driven by the 64-value ladder, because the eight-value
+  //     cycle hangs BetaKopylov's unguarded rejection loop (docs/RISK.md V157).
+  // -------------------------------------------------------------------------------------------
+  const int b_fps = new_bucket("FermiPhaseSpaceDecay", 5e-14);
+  const int b_fpsd = new_bucket("FermiPhaseSpaceDraws", 0.0);
+  {
+    const auto rows = read_csv("bic_imr_fps.csv");
+    int last_case = -1, last_phase = -1;
+    double last_parent = -1.0;
+    imr::LorentzVector out[8];
+    int n_body = 0;
+    int draws = 0;
+    for (const auto& r : rows) {
+      const int c = iv(r, 0);
+      const int n = iv(r, 1);
+      const double parent = dv(r, 2);
+      const int phase = iv(r, 3);
+      if (c != last_case || phase != last_phase || parent != last_parent) {
+        last_case = c;
+        last_phase = phase;
+        last_parent = parent;
+        n_body = n;
+        // The same six mass sets the dump uses.
+        double masses[8];
+        const int kSet[6][8] = {{0, 0, -1, -1, -1, -1, -1, -1},
+                                {0, 0, 1, -1, -1, -1, -1, -1},
+                                {0, 0, 0, 1, -1, -1, -1, -1},
+                                {0, 1, 0, 1, 0, -1, -1, -1},
+                                {0, 0, 0, 0, 0, 0, -1, -1},
+                                {0, 1, 0, 1, 0, 1, 0, 1}};
+        for (int k = 0; k < n; ++k) { masses[k] = (kSet[c][k] == 0) ? mn : mp; }
+        Cycle64Rng rng;
+        rng.reset(phase);
+        bic::fermi_phase_space_decay(parent, masses, n, out, rng);
+        draws = rng.n;
+      }
+      const int k = iv(r, 4);
+      const std::string where = "case " + sv(r, 0) + " n=" + sv(r, 1) + " M=" + sv(r, 2) +
+                                " phase=" + sv(r, 3) + " k=" + sv(r, 4);
+      cmp_int(b_fpsd, draws, iv(r, 9), where + " draws");
+      if (k < 0 || k >= n_body) { continue; }
+      const double scale = dv(r, 8);
+      cmp_scaled(b_fps, out[k].v.x, dv(r, 5), scale, where + " px");
+      cmp_scaled(b_fps, out[k].v.y, dv(r, 6), scale, where + " py");
+      cmp_scaled(b_fps, out[k].v.z, dv(r, 7), scale, where + " pz");
+      cmp_scaled(b_fps, out[k].e, dv(r, 8), scale, where + " e");
+    }
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they

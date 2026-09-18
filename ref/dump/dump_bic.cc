@@ -94,6 +94,7 @@
 #include "G4ExcitationHandler.hh"
 #include "G4Fancy3DNucleus.hh"
 #include "G4FermiMomentum.hh"
+#include "G4FermiPhaseSpaceDecay.hh"
 #include "G4HadFinalState.hh"
 #include "G4HadProjectile.hh"
 #include "G4HadSecondary.hh"
@@ -802,7 +803,60 @@ class ImrCycleEngine : public CLHEP::HepRandomEngine {
   int n_ = 0;
 };
 
+/// A SIXTY-FOUR-value ladder, for the one sampler in this package that the eight-value cycle
+/// above cannot drive: `G4FermiPhaseSpaceDecay::BetaKopylov`.
+///
+/// BetaKopylov is a rejection sampler with NO iteration guard:
+///
+///     do { chi = rndmEngine->flat();
+///          F = std::sqrt(g4calc->powN(chi,N)*(1-chi));
+///        } while ( Fmax*rndmEngine->flat() > F);
+///
+/// It draws TWO uniforms per attempt, so an eight-value cycle offers it exactly four distinct
+/// (chi, test) pairs, and if none of the four is accepted the loop spins forever. MEASURED: with
+/// the eight-value engine the dump ran 338 rows and then hung on the five-body case at threshold,
+/// inside Geant4, with no way out. docs/RISK.md V157.
+///
+/// The ladder is `(2i+1)/128` for i = 0..63, which walks the whole of (0, 1) and so puts some
+/// attempt near the mode of chi^N(1-chi) whatever N is. It is used ONLY by write_imr_fps; every
+/// other sweep in this file keeps the eight-value cycle, because a longer sequence would weaken
+/// the phase-by-phase comparison those rely on.
+const double* kImr64Seq() {
+  static double v[64];
+  static bool built = false;
+  if (!built) {
+    for (int i = 0; i < 64; ++i) { v[i] = (2.0 * i + 1.0) / 128.0; }
+    built = true;
+  }
+  return v;
+}
+
+class ImrCycle64Engine : public CLHEP::HepRandomEngine {
+ public:
+  void reset(int phase) { phase_ = phase; n_ = 0; }
+  int draws() const { return n_; }
+  double flat() override {
+    const double v = kImr64Seq()[(n_ + phase_) % 64];
+    ++n_;
+    return v;
+  }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long, int) override {}
+  void setSeeds(const long*, int) override {}
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "ImrCycle64Engine"; }
+
+ private:
+  int phase_ = 0;
+  int n_ = 0;
+};
+
 /// An engine that serves ONE prescribed uniform, for the table sweep below.
+
 ///
 /// The eight-value cycle above proves the sampler is right at the eight points of the cumulative
 /// it reaches, and it was MEASURED that that is all it proves: moving one entry of the 7,020-value
@@ -3028,7 +3082,7 @@ void write_imr_capture() {
 // in both directions, one at a time and together, so that the 1/secondaries share-out and the
 // PROTON-in/NEUTRON-out asymmetry (docs/RISK.md V156) both show.
 void write_imr_boundary() {
-  FILE* f = std::fopen("bic_imr_boundary.csv", "w");
+  FILE* f = std::fopen("bic_imr_boundary.csv bic_imr_fps.csv", "w");
   std::fprintf(f, "a,z,dir,set,n_cross,mass_secondary,mass_initial,mass_final,correction,"
                   "a_after,z_after,barrier_p,barrier_n\n");
 
@@ -3093,7 +3147,66 @@ void write_imr_boundary() {
   std::fclose(f);
 }
 
+// G4FermiPhaseSpaceDecay::Decay - Kopylov's n-body sampling, which G4BinaryCascade is the ONLY
+// class in Geant4 to instantiate (P3's fermi_breakup.cuh records that the Fermi break-up model
+// itself does not use it). DecayVoidNucleus is the one caller, for an all-neutron remnant.
+//
+// The class is public and default-constructible, so this is a direct comparison and not a
+// re-expression: the same masses, the same parent mass, the same prescribed uniforms.
+void write_imr_fps() {
+  FILE* f = std::fopen("bic_imr_fps.csv", "w");
+  std::fprintf(f, "case,n,parent_mass,phase,k,px,py,pz,e,draws\n");
+
+  const double mn = G4Neutron::Neutron()->GetPDGMass();
+  const double mp = G4Proton::Proton()->GetPDGMass();
+  // Two to eight bodies, equal and unequal masses, and parent masses from just above threshold
+  // to well above it - the `max(M, mtot + eV)` guard is reached by the first of those.
+  struct Case { int n; double masses[8]; };
+  const Case kCases[6] = {
+      {2, {mn, mn, 0, 0, 0, 0, 0, 0}},
+      {3, {mn, mn, mp, 0, 0, 0, 0, 0}},
+      {4, {mn, mn, mn, mp, 0, 0, 0, 0}},
+      {5, {mn, mp, mn, mp, mn, 0, 0, 0}},
+      {6, {mn, mn, mn, mn, mn, mn, 0, 0}},
+      {8, {mn, mp, mn, mp, mn, mp, mn, mp}}};
+
+  // The SIXTY-FOUR-value ladder, not the eight-value cycle: BetaKopylov's rejection loop has
+  // no iteration guard and the eight-value cycle hangs it. See ImrCycle64Engine and V157.
+  auto* eng = new ImrCycle64Engine();
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  G4FermiPhaseSpaceDecay decay;
+
+  for (int c = 0; c < 6; ++c) {
+    const Case& cs = kCases[c];
+    std::vector<G4double> masses;
+    double mtot = 0.0;
+    for (int k = 0; k < cs.n; ++k) {
+      masses.push_back(cs.masses[k]);
+      mtot += cs.masses[k];
+    }
+    for (double extra : {0.0, 1.0, 20.0, 200.0}) {
+      const double parent = mtot + extra;
+      CLHEP::HepRandom::setTheEngine(eng);
+      for (int phase = 0; phase < 8; ++phase) {
+        eng->reset(phase);
+        std::vector<G4LorentzVector*>* p = decay.Decay(parent, masses);
+        for (int k = 0; k < static_cast<int>(p->size()); ++k) {
+          std::fprintf(f, "%d,%d,%.17g,%d,%d,%.17g,%.17g,%.17g,%.17g,%d\n", c, cs.n, parent,
+                       phase, k, (*p)[k]->x(), (*p)[k]->y(), (*p)[k]->z(), (*p)[k]->t(),
+                       eng->draws());
+          delete (*p)[k];
+        }
+        delete p;
+      }
+      CLHEP::HepRandom::setTheEngine(saved);
+    }
+  }
+  delete eng;
+  std::fclose(f);
+}
+
 void write_imr_mbselect() {
+
 
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -3207,6 +3320,7 @@ void dump_bic(const DumpContext&) {
   write_imr_pauli();
   write_imr_capture();
   write_imr_boundary();
+  write_imr_fps();
 }
 
 }  // namespace
