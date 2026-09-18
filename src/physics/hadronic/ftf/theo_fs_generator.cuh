@@ -508,7 +508,13 @@ __host__ __device__ inline void ftf_emit_escaped(FtfWorkspace<kA, kP, kI, kS, kT
     s.pdg = t.pdg;
     s.z = 0;
     s.a = 0;
+    // An ION - the 1000-attempt fallback's primary, or a deuteron out of `MakeCoalescence` - has
+    // no hadron-table row, so its mass is its own invariant mass and its (Z, A) go out with it.
     s.mass = static_cast<real_t>((d != nullptr) ? d->mass : t.momentum.mag());
+    if (d == nullptr && t.pdg > 1000000000) {
+      s.z = (t.pdg / 10000) % 1000;
+      s.a = (t.pdg / 10) % 1000;
+    }
     s.kin_energy = static_cast<real_t>(t.momentum.e) - s.mass;
     const double p = std::sqrt(g4gpu::mag2(t.momentum.v));
     s.direction = (p > 0.0)
@@ -635,14 +641,34 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   }
 
   // The string model's secondaries become the cascade tracks P6's interface propagates.
+  //
+  // THE 1000-ATTEMPT FALLBACK IS BUILT HERE AND NOT LOOKED UP. `ftf_scatter`'s exhaustion path
+  // puts THE PRIMARY in `strings.out[0]`, and for an ION beam that PDG code is a 10LZZZAAAI
+  // nuclear code with no row in `data/ftf_hadrons.hh` and none possible (docs/RISK.md V89) - so
+  // routing it through `ftf_track_from_hadron` reported `kUnknownHadronCode` and the caller got
+  // a "primary unchanged" status with NO primary in it. Found by calling the entry point from
+  // outside the package (`tests/test_ftf_entry.cu`); docs/RISK.md V146. The projectile's
+  // identity is an argument to this function, so the track is assembled from it.
   ws->n_tracks = 0;
-  for (int i = 0; i < ws->strings.n_out; ++i) {
-    if (ws->n_tracks >= kT) {
-      ws->report.track_capacity = true;
-      break;
+  if (ws->report.primary_returned_unchanged) {
+    preco::CascadeTrack t;
+    t.pdg = proj_in.pdg;
+    t.charge = static_cast<int>(proj_in.charge);
+    t.momentum = ws->strings.out[0].momentum;
+    t.position = ws->strings.out[0].position;
+    t.formation_time = ws->strings.out[0].formation_time;
+    t.creator_model_id = 0;
+    t.is_short_lived = false;
+    ws->tracks[ws->n_tracks++] = t;
+  } else {
+    for (int i = 0; i < ws->strings.n_out; ++i) {
+      if (ws->n_tracks >= kT) {
+        ws->report.track_capacity = true;
+        break;
+      }
+      ws->tracks[ws->n_tracks++] =
+          ftf_track_from_hadron(ws->strings.out[i], /*model_id=*/0, &ws->report.refused);
     }
-    ws->tracks[ws->n_tracks++] =
-        ftf_track_from_hadron(ws->strings.out[i], /*model_id=*/0, &ws->report.refused);
   }
   if (ws->report.refused != FtfRefusal::kNone) { return; }
 

@@ -1085,6 +1085,9 @@ what anyone means by "the Glauber model":
 | **G4TheoFSGenerator::ApplyYourself** | **P** | same file, entry point `ftf::apply_yourself()`. The two dummy branches below 100 MeV (a charm/bottom hadron, a hypernucleus) are reproduced rather than refused, because returning the primary IS what Geant4 does. **Both hand-overs are wired**: `Propagate` for a hadron beam and, since P11c, `PropagateNuclNucl` for an ion one - with `MakeCoalescence` in front of it, both residuals emitted, and the projectile's boosted back to the lab from the rest frame `propagate_nucl_nucl_residuals` leaves it in. **Refused by name:** `G4DecayStrongResonances` (taken when EVERY target nucleon was hit), `G4QuasiElasticChannel` and `G4CRCoalescence`, both unreachable in QBBC |
 | **G4FTFAnnihilation** (`Annihilate`, `Create3QuarkAntiQuarkStrings`, `Create1DiquarkAntiDiquarkString`, `Create2QuarkAntiQuarkStrings`, `Create1QuarkAntiQuarkString`, `UnpackBaryon`, `GaussianPt`) | **V** | `ftf/annihilation.cuh`. All four channels and the nine-by-two weight table that picks among them. Nine collisions x 8 phases - both PDG codes, both four-momenta, statuses, collision counts, the projectile's time and position, both partons AND their momenta, the additional string with its own two partons, and the draw count: **2,862 comparisons, worst 0**, reaching all four channels. `GetProbabilityOfAnnihilation()` is non-zero only for an anti-baryon projectile, so no other beam reaches this at all. It is also the only producer of `theAdditionalString`, which is what makes `CreateStrings`' `HadronIsString` arm reachable - and that arm rebuilds the string from the parton objects as they are, so `SplitableHadron` has to store the parton momenta that nothing else in FTF reads back |
 
+| **The entry CONTRACT** - `ftf/ftf_entry.cuh`, added by P11d | **V** | The one header a caller outside this package includes. It exposes a sized workspace type, a `Handle` a kernel thread takes one slot of, a host builder that allocates and uploads, and `apply` - and **nothing of the model**. It exists because P12 reported 200,000 at-rest captures refused with "no workspace builder outside its own model tests": the entry point was validated and unreachable. `tests/test_ftf_entry.cu` proves it from outside, including only this header. docs/RISK.md V145 |
+| the workspace **sizing**, and its unit | **V** | The workspace lives for ONE `apply_yourself` call, so a run needs one per thread INSIDE it - not per track in the pool, not per event. `entry::Workspace` (ion beams, `kMaxProjA = 64`) is **410,824 B**; `entry::HadronWorkspace` (`kMaxProjA = 1`, for P12 and P13) is **329,816 B**; `LundTables<double>` is 9,648 B and shared once for the run. 64 slots is 25.08 MB, 256 is 100.31 MB, 1,024 is 401.20 MB, and the per-TRACK reading of a 65,536-track batch would be **25.7 GB** - past every card this project targets, which is why the contract makes the caller state `n_slots` and refuses a thread past the end (`kNoWorkspaceSlot`) instead of aliasing two threads onto one workspace |
+
 **The energy windows, read from the CONSTRUCTED processes and not from the builders.**
 `ref/oracle/ftf_windows.csv` walks every hadronic process QBBC registered and writes one row per
 model it holds, with the energy range that model is asked for - so the paragraph below is a
@@ -1135,14 +1138,24 @@ K* and Delta on undecayed, so **essentially every FTFP event contains one** and
 `preco::propagate_residual` refuses it. Everything above the hand-over is validated; the
 hand-over itself is reached and reports. docs/RISK.md V100.
 
-Tests: `test_ftf_model.cu`, **20,301 comparisons**. **Exact, worst 0.000e+00 in all 33 buckets**
+Tests: `test_ftf_model.cu`, **30,501 comparisons**. **Exact, worst 0.000e+00 in all 33 buckets**
 (12,365 comparisons) under the eight-value cycle engine. **Statistical**, 24 cases x 20,000
 events - {p, n, pi+, pi-, K+} on {C, O, Al, Fe, Pb} at 4, 10 and 50 GeV, {alpha, C12} on {C, Pb}
 at 8 and 20 GeV/nucleon, and {pbar, nbar} on {C, Pb} at 5 GeV - thirteen histograms against a
 5-sigma gate; plus the rapidity/xF and pT spectra as their first moments per species (`<E>`,
 `<pz>`, `<pt2>` in the lab) and the energy balance as `<E_total>` per event, one number per case.
 Every one of the 23 statistical rows is under 5 sigma, worst **4.13** (`p_O_10` multiplicity),
-and 20,301 comparisons in all, in **156 s**.
+and 30,501 comparisons in all, in **156 s**.
+
+`test_ftf_entry.cu`, **34 s**, includes `ftf/ftf_entry.cuh` and nothing else of this package -
+if the contract is incomplete it does not compile. {proton, pi+, alpha, anti-proton} x {C, Pb} x
+{1 MeV, 10 GeV}: **7,563 events produced a final state with baryon number and charge exactly
+right, 300 took the 1000-attempt fallback, 12,437 refused by name, and none was silent or
+short of a workspace slot.** Worst mean energy imbalance **1.882 MeV** against a 10 MeV gate
+(V115 is why it is a gate and not a law). Four of the sixteen rows are outside FTFP's window and
+run 50 events rather than 2,000 because they cost 185-242 ms a call on lead and cannot succeed;
+the measurement is in the file header. It also asserts the contract itself: a thread past
+`n_slots` is refused rather than served, and a default-constructed handle is not usable.
 
 **The generality sweep.** `ftf_windows.csv` has 17 FTFP rows; the test runs `apply_yourself` at
 three energies inside each, on carbon and on lead - 96 (beam, energy, target) points. **44 ran

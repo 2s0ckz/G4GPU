@@ -9893,3 +9893,117 @@ Three things worth carrying:
     13,456 rather than 34,000 in the integrated branch. Which is the same lesson as the stale
     `test_bertini_data.cu` two entries up, in a different currency: **a probe that is not re-run is
     not a measurement, and a test that is not rebuilt is not a test.**
+
+### V145: a model with no way in, and the workspace is per thread and not per track
+
+P12 reported 200,000 at-rest captures on the Fritiof arm, all refused, with the reason
+"`ftf::apply_yourself` has no workspace builder outside its own model tests". That is the whole
+of it: the entry point was finished, validated over 30,501 comparisons, and unreachable, because
+the only code that knew how to build its 410-kilobyte workspace was the test that validated it.
+A package is not done when its function is right; it is done when a caller can call it.
+
+`ftf/ftf_entry.cuh` is the way in, and it exposes four things and no more - two sized workspace
+types, a handle a kernel thread takes one slot of, a host builder, and `apply`. Nothing of the
+model is re-exported, which is the property that makes it a contract rather than a convenience:
+a caller that wants `FtfModelWorkspace` or `ExcitedString` has to include the model's own headers
+and is then not a caller.
+
+**The sizing is the substance, and the unit is the thing to get right.** The workspace lives for
+the duration of ONE `apply_yourself` call, so a run needs as many as can be INSIDE it at once -
+not one per track in the pool, not one per event. The two readings differ by four orders of
+magnitude:
+
+    entry::Workspace        410,824 B    ion beams included (kMaxProjA = 64)
+    entry::HadronWorkspace  329,816 B    projectile is a single hadron (kMaxProjA = 1)
+
+    slots        Workspace     HadronWorkspace
+       64         25.08 MB         20.14 MB
+      256        100.31 MB         80.53 MB
+    1,024        401.20 MB        322.10 MB
+   65,536      25,676.51 MB     20,613.51 MB   <- the per-TRACK reading
+
+A 65,536-track batch does not need 65,536 workspaces and could not have them: 25.7 GB is past
+every card this project targets, and a 1 GB budget buys 2,613 slots. Since a CUDA thread cannot
+portably learn its own residency, the contract runs the other way: the caller states `n_slots`,
+a thread takes slot `tid`, and **a thread whose `tid` is past the end is refused by name**
+(`Status::kNoWorkspaceSlot`). Aliasing two threads onto one workspace would be silent and wrong.
+
+Two details of the upload that are not obvious and both come from earlier findings. The image is
+a CONSTRUCTED one, uploaded into every slot, and not a `cudaMemset` - V104 is a member that only
+the constructor sets and that decides whether a nucleus diffracts. And the pointers that image
+carries, `Nucleus3DScratch::momentum` and the two `Nucleus3D::nucleons`, point into the HOST
+copy's arrays; `ftf_model_init` re-wires all of them from the device workspace's own address
+before anything reads them, so they are nulled before the upload and a future caller that reads
+one faults at once instead of reading a host address as a device one.
+
+What it costs per call, measured on the host and printed by `tests/test_ftf_entry.cu`: 0.019 ms
+for a 10 GeV proton on carbon, 0.234 ms for a 10 GeV alpha on lead, 0.015 ms for P12's at-rest
+anti-proton on carbon and 0.162 ms on lead. Out of FTFP's energy window it is 7 ms on carbon and
+185-242 ms on lead, all of it the 1,000 `Scatter` attempts - which is a quarter of a second of
+one GPU thread, and the argument for a caller respecting `ref/oracle/ftf_windows.csv` rather
+than for the model bailing out early.
+
+### V146: the 1000-attempt fallback lost the primary it exists to return, for an ion
+
+`G4VPartonStringModel::Scatter` gives up after 1,000 attempts, raises a JustWarning, resets both
+nuclei to their ground states, erases every hit mark and returns THE PRIMARY UNCHANGED as one
+kinetic track. `ftf_scatter` reproduced that and put the primary in `strings.out[0]`, and then
+`apply_yourself` converted every entry of that list with `ftf_track_from_hadron` - which looks
+the species up in `data/ftf_hadrons.hh`.
+
+An ION's PDG code is a 10LZZZAAAI nuclear code and there is no row for it, nor can there be
+(docs/RISK.md V89: which ions exist is a property of the run and not of Geant4). So the lookup
+returned null, the conversion reported `kUnknownHadronCode`, `apply_yourself` returned at the
+next line, and the caller got a status saying "the primary came back unchanged" with **no
+secondaries at all**. For a hadron beam it worked, because a proton has a row.
+
+Neither the 30,501-comparison model test nor the 96-point sweep could see it. The model test
+never asks whether the fallback's final state is well formed - it compares distributions, and a
+fallback event is not in any oracle table - and the sweep counts outcomes by NAME, and
+"primary unchanged" and "primary unchanged with nothing in it" have the same name. What found it
+was calling the entry point from OUTSIDE the package, in a test that had to state what it
+expected to come back and then count it: `tests/test_ftf_entry.cu` asserts two secondaries for a
+hadron and three for an ion, and the ion row said zero.
+
+The fix is that the fallback's track is ASSEMBLED from the projectile rather than looked up - the
+projectile's identity is an argument to `apply_yourself`, so nothing needs a table - and that an
+escaped track with a nuclear PDG code carries its (Z, A) out with it, which a deuteron from
+`MakeCoalescence` needs too and did not have.
+
+The general lesson is the one about who writes the test. A package's own test knows what the
+package can do and asks it that; a caller's test knows what it needs and asks for that. The two
+are not the same question, and the gap between them is where an entry point that works for its
+author and not for anyone else lives.
+
+### V147: on the fallback path an ion event carries its projectile twice, in Geant4 too
+
+Having made the 1000-attempt fallback return its primary for an ion (V146), the conservation
+check in `tests/test_ftf_entry.cu` then failed on exactly those events, and by exactly the
+projectile's mass number and charge: an alpha on carbon came back with A = 20 where A = 16 went
+in, on every one of the twenty events.
+
+It is not the port's arithmetic. `G4GeneratorPrecompoundInterface::PropagateNuclNucl` sets the
+projectile residual to the WHOLE primary when no projectile nucleon was hit -
+
+    if ( (anAb == projectile.a) && (ex_energyB <= 0.0) ) projectile4 = primary_projectile;
+    if ( anAb != 0 ) { ...residual exists with the full (A, Z)... }
+
+- and the primary ALSO escapes as a track, because it is not a nucleon and nothing captures it.
+So the event carries the projectile as a track and again as a residual. `Propagate`, the
+hadron-nucleus arm, has no such line: its residual is built only from what was hit, so a proton
+on carbon comes back as the proton plus a ground-state carbon and the books are exact. The
+asymmetry is between the two arms of one class.
+
+Reproduced and not corrected, for the usual reason and one more. The usual one: this is
+upstream's, the oracle would contain it, and a port that "fixed" it would be right about
+conservation and wrong about Geant4. The one more: the path is reachable only through the
+1000-attempt exhaustion, which Geant4 itself marks with a JustWarning, and only outside FTFP's
+energy window - the 3 GeV/nucleon floor `G4IonPhysicsXS` gives an ion beam. An ion at 1 MeV is
+not something QBBC produces; it is something a test asked for, and what it found is worth
+recording rather than smoothing.
+
+So `tests/test_ftf_entry.cu` asserts the behaviour and not the law on that path: baryon number
+and charge exactly on the 7,563 events that produced a final state, and `A_proj + A_targ +
+A_proj` on the 300 that took the fallback with an ion beam. A test that asserted the law there
+would have to be switched off, and a switched-off test is worth less than one that says what the
+code does and why that is not what the physics says.
