@@ -2921,6 +2921,105 @@ void write_imr_pauli() {
   std::fclose(g);
 }
 
+// G4BinaryCascade::Capture's decision and G4Absorber::WillBeAbsorbed, both re-expressed from
+// their public ingredients - see write_imr_pauli above for why that is a faithful oracle.
+//
+// Capture is all-or-nothing and is decided by a MEAN: `capturedEnergy/particlesBelowCut <
+// 0.2*theCutOnP`, where particlesBelowCut counts EVERY nucleon inside whatever its energy,
+// because the `if(energy < theCutOnP)` that would have separated them is commented out upstream
+// and so is the `particlesAboveCut==0 &&` that used the result. Each nucleon contributes
+// `e() - actualMass + GetField(pdg,pos) - GetBarrier(pdg)`, which can be NEGATIVE.
+//
+// The synthetic lists below are built to straddle the gate: one of slow nucleons deep in the
+// well, one of fast ones, and mixtures where a single deep nucleon pulls the mean under.
+void write_imr_capture() {
+  FILE* f = std::fopen("bic_imr_capture.csv", "w");
+  std::fprintf(f, "a,z,list,n_inside,captured_energy,mean,cut,capture\n");
+  FILE* g = std::fopen("bic_imr_absorbcut.csv", "w");
+  std::fprintf(g, "pdg,ekin,cut,absorbed\n");
+  // The per-entry field the decision is built from, so that the test can drive
+  // `capture_decision` with the field Geant4 computed rather than rebuilding a whole nucleus to
+  // get it. The field itself is P9's and is already compared in bic_field.csv; what is new here
+  // is the sum over the list, the count, and the gate on the mean.
+  FILE* h = std::fopen("bic_imr_capturefield.csv", "w");
+  std::fprintf(h, "a,z,list,k,pdg,r_fm,pmag,field_minus_barrier\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  struct Target { int a; int z; };
+  const Target kT[] = {{12, 6}, {27, 13}, {56, 26}, {208, 82}};
+  // (pdg, r in fm, |p| in MeV/c) triples; a zero pdg ends a list.
+  const int kLists = 8;
+  struct Entry { int pdg; double r; double pmag; };
+  const Entry kSets[8][6] = {
+      {{2212, 1.0, 20.0}, {2112, 1.5, 25.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      // The nuclear well is 35 to 55 MeV deep, so a nucleon needs a kinetic energy above about
+      // 45 + 9 MeV before it lifts the mean over the gate at all. MEASURED: the first version of
+      // these lists topped out at 350 MeV/c, which is 64 MeV of kinetic energy, and every one of
+      // the 24 rows captured - the verdict column was a constant and the oracle proved nothing.
+      // 900 and 1200 MeV/c are 370 and 620 MeV and they do not.
+      {{2212, 1.0, 900.0}, {2112, 1.5, 1200.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      {{2212, 0.5, 10.0}, {2112, 0.5, 1000.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      {{2112, 0.2, 5.0}, {2112, 0.4, 8.0}, {2212, 6.0, 1400.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      {{2212, 8.0, 60.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      {{2212, 1.0, 150.0}, {2112, 1.0, 150.0}, {2212, 1.0, 150.0}, {2112, 1.0, 150.0},
+       {2212, 1.0, 150.0}, {0, 0, 0}},
+      // Two lists tuned to land BETWEEN 0.2*theCutOnP and theCutOnP, which is the only window
+      // where the 0.2 decides anything. MEASURED: with the six lists above, replacing the gate
+      // `mean < 0.2*theCutOnP` by `mean < theCutOnP` changed none of the 24 verdicts - every one
+      // of them was tens of MeV clear of both. A proton at 421 MeV/c one fermi into carbon has
+      // a mean of about +24 MeV, which is over 9 and under 45.
+      {{2212, 1.0, 421.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+      {{2212, 1.0, 380.0}, {2112, 1.2, 390.0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}};
+
+  for (const Target& t : kT) {
+    CLHEP::HepRandom::setTheSeed(920000L + t.a);
+    auto* nucleus = new G4Fancy3DNucleus;
+    nucleus->Init(t.a, t.z);
+    G4RKPropagation prop;
+    prop.Init(nucleus);
+    const double cut = 45.0 * MeV;   // theCutOnP is always 45; docs/RISK.md V72
+    for (int l = 0; l < kLists; ++l) {
+      double captured = 0.0;
+      int below = 0;
+      for (int k = 0; k < 6; ++k) {
+        const Entry& e = kSets[l][k];
+        if (e.pdg == 0) { break; }
+        const G4ParticleDefinition* d = (e.pdg == 2212) ? p : n;
+        const double m = d->GetPDGMass();
+        const G4ThreeVector pos(e.r * fermi, 0, 0);
+        const double energy = std::sqrt(e.pmag * e.pmag + m * m);
+        const double field = prop.GetField(e.pdg, pos) - prop.GetBarrier(e.pdg);
+        captured += energy - m + field;
+        std::fprintf(h, "%d,%d,%d,%d,%d,%.17g,%.17g,%.17g\n", t.a, t.z, l, below, e.pdg, e.r,
+                     e.pmag, field);
+        ++below;
+      }
+      const double mean = (below > 0) ? captured / below : 0.0;
+      std::fprintf(f, "%d,%d,%d,%d,%.17g,%.17g,%.17g,%d\n", t.a, t.z, l, below, captured, mean,
+                   cut, (below > 0 && mean < 0.2 * cut) ? 1 : 0);
+    }
+  }
+
+  // G4Absorber::WillBeAbsorbed, at the threshold the constructor sets and at one that is not
+  // zero, so that the predicate is shown to be live and the CONSTANT shown to be what kills it.
+  for (int pdg : {211, -211, 111, 2212, 2112}) {
+    const G4ParticleDefinition* d = G4ParticleTable::GetParticleTable()->FindParticle(pdg);
+    const double m = d->GetPDGMass();
+    for (double ekin : {0.0, 1.0, 25.0, 100.0, 500.0, 2000.0}) {
+      for (double cut : {0.0, 50.0}) {
+        const double e = ekin + m;
+        const bool is_pion = (pdg == 211 || pdg == 111 || pdg == -211);
+        std::fprintf(g, "%d,%.17g,%.17g,%d\n", pdg, ekin, cut,
+                     ((e - m < cut) && is_pion) ? 1 : 0);
+      }
+    }
+  }
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+}
+
 void write_imr_mbselect() {
   FILE* f = std::fopen("bic_imr_mbpartial.csv", "w");
   std::fprintf(f, "pair,sqrt_s_MeV,in1z,in1e,in2e,component,sigma_mb\n");
@@ -3032,6 +3131,7 @@ void dump_bic(const DumpContext&) {
   write_imr_scatterlife();
   write_imr_ionmass();
   write_imr_pauli();
+  write_imr_capture();
 }
 
 }  // namespace
@@ -3054,5 +3154,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_lifetime.csv bic_imr_decayfs.csv "
                     "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv "
                     "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
-                    "bic_imr_ionmass.csv bic_imr_pauli.csv",
+                    "bic_imr_ionmass.csv bic_imr_pauli.csv "
+                    "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv",
                     dump_bic);

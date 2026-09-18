@@ -598,8 +598,13 @@ struct RkPropagation {
     return 0.0;
   }
 
-  /// `G4RKPropagation::GetSphereIntersectionTimes(const G4KineticTrack*, t1, t2)`.
+  /// `G4RKPropagation::GetBarrier(encoding)`, the same map lookup with the same default of zero.
+  __host__ __device__ double barrier(int pdg) const {
+    const SpeciesField* sf = find_field(pdg);
+    return (sf != nullptr) ? sf->barrier() : 0.0;
+  }
 
+  /// `G4RKPropagation::GetSphereIntersectionTimes(const G4KineticTrack*, t1, t2)`.
   ///
   /// The sphere is `theOuterRadius + 3 fermi` - the "safety of 3 fermi" the source names - and
   /// NOT the outer radius, so a particle is "inside" out to three femtometres beyond the

@@ -105,6 +105,14 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_capture      G4BinaryCascade::Capture's decision over 4 nuclei x 8 synthetic
+//                        secondary lists, with the per-entry nuclear field in
+//                        bic_imr_capturefield.csv so the test drives the gate with the field
+//                        Geant4 computed. Two of the lists are tuned to land BETWEEN 9 and 45
+//                        MeV, which is the only window where the 0.2 factor decides anything.
+//   bic_imr_absorbcut    G4Absorber::WillBeAbsorbed at the threshold Geant4 sets (zero, so
+//                        nothing is ever absorbed) and at one that is not, so the predicate is
+//                        shown to be live and the CONSTANT shown to be what kills it.
 //   bic_imr_pauli        G4BinaryCascade::CheckPauliPrinciple over 5 nuclei x 12 radii x 2
 //                        nucleons x 10 momenta. The function is private, so the dump
 //                        re-expresses it from the three public ingredients the source names -
@@ -160,6 +168,7 @@
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
+#include "physics/hadronic/bic/cascade_capture.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
 #include "physics/hadronic/bic/kinetic_decay.cuh"
@@ -2194,6 +2203,104 @@ int main() {
             "an ANTI-proton is, because the exclusions are the positive codes only");
     cmp_int(b_pauf, bic::is_shortlived_for_fermi(-2112) ? 1 : 0, 1, "and so is an anti-neutron");
     cmp_int(b_pauf, bic::is_shortlived_for_fermi(3122) ? 1 : 0, 1, "a lambda is");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3s. G4BinaryCascade::Capture's decision and G4Absorber::WillBeAbsorbed. Both are private, so
+  //     the dump re-expresses them from their public ingredients; see write_imr_capture.
+  //
+  //     The FIELD each nucleon contributes is dumped per entry and fed back through a stub, not
+  //     recomputed: `GetField` and `GetBarrier` are P9's and `bic_field.csv` already compares
+  //     them. What is new and what this block checks is the sum over the list, the count, and
+  //     the gate on the MEAN.
+  // -------------------------------------------------------------------------------------------
+  const int b_cap = new_bucket("CaptureDecision", 1e-14);
+  const int b_capv = new_bucket("CaptureVerdict", 0.0);
+  const int b_abs = new_bucket("AbsorbPredicate", 0.0);
+  {
+    // A propagator that answers from the dumped field, keyed by the track's position. The
+    // capture decision asks `GetField(pdg,pos) - GetBarrier(pdg)` once per track and nothing
+    // else, so this is the whole of what it needs.
+    struct StubProp {
+      const double* fields = nullptr;
+      const double* radii = nullptr;
+      const int* pdgs = nullptr;
+      int n = 0;
+      double field(int pdg, const deex::Vec3d& pos) const {
+        for (int i = 0; i < n; ++i) {
+          if (pdgs[i] == pdg && std::fabs(radii[i] * 1.e-12 - pos.x) < 1e-20) {
+            return fields[i];
+          }
+        }
+        return 0.0;
+      }
+      double barrier(int) const { return 0.0; }  // already folded into `fields`
+    };
+    const auto frows = read_csv("bic_imr_capturefield.csv");
+    const auto rows = read_csv("bic_imr_capture.csv");
+    for (const auto& r : rows) {
+      const int a = iv(r, 0);
+      const int l = iv(r, 2);
+      double fields[6];
+      double radii[6];
+      int pdgs[6];
+      double pmags[6];
+      int n = 0;
+      for (const auto& fr : frows) {
+        if (iv(fr, 0) != a || iv(fr, 2) != l) { continue; }
+        if (n >= 6) { break; }
+        pdgs[n] = iv(fr, 4);
+        radii[n] = dv(fr, 5);
+        pmags[n] = dv(fr, 6);
+        fields[n] = dv(fr, 7);
+        ++n;
+      }
+      StubProp prop;
+      prop.fields = fields;
+      prop.radii = radii;
+      prop.pdgs = pdgs;
+      prop.n = n;
+      bic::CascadeTrack list[6];
+      for (int k = 0; k < n; ++k) {
+        const double m = (pdgs[k] == 2212) ? mp : mn;
+        list[k] = bic::CascadeTrack{};
+        list[k].pdg = pdgs[k];
+        list[k].state = bic::kInside;
+        list[k].position = deex::Vec3d{radii[k] * 1.e-12, 0.0, 0.0};
+        list[k].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, pmags[k]},
+                                              std::sqrt(pmags[k] * pmags[k] + m * m));
+      }
+      const bic::CaptureDecision d = bic::capture_decision(list, n, dv(r, 6), prop);
+      const std::string where = "A=" + sv(r, 0) + " list " + sv(r, 2);
+      cmp_int(b_capv, d.particles_below_cut, iv(r, 3), where + " n_inside");
+      cmp_int(b_capv, d.particles_above_cut, 0,
+              where + " particlesAboveCut is always zero - the increment is commented out");
+      cmp_scaled(b_cap, d.captured_energy, dv(r, 4), 1e-6, where + " captured energy");
+      cmp_int(b_capv, d.capture ? 1 : 0, iv(r, 7), where + " capture");
+    }
+  }
+  {
+    const auto rows = read_csv("bic_imr_absorbcut.csv");
+    for (const auto& r : rows) {
+      const int pdg = iv(r, 0);
+      const double ekin = dv(r, 1);
+      const double cut = dv(r, 2);
+      const double m = (pdg == 2212) ? mp
+                                     : ((pdg == 2112) ? mn : ((pdg == 111) ? 134.9766 : 139.5701));
+      const bool got = bic::will_be_absorbed(pdg, ekin + m, m, cut);
+      cmp_int(b_abs, got ? 1 : 0, iv(r, 3),
+              "pdg " + sv(r, 0) + " T=" + sv(r, 1) + " cut=" + sv(r, 2));
+    }
+    // theCutOnPAbsorb is ZERO, so nothing is ever absorbed - the whole of G4Absorber is dead
+    // code in 11.1.1 and is refused by name. This is the assertion that says so, and the
+    // absorbcut rows above are what show the predicate is live when the constant is not zero.
+    for (double ekin = 0.0; ekin <= 2000.0; ekin += 5.0) {
+      for (int pdg : {211, -211, 111}) {
+        const double m = (pdg == 111) ? 134.9766 : 139.5701;
+        cmp_int(b_abs, bic::will_be_absorbed(pdg, ekin + m, m, bic::cut_on_p_absorb()) ? 1 : 0, 0,
+                "no pion is absorbed at the threshold Geant4 sets");
+      }
+    }
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
