@@ -152,8 +152,18 @@ int main() {
       // never decays.
       if (species_disposition(t) != SpeciesDisposition::kStepped) {
         if (applicable && !stable) { ++refused_unstable; }
-        check(!had::decays_in_flight(t),
-              name + ": refused by P4's tables and refused as a species");
+        // Since P10c the six hyperons lambda, sigma+, sigma0, sigma-, xi0 and xi- (and omega-) DO have
+        // tables, because G4IntraNucleiCascader::decayTrappedParticle decays a hyperon the Bertini
+        // cascade traps INSIDE the nucleus and puts the daughters back on its stack - a caller that is
+        // not a stepper. So the two refusals no longer have to agree in both directions. What must
+        // hold is one-directional and is checked below for every stepped species: a particle with a
+        // kernel decays exactly where Geant4 decays it. A refused species may carry a table for the
+        // cascade's sake, and if it does, the table has to say what Geant4 says - a table for a
+        // species Geant4 calls stable or inapplicable would be a decay invented for the cascade.
+        if (had::decays_in_flight(t)) {
+          check(applicable && !stable,
+                name + ": refused as a species, given a decay table, and Geant4 has it stable");
+        }
         continue;
       }
       ++n;
