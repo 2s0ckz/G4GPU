@@ -64,6 +64,7 @@
 #include "G4BinaryCascade.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4CollisionManager.hh"
+#include "G4MesonAbsorption.hh"
 #include "G4CollisionMesonBaryon.hh"
 #include "G4CollisionMesonBaryonElastic.hh"
 #include "G4CollisionMesonBaryonToResonance.hh"
@@ -2272,7 +2273,8 @@ void write_imr_decay() {
   // hbar_Planck * (-1/totalWidth) * log(uniform) * the4Momentum.gamma(), so it needs a MOVING
   // track: with the resonance at rest the Lorentz factor is 1 and a port that dropped it
   // entirely would agree everywhere.
-  FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv", "w");
+  FILE* t = std::fopen("bic_imr_lifetime.csv bic_imr_decayfs.csv "
+                    "bic_imr_absorb.csv bic_imr_absorbfs.csv bic_imr_absorbcluster.csv", "w");
   std::fprintf(t, "pdg,actual_mass,pz,e,gamma,phase,lifetime_ns,total_width,draws\n");
   {
     auto* eng = new ImrCycleEngine();
@@ -2375,6 +2377,215 @@ void write_imr_decayfs() {
   }
   delete eng;
   std::fclose(f);
+}
+
+// G4MesonAbsorption: the scheduling, the cluster partner and the two outgoing nucleons.
+//
+// GetTimeToAbsorption and AbsorptionCrossSection are both PRIVATE, so the cross section cannot be
+// read out directly - but it is not needed directly. The verdict `distance <= sigma/pi` flips at
+// exactly one impact parameter, so scanning the transverse offset and dumping whether a collision
+// was scheduled measures the cross section through the geometry that uses it, which is the only
+// thing the cascade cares about. The scan runs to 1.5 fm in 0.025 fm steps, which is 0.3 mb per
+// step against cross sections of 1 to 6 mb.
+//
+// The pair (proton, pi-) is in the list for one reason: it is the ordering that reaches the
+// `else if (bT == pi+ || bT != pi-)` branch with a pi- in slot b, where the condition is false,
+// the kinetic energy stays at its initialiser of zero, and `it[-2]` is read. See
+// src/physics/hadronic/bic/im_r/absorption.cuh and docs/RISK.md V153. If Geant4's answer there is
+// anything but the 2 mb the cancellation predicts, this dump is where it shows.
+void write_imr_absorb() {
+  FILE* f = std::fopen("bic_imr_absorb.csv", "w");
+  std::fprintf(f, "pair,ekin_MeV,b_fm,scheduled,time_ns,n_targets,t0_pdg,t1_pdg\n");
+  FILE* g = std::fopen("bic_imr_absorbfs.csv", "w");
+  std::fprintf(g, "pair,ekin_MeV,phase,d1,d2,p1x,p1y,p1z,p1e,p2x,p2y,p2z,p2e,draws\n");
+  FILE* h = std::fopen("bic_imr_absorbcluster.csv", "w");
+  std::fprintf(h, "set,n_targets,first,partner\n");
+
+  const G4ParticleDefinition* p = G4Proton::ProtonDefinition();
+  const G4ParticleDefinition* n = G4Neutron::NeutronDefinition();
+  const G4ParticleDefinition* pip = G4PionPlus::PionPlusDefinition();
+  const G4ParticleDefinition* pim = G4PionMinus::PionMinusDefinition();
+  const G4ParticleDefinition* pi0 = G4PionZero::PionZeroDefinition();
+
+  struct Pair { const char* name; const G4ParticleDefinition* pro; const G4ParticleDefinition* c0; };
+  const Pair pairs[] = {{"pip_p", pip, p}, {"pim_p", pim, p}, {"pim_n", pim, n},
+                        {"p_pim", p, pim}, {"n_pim", n, pim}, {"pi0_p", pi0, p},
+                        {"pip_n", pip, n}, {"p_pip", p, pip}};
+
+  G4MesonAbsorption absorber;
+
+  for (const Pair& pr : pairs) {
+    for (double ekin : {5.0, 40.0, 90.0, 140.0, 200.0, 280.0, 350.0}) {
+      for (int ib = 0; ib <= 60; ++ib) {
+        const double b = 0.025 * ib;
+        const double m1 = pr.pro->GetPDGMass();
+        const double e1 = ekin + m1;
+        const G4LorentzVector q1(G4ThreeVector(0, 0, std::sqrt(e1 * e1 - m1 * m1)), e1);
+        G4KineticTrack t0(pr.pro, 0.0, G4ThreeVector(0, 0, 0), q1);
+        // Three candidates: the partner of the pair at (b, 0, 4 fm), and two spectators, one
+        // neutron and one proton, far enough away that the geometry of the first pair is
+        // untouched. BOTH charges are needed. FindAndFillCluster rejects a candidate that would
+        // take charge(projectile) + charge(first target) + charge(candidate) outside [0, 2], and
+        // with only a proton spectator a pi+ on a proton has nothing left to cluster with - the
+        // sum is 3 - so no absorption is scheduled at any impact parameter. MEASURED: with the
+        // single proton spectator the first version of this dump had, pip_p and p_pip produced
+        // not one scheduled collision in 427 rows each, and the scan said nothing about the
+        // cross section it was written to measure.
+        // The candidate is NOT at rest. If it were, a pair whose kinetic energy is taken from
+        // the candidate would have t = 0 and would fall into the same `it[-2]` branch as the
+        // `!=` bug - and the two would be indistinguishable. MEASURED: with the candidate at
+        // rest, p_pip and p_pim both scheduled exactly 11 impact parameters at every one of the
+        // seven energies, the flat 2 mb, and the bug was invisible.
+        const double m2 = pr.c0->GetPDGMass();
+        const G4ThreeVector k2(150.0, -80.0, 60.0);
+        const G4LorentzVector q2(k2, std::sqrt(k2.mag2() + m2 * m2));
+        G4KineticTrack* c0 =
+            new G4KineticTrack(pr.c0, 0.0, G4ThreeVector(b * fermi, 0, 4.0 * fermi), q2);
+        G4KineticTrack* c1 = new G4KineticTrack(
+            n, 0.0, G4ThreeVector(-1.0 * fermi, 2.0 * fermi, 3.0 * fermi),
+            G4LorentzVector(G4ThreeVector(0, 0, 0), n->GetPDGMass()));
+        G4KineticTrack* c2 = new G4KineticTrack(
+            p, 0.0, G4ThreeVector(2.0 * fermi, -1.0 * fermi, -3.0 * fermi),
+            G4LorentzVector(G4ThreeVector(0, 0, 0), p->GetPDGMass()));
+        std::vector<G4KineticTrack*> cands;
+        cands.push_back(c0);
+        cands.push_back(c1);
+        cands.push_back(c2);
+        const std::vector<G4CollisionInitialState*>& coll =
+            absorber.GetCollisions(&t0, cands, 0.0);
+        int found = 0;
+        double time = -1.0;
+        int nt = 0, t0p = 0, t1p = 0;
+        for (auto* ci : coll) {
+          if (ci->GetPrimary() != &t0) { continue; }
+          G4KineticTrackVector& tv = ci->GetTargetCollection();
+          if (tv.empty() || tv[0] != c0) { continue; }
+          found = 1;
+          time = ci->GetCollisionTime();
+          nt = static_cast<int>(tv.size());
+          t0p = tv[0]->GetDefinition()->GetPDGEncoding();
+          t1p = (nt > 1) ? tv[1]->GetDefinition()->GetPDGEncoding() : 0;
+          break;
+        }
+        std::fprintf(f, "%s,%.17g,%.17g,%d,%.17g,%d,%d,%d\n", pr.name, ekin, b, found, time, nt,
+                     t0p, t1p);
+        for (auto* ci : coll) { delete ci; }
+        delete c0;
+        delete c1;
+        delete c2;
+      }
+    }
+  }
+
+  // FindAndFillCluster on its own, through the partner the scheduled collision carries. Five
+  // candidates at five positions with three charge patterns: the charge filter rejects any
+  // candidate that would take the sum of (projectile + first target + candidate) outside [0, 2],
+  // and among the survivors the winner is the one with the smallest |r_first + r_candidate| -
+  // a SUM, so the winner is the one most nearly opposite the first target through the origin.
+  // docs/RISK.md V154. The positions below are chosen so that the nearest and the most-opposite
+  // candidates are different tracks, which is the only way to tell the two rules apart.
+  {
+    struct Cand { double x, y, z; int charge; };
+    const Cand kSets[3][5] = {
+        {{0.2, 0.0, 4.1, 1}, {-0.2, 0.0, -4.1, 1}, {3.0, 1.0, 1.0, 0}, {-3.0, -1.0, -1.0, 0},
+         {0.1, 0.1, 4.0, 0}},
+        {{1.0, 1.0, 1.0, 1}, {-1.0, -1.0, -1.0, 1}, {0.5, 0.5, 0.5, 1}, {-0.5, -0.5, -0.5, 1},
+         {2.0, 0.0, 0.0, 0}},
+        {{0.0, 0.0, 5.0, 0}, {0.0, 0.0, -5.0, 0}, {1.0, 0.0, 4.5, 1}, {-1.0, 0.0, -4.5, 1},
+         {0.0, 3.0, 0.0, 0}}};
+    for (int set = 0; set < 3; ++set) {
+      const double m1 = pip->GetPDGMass();
+      const double e1 = 140.0 + m1;
+      const G4LorentzVector q1(G4ThreeVector(0, 0, std::sqrt(e1 * e1 - m1 * m1)), e1);
+      G4KineticTrack pro(pip, 0.0, G4ThreeVector(0, 0, 0), q1);
+      std::vector<G4KineticTrack*> cands;
+      for (int k = 0; k < 5; ++k) {
+        const Cand& cd = kSets[set][k];
+        const G4ParticleDefinition* d = (cd.charge == 1) ? p : n;
+        cands.push_back(new G4KineticTrack(
+            d, 0.0, G4ThreeVector(cd.x * fermi, cd.y * fermi, cd.z * fermi),
+            G4LorentzVector(G4ThreeVector(0, 0, 0), d->GetPDGMass())));
+      }
+      const std::vector<G4CollisionInitialState*>& coll = absorber.GetCollisions(&pro, cands, 0.0);
+      for (auto* ci : coll) {
+        G4KineticTrackVector& tv = ci->GetTargetCollection();
+        int first = -1, partner = -1;
+        for (int k = 0; k < 5; ++k) {
+          if (!tv.empty() && tv[0] == cands[k]) { first = k; }
+          if (tv.size() > 1 && tv[1] == cands[k]) { partner = k; }
+        }
+        std::fprintf(h, "%d,%d,%d,%d\n", set, static_cast<int>(tv.size()), first, partner);
+      }
+      for (auto* ci : coll) { delete ci; }
+      for (auto* q : cands) { delete q; }
+    }
+  }
+
+  // The final state, under the prescribed engine. The projectile is a charged pion and the two
+  // targets are the four combinations of proton and neutron, so both the identity swap and the
+  // charge fixing - which draws a SECOND uniform only when both nucleons sit on the same side of
+  // the pion's charge - are exercised.
+  {
+    auto* eng = new ImrCycleEngine();
+    CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+    struct FsCase { const char* name; const G4ParticleDefinition* pro;
+                    const G4ParticleDefinition* a; const G4ParticleDefinition* b; };
+    const FsCase cases[] = {{"pip_pp", pip, p, p}, {"pip_pn", pip, p, n}, {"pip_np", pip, n, p},
+                            {"pip_nn", pip, n, n}, {"pim_pp", pim, p, p}, {"pim_pn", pim, p, n},
+                            {"pim_np", pim, n, p}, {"pim_nn", pim, n, n},
+                            {"pi0_pn", pi0, p, n}};
+    for (const FsCase& c : cases) {
+      for (double ekin : {40.0, 150.0, 300.0}) {
+        const double m1 = c.pro->GetPDGMass();
+        const double e1 = ekin + m1;
+        // A tilted projectile, so that the rotation to z is not the identity - the same lesson
+        // the elastic final state taught (docs/RISK.md V75).
+        G4ThreeVector v1(0, 0, std::sqrt(e1 * e1 - m1 * m1));
+        v1.rotateY(0.4);
+        v1.rotateZ(0.9);
+        const G4LorentzVector q1(v1, e1);
+        G4KineticTrack pro(c.pro, 0.0, G4ThreeVector(0, 0, 0), q1);
+        const G4ThreeVector k1(31.0, -17.0, 44.0);
+        const G4ThreeVector k2(-23.0, 51.0, -12.0);
+        G4KineticTrack* ta =
+            new G4KineticTrack(c.a, 0.0, G4ThreeVector(0.5 * fermi, 0, 2.0 * fermi),
+                               G4LorentzVector(k1, std::sqrt(k1.mag2() + c.a->GetPDGMass() *
+                                                                            c.a->GetPDGMass())));
+        G4KineticTrack* tb =
+            new G4KineticTrack(c.b, 0.0, G4ThreeVector(-0.5 * fermi, 1.0 * fermi, 2.5 * fermi),
+                               G4LorentzVector(k2, std::sqrt(k2.mag2() + c.b->GetPDGMass() *
+                                                                            c.b->GetPDGMass())));
+        std::vector<G4KineticTrack*> targets;
+        targets.push_back(ta);
+        targets.push_back(tb);
+        CLHEP::HepRandom::setTheEngine(eng);
+        for (int phase = 0; phase < 8; ++phase) {
+          eng->reset(phase);
+          G4KineticTrackVector* out = absorber.GetFinalState(&pro, targets);
+          if (out != nullptr && out->size() == 2) {
+            const G4LorentzVector& a4 = (*out)[0]->Get4Momentum();
+            const G4LorentzVector& b4 = (*out)[1]->Get4Momentum();
+            std::fprintf(g,
+                         "%s,%.17g,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n",
+                         c.name, ekin, phase, (*out)[0]->GetDefinition()->GetPDGEncoding(),
+                         (*out)[1]->GetDefinition()->GetPDGEncoding(), a4.x(), a4.y(), a4.z(),
+                         a4.t(), b4.x(), b4.y(), b4.z(), b4.t(), eng->draws());
+          }
+          if (out != nullptr) {
+            for (auto* q : *out) { delete q; }
+            delete out;
+          }
+        }
+        CLHEP::HepRandom::setTheEngine(saved);
+        delete ta;
+        delete tb;
+      }
+    }
+    delete eng;
+  }
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
 }
 
 void write_imr_mbselect() {
@@ -2482,6 +2693,7 @@ void dump_bic(const DumpContext&) {
   write_imr_mbselect();
   write_imr_decay();
   write_imr_decayfs();
+  write_imr_absorb();
 }
 
 }  // namespace

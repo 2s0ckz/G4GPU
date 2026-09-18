@@ -105,6 +105,18 @@
 //                        returned list, plus the number of uniforms the whole decay consumed.
 //                        The list ORDER is compared because it is the order the cascade's track
 //                        list takes and therefore the order of every later random: V151.
+//   bic_imr_absorb       G4MesonAbsorption's scheduling over 8 pairs x 7 energies x 61 impact
+//                        parameters in 0.025 fm steps. The cross section is private, so the scan
+//                        measures it through the verdict it decides - and the pair (proton, pi-)
+//                        is in the list to reach the out-of-bounds table read of V153, with the
+//                        candidate given a momentum so that its t is not zero for the honest
+//                        reason as well as the buggy one.
+//   bic_imr_absorbcluster  FindAndFillCluster over three five-candidate sets built so that the
+//                        nearest candidate and the most-opposite one are different tracks.
+//   bic_imr_absorbfs     GetFinalState over 9 (pion, nucleon, nucleon) combinations x 3 energies
+//                        x 8 phases, with a tilted projectile so the rotation to z is not the
+//                        identity, and the draw count because the charge fixing draws a SECOND
+//                        uniform only when both nucleons sit on the same side of the pion.
 //
 // **Why the tolerance is 1e-15 and not zero.** The port and Geant4 evaluate the same expressions
 // in the same order in double, so most of these agree bitwise; what they do not share is
@@ -124,6 +136,7 @@
 #include "physics/hadronic/bic/im_r/channels.cuh"
 #include "physics/hadronic/bic/im_r/clebsch.cuh"
 #include "physics/hadronic/bic/im_r/collision_meson.cuh"
+#include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/im_r/collision_nn.cuh"
 #include "physics/hadronic/bic/im_r/resonance_fs.cuh"
@@ -1697,6 +1710,163 @@ int main() {
       cmp_scaled(b_dfs, res.prod[i].p.v.y, dv(r, 8), scale, where + " py");
       cmp_scaled(b_dfs, res.prod[i].p.v.z, dv(r, 9), scale, where + " pz");
       cmp_scaled(b_dfs, res.prod[i].p.e, dv(r, 10), scale, where + " e");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3n. G4MesonAbsorption: the scheduling through GetTimeToAbsorption and AbsorptionCrossSection,
+  //     the cluster partner FindAndFillCluster picks, and the two outgoing nucleons.
+  // -------------------------------------------------------------------------------------------
+  const int b_absch = new_bucket("AbsorptionSchedule", 0.0);
+  const int b_abstime = new_bucket("AbsorptionTime", 1e-16);
+  const int b_absclu = new_bucket("AbsorptionCluster", 0.0);
+  const int b_absfs = new_bucket("AbsorptionFinalState", 5e-15);
+  const int b_absdr = new_bucket("AbsorptionDraws", 0.0);
+  {
+    const double fm = 1.e-12;
+    const double m_pip = 139.5701;
+    const double m_pi0 = 134.9766;
+    auto mass_of = [&](int pdg) {
+      if (pdg == 2212) { return mp; }
+      if (pdg == 2112) { return mn; }
+      if (pdg == 111) { return m_pi0; }
+      return m_pip;
+    };
+    auto charge_of = [](int pdg) {
+      if (pdg == 2212 || pdg == 211) { return 1; }
+      if (pdg == -211) { return -1; }
+      return 0;
+    };
+    struct APair { const char* name; int pro; int c0; };
+    const APair kPairs[] = {{"pip_p", 211, 2212},  {"pim_p", -211, 2212}, {"pim_n", -211, 2112},
+                            {"p_pim", 2212, -211}, {"n_pim", 2112, -211}, {"pi0_p", 111, 2212},
+                            {"pip_n", 211, 2112},  {"p_pip", 2212, 211}};
+    const auto rows = read_csv("bic_imr_absorb.csv");
+    for (const auto& r : rows) {
+      int pro = 0, c0 = 0;
+      for (const APair& q : kPairs) {
+        if (sv(r, 0) == q.name) { pro = q.pro; c0 = q.c0; }
+      }
+      if (pro == 0) { continue; }
+      const double ekin = dv(r, 1);
+      const double b = dv(r, 2);
+      const double m1 = mass_of(pro);
+      const double e1 = ekin + m1;
+      const imr::LorentzVector q1(deex::Vec3d{0.0, 0.0, std::sqrt(e1 * e1 - m1 * m1)}, e1);
+      const double m2 = mass_of(c0);
+      const deex::Vec3d k2{150.0, -80.0, 60.0};
+      const imr::LorentzVector q2(k2, std::sqrt(g4gpu::mag2(k2) + m2 * m2));
+      const deex::Vec3d x0{0.0, 0.0, 0.0};
+      const deex::Vec3d x1{b * fm, 0.0, 4.0 * fm};
+      imr::AbsorptionRefusal aref;
+      const double t = imr::time_to_absorption(pro, c0, charge_of(pro), charge_of(c0), x0, x1, q1,
+                                               q1, q2, m1, m2, aref);
+      // The candidate list the dump builds: the pair's partner, then a neutron spectator, then a
+      // proton one. `find_and_fill_cluster` is asked about the first of them.
+      const int charges[3] = {charge_of(c0), 0, 1};
+      const deex::Vec3d positions[3] = {x1,
+                                        deex::Vec3d{-1.0 * fm, 2.0 * fm, 3.0 * fm},
+                                        deex::Vec3d{2.0 * fm, -1.0 * fm, -3.0 * fm}};
+      const int partner =
+          imr::find_and_fill_cluster(charge_of(pro), charge_of(c0), x1, charges, positions, 3, 0);
+      const int scheduled = (t < DBL_MAX && partner >= 0) ? 1 : 0;
+      const std::string where = sv(r, 0) + " T=" + sv(r, 1) + " b=" + sv(r, 2);
+      cmp_int(b_absch, scheduled, iv(r, 3), where);
+      if (scheduled == 1 && iv(r, 3) == 1) {
+        cmp_scaled(b_abstime, t, dv(r, 4), 1e-18, where + " time");
+        cmp_int(b_absclu, iv(r, 5), 2, where + " two targets");
+        cmp_int(b_absclu, c0, iv(r, 6), where + " first target");
+        cmp_int(b_absclu, (partner == 1) ? 2112 : 2212, iv(r, 7), where + " partner");
+      }
+    }
+  }
+  {
+    // FindAndFillCluster on its own. The sets are the dump's, and the port is asked the same
+    // question for every candidate as the first target - which is what GetCollisions does.
+    struct Cand { double x, y, z; int charge; };
+    const Cand kSets[3][5] = {
+        {{0.2, 0.0, 4.1, 1}, {-0.2, 0.0, -4.1, 1}, {3.0, 1.0, 1.0, 0}, {-3.0, -1.0, -1.0, 0},
+         {0.1, 0.1, 4.0, 0}},
+        {{1.0, 1.0, 1.0, 1}, {-1.0, -1.0, -1.0, 1}, {0.5, 0.5, 0.5, 1}, {-0.5, -0.5, -0.5, 1},
+         {2.0, 0.0, 0.0, 0}},
+        {{0.0, 0.0, 5.0, 0}, {0.0, 0.0, -5.0, 0}, {1.0, 0.0, 4.5, 1}, {-1.0, 0.0, -4.5, 1},
+         {0.0, 3.0, 0.0, 0}}};
+    const double fm = 1.e-12;
+    const auto rows = read_csv("bic_imr_absorbcluster.csv");
+    for (const auto& r : rows) {
+      const int set = iv(r, 0);
+      const int first = iv(r, 2);
+      if (set < 0 || set > 2 || first < 0) { continue; }
+      int charges[5];
+      deex::Vec3d positions[5];
+      for (int k = 0; k < 5; ++k) {
+        charges[k] = kSets[set][k].charge;
+        positions[k] = deex::Vec3d{kSets[set][k].x * fm, kSets[set][k].y * fm,
+                                   kSets[set][k].z * fm};
+      }
+      const int partner = imr::find_and_fill_cluster(1, charges[first], positions[first], charges,
+                                                     positions, 5, first);
+      cmp_int(b_absclu, partner, iv(r, 3),
+              "cluster set " + sv(r, 0) + " first " + sv(r, 2) + " partner");
+    }
+  }
+  {
+    const double fm = 1.e-12;
+    const double m_pip = 139.5701;
+    const double m_pi0 = 134.9766;
+    struct FsCase { const char* name; int pro; int a; int b; };
+    const FsCase kCases[] = {{"pip_pp", 211, 2212, 2212},  {"pip_pn", 211, 2212, 2112},
+                             {"pip_np", 211, 2112, 2212},  {"pip_nn", 211, 2112, 2112},
+                             {"pim_pp", -211, 2212, 2212}, {"pim_pn", -211, 2212, 2112},
+                             {"pim_np", -211, 2112, 2212}, {"pim_nn", -211, 2112, 2112},
+                             {"pi0_pn", 111, 2212, 2112}};
+    (void)fm;
+    const auto rows = read_csv("bic_imr_absorbfs.csv");
+    for (const auto& r : rows) {
+      const FsCase* c = nullptr;
+      for (const FsCase& q : kCases) {
+        if (sv(r, 0) == q.name) { c = &q; }
+      }
+      if (c == nullptr) { continue; }
+      const double ekin = dv(r, 1);
+      const double m1 = (c->pro == 111) ? m_pi0 : m_pip;
+      const double e1 = ekin + m1;
+      // The same tilt the dump applies: rotateY(0.4) then rotateZ(0.9) on a +z momentum.
+      const double pmag = std::sqrt(e1 * e1 - m1 * m1);
+      double vx = pmag * std::sin(0.4);
+      double vz = pmag * std::cos(0.4);
+      double vy = 0.0;
+      const double cz = std::cos(0.9), sz = std::sin(0.9);
+      const double nx = vx * cz - vy * sz;
+      const double ny = vx * sz + vy * cz;
+      vx = nx;
+      vy = ny;
+      const imr::LorentzVector pro(deex::Vec3d{vx, vy, vz}, e1);
+      const double ma = (c->a == 2212) ? mp : mn;
+      const double mb = (c->b == 2212) ? mp : mn;
+      const deex::Vec3d k1{31.0, -17.0, 44.0};
+      const deex::Vec3d k2{-23.0, 51.0, -12.0};
+      const imr::LorentzVector t1(k1, std::sqrt(g4gpu::mag2(k1) + ma * ma));
+      const imr::LorentzVector t2(k2, std::sqrt(g4gpu::mag2(k2) + mb * mb));
+      CycleRng rng;
+      rng.reset(iv(r, 2));
+      const imr::AbsorptionFinalState fs = imr::meson_absorption_final_state(
+          c->pro, static_cast<double>((c->pro == 211) ? 1 : ((c->pro == -211) ? -1 : 0)), pro, t1,
+          t2, c->a, c->b, mp, mn, rng);
+      const std::string where = sv(r, 0) + " T=" + sv(r, 1) + " phase=" + sv(r, 2);
+      cmp_int(b_absdr, fs.pdg1, iv(r, 3), where + " d1");
+      cmp_int(b_absdr, fs.pdg2, iv(r, 4), where + " d2");
+      cmp_int(b_absdr, rng.n, iv(r, 13), where + " draws");
+      const double s1 = dv(r, 8);
+      const double s2 = dv(r, 12);
+      cmp_scaled(b_absfs, fs.p1.v.x, dv(r, 5), s1, where + " p1x");
+      cmp_scaled(b_absfs, fs.p1.v.y, dv(r, 6), s1, where + " p1y");
+      cmp_scaled(b_absfs, fs.p1.v.z, dv(r, 7), s1, where + " p1z");
+      cmp_scaled(b_absfs, fs.p1.e, dv(r, 8), s1, where + " p1e");
+      cmp_scaled(b_absfs, fs.p2.v.x, dv(r, 9), s2, where + " p2x");
+      cmp_scaled(b_absfs, fs.p2.v.y, dv(r, 10), s2, where + " p2y");
+      cmp_scaled(b_absfs, fs.p2.v.z, dv(r, 11), s2, where + " p2z");
+      cmp_scaled(b_absfs, fs.p2.e, dv(r, 12), s2, where + " p2e");
     }
   }
 

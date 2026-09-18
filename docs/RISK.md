@@ -10145,3 +10145,95 @@ MEASURED: dropping the division from the energy changes none of the 11,316 compa
 Both divisions are transcribed anyway - the rounding they carry is real, and a release that
 changed how `direction2` is built would make them load-bearing overnight. Recorded because a
 reader who removes them as dead weight would be making a judgement the code does not support.
+
+### V153: the pion absorption cross section reads its table before the first element, and the values cancel
+
+`G4MesonAbsorption::AbsorptionCrossSection` picks whose kinetic energy to look the cross section up
+at:
+
+```
+if (aT.GetDefinition()==G4PionPlus::PionPlusDefinition() ||
+    aT.GetDefinition()==G4PionMinus::PionMinusDefinition() )
+{ t = aT.Get4Momentum().t()-aT.Get4Momentum().mag()/MeV; }
+else if(bT.GetDefinition()==G4PionPlus::PionPlusDefinition() ||
+      bT.GetDefinition()!=G4PionMinus::PionMinusDefinition())
+{ t = bT.Get4Momentum().t()-bT.Get4Momentum().mag()/MeV; }
+```
+
+The second comparison in the `else if` is `!=` where the first is `==`. It does not make the branch
+fire too often - it makes it not fire at all for the one case it exists for. `GetTimeToAbsorption`
+has already established that one of the two tracks is a charged pion, so if `aT` is not one then
+`bT` is; and if that `bT` is a **pi-**, the first disjunct is false and the second is `pi- != pi-`,
+also false. `t` keeps its initialiser of zero.
+
+Then:
+
+```
+static const G4double it [26] = {0,4,50,5.5,75,8, ... ,300,2};
+if(t<=it[24])
+{ G4int count = 0;
+  while(t>it[count])count+=2;
+  G4double x1 = it[count-2]; G4double x2 = it[count];
+  G4double y1 = it[count-1]; G4double y2 = it[count+1];
+  aCross = y1+(y2-y1)/(x2-x1)*(t-x1); }
+```
+
+`it[0]` is 0, so `t > it[0]` is false at `t == 0`, `count` stays 0, and **`it[-2]` and `it[-1]` are
+read** - two doubles from whatever the linker put before the static array.
+
+The arithmetic then saves it. With `t == x2 == 0` the interpolation is `y1 + (y2-y1)*(0-x1)/(0-x1)`,
+which is `y2` exactly for any finite `x1 != 0`: **the out-of-bounds values cancel**. MEASURED
+against Geant4 itself, through the only door that is open - `AbsorptionCrossSection` and
+`GetTimeToAbsorption` are both private, but the verdict `distance <= sigma/pi` flips at one impact
+parameter, so scanning the transverse offset measures the cross section through the geometry that
+uses it. A proton projectile with a pi- candidate schedules an absorption out to b = 0.250 fm and
+no further, at every one of seven projectile energies; `pi*b^2` there is 1.96 mb, and the branch
+predicts `0.5*it[1] = 2` mb. Geant4's answer is the cancellation's answer.
+
+**How reachable is it?** Not, from `G4BinaryCascade` as it stands. `FindCollisions` calls
+`GetCollisions(secondary, theTargetList, theCurrentTime)`, and `theTargetList` holds the nucleus's
+nucleons - so the pion is always the PROJECTILE and always lands in slot `aT`, where the first
+branch fires correctly. The `t == 0` exit is also reachable honestly, by a charged pion at exactly
+zero momentum, which is measure-zero. So this is a latent out-of-bounds read, guarded only by the
+habits of its single caller, in a function whose signature invites either order.
+
+Reproduced, as the limit: the port returns `it[1]` at `count == 0` and sets
+`AbsorptionRefusal::read_before_table` so that a caller can see it happened. It cannot reproduce
+what Geant4 would do if the two doubles before the array were a zero or a NaN, because there is
+nothing before the port's array to read. MEASURED: correcting the `!=` to `==` changes the verdict
+at 0.275 fm and above for every pi- in slot b, and returning zero from that branch instead of
+`it[1]` changes it at b = 0.
+
+### V154: the absorbing pair's second nucleon is the one FARTHEST from the first
+
+`G4MesonAbsorption::FindAndFillCluster` chooses the second nucleon of the absorbing pair:
+
+```
+G4ThreeVector firstBase = aTarget->GetPosition();
+...
+G4ThreeVector secodeBase = (*j)->GetPosition();
+if((firstBase+secodeBase).mag()<min)
+{ min=(firstBase+secodeBase).mag(); partner = *j; }
+```
+
+with the comment `// get the one with the smallest distance.` three lines above it. It is a SUM of
+two position vectors where a distance is a difference. What it minimises is `|r1 + r2|`, which is
+smallest for the candidate most nearly diametrically opposite the first target through the origin
+of the nucleus's frame - **the farthest one, in the geometry it says it is picking the nearest in**.
+The misspelt `secodeBase` is a fair indication of how long it has been since anyone read the line.
+
+It is reachable and it runs on every absorption: it is how a two-nucleon absorbing cluster is
+formed, and the cluster's two members are then given back-to-back momenta in their own
+centre-of-momentum frame. The effect is that a pion is absorbed on a pair straddling the nucleus
+rather than on a pair beside each other.
+
+Reproduced. MEASURED: replacing the sum with a difference changes the partner in the port's own
+5-candidate sets and in 1,749 scheduled collisions.
+
+Also reproduced, and worth naming because it looks like the same kind of mistake and is not: the
+charge filter above it, `if (chargeSum+cCharge > 2) continue; if (chargeSum+cCharge < 0) continue;`
+where `chargeSum` is the projectile's charge plus the first target's. It is what stops a pi+ being
+absorbed on two protons and a pi- on two neutrons, and it is correct. MEASURED: removing it changes
+the partner in 1,749 collisions, and the first version of the oracle - which offered only a proton
+spectator - scheduled no absorption at all for a pi+ on a proton in 427 rows, because the filter
+had nothing left to choose.
