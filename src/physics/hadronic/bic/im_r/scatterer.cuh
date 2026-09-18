@@ -268,18 +268,25 @@ __host__ __device__ inline TimeToInteraction scatterer_time_to_interaction(
 // G4CollisionInitialState and G4CollisionManager.
 // =============================================================================================
 
-/// `G4CollisionInitialState`, with the two track pointers as indices into the cascade's track
-/// array. `theTs` - the target COLLECTION - is one entry for every collision `G4Scatterer`
-/// makes, because `GetCollisions` pushes exactly one target into it; the vector exists for
-/// `G4MesonAbsorption`, which makes two-target collisions and which this package does not have.
-/// So the collection is a single index here and the multi-target case is refused where it would
-/// be needed rather than carried empty.
+/// `G4CollisionInitialState`, with the track pointers as indices into the cascade's track pool.
+///
+/// `theTs` - the target COLLECTION - holds exactly one entry for a collision `G4Scatterer` made,
+/// because `GetCollisions` pushes one target into it, and exactly TWO for one `G4MesonAbsorption`
+/// made, because `FindAndFillCluster` gives it a pair. `G4BCDecay` and `G4BCLateParticle` leave
+/// it empty. Two slots is therefore the whole range, and `target2` is -1 for everything but an
+/// absorption.
 struct CollisionInitialState {
   double collision_time = DBL_MAX;
   int primary = -1;   ///< index of thePrimary
-  int target = -1;    ///< index of theTarget, or of theTs[0] when built by GetCollisions
-  int generator = -1; ///< which G4BCAction made it: 0 = G4Scatterer; -1 = none
+  int target = -1;    ///< index of theTs[0], or -1 for a decay or a late particle
+  int target2 = -1;   ///< index of theTs[1]: only G4MesonAbsorption fills it
+  int generator = -1; ///< which G4BCAction made it; see `CollisionGenerator` in cascade_find.cuh
   bool alive = false;
+
+  /// `G4CollisionInitialState::GetTargetCollection().size()`.
+  __host__ __device__ int n_targets() const {
+    return (target < 0) ? 0 : ((target2 < 0) ? 1 : 2);
+  }
 };
 
 /// `G4CollisionManager`'s list, in a caller-owned array. The cascade's own state never lives in
@@ -299,7 +306,7 @@ struct CollisionList {
   /// only caller, `G4BinaryCascade::FindCollisions`, would want, since it has already filtered
   /// on `GetTimeToInteraction` returning less than DBL_MAX.
   __host__ __device__ bool add(double time, int primary, int target, int generator,
-                               ScatterRefusal& ref) {
+                               ScatterRefusal& ref, int target2 = -1) {
     if (!(time < DBL_MAX)) { return false; }
     if (n >= capacity) {
       ref.list_full = true;
@@ -309,6 +316,7 @@ struct CollisionList {
     c.collision_time = time;
     c.primary = primary;
     c.target = target;
+    c.target2 = target2;
     c.generator = generator;
     c.alive = true;
     return true;
@@ -331,7 +339,8 @@ struct CollisionList {
     for (int i = 0; i < n; ++i) {
       if (!items[i].alive) { continue; }
       for (int j = 0; j < n_tracks; ++j) {
-        if (items[i].primary == tracks[j] || items[i].target == tracks[j]) {
+        if (items[i].primary == tracks[j] || items[i].target == tracks[j] ||
+            items[i].target2 == tracks[j]) {
           items[i].alive = false;
           break;
         }

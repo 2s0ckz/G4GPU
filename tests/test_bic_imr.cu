@@ -174,6 +174,7 @@
 #include "physics/hadronic/bic/im_r/absorption.cuh"
 #include "physics/hadronic/bic/im_r/decay.cuh"
 #include "physics/hadronic/bic/cascade_capture.cuh"
+#include "physics/hadronic/bic/cascade_find.cuh"
 #include "physics/hadronic/bic/cascade_step.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
@@ -2398,6 +2399,71 @@ int main() {
       cmp_scaled(b_bnd, bic::get_ion_mass(iv(r, 10), iv(r, 9), mn), dv(r, 7), 1e-6,
                  where + " mass_final");
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 3u. The collision scheduler and ApplyCollision. Neither has an oracle of its own - every
+  //     number in them comes from a piece compared above, and G4BinaryCascade exposes neither -
+  //     so what this block checks are the STRUCTURAL facts the two depend on, each of which
+  //     would be silently wrong in a plausible port.
+  // -------------------------------------------------------------------------------------------
+  const int b_sched = new_bucket("SchedulerStructure", 0.0);
+  {
+    // theImR's order, which is the order the constructor pushes the three actions and therefore
+    // the order they draw randoms in. G4BCDecay is FIRST and it is the only one that draws.
+    cmp_int(b_sched, static_cast<int>(bic::kGenDecay), 0, "G4BCDecay is theImR[0]");
+    cmp_int(b_sched, static_cast<int>(bic::kGenAbsorption), 1, "G4MesonAbsorption is theImR[1]");
+    cmp_int(b_sched, static_cast<int>(bic::kGenScatterer), 2, "G4Scatterer is theImR[2]");
+
+    // A RESONANCE with a nucleon target is in charge of neither composite, so the only thing
+    // that can happen to it inside the nucleus is its own decay. That is what bounds the buffer
+    // cache to four nucleon pairs and six pion-nucleon ones.
+    imr::ScatterRefusal sref;
+    cmp_int(b_sched, imr::scatterer_find_collision(2214, 2212, sref), -1,
+            "a delta+ on a proton finds no channel");
+    cmp_int(b_sched, imr::scatterer_find_collision(12212, 2112, sref), -1,
+            "an N(1440)+ on a neutron finds no channel");
+    cmp_int(b_sched, imr::scatterer_find_collision(2212, 2112, sref), 0,
+            "a proton on a neutron finds G4CollisionNN");
+    cmp_int(b_sched, imr::scatterer_find_collision(211, 2212, sref), 1,
+            "a pi+ on a proton finds G4CollisionMesonBaryon");
+    cmp_int(b_sched, imr::scatterer_find_collision(211, 2214, sref), 1,
+            "and a pi+ on a DELTA finds it too, by parton count");
+
+    // The target collection's size, which is what tells ApplyCollision whether it is looking at
+    // a scattering, an absorption, a decay or a late particle.
+    imr::CollisionInitialState c;
+    cmp_int(b_sched, c.n_targets(), 0, "a decay has no target");
+    c.target = 3;
+    cmp_int(b_sched, c.n_targets(), 1, "a scattering has one");
+    c.target2 = 7;
+    cmp_int(b_sched, c.n_targets(), 2, "an absorption has two");
+
+    // The buffer cache: one slot per pair of DEFINITIONS, reused on a repeat, and refusing
+    // rather than overwriting when the four nucleon pairs are full.
+    static bic::CascadeBuffers buf;
+    static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
+    const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
+    bic::CascadeRefusal bref;
+    const int s0 = bic::ensure_nn_buffer(buf, chans, n_chan, 2212, 2212, mp, mp, bref);
+    const int s0b = bic::ensure_nn_buffer(buf, chans, n_chan, 2212, 2212, mp, mp, bref);
+    cmp_int(b_sched, s0b, s0, "the same pair gets the same slot");
+    const int s1 = bic::ensure_nn_buffer(buf, chans, n_chan, 2112, 2212, mn, mp, bref);
+    cmp_int(b_sched, (s1 != s0) ? 1 : 0, 1, "a different pair gets a different slot");
+    bic::ensure_nn_buffer(buf, chans, n_chan, 2212, 2112, mp, mn, bref);
+    bic::ensure_nn_buffer(buf, chans, n_chan, 2112, 2112, mn, mn, bref);
+    cmp_int(b_sched, bref.capacity ? 1 : 0, 0, "four nucleon pairs fit");
+    bic::ensure_nn_buffer(buf, chans, n_chan, 2214, 2212, 1232.0, mp, bref);
+    cmp_int(b_sched, bref.capacity ? 1 : 0, 1, "a fifth refuses rather than overwriting");
+
+    // The species helpers the three schedulers share, so that they cannot disagree.
+    cmp_int(b_sched, bic::CascadeSpecies::iso3_of(2212), 1, "a proton is iso3 +1/2");
+    cmp_int(b_sched, bic::CascadeSpecies::iso3_of(2112), -1, "a neutron is -1/2");
+    cmp_int(b_sched, bic::CascadeSpecies::iso3_of(211), 2, "a pi+ is +1");
+    cmp_int(b_sched, bic::CascadeSpecies::iso3_of(-211), -2, "a pi- is -1");
+    cmp_int(b_sched, bic::CascadeSpecies::iso3_of(111), 0, "a pi0 is 0");
+    cmp_int(b_sched, bic::CascadeSpecies::is_pion(111) ? 1 : 0, 1, "a pi0 is a pion");
+    cmp_int(b_sched, bic::CascadeSpecies::is_pion(2212) ? 1 : 0, 0, "a proton is not");
   }
 
   // 4. Structural assertions on the extracted tables. These are not oracle comparisons - they
