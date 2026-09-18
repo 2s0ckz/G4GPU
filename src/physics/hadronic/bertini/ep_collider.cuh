@@ -99,7 +99,9 @@ enum class ColliderRefusal {
   kNeutrinoProjectile,      ///< collide() returns immediately for a neutrino
   kNoChannelTable,          ///< no table and neither particle is a dibaryon
   kIllegalDibaryonPartner,  ///< useQuasiDeuteron rejects the pair
-  kMuonAbsorption,          ///< generateSCMmuonAbsorption - P12's, refused by name
+  kMuonAbsorption,          ///< generateSCMmuonAbsorption reached a pair it has no channel for.
+                            ///< No longer a port refusal: P12 transcribed the two channels it
+                            ///< does have, and this is Geant4 own "Illegal absorption"
   kIllegalAbsorption,       ///< the type product matches none of the nine absorption cases
   kIllegalPionNAbsorption,  ///< pi-p / pi+n charge exchange expected and not found
   kPionNAbsorptionNucleus,  ///< the pi-N-on-a-bound-nucleon arm fired but no (A, Z) was given
@@ -120,8 +122,12 @@ enum class ColliderRefusal {
 /// refused channel table are not: they are places where Geant4 would have produced something
 /// and this port will not, and they have to reach the caller by name.
 __host__ __device__ inline bool collider_refusal_is_port_limit(ColliderRefusal r) {
-  return r == ColliderRefusal::kMuonAbsorption ||
-         r == ColliderRefusal::kPionNAbsorptionNucleus ||
+  // `kMuonAbsorption` LEFT this list in P12. It used to mean "this port declines to do muon
+  // absorption"; it now means "Geant4's own Illegal absorption", i.e. a mu- met a dibaryon it
+  // has no channel for, which Geant4 answers with an empty final state and a pass-through. The
+  // difference is not cosmetic: while it was a port limit the cascade ABORTED the event, and
+  // 154 of 159 muon captures in carbon were lost that way.
+  return r == ColliderRefusal::kPionNAbsorptionNucleus ||
          r == ColliderRefusal::kMultiplicityTooLarge ||
          r == ColliderRefusal::kChannelRefused;
 }
@@ -517,6 +523,133 @@ __host__ __device__ inline bool ep_pion_nucleon_absorption(int is, double ekin,
 /// two-body form written out rather than through TwoBodyMomentum - `a = (E^2-m1^2-m2^2)/2` and
 /// `p = sqrt((a^2 - m1^2 m2^2)/E^2)` - which is the same number in exact arithmetic and a
 /// different one in floating point, so it is written the way Geant4 writes it.
+/// G4GDecay3: three-body phase space, the only thing `generateSCMmuonAbsorption` needs that the
+/// rest of the collider does not have. cascade/cascade/src/G4GDecay3.cc, all of it.
+///
+/// **`loopMax` is 100 and is never used.** The constructor stores it, `CalculateMomentumMagnitudes`
+/// has an UNBOUNDED `do { ... } while (momentummax > momentumsum - momentummax)` and always
+/// returns true, and `GetThreeBodyMomenta`'s failure arm - whose message prints `loopMax` - is
+/// therefore unreachable. So is the "GetThreeBodyMomenta() failed" branch in
+/// `generateSCMmuonAbsorption` that tests for an empty vector. Both are transcribed as the dead
+/// code they are rather than deleted; same family as docs/RISK.md V130 and V140.
+///
+/// The rejection is the standard one for a flat Dalitz plot: two uniforms sorted into descending
+/// order carve the available kinetic energy into three, and the triple is kept only when no one
+/// momentum exceeds the sum of the other two - the triangle inequality that lets three momenta
+/// close.
+///
+/// `parent_mass` is floored at the daughter-mass sum plus 1 keV by the constructor, which keeps
+/// `availableE` positive at threshold.
+template <typename Rng>
+__host__ __device__ inline void g4_decay3_momenta(double parent_mass_in, double m0, double m1,
+                                                  double m2, Vec3d& p0, Vec3d& p1, Vec3d& p2,
+                                                  Rng& rng) {
+  const double k_keV = 1.0e-6;      // CLHEP::keV in Bertini's GeV
+  const double sum = m0 + m1 + m2;
+  const double parent_mass = (parent_mass_in > sum + k_keV) ? parent_mass_in : (sum + k_keV);
+  const double available = parent_mass - m0 - m1 - m2;
+
+  double pd0 = 0.0, pd1 = 0.0, pd2 = 0.0;
+  for (;;) {
+    double r1 = rng.uniform();
+    double r2 = rng.uniform();
+    if (r2 > r1) {
+      const double t = r1;
+      r1 = r2;
+      r2 = t;
+    }
+    double mmax = 0.0;
+    double msum = 0.0;
+    double energy = r2 * available;
+    pd0 = std::sqrt(energy * energy + 2.0 * energy * m0);
+    if (pd0 > mmax) { mmax = pd0; }
+    msum += pd0;
+    energy = (1.0 - r1) * available;
+    pd1 = std::sqrt(energy * energy + 2.0 * energy * m1);
+    if (pd1 > mmax) { mmax = pd1; }
+    msum += pd1;
+    energy = (r1 - r2) * available;
+    pd2 = std::sqrt(energy * energy + 2.0 * energy * m2);
+    if (pd2 > mmax) { mmax = pd2; }
+    msum += pd2;
+    if (!(mmax > msum - mmax)) { break; }
+  }
+
+  const double costheta = 2.0 * rng.uniform() - 1.0;
+  const double sintheta = std::sqrt((1.0 - costheta) * (1.0 + costheta));
+  const double twopi = 6.283185307179586476925286766559;   // CLHEP::twopi
+  const double phi = twopi * rng.uniform();
+  const double sinphi = std::sin(phi);
+  const double cosphi = std::cos(phi);
+  const Vec3d dir0{sintheta * cosphi, sintheta * sinphi, costheta};
+
+  const double costhetan = (pd1 * pd1 - pd2 * pd2 - pd0 * pd0) / (2.0 * pd2 * pd0);
+  const double sinthetan = std::sqrt((1.0 - costhetan) * (1.0 + costhetan));
+  const double phin = twopi * rng.uniform();
+  const double sinphin = std::sin(phin);
+  const double cosphin = std::cos(phin);
+  const Vec3d dir2{sinthetan * cosphin * costheta * cosphi - sinthetan * sinphin * sinphi +
+                       costhetan * sintheta * cosphi,
+                   sinthetan * cosphin * costheta * sinphi + sinthetan * sinphin * cosphi +
+                       costhetan * sintheta * sinphi,
+                   -sinthetan * cosphin * sintheta + costhetan * costheta};
+
+  p0 = Vec3d{dir0.x * pd0, dir0.y * pd0, dir0.z * pd0};
+  p2 = Vec3d{dir2.x * pd2, dir2.y * pd2, dir2.z * pd2};
+  // Geant4 writes daughter 1 as `-direction0*pDaughter0 - direction2*pDaughter2`, the recoil that
+  // closes the triangle, and NOT from its own magnitude - so `pd1` is used only by the rejection.
+  p1 = Vec3d{-p0.x - p2.x, -p0.y - p2.y, -p0.z - p2.z};
+}
+
+/// G4ElementaryParticleCollider::generateSCMmuonAbsorption.
+///
+/// mu- on a dibaryon, which is how Bertini absorbs a captured muon: the muon and a correlated
+/// nucleon pair go to two nucleons and a mu-neutrino, the neutrino carrying away most of the
+/// 105.7 MeV. Two channels and no others -
+///
+///     mu- + diproton   ->  p + n + nu_mu
+///     mu- + unboundPN  ->  n + n + nu_mu
+///
+/// and anything else is "Illegal absorption", an empty final state, which the caller turns into
+/// "failed to collide" and passes the bullet through. There is no mu- + dineutron channel because
+/// there is no charge-conserving one.
+///
+/// **This was refused by name in P10 as P12's, and P12 arrived.** It is the one place where a
+/// deferred refusal in this port has been redeemed rather than described, and the cost of NOT
+/// having it was measured before it was written: 154 of 159 muon captures in carbon came back
+/// `kColliderRefused`, i.e. every muon that was not decaying in orbit.
+template <typename Rng>
+__host__ __device__ inline void ep_generate_scm_muon_absorption(double etot_scm, int type1,
+                                                                int type2, ColliderOutput& out,
+                                                                Rng& rng) {
+  const int tp = type1 * type2;
+  int k0, k1;
+  if (tp == kMuonMinus * kDiproton) {
+    k0 = kProton;
+    k1 = kNeutron;
+  } else if (tp == kMuonMinus * kUnboundPN) {
+    k0 = kNeutron;
+    k1 = kNeutron;
+  } else {
+    out.refusal = ColliderRefusal::kIllegalAbsorption;
+    out.n = 0;
+    return;
+  }
+  const int k2 = kMuonNu;
+  const double m0 = inucl_particle_mass(k0);
+  const double m1 = inucl_particle_mass(k1);
+  const double m2 = inucl_particle_mass(k2);
+  Vec3d p0, p1, p2;
+  g4_decay3_momenta(etot_scm, m0, m1, m2, p0, p1, p2, rng);
+  out.n = 3;
+  out.kinds[0] = k0;
+  out.kinds[1] = k1;
+  out.kinds[2] = k2;
+  out.momenta[0] = lv_set_vect_m(p0, m0);
+  out.momenta[1] = lv_set_vect_m(p1, m1);
+  out.momenta[2] = lv_set_vect_m(p2, m2);
+}
+
 template <typename Rng>
 __host__ __device__ inline void ep_generate_scm_pion_absorption(double etot_scm, int type1,
                                                                 int type2, ColliderOutput& out,
@@ -769,10 +902,12 @@ __host__ __device__ inline void ep_collide_in_nucleus(int type1, const LV& mom1,
       return;
     }
     if (inucl_is_muon(type1) || inucl_is_muon(type2)) {
-      out.refusal = ColliderRefusal::kMuonAbsorption;
-      return;
+      // P10 refused this by name as P12's; P12 arrived. Geant4's own `if/else` here, with the
+      // comment "Currently, pion absorption also handles gammas" on the other arm.
+      ep_generate_scm_muon_absorption(etot_scm, type1, type2, out, rng);
+    } else {
+      ep_generate_scm_pion_absorption(etot_scm, type1, type2, out, rng);
     }
-    ep_generate_scm_pion_absorption(etot_scm, type1, type2, out, rng);
   }
 
   if (out.n == 0) { return; }   // "failed to collide": bullet passes through

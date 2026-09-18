@@ -1189,7 +1189,13 @@ void dump_epcollide_pass(FILE* f, int ps) {
       {pionPlus, unboundPN}, {pionMinus, diproton}, {pionZero, unboundPN},
       {pionZero, diproton}, {pionZero, dineutron}, {pionPlus, dineutron},
       {pionMinus, unboundPN}, {photon, diproton}, {photon, unboundPN},
-      {photon, dineutron}};
+      {photon, dineutron},
+      // MUON absorption, added by P12. These two pairs are the whole of
+      // `generateSCMmuonAbsorption`, which P10 refused by name as P12's and P12 transcribed; the
+      // third dibaryon has no charge-conserving muon channel and is here to dump Geant4's
+      // "Illegal absorption" - an empty final state, not a refusal - so that the port's
+      // pass-through is compared rather than assumed.
+      {mum, diproton}, {mum, unboundPN}, {mum, dineutron}};
 
   // Lab momenta of the bullet, GeV/c. Covers the sub-threshold region, the Delta, the
   // multi-pion rise and the top of Bertini's range.
@@ -1813,6 +1819,7 @@ void dump_bertini(const DumpContext&) {
   // checked-in program is the one that produces the checked-in oracle: with it unset this runs
   // everything, which is what ref/oracle/run.bat does.
   if (std::getenv("G4GPU_BERTINI_APPLY_ONLY")) { dump_apply(); return; }
+  if (std::getenv("G4GPU_BERTINI_EPCOLLIDE_ONLY")) { dump_epcollide(); return; }
   dump_params();
   dump_particles();
   dump_nuclei();
