@@ -44,8 +44,9 @@
 // Failing either of the first two returns the initial state: status isAlive, the lepton's own
 // energy and direction, no secondaries. That is a real outcome of a real interaction in Geant4 -
 // the process has already decided the electron interacts - so it is NOT a refusal here either,
-// and `LeptonVdResult::no_photon` records which gate closed. Measured over the campaign, the
-// first gate closes for 1 to 7% of events and the third for none.
+// and `LeptonVdResult::no_photon` records which gate closed. Measured over the campaign: the
+// first gate closes for 0.5% to 7% of events depending on the case, the third for none of
+// them, and the port's rate agrees with Geant4's to 0.3 of a standard error over 66 cases.
 //
 // THE MUON MODEL'S LOW-ENERGY RETURN
 //
