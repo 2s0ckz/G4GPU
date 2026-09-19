@@ -79,10 +79,15 @@ struct AbsorbRefusal {
   int refused_pdg = 0;
 };
 
-__host__ __device__ inline bool absorb(const CascadeTrack* secondaries, int n,
+/// `pool` is the whole track pool and `n` its length; the loop takes only the tracks tagged
+/// `kListSecondary`, because Geant4 iterates `theSecondaryList`. **That filter is the whole
+/// correctness of this function.** Without it the loop walks the nucleus's own target nucleons,
+/// which are all `inside` - see `capture_decision` below, where leaving it out was measured.
+__host__ __device__ inline bool absorb(const CascadeTrack* pool, int n,
                                        double cut_on_p_absorb, AbsorbRefusal& ref) {
   for (int i = 0; i < n; ++i) {
-    const CascadeTrack& kt = secondaries[i];
+    const CascadeTrack& kt = pool[i];
+    if (kt.list != kListSecondary) { continue; }
     if (kt.state != kInside) { continue; }
     if (will_be_absorbed(kt.pdg, kt.momentum.e, kt.actual_mass(), cut_on_p_absorb)) {
       ref.would_absorb = true;
@@ -106,13 +111,28 @@ struct CaptureDecision {
 /// `field_minus_barrier` is `GetField(pdg, pos) - GetBarrier(pdg)`, which the caller has the
 /// propagator for. Splitting the decision from the move is the port's shape, not Geant4's: the
 /// move is three lines and the decision is the part worth checking on its own.
+///
+/// ## THE LOOP IS OVER theSecondaryList AND NOTHING ELSE
+///
+/// `pool` is the whole track pool, so the `kListSecondary` filter is what makes this Geant4's
+/// loop. Leaving it out does not look like a bug - every skipped track is still `inside` and
+/// still a nucleon - and it is catastrophic, because the gate is a MEAN and a BOUND nucleon
+/// contributes a NEGATIVE term: `e - m` is a few tens of MeV and the field is about -40.
+/// MEASURED, on the C12 cases of `bic_imr_prop.csv` with the filter absent: the gate saw
+/// `count 12` - the whole nucleus - with `capturedEnergy = -240.7 MeV`, a mean of -20.1 against
+/// a threshold of 9, so it said CAPTURE on the first turn of the collision loop of every single
+/// case. The projectile went straight into theCapturedList, the cascade ended with nothing in
+/// theFinalState, and the excitation energy came out equal to the whole beam energy. Twelve of
+/// the forty cases produced zero products where Geant4 produced one to five. Nothing threw,
+/// nothing was refused, and the event looked like a projectile that had simply been absorbed.
 template <typename Prop>
-__host__ __device__ inline CaptureDecision capture_decision(const CascadeTrack* secondaries,
+__host__ __device__ inline CaptureDecision capture_decision(const CascadeTrack* pool,
                                                             int n, double cut_on_p,
                                                             const Prop& propagator) {
   CaptureDecision d;
   for (int i = 0; i < n; ++i) {
-    const CascadeTrack& kt = secondaries[i];
+    const CascadeTrack& kt = pool[i];
+    if (kt.list != kListSecondary) { continue; }
     if (kt.state != kInside) { continue; }
     if (kt.pdg != imr::kPdgProton && kt.pdg != imr::kPdgNeutron) { continue; }
     const double field = propagator.field(kt.pdg, kt.position) - propagator.barrier(kt.pdg);

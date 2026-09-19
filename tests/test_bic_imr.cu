@@ -181,6 +181,7 @@
 #include "physics/hadronic/bic/cascade_find.cuh"
 #include "physics/hadronic/bic/cascade_deexcite.cuh"
 #include "physics/hadronic/bic/cascade_finish.cuh"
+#include "physics/hadronic/bic/cascade_propagate.cuh"
 #include "physics/hadronic/bic/cascade_step.cuh"
 #include "physics/hadronic/bic/cascade_collision.cuh"
 #include "physics/hadronic/bic/cascade_state.cuh"
@@ -434,6 +435,41 @@ struct CycleRng {
     const double v = seq[(n + phase) % 8];
     ++n;
     return v;
+  }
+};
+
+/// The largest tape any case in `bic_imr_proptape.csv` needs. The whole file is 2,620 values
+/// across forty cases; 8,192 is room for a case ten times the worst of them.
+inline constexpr int kTapeMax = 8192;
+
+/// A RECORDED random stream, replayed value by value.
+///
+/// This is the strongest oracle in this file and it is worth saying why. Every other block
+/// drives a sampler with a prescribed sequence and compares what comes out. `Propagate` cannot
+/// be checked that way: its loop consumes uniforms in an order that depends on what the
+/// previous turn produced, so a prescribed cycle would prove only that the port agrees at the
+/// few points of the cycle it happens to land on - and an eight-value cycle puts every nucleon
+/// of the nucleus in the same place and hangs BetaKopylov outright (docs/RISK.md V157). So the
+/// dump runs CLHEP own HepJamesRandom and writes down every value it served, in order, and this
+/// hands them back. If the port draws one more or one fewer uniform anywhere, its very next
+/// number belongs to something else and every product after that point is wrong. The draw count
+/// is compared too, so a failure says WHERE and not only THAT.
+///
+/// `overrun` counts reads past the end of the tape, which is the port asking for more than
+/// Geant4 did. It returns 0.5 in that case rather than reading out of bounds - a value that will
+/// not look like a plausible continuation of anything.
+struct TapeRng {
+  double value[kTapeMax] = {};
+  int n_values = 0;
+  int n = 0;
+  int overrun = 0;
+  __host__ __device__ double uniform() {
+    if (n >= n_values || n >= kTapeMax) {
+      ++overrun;
+      ++n;
+      return 0.5;
+    }
+    return value[n++];
   }
 };
 
@@ -2407,6 +2443,10 @@ int main() {
         list[k] = bic::CascadeTrack{};
         list[k].pdg = pdgs[k];
         list[k].state = bic::kInside;
+        // `capture_decision` and `absorb` take the whole POOL and pick out theSecondaryList,
+        // so every track here has to carry the tag or the gate would see an empty list. That
+        // filter is not cosmetic - see the header note on `capture_decision`.
+        list[k].list = bic::kListSecondary;
         list[k].position = deex::Vec3d{radii[k] * 1.e-12, 0.0, 0.0};
         list[k].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, pmags[k]},
                                               std::sqrt(pmags[k] * pmags[k] + m * m));
@@ -2832,6 +2872,241 @@ int main() {
   }
 
   // -------------------------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------------------------
+  // 3x. G4BinaryCascade::Propagate - the cascade loop itself, against a RECORDED random stream.
+  //
+  //     There is no intermediate quantity to compare here. Every turn of the loop consumes
+  //     uniforms, so a port that is one draw out of step produces a different event from that
+  //     point on and nothing short of the products says so. The oracle is therefore a TAPE:
+  //     `ref/dump/dump_bic.cc` runs CLHEP's own HepJamesRandom at a fixed seed through a wrapper
+  //     that records every value it serves, calls the PUBLIC `G4BinaryCascade::Propagate`
+  //     directly on a nucleus and a secondary list it built, and writes the tape out with the
+  //     case. `TapeRng` below replays it.
+  //
+  //     That makes the comparison bitwise AND makes the draw count part of the comparison: one
+  //     extra rejection, one missing SampleResidualLifetime, one FindCollisions called before the
+  //     list was updated instead of after, and the very next number the port reads is somebody
+  //     else's. `ndraws` goes out with the row so a divergence says where.
+  //
+  //     The loop run here is `ApplyYourself`'s INNER loop, which is what the dump runs: sample
+  //     the impact parameter with `get_sphere_point`, run the cascade, and stop when it returns
+  //     something. The nucleus is NOT rebuilt - that is the outer loop, and its ingredient is
+  //     P9's own oracle - and it is loaded from `bic_imr_propnuc.csv` rather than replayed,
+  //     because `G4Fancy3DNucleus::Init` spends thousands of uniforms on lead and is already
+  //     validated bitwise. Everything else about the nucleus is a function of (A, Z).
+  //
+  //     `de_excite` returns nothing, because the dump's precompound model is one that records the
+  //     fragment and returns an empty vector. So what is compared is the CASCADE's final state
+  //     and the FRAGMENT it hands over - which is exactly the boundary `propagate` draws.
+  // -------------------------------------------------------------------------------------------
+  const int b_prp = new_bucket("PropagateStructure", 0.0);
+  const int b_prm = new_bucket("PropagateMomenta", 3e-13);
+  const int b_prf = new_bucket("PropagateFragment", 3e-13);
+  {
+    const auto rows = read_csv("bic_imr_prop.csv");
+    const auto nucrows = read_csv("bic_imr_propnuc.csv");
+    const auto taperows = read_csv("bic_imr_proptape.csv");
+    const auto fsrows = read_csv("bic_imr_propfs.csv");
+
+    // Caller-owned storage, sized for the heaviest case in the sweep (Pb208).
+    static bic::Nucleon nucleons[256];
+    static double proton_field[bic::kMaxFieldTable];
+    static double neutron_field[bic::kMaxFieldTable];
+    static bic::CascadeTrack pool[768];
+    static imr::CollisionInitialState colls[4096];
+    static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
+    static bic::CascadeBuffers buffers;
+    static bic::CascadeProduct products[256];
+    static bic::CascadeProduct preco[8];
+    const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
+
+    for (const auto& r : rows) {
+      const int icase = iv(r, 0);
+      const int a = iv(r, 1);
+      const int z = iv(r, 2);
+      const int pdg = iv(r, 3);
+      const double ekin = dv(r, 4);
+      const std::string where = "case " + std::to_string(icase) + " (A=" + std::to_string(a) +
+                                " pdg=" + std::to_string(pdg) + " T=" + std::to_string(ekin) +
+                                ")";
+
+      // The nucleus, straight out of the dump. `nucleondistance`, the density and the Fermi
+      // momentum table are functions of (A, Z) and are built here the way `nucleus_init` builds
+      // them, because the cascade reads all three and none of them is in the nucleon rows.
+      bic::Nucleus3D nucleus;
+      nucleus.nucleons = nucleons;
+      nucleus.capacity = 256;
+      nucleus.my_a = a;
+      nucleus.my_z = z;
+      nucleus.my_l = 0;
+      nucleus.current = -1;
+      nucleus.excitation = 0.0;
+      nucleus.nucleondistance = (a == 12) ? 0.9 * deex::fermi() : 0.8 * deex::fermi();
+      nucleus.density = (a < 17) ? bic::make_shell_model_density(a, z)
+                                 : bic::make_fermi_density(a, z);
+      nucleus.fermi.init(a, z);
+      int n_loaded = 0;
+      for (const auto& nr : nucrows) {
+        if (iv(nr, 0) != icase) { continue; }
+        const int i = iv(nr, 1);
+        if (i < 0 || i >= 256) { continue; }
+        nucleons[i] = bic::Nucleon{};
+        nucleons[i].type = (iv(nr, 2) == imr::kPdgProton) ? bic::kProton
+                                                          : bic::kNeutron;
+        nucleons[i].position = deex::Vec3d{dv(nr, 3), dv(nr, 4), dv(nr, 5)};
+        nucleons[i].momentum = imr::LorentzVector(deex::Vec3d{dv(nr, 6), dv(nr, 7), dv(nr, 8)},
+                                                  dv(nr, 9));
+        nucleons[i].hit = false;
+        ++n_loaded;
+      }
+      cmp_int(b_prp, n_loaded, a, where + " nucleon rows");
+      if (n_loaded != a) { continue; }
+
+      // The tape.
+      TapeRng tape;
+      tape.n_values = 0;
+      for (const auto& tr : taperows) {
+        if (iv(tr, 0) != icase) { continue; }
+        const int i = iv(tr, 1);
+        if (i >= 0 && i < kTapeMax) {
+          tape.value[i] = dv(tr, 2);
+          if (i + 1 > tape.n_values) { tape.n_values = i + 1; }
+        }
+      }
+      cmp_int(b_prp, tape.n_values, iv(r, 13), where + " tape length");
+      tape.n = 0;
+      tape.overrun = 0;
+
+      bic::NucleusReport nrep;
+      bic::RkPropagation prop = bic::make_rk_propagation(nucleus, nrep, proton_field,
+                                                         neutron_field, bic::kMaxFieldTable);
+      cmp_int(b_prp, nrep.fatal() ? 1 : 0, 0, where + " propagator built");
+
+      bic::CascadeSpecies sp;
+      sp.proton_mass = g4gpu::units::proton_mass_c2<double>();
+      sp.neutron_mass = g4gpu::units::neutron_mass_c2<double>();
+      sp.pi_plus_mass = bic::pdg_mass_pion_charged();
+      sp.pi_zero_mass = bic::pdg_mass_pion_zero();
+
+      bic::CascadeWorkspace ws;
+      ws.pool = pool;
+      ws.pool_capacity = 768;
+      ws.collisions = colls;
+      ws.collision_capacity = 4096;
+      ws.channels = chans;
+      ws.n_channels = n_chan;
+      ws.buffers = &buffers;
+      ws.products = products;
+      ws.product_capacity = 256;
+      ws.preco_products = preco;
+      ws.preco_capacity = 8;
+      // A fresh buffer set per case: Geant4's composites keep theirs for the life of the process
+      // (docs/RISK.md V155 is what that costs), and the numbers are the same either way because
+      // the buffer is a function of the pair and nothing else.
+      buffers = bic::CascadeBuffers{};
+
+      const imr::LorentzVector initial4(deex::Vec3d{dv(r, 9), dv(r, 10), dv(r, 11)}, dv(r, 12));
+      const double mass = std::sqrt(std::fabs(initial4.e * initial4.e -
+                                              g4gpu::mag2(initial4.v)));
+
+      // `ApplyYourself`'s inner loop, as the dump runs it.
+      bic::BicCascadeState st;
+      bic::PropagateResult pr;
+      bic::CascadeRefusal cref;
+      bic::CascadeFragment frag_seen;
+      bool frag_called = false;
+      deex::Vec3d pos{0.0, 0.0, 0.0};
+      int ntries = 0;
+      int guard = 200;
+      bool have = false;
+      do {
+        const double radius = nucleus.outer_radius() + 3.0 * deex::fermi();
+        pos = bic::get_sphere_point(1.1 * radius, initial4.v, tape);
+        ++ntries;
+        bic::CascadeTrack kt;
+        kt.pdg = pdg;
+        kt.pdg_mass = mass;
+        kt.charge = (pdg == 2212 || pdg == 211) ? 1 : ((pdg == -211) ? -1 : 0);
+        kt.baryon = (pdg == 2212 || pdg == 2112) ? 1 : 0;
+        kt.momentum = initial4;
+        kt.position = pos;
+        kt.formation_time = 0.0;
+        kt.state = bic::kOutside;
+        kt.creator_model_id = bic::bic_model_id();
+        cref = bic::CascadeRefusal{};
+        frag_called = false;
+        auto de = [&](const bic::CascadeFragment& f, bic::CascadeProduct*, int) {
+          frag_seen = f;
+          frag_called = true;
+          return 0;  // the dump's precompound model returns an empty vector
+        };
+        pr = bic::propagate(st, nucleus, prop, sp, ws, &kt, 1, nucleus.density,
+                            bic::coulomb_barrier_mev(a, z), de, tape, cref);
+        have = (pr.outcome != bic::kPropagateNoCollision);
+        if (cref.any()) {
+          std::printf("REFUSED propagate %s: he=%d cap=%d nuc=%d unk=%d void=%d pdg=%d\n",
+                      where.c_str(), cref.high_energy_primary ? 1 : 0, cref.capacity ? 1 : 0,
+                      cref.invalid_nucleus ? 1 : 0, cref.unknown_species ? 1 : 0,
+                      cref.void_nucleus ? 1 : 0, cref.refused_pdg);
+          ++fails;
+          break;
+        }
+      } while (!have && --guard > 0);
+
+      cmp_int(b_prp, ntries, iv(r, 5), where + " tries");
+      cmp_int(b_prp, tape.n, iv(r, 13), where + " uniforms consumed");
+      cmp_int(b_prp, tape.overrun, 0, where + " tape not overrun");
+      cmp_scaled(b_prm, pos.x, dv(r, 6), std::fabs(dv(r, 8)), where + " pos x");
+      cmp_scaled(b_prm, pos.y, dv(r, 7), std::fabs(dv(r, 8)), where + " pos y");
+      cmp_scaled(b_prm, pos.z, dv(r, 8), std::fabs(dv(r, 8)), where + " pos z");
+      // `nprod` is -1 for Geant4's NULL and 0 for an empty vector, which are different answers.
+      const int want_prod = iv(r, 14);
+      cmp_int(b_prp, have ? pr.n_products : -1, want_prod, where + " product count");
+      cmp_int(b_prp, frag_called ? 1 : 0, iv(r, 15), where + " precompound called");
+      if (iv(r, 15) == 1 && frag_called) {
+        cmp_int(b_prf, frag_seen.a, iv(r, 16), where + " fragment A");
+        cmp_int(b_prf, frag_seen.z, iv(r, 17), where + " fragment Z");
+        cmp_int(b_prf, frag_seen.holes, iv(r, 19), where + " fragment holes");
+        cmp_int(b_prf, frag_seen.particles, iv(r, 20), where + " fragment particles");
+        cmp_int(b_prf, frag_seen.charged, iv(r, 21), where + " fragment charged");
+        const double fsc = std::fabs(dv(r, 25));
+        cmp_scaled(b_prf, frag_seen.momentum.v.x, dv(r, 22), fsc, where + " fragment px");
+        cmp_scaled(b_prf, frag_seen.momentum.v.y, dv(r, 23), fsc, where + " fragment py");
+        cmp_scaled(b_prf, frag_seen.momentum.v.z, dv(r, 24), fsc, where + " fragment pz");
+        cmp_scaled(b_prf, frag_seen.momentum.e, dv(r, 25), fsc, where + " fragment e");
+        // The excitation energy G4Fragment computed from that four-momentum. The port's own
+        // `get_excitation_energy` is the same number by a different route - the fragment's
+        // invariant mass minus GetIonMass(Z,A) - and comparing both is what would catch a
+        // fragment that was built from the right momentum and the wrong (A, Z).
+        // The scale is the FRAGMENT'S ENERGY and not the excitation: the excitation is a
+        // difference of two numbers near 15,000 MeV and agreeing to 4e-12 MeV on it is agreeing
+        // to 2.4e-16 on what it is made of, which is the last bit.
+        cmp_scaled(b_prf, pr.excitation_energy, dv(r, 18), fsc, where + " excitation energy");
+      }
+
+      // Every product, in order. `newlyadded` is `IsParticipant()`, which is what the decay pass
+      // has to preserve through the list rebuild.
+      int seen = 0;
+      for (const auto& fr : fsrows) {
+        if (iv(fr, 0) != icase) { continue; }
+        const int i = iv(fr, 1);
+        if (i < 0 || i >= pr.n_products) { continue; }
+        const std::string pw = where + " product " + std::to_string(i);
+        cmp_int(b_prp, products[i].pdg, iv(fr, 2), pw + " pdg");
+        const double psc = std::fabs(dv(fr, 6));
+        cmp_scaled(b_prm, products[i].momentum.v.x, dv(fr, 3), psc, pw + " px");
+        cmp_scaled(b_prm, products[i].momentum.v.y, dv(fr, 4), psc, pw + " py");
+        cmp_scaled(b_prm, products[i].momentum.v.z, dv(fr, 5), psc, pw + " pz");
+        cmp_scaled(b_prm, products[i].momentum.e, dv(fr, 6), psc, pw + " e");
+        cmp_int(b_prp, products[i].newly_added ? 1 : 0, iv(fr, 7), pw + " newly added");
+        cmp_int(b_prp, products[i].creator_model_id, iv(fr, 8), pw + " creator model id");
+        ++seen;
+      }
+      cmp_int(b_prp, seen, (want_prod > 0) ? want_prod : 0, where + " product rows read");
+    }
+  }
+
   std::printf("\n%-38s %10s %14s  %s\n", "bucket", "points", "worst", "where");
   for (const Bucket& b : buckets) {
     const bool bad = b.worst > b.tol;

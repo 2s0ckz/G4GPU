@@ -340,7 +340,7 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
     const int s = st.lists.pool[was_outside[k]].state;
     if ((s == kMissNucleus || s == kGoneOut) && n_out < 256) { gone_out[n_out++] = was_outside[k]; }
   }
-  for (int k = 0; k < n_out; ++k) { st.lists.pool[gone_out[k]].list = kListFinal; }
+  for (int k = 0; k < n_out; ++k) { push_final(st, gone_out[k]); }
   out.n_gone_out = n_out;
 
   int captured[256];
@@ -371,7 +371,7 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
   if (n_cap > 0) {
     for (int k = 0; k < n_cap; ++k) {
       st.lists.pool[captured[k]].list = kListCaptured;
-      st.lists.pool[captured[k]].hit = true;
+      mark_hit(st, captured[k]);
     }
     collisions.remove_tracks(captured, n_cap);
   }

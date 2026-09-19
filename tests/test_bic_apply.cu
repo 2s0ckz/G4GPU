@@ -108,10 +108,10 @@ __global__ void bic_blir_probe(physics::hadronic::HadProjectile<double> proj,
 __global__ void bic_apply_probe(physics::hadronic::HadProjectile<double> proj,
                                 physics::hadronic::HadNucleus tgt, const data::LevelTable* lt,
                                 const deex::FermiPool* pool, preco::PrecoWorkspace ws,
-                                bic::BicFinalState* fs, bic::BicRefusal* ref,
-                                bic::BicReport* rep) {
+                                bic::BicStorage store, bic::BicFinalState* fs,
+                                bic::BicRefusal* ref, bic::BicReport* rep) {
   Philox<double> rng(1u, 2u, 3u);
-  bic::apply_yourself(proj, tgt, *lt, *pool, ws, rng, *fs, *ref, *rep);
+  bic::apply_yourself(proj, tgt, *lt, *pool, ws, store, rng, *fs, *ref, *rep);
 }
 
 namespace {
@@ -431,6 +431,45 @@ int main() {
 
     Philox<double> rng(0x51ed270bu, static_cast<unsigned>(c.pa * 1000 + c.ta),
                        static_cast<unsigned>(c.ekin_per_a * 10.0) + 1u);
+    // The cascade's own storage. Every case in this file is a nucleon below `theBCminP` or an
+    // ion below the fusion threshold, so `apply_yourself` takes its precompound branch and never
+    // reads any of this - but the parameter is not optional and a null one would be a trap for
+    // whoever adds the first case above 45 MeV. Sized for the heaviest target here.
+    static bic::Nucleon apply_nucleons[256];
+    static deex::Vec3d apply_mom[256];
+    static double apply_fermi[256];
+    static bic::NucleusSortEntry apply_sums[256];
+    static double apply_flat[bic::kFlatBlock];
+    static double apply_pfield[bic::kMaxFieldTable];
+    static double apply_nfield[bic::kMaxFieldTable];
+    static bic::CascadeTrack apply_pool[512];
+    static bic::imr::CollisionInitialState apply_colls[2048];
+    static bic::imr::ConcreteChannel apply_chans[bic::imr::kConcreteChannelCount];
+    static bic::CascadeBuffers apply_buffers;
+    static bic::CascadeProduct apply_products[256];
+    static bic::CascadeProduct apply_preco[64];
+    bic::BicStorage store;
+    store.nucleons = apply_nucleons;
+    store.scratch.momentum = apply_mom;
+    store.scratch.fermi_p = apply_fermi;
+    store.scratch.test_sums = apply_sums;
+    store.scratch.flat_block = apply_flat;
+    store.scratch.capacity = 256;
+    store.proton_field = apply_pfield;
+    store.neutron_field = apply_nfield;
+    store.field_capacity = bic::kMaxFieldTable;
+    store.cascade.pool = apply_pool;
+    store.cascade.pool_capacity = 512;
+    store.cascade.collisions = apply_colls;
+    store.cascade.collision_capacity = 2048;
+    store.cascade.channels = apply_chans;
+    store.cascade.n_channels =
+        bic::imr::build_concrete_channels(apply_chans, bic::imr::kConcreteChannelCount);
+    store.cascade.buffers = &apply_buffers;
+    store.cascade.products = apply_products;
+    store.cascade.product_capacity = 256;
+    store.cascade.preco_products = apply_preco;
+    store.cascade.preco_capacity = 64;
     bool refused_cascade = false;
     for (long long ev = 0; ev < c.n; ++ev) {
       bic::BlirRefusal bref;
@@ -441,7 +480,7 @@ int main() {
       if (is_ion) {
         st = bic::blir_apply_yourself(proj, tgt, lt, pool, ws, rng, result, bref);
       } else {
-        st = bic::apply_yourself(proj, tgt, lt, pool, ws, rng, result, nref, nrep);
+        st = bic::apply_yourself(proj, tgt, lt, pool, ws, store, rng, result, nref, nrep);
       }
       const bool cascade = is_ion ? bref.cascade : nref.cascade;
       const bool other = is_ion ? bref.anti_or_hyper : (nref.species || nref.preco_projectile);
@@ -516,29 +555,20 @@ int main() {
       }
     }
 
-    // ---- the refusal boundary, for the nucleon entry point only.
+    // ---- the threshold boundary, for the nucleon entry point only.
     //
     // `theBCminP` is 45 MeV and the oracle has a 44 and a 46 MeV row on carbon for each nucleon.
-    // The port answers the 44 and MUST refuse the 46 - Geant4 runs a cascade there, and the
-    // difference is visible in the oracle itself (4.17 secondaries per event against 3.96). This
-    // is the only assertion in the port that checks a refusal against what Geant4 did instead:
-    // a threshold set at 40 or 50 MeV would produce a compound nucleus where a cascade belongs
-    // and both halves of this test would still pass.
-    if (!is_ion) {
-      const bool should_refuse = !(c.ekin_per_a < 45.0);
-      if (should_refuse != refused_cascade || (should_refuse && n_refused < c.n)) {
-        std::printf("THRESHOLD %s at %g MeV: port %s, theBCminP is 45 MeV and Geant4 answered "
-                    "with %g secondaries per event\n",
-                    c.name.c_str(), c.ekin_per_a, refused_cascade ? "refused" : "answered",
-                    c.mean_mult);
-        ++fails;
-      }
-      if (should_refuse) {
-        std::printf("  refused by name: %s, %g MeV - above theBCminP, so Geant4 runs the "
-                    "cascade (%g secondaries/event) and this package has none\n",
-                    c.name.c_str(), c.ekin_per_a, c.mean_mult);
-        continue;
-      }
+    // The 44 is a compound nucleus and the 46 is a CASCADE, and the difference is visible in the
+    // oracle itself: 4.17 secondaries per event against 3.96. Both sides now run, so what is
+    // asserted here is that NEITHER is refused - a port that answered one and refused the other
+    // would still pass every statistical comparison below, because a refused case contributes
+    // nothing to them. Until 8b20ffb the 46 was refused by name and this assertion said so.
+    if (!is_ion && refused_cascade) {
+      std::printf("THRESHOLD %s at %g MeV: the port refused, and Geant4 answered with %g "
+                  "secondaries per event\n",
+                  c.name.c_str(), c.ekin_per_a, c.mean_mult);
+      ++fails;
+      continue;
     }
 
     // ---- exact: the fusion gate's verdict

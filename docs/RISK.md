@@ -10543,3 +10543,59 @@ the guard. Three smaller stale statements sit beside it: "94 entries" and "all 9
 the table has 126, and PORTED 2.1.10's row for `im_r/decay.cuh` refusing "four-daughter channels,
 which the closure does not contain" where the row below it correctly says `ManyBodyDecayIt` is in
 for f2(1270) -> 4 pi and the table holds two such channels.
+### V162: GetSpherePoint starts the projectile one and a half radii back, and its comment says one
+
+`G4BinaryCascade::GetSpherePoint(r, mom4)` is the impact-parameter sampler: it returns a point
+uniform in the disc of radius `r` orthogonal to the beam, displaced back along it. The comment
+above the return and the return itself do not agree:
+
+```
+    //  Get a point outside radius.
+    //     point is random in plane (circle of radius r) orthogonal to mom,
+    //      plus -1*r*mom->vect()->unit();
+    ...
+    return G4ThreeVector(r*(x1*o1.unit() + x2*o2.unit() - 1.5* mom.unit()));
+```
+
+One radius in the comment, one and a half in the code. `ApplyYourself` calls it with
+`r = 1.1*(GetOuterRadius() + 3*fermi)`, so the track starts about 1.65 outer radii upstream
+instead of 1.1, which is what makes its `outside` state unambiguous.
+
+MEASURED, because the difference is not obviously observable: with 1.0 in place of 1.5, the port
+reproduces all 729 STRUCTURAL comparisons of `bic_imr_prop.csv` - the same number of
+impact-parameter tries, the same number of uniforms consumed, the same products, the same
+fragment - and misses the starting POSITION by exactly one third. The cascade does not care where
+upstream the track starts as long as it is outside; the recorded position does. So the constant
+is not free, it is simply not observable in the physics, and it is ported as written with the
+comment quoted beside it.
+
+### V163: IsParticipant returns TRUE for a track that has no nucleon
+
+```
+G4bool G4KineticTrack::IsParticipant() const
+{ if(!theNucleon) return true;
+  return theNucleon->AreYouHit(); }
+```
+
+Read as its own name it is backwards: a pion the cascade has just made is not a "participant" in
+any ordinary sense, and this says it is. Read as "not a spectator" it is right - the only tracks
+that answer false are the nucleus's own nucleons that nothing has touched. Either way it leaves
+the model: `G4BinaryCascade::ProductsAddFinalState` writes `aNew->SetNewlyAdded(kt->IsParticipant())`
+onto every product, and `G4HadFinalState` carries that flag out to whatever is counting new
+secondaries.
+
+Two more things about it are worth writing down, because a port that stores the flag on the TRACK
+reproduces neither:
+
+  * `Hit()` sets the flag on the **G4Nucleon**, not on the track, and `IsParticipant()` reads it
+    back through the same pointer. An elastic product is `new G4KineticTrack(trk2)`, a copy of the
+    entrance track, so it SHARES the nucleon - and `ApplyCollision` calls `Hit()` on the entrance
+    tracks AFTER the products have been made, then deletes them. The product sees the flag anyway.
+  * `BuildTargetList` skips a nucleon that has been hit, so a nucleus that has been through one
+    cascade is not the nucleus it was. `ApplyYourself`'s inner loop relies on that never mattering:
+    it only repeats when `Propagate` returned NULL, and a cascade with no collisions hits nothing.
+
+MEASURED with the flag on the track and the predicate read the obvious way round: the first
+product of case 0 of `bic_imr_prop.csv` came back not-newly-added where Geant4 has it added, and
+so did the pi+ and the pi0 of case 28. The port now keeps the flag on the nucleon, through
+`BicCascadeState::nucleons`, and `is_participant` has the `return true` first.

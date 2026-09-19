@@ -582,7 +582,7 @@ __host__ __device__ inline bool apply_collision(BicCascadeState& st, imr::Collis
       return false;
     }
     if (late_particle && (t.state == kGoneOut || t.state == kMissNucleus)) {
-      st.lists.pool[idx].list = kListFinal;
+      push_final(st, idx);
       to_final[n_to_final++] = idx;
     } else {
       new_index[n_new++] = idx;
@@ -594,15 +594,17 @@ __host__ __device__ inline bool apply_collision(BicCascadeState& st, imr::Collis
   st.current_z += final_charge - initial_charge;
 
   const int old_secondary[1] = {coll.primary};
-  primary.hit = true;
+  // `primary->Hit()` and `theTarget->Hit()`, AFTER the products were made - which is not a
+  // detail, because an elastic product is a copy of the entrance track and shares its nucleon.
+  mark_hit(st, coll.primary);
   int old_target[2];
   int n_old_tgt = 0;
   if (coll.target >= 0) {
-    st.lists.pool[coll.target].hit = true;
+    mark_hit(st, coll.target);
     old_target[n_old_tgt++] = coll.target;
   }
   if (coll.target2 >= 0) {
-    st.lists.pool[coll.target2].hit = true;
+    mark_hit(st, coll.target2);
     old_target[n_old_tgt++] = coll.target2;
   }
   update_tracks_and_collisions(st, colls, old_secondary, 1, old_target, n_old_tgt, new_index,

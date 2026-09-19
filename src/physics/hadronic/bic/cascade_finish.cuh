@@ -114,7 +114,7 @@ __host__ __device__ inline StepOutReport step_particles_out(
       // "add left secondaries to FinalSate" - as they stand, uncorrected.
       for (int i = 0; i < st.lists.n_pool; ++i) {
         if (st.lists.pool[i].list == kListSecondary) {
-          st.lists.pool[i].list = kListFinal;
+          push_final(st, i);
           ++rep.abandoned;
         }
       }
@@ -137,7 +137,7 @@ __host__ __device__ inline StepOutReport step_particles_out(
         if (t.list != kListSecondary || t.state != kInside) { continue; }
         if (t.pdg != imr::kPdgProton && t.pdg != imr::kPdgNeutron) { continue; }
         t.list = kListCaptured;
-        t.hit = true;
+        mark_hit(st, i);
         captured[n_cap++] = i;
       }
       colls.remove_tracks(captured, n_cap);

@@ -97,6 +97,7 @@ struct CascadeTrack {
   int parent_resonance_pdg = 0;
   int parent_resonance_id = 0;
   int list = kListNone;      ///< which of the four G4KineticTrackVectors; see `TrackList`
+  int final_seq = -1;        ///< position in theFinalState; see `push_final`
   bool hit = false;          ///< `G4KineticTrack::Hit()`, which marks the G4Nucleon
 
   /// `G4KineticTrack::GetActualMass` - `sqrt(|the4Momentum.mag2()|)`.
@@ -111,9 +112,10 @@ struct CascadeRefusal {
   bool capacity = false;             ///< one of the four lists is full
   bool invalid_nucleus = false;      ///< BuildTargetList's (A,Z) throw
   bool unknown_species = false;
+  bool void_nucleus = false;         ///< FillVoidNucleusProducts; see cascade_propagate.cuh
   int refused_pdg = 0;
   __host__ __device__ bool any() const {
-    return high_energy_primary || capacity || invalid_nucleus || unknown_species;
+    return high_energy_primary || capacity || invalid_nucleus || unknown_species || void_nucleus;
   }
 };
 
@@ -148,6 +150,19 @@ struct CascadeLists {
 /// which is the per-track enum in `kinetic_track.cuh` and already has that name.
 struct BicCascadeState {
   CascadeLists lists;
+  /// The nucleus's own nucleon array, so that `Hit()` can mark what Geant4 marks.
+  ///
+  /// `G4KineticTrack::Hit()` is `if (theNucleon) theNucleon->Hit(1, 1.)` - it sets a flag on the
+  /// **G4Nucleon**, not on the track - and `IsParticipant()` reads it back through the same
+  /// pointer. Two things depend on that indirection and neither is obvious. An ELASTIC product is
+  /// `new G4KineticTrack(trk2)`, a COPY of the target track, so it shares the nucleon; `Hit()` is
+  /// called on the ENTRANCE track AFTER the products have been made, and the product sees it
+  /// anyway. And `BuildTargetList` skips a hit nucleon, so a nucleus that has been through a
+  /// cascade is not the nucleus it was. A port with a `hit` flag on the track reproduces neither:
+  /// MEASURED, the first product of the first case of `bic_imr_prop.csv` came back with
+  /// `IsParticipant()` false where Geant4 has it true, because the copy was taken one statement
+  /// before the flag was set.
+  Nucleon* nucleons = nullptr;
   int initial_a = 0;
   int initial_z = 0;
   int current_a = 0;
@@ -166,7 +181,48 @@ struct BicCascadeState {
   imr::LorentzVector projectile_4mom;     ///< theProjectile4Momentum
   deex::Vec3d momentum_transfer{0.0, 0.0, 0.0};
   deex::Vec3d precompound_boost{0.0, 0.0, 0.0};  ///< precompoundLorentzboost, set by the below
+  int n_final_pushed = 0;    ///< the next sequence number `push_final` will hand out
 };
+
+/// `G4KineticTrack::Hit()` - the flag goes on the NUCLEON when there is one, and on the track
+/// either way. See the note on `BicCascadeState::nucleons` for why both.
+__host__ __device__ inline void mark_hit(BicCascadeState& st, int pool_index) {
+  CascadeTrack& t = st.lists.pool[pool_index];
+  t.hit = true;
+  if (t.nucleon_index >= 0 && st.nucleons != nullptr) { st.nucleons[t.nucleon_index].hit = true; }
+}
+
+/// `G4KineticTrack::IsParticipant()`, and it is NOT what the name says:
+///
+///     G4bool G4KineticTrack::IsParticipant() const
+///     { if(!theNucleon) return true;
+///       return theNucleon->AreYouHit(); }
+///
+/// **A track with no nucleon is a participant.** Every particle the cascade MAKES - every pion,
+/// every resonance product, the projectile itself - has a null `theNucleon` and so answers true;
+/// the only tracks that answer false are the nucleus's own nucleons that nothing has touched.
+/// Read as "not a spectator" it is right, and read as its own name it is backwards. It reaches
+/// the outside world as `G4ReactionProduct::SetNewlyAdded`, which the process uses to decide
+/// whether a secondary is new, so a port that took the name at face value would mark every pion
+/// it produced as NOT newly added. MEASURED before the fix: the pi+ and the pi0 of case 28 of
+/// `bic_imr_prop.csv` came back false where Geant4 has them true. docs/RISK.md V163.
+__host__ __device__ inline bool is_participant(const BicCascadeState& st,
+                                               const CascadeTrack& t) {
+  if (t.nucleon_index < 0) { return true; }
+  return st.nucleons != nullptr && st.nucleons[t.nucleon_index].hit;
+}
+
+/// Move a track into theFinalState, keeping the ORDER it was pushed in.
+///
+/// Geant4's `theFinalState` is a vector and `ProductsAddFinalState` walks it front to back, so
+/// the product order is the order tracks left the cascade - which is not the order they were
+/// created in. The port's lists are tags on one pool, and a tag has no order, so the sequence
+/// number is what carries it. MEASURED without it: case 28 of `bic_imr_prop.csv` put its proton
+/// where Geant4 has its pi0, and every product after the first was a different particle.
+__host__ __device__ inline void push_final(BicCascadeState& st, int pool_index) {
+  st.lists.pool[pool_index].list = kListFinal;
+  st.lists.pool[pool_index].final_seq = st.n_final_pushed++;
+}
 
 /// `G4BinaryCascade::GetIonMass(Z, A)` and its three fallbacks.
 ///

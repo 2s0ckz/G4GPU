@@ -183,6 +183,18 @@ struct CascadeProduct {
   int creator_model_id = -1;
   int parent_resonance_pdg = 0;
   int parent_resonance_id = 0;
+  /// The (Z, A) of a NUCLEUS product. `G4ReactionProduct` carries a `G4ParticleDefinition*` and
+  /// an ion is a definition like any other, so Geant4 needs no extra field; the port names the
+  /// species by PDG code, and a PDG ion code would have to be decoded again at the far end. Both
+  /// are zero for every product the cascade itself makes - it emits only nucleons, pions and
+  /// what they decay to - and are set only by the precompound exit, which emits fragments.
+  int nucleus_z = 0;
+  int nucleus_a = 0;
+  /// `G4ReactionProduct`'s mass, which is the DEFINITION's and not `momentum.mag()`. It is what
+  /// `new G4DynamicParticle(def, GetTotalEnergy(), GetMomentum())` compares the invariant mass
+  /// against, and an off-shell product keeps its own mass only when the two differ by more than
+  /// the constructor's tolerance - so it has to travel with the product.
+  double pdg_mass = 0.0;
 };
 
 /// `G4BinaryCascade::DecayVoidNucleus` - the all-neutron remnant shared out by Kopylov phase
@@ -224,6 +236,9 @@ __host__ __device__ inline int decay_void_nucleus(BicCascadeState& st, CascadePr
   for (int k = 0; k < n; ++k) {
     const CascadeTrack& t = st.lists.pool[idx[k]];
     out[k].pdg = t.pdg;
+    out[k].pdg_mass = t.pdg_mass;
+    out[k].nucleus_z = t.charge;
+    out[k].nucleus_a = t.baryon;
     out[k].momentum = momenta[k];
     out[k].creator_model_id = bic_model_id;
     out[k].parent_resonance_pdg = t.parent_resonance_pdg;
@@ -244,16 +259,34 @@ __host__ __device__ inline int products_add_final_state(const BicCascadeState& s
                                                         int capacity, int bic_model_id,
                                                         CascadeRefusal& ref) {
   int n = n_out;
-  for (int i = 0; i < st.lists.n_pool; ++i) {
-    const CascadeTrack& t = st.lists.pool[i];
-    if (t.list != kListFinal) { continue; }
+  // `for(i = 0; i < fs.size(); i++)` - theFinalState IN ORDER, which for the port is ascending
+  // `final_seq` and not pool order; see `push_final`.
+  for (int seq = 0; seq < st.n_final_pushed; ++seq) {
+    int idx = -1;
+    for (int k = 0; k < st.lists.n_pool; ++k) {
+      if (st.lists.pool[k].list == kListFinal && st.lists.pool[k].final_seq == seq) {
+        idx = k;
+        break;
+      }
+    }
+    if (idx < 0) { continue; }
+    const CascadeTrack& t = st.lists.pool[idx];
     if (n >= capacity) {
       ref.capacity = true;
       return n;
     }
     out[n].pdg = t.pdg;
+    out[n].pdg_mass = t.pdg_mass;
+    // A cascade product is a PARTICLE and Geant4 names it with a `G4ParticleDefinition*`; the
+    // framework this port feeds asks for (Z, A) as well, and for a nucleon that is (charge, 1)
+    // and not (0, 0). MEASURED with them left at zero: every proton and neutron the cascade
+    // emitted was filed under (Z=0, A=0) - the gamma bucket - so n46_C12 came out 1,726
+    // neutrons and 1,112 protons short of the oracle, at 30 and 22 sigma, with the missing
+    // ones piled up somewhere the comparison could not see them.
+    out[n].nucleus_z = (t.baryon != 0) ? t.charge : 0;
+    out[n].nucleus_a = t.baryon;
     out[n].momentum = t.momentum;
-    out[n].newly_added = (t.nucleon_index >= 0) && t.hit;
+    out[n].newly_added = is_participant(st, t);
     out[n].creator_model_id = bic_model_id;
     out[n].parent_resonance_pdg = t.parent_resonance_pdg;
     out[n].parent_resonance_id = t.parent_resonance_id;
