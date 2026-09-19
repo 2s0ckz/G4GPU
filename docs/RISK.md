@@ -10385,3 +10385,138 @@ Worth naming beyond this port: `G4FermiPhaseSpaceDecay` is instantiated by exact
 11.1.1, `G4BinaryCascade`, for an all-neutron residual nucleus. Anyone driving Geant4 from a
 quasi-random or stratified source - a variance-reduction study, a replay harness, a regression
 oracle like this one - can reach the same hang through that one door.
+
+### V158: the decay engine flags "unknown species" for particles Geant4 never decays, and eta-prime is 0.011% of FTFP's output
+
+`bic::decay_kinetic_tracks` sets `KineticDecayRefusal::unknown_species` for **any** PDG code its
+generated table does not carry, including codes `G4DecayKineticTracks` would never touch. Its
+predicate is
+
+```
+if (!kinetic_decay_is_short_lived(pdg)) {
+  if (!kinetic_decay_knows(pdg)) { ref.unknown_species = true; ref.refused_pdg = pdg; }
+  continue;
+}
+```
+
+and `kinetic_decay_is_short_lived` returns **false** for an unknown code. So the flag cannot
+distinguish the two cases a caller actually needs to tell apart:
+
+  * a code the table lacks that Geant4 also leaves alone - nothing is missed, and
+  * a code the table lacks that Geant4 WOULD have decayed - a silently skipped decay.
+
+MEASURED, from the seven configurations of docs/HADRONIC_PLAN.md 9.3 (14,000 events, 161,568
+string products): FTFP produces **eta-prime (331) at 17 tracks, 0.011%**, every one of them on a
+pion beam. Its `IsShortLived()` is `false` - read off the `G4ParticleDefinition` constructor
+arguments in `G4Etaprime.cc`, where the flag is the SECOND `false`, after the lifetime and the
+null decay table - so Geant4 leaves it in the list and nothing at all is wrong. The same is true
+of Omega- (3334), anti-Xi0 (-3322), anti-Xi- (-3312), anti-Omega- (-3334) and every charm and
+bottom hadron; 50 such codes are in FTFP's producible set and none is short-lived.
+
+Treating the flag as a refusal would therefore have refused one FTFP event in several hundred for
+nothing. `ftf/theo_fs_generator.cuh` does not: it pre-screens on `data/ftf_hadrons.hh`'s own
+`shortlived` - the oracle's dump of `IsShortLived()`, which is the only authority for "would
+Geant4 decay this" - and refuses only `short-lived AND !kinetic_decay_knows`, as
+`FtfRefusal::kDecayEngineUnknownSpecies`. The engine's flag is kept in `FtfApplyReport::decay`
+for a test to read and is not acted on.
+
+The argument that nothing is lost by ignoring it is not an assumption. After the pre-screen every
+short-lived track's code is known to the engine; the table is a transitive closure under "is a
+decay daughter of", so a daughter is known too; and if a daughter ever were not,
+`kinetic_decay_one` returns zero products and Geant4 leaves the PARENT in the list - where the
+post-pass re-test (`kDecayLeftShortLived`) catches it by name. The two named refusals between them
+cover every case in which `unknown_species` would have mattered.
+
+### V159: two anti-Xi(1530) codes FTFP can produce are outside the shared decay engine's closure, and an ion beam finds them
+
+P9d's `im_r/decay_tables.hh` is a 126-species closure seeded with the binary cascade's production
+set plus FTFP's 27 short-lived species from docs/HADRONIC_PLAN.md 9.3. Those 27 are a **sample** -
+they come from a 14,000-event census in which two species appeared exactly once - so the closure
+cannot be said to cover FTFP on that evidence alone.
+
+Enumerated instead: `G4HadronBuilder::Meson` and `Barion` were run over every quark and diquark
+flavour, both signs, both spins, with the mixing draw swept over 501 values so that every branch
+of the two truncations is taken. The builder can return **99 distinct codes, 27 of them
+short-lived**, and the `Meson[5][5][7]` / `Baryon[5][5][5][4]` tables that
+`G4LundStringFragmentation`'s three `*_lastSplitting` functions choose the final two hadrons from
+add nothing Build cannot already make. Of those 27:
+
+  * 25 are in P9d's closure, and
+  * **`-3314` (anti-Xi(1530)-, 1535.0 MeV, 9.9 MeV wide) and `-3324` (anti-Xi(1530)0, 1531.8,
+    9.1) are not.**
+
+They need an anti-strange diquark, so they are rare: **0 of 161,568 string products** over the
+14,000 hadron-beam events of 9.3. They are not unreachable. On the ion campaign - {alpha, C12,
+O16, Fe56} x {H, C, O, Al, Fe, Pb} x {3, 8, 20} GeV per nucleon, 36,000 events - they appear in
+**2 events**, and `FtfRefusal::kDecayEngineUnknownSpecies` names them rather than letting an
+undecayed anti-Xi* reach P6.
+
+Not fixed in this package: widening the closure is one line in `tools/extract_bic_decay.pl`'s
+`kSeeds` and belongs to P9d, whose oracle and whose test assert the table's channel census. The
+refusal is the correct behaviour until then, and its rate is now measured rather than assumed.
+
+### V160: the decay pass doubles FTFP's track count, and two capacities that were never reached now are
+
+Wiring `G4DecayKineticTracks` in changes the size of an FTFP final state, because a resonance
+becomes two or more tracks and 10-14% of FTFP's products are resonances. MEASURED on the ion
+campaign, before and after:
+
+    secondaries per ion event        14  ->  33.03
+
+Two buffers that had never been reached now are, and both are capacities rather than physics:
+
+  * **`kMaxTracks = 256`**, the workspace's track list, which is also what
+    `decay_kinetic_tracks` is given as its capacity. It overflows in **323 of 36,000 ion events
+    (0.90%)**, all of them heavy-on-heavy at the top of the energy range, and reports
+    `KineticDecayRefusal::list_full` -> `FtfRefusal::kDecayEngineRefused`. Raising it is a
+    workspace-size decision: the track list, the escaped list, the coalescence list and the decay
+    list are all `kMaxTracks` long, so 512 would cost roughly another 120 kB on top of the
+    433,376 B a slot already takes. Left as a named refusal with its rate, the way the 64-track
+    coalescence cap was (V114), rather than raised silently.
+  * **`kMaxSec = 128`**, the FINAL STATE buffer, which is the caller's template argument in P5's
+    framework and not the model's. `tests/test_ftf_model.cu`'s ion block overflowed it in 1,269
+    of 36,000 events; it is 512 there now and the number is recorded for whoever sizes the
+    transport's.
+
+The three arms' totals, before this wiring and after, at N = 500 per point:
+
+    96-point generality sweep    44 ran, 52 refused  ->  96 ran, 0 refused
+    ion arm (36,000 events)    7,081 ran (19.7%)     ->  35,675 ran (99.10%), 325 refused
+    sub-GeV anti-nucleon arm  24,366 ran (67.7%)     ->  36,000 ran (100%), 0 refused
+
+with baryon number and charge exact in all 35,675 ion events and all 20,000 events of
+`tests/test_ftf_entry.cu`, which went from 7,563 ran / 12,437 refused to 20,000 ran / 0 refused.
+
+### V161: the stale header of the shared decay engine says the branch a2(1320) wakes is dead
+
+`bic/im_r/decay.cuh`'s file header states, as a MEASUREMENT over "563 channels", that "of the 491
+two-body channels, 159 have no short-lived daughter and 332 have exactly one - and **none has
+two**. Of the 70 three-body channels, **all 70 have none**", and concludes that
+`IntegrateCMMomentum2`/`IntegrandFunction3`/`IntegrandFunction4` and "the three-body
+`nShortLived >= 1` branch, with its second swap and its `theDaughterMass[0] += theDaughterMass[2]`,
+are never entered". It then records that both carry defects that "would show the moment they woke
+up".
+
+The committed table is **638 channels**, not 563: 4 one-body, 220 + 335 two-body, 75 + **2**
+three-body, 2 four-body. The two three-body channels with a short-lived daughter are
+a2(1320)0 -> `omega pi- pi+` and `omega pi0 pi0`, and **FTFP produces a2(1320)0 at 51 of 161,568
+string products (0.032%)**, so that branch is entered as soon as FTFP calls the engine.
+
+The code and the test are both right and only the header is stale: `kinetic_track_actual_widths`
+implements the branch, and `tests/test_bic_imr.cu` asserts `three_body[1] == 2` and names it
+"a2(1320)0's two". Nothing is wrong with the numbers. What is wrong is the stated reason nobody
+has checked that path - and the defects it names are real:
+
+  * `IntegrandFunction3` has no `std::max(...,0.0)` under its square root where `IntegrandFunction1`
+    and `2` do, and
+  * `IntegrateCMMomentum2` reads `theActualMass` for its upper limit where the one-resonance
+    branch takes `poleMass`.
+
+Both remain unreachable, and that is checkable rather than hopeful: `IntegrandFunction3` is called
+only from `IntegrandFunction4`, which is called only from `IntegrateCMMomentum2`, which is called
+only from the two-body TWO-short-lived-daughter branch - and the table has **zero** such channels.
+The live three-body branch uses `IntegrateCMMomentum` -> `IntegrandFunction1`/`2`, which do carry
+the guard. Three smaller stale statements sit beside it: "94 entries" and "all 94 columns" where
+the table has 126, and PORTED 2.1.10's row for `im_r/decay.cuh` refusing "four-daughter channels,
+which the closure does not contain" where the row below it correctly says `ManyBodyDecayIt` is in
+for f2(1270) -> 4 pi and the table holds two such channels.

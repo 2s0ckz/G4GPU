@@ -1936,7 +1936,13 @@ int main(int argc, char** argv) {
   {
     using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
     WS* ws = new WS();
-    static physics::hadronic::HadFinalState<double, 128> out;
+    // 512 AND NOT 128, AND THE NUMBER IS MEASURED. Before P11d part 2 the ion arm averaged 14
+    // secondaries and 128 was never reached; the decay pass turns every resonance into two or
+    // more tracks and the average went to 28, with Fe on Pb at 20 GeV per nucleon running past
+    // 128 in 1,269 of 36,000 events. That is the TEST's buffer and not a limit of the model -
+    // `kMaxSec` is the caller's template argument in P5's framework - so it is raised here and
+    // the number is recorded for whoever sizes the transport's own.
+    static physics::hadronic::HadFinalState<double, 512> out;
     struct Ion { const char* name; int a, z; };
     const Ion beams[] = {{"alpha", 4, 2}, {"C12", 12, 6}, {"O16", 16, 8}, {"Fe56", 56, 26}};
     const Ion targets[] = {{"H1", 1, 1},   {"C12", 12, 6},   {"O16", 16, 8},
@@ -1945,6 +1951,8 @@ int main(int argc, char** argv) {
     const int n_events = quick ? 100 : 500;
     long long points = 0, ran = 0, refused = 0, bad_b = 0, bad_q = 0, unknown = 0;
     long long secondaries = 0, with_two_residuals = 0;
+    std::map<int, long long> ion_refusals;
+    long long decay_full = 0, decay_nd = 0, decay_thr = 0, decay_ps = 0;
     for (const Ion& b : beams) {
       const double mass = deex::nuclear_mass(b.a, b.z);
       for (const Ion& t : targets) {
@@ -1960,11 +1968,29 @@ int main(int argc, char** argv) {
           nuc.a = t.a;
           nuc.z = t.z;
           for (int ev = 0; ev < n_events; ++ev) {
-            out = physics::hadronic::HadFinalState<double, 128>();
+            out = physics::hadronic::HadFinalState<double, 512>();
             Philox<double> rng(static_cast<uint32_t>(ev), 53u);
             ftf::apply_yourself(hp, nuc, out, ws, lund, rng);
             if (out.n_secondaries == 0 || ws->report.any()) {
               ++refused;
+              // WHICH refusal, because "1,594 refused" was the whole answer before P11d part 2
+              // wired the decay engine and 28,919 of 36,000 were the single `short_lived_track`.
+              // With that one gone the remainder is small enough that the reason matters, and a
+              // count with no reason is exactly what the refusal discipline exists to prevent.
+              int code = static_cast<int>(ws->report.refused);
+              if (code == 0) { code = static_cast<int>(ws->report.model.refused); }
+              if (code == 0 && ws->report.generator.any()) { code = -1; }
+              if (code == 0 && ws->report.track_capacity) { code = -2; }
+              if (code == 0 && ws->report.secondary_overflow) { code = -3; }
+              if (code == 0 && ws->report.attempts_exhausted) { code = -4; }
+              ++ion_refusals[code];
+              // WHICH of the engine's four, since `kDecayEngineRefused` covers them all and
+              // `list_full` (the decayed list outgrowing `kMaxTracks`) is a capacity while
+              // `below_threshold` and `phase_space_failed` are Geant4 giving up on the physics.
+              if (ws->report.decay.list_full) { ++decay_full; }
+              if (ws->report.decay.too_many_daughters) { ++decay_nd; }
+              if (ws->report.decay.below_threshold) { ++decay_thr; }
+              if (ws->report.decay.phase_space_failed) { ++decay_ps; }
               continue;
             }
             ++ran;
@@ -2003,6 +2029,18 @@ int main(int argc, char** argv) {
                 with_two_residuals, unknown);
     std::printf("    baryon number wrong in %lld of %lld, charge wrong in %lld\n", bad_b, ran,
                 bad_q);
+    for (const auto& kv : ion_refusals) {
+      const char* name = (kv.first == -1)   ? "P6's Propagate (see GeneratorRefusal)"
+                         : (kv.first == -2) ? "the track list's capacity"
+                         : (kv.first == -3) ? "the final state's capacity"
+                         : (kv.first == -4) ? "Scatter's 1000 attempts"
+                         : ftf::ftf_refusal_name(static_cast<ftf::FtfRefusal>(kv.first));
+      std::printf("    refused %4d : %5lld events   %s\n", kv.first, kv.second, name);
+    }
+    if (decay_full + decay_nd + decay_thr + decay_ps > 0) {
+      std::printf("      of which list_full %lld, too_many_daughters %lld, below_threshold "
+                  "%lld, phase_space_failed %lld\n", decay_full, decay_nd, decay_thr, decay_ps);
+    }
     if (ran == 0) {
       std::printf("FAIL: the ion arm produced no final state at any of the %lld points\n",
                   points);
