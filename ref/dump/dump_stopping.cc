@@ -17,8 +17,23 @@
 // for value. `G4HadronStoppingProcess::AtRestDoIt` cannot: it needs a G4Track in a G4Material
 // inside a run, it calls a nuclear model that runs its own retry loops, and under a prescribed
 // engine every rejection sampler in that stack exhausts rather than samples (docs/RISK.md V132).
-// So the pieces are exact here and the assembly is compared as a distribution by
-// tests/test_stopping.cu, exactly as the Bertini package is arranged.
+// So the pieces are exact here and the assembly is REPORTED as a distribution by
+// tests/test_stopping.cu.
+//
+// **That is not what the Bertini package does, and an earlier draft of this comment said it was.**
+// `test_bertini_apply` compares its assembly against a dumped oracle - 95 cases, refused fractions
+// and multiplicity moments inside five-sigma bands, which is why `bertini_apply.csv` exists. There
+// is no `stopping_campaign.csv`, so the at-rest campaign's multiplicities, deposits and capture
+// fractions are printed and read, not checked: nothing in this package would fail if FTFP at rest
+// returned a plausible wrong number. The one thing that IS asserted through the assembly is
+// `AtomicCascadeSurvives`, a count that cannot legally decrease, and it is asserted because a
+// wrong number did get through (docs/RISK.md V164).
+//
+// What closing this needs is a fourth dump here: `G4HadronicAbsorptionFritiof` and
+// `G4HadronicAbsorptionBertini` driven at rest over the same (species, material) grid with a REAL
+// engine, writing the same moments the test already accumulates. It needs a G4Track in a
+// G4Material inside a run, which is why it is named here as the next step rather than attempted
+// as part of the piecewise dumps above.
 //
 // **The EM cascade is dumped for 40 elements because its two branches are chosen by Z^4.** The
 // Auger probability is 10000/(Z^4 + 10000) - 91% at Z = 1, 50% at Z = 10, 0.004% at Z = 82 - so a
