@@ -11035,8 +11035,13 @@ measurements bound it:
 | the same + ALL eighteen other dumps | 1 | 126 of 126 cases, exit 0 |
 | the same + ALL eighteen other dumps | 2,000 | dies in case 6 |
 
-**THE THIRD ROW NO LONGER HOLDS, AND THE ATTRIBUTION IS NOW DECISIVE.** Re-measured on
-2026-09-19 against the current dumper, six more runs:
+**FIXED on 2026-09-19, in `ref/dump/dump_deexcitation.cc` and not in this package's own dump.**
+The mechanism is below; in one line, `~G4FermiBreakUpVI()` deletes a CLASS STATIC that QBBC's
+own de-excitation is still using, and four stack objects in that file were destroying it. What
+follows is the measurement trail, kept because the wrong conclusions in it were each reasonable.
+
+**THE THIRD ROW BELOW DID NOT HOLD EITHER.** Re-measured on
+2026-09-19 against the then-current dumper, six more runs:
 
 | executable | events per case | result |
 |---|--:|---|
@@ -11056,18 +11061,89 @@ times) and BEFORE `dump_ftf` writes any of its, leaving 82 files stale - which i
 SHARED infrastructure, because every package downstream of emextra in the registry order now
 gets a stale oracle from `run.bat tables`.
 
-Ruled out since: **the campaign's own `release()`**. The heap-corruption hypothesis - that
+Ruled out on the way: **the campaign's own `release()`**. The heap-corruption hypothesis - that
 deleting the secondaries' `G4DynamicParticle`s frees something a model still owns, and that the
 damage detonates in the next dump's first large allocation - was tested directly by replacing
-the `delete` with a leak and rebuilding the real dumper. It still dies, 0xC0000005, same place.
-So `release()` is not it, and the leak it prevents is real and stays.
+the `delete` with a leak and rebuilding the real dumper. It still died, 0xC0000005, same place.
+So `release()` was not it, and the leak it prevents is real and stays.
 
-What is left, and what the next person should do: bisect the eighteen dumps against emextra,
-four builds of a binary search over `scratchpad/noemextra/run.ps1`'s `EXTRA` list, which names
-the pair. The pair is what matters, because `dump_precompound.cc` reconfigures `SetOPTxs`,
-`UseCEMtr` and `UseNGB` on the shared `G4DeexPrecoParameters` on purpose and any dump that does
-that changes what every other dump measures - the registry's isolation is a compile-time
-isolation, not a run-time one.
+## THE MECHANISM, AND IT IS A DESTRUCTOR THAT FREES A CLASS STATIC
+
+The bisect took four builds - `scratchpad/noemextra/run.ps1`, which links `g4dump.cc` plus a
+named list and nothing else - and narrowed to a PAIR:
+
+    bertini;bic;capture;chargeodd;coulomb;emextra;ftf   exit 0
+    decay;deexcitation;elastic;electron_hi;emextra;ftf  0xC0000005
+    decay;emextra;ftf                                   exit 0
+    deexcitation;emextra;ftf                            0xC0000005
+    deexcitation;emextra                                0xC0000005   <- ftf is not needed either
+
+Two dumps. Instrumenting `g4dump.cc`'s registry loop with flushed markers put the fault INSIDE
+`dump_emextra_apply`, and the campaign's own `start,` rows put it in case 6 - `preco gamma
+10 MeV on C12` - which is where V174 always said it was. Cases 1-5 are on hydrogen and survive
+because `G4ExcitationHandler::BreakItUp` returns before Fermi break-up for A <= 1. Then `cdb`
+gave the stack in one run:
+
+    ExceptionCode c0000005, reading address 0x158
+    G4FermiFragmentsPoolVI::HasChannels+0x12
+    G4FermiBreakUpVI::IsApplicable+0x2b
+    G4ExcitationHandler::BreakItUp+0xd72
+    G4PreCompoundModel::PerformEquilibriumEmission+0x19
+    G4PreCompoundModel::DeExcite+0x403
+    G4LowEGammaNuclearModel::ApplyYourself+0x14b
+
+A null pool, dereferenced at offset 0x158. And the reason it is null is four lines of Geant4:
+
+    G4FermiFragmentsPoolVI* G4FermiBreakUpVI::thePool = nullptr;   // a CLASS STATIC
+
+    G4FermiBreakUpVI::~G4FermiBreakUpVI() {
+      if(G4Threading::IsMasterThread()) { delete thePool; thePool = nullptr; }
+    }
+
+**A per-instance destructor frees a process-wide static.** Destroying ANY `G4FermiBreakUpVI`
+deletes the pool that every other one is still holding, and `Initialise()` - the only thing that
+rebuilds it - is called from the CONSTRUCTOR, so no existing instance ever notices. The
+instance that matters is the one inside QBBC's own `G4ExcitationHandler`, owned by the shared
+"PRECO" `G4PreCompoundModel` that `G4LowEGammaNuclearModel` finds in
+`G4HadronicInteractionRegistry`. It is built once at physics-list initialisation and lives for
+the whole program.
+
+The reach is wider than one class, because ownership chains down to it:
+`~G4ExcitationHandler()` does `delete theFermiModel`, and `~G4PreCompoundModel()` does
+`delete GetExcitationHandler()`. So a stack `G4ExcitationHandler`, a stack
+`G4PreCompoundModel`, or anything owning one, disarms Fermi break-up for the rest of the
+process when it goes out of scope.
+
+**Four such objects were in `ref/dump/dump_deexcitation.cc`** - P3's file (docs/PORTED.md
+2.1.3), not P13's - and all four were stack objects: `G4FermiBreakUpVI fbu;` in `dump_fermi()` and `G4ExcitationHandler handler;`
+in `dump_params()`, `dump_firststep()` and `dump_breakup()`. The fix is four `new`s that are
+never deleted, with the reason written above each: leaking four objects for the life of a dump
+program is the smallest correct change, and `ref/dump/dump_bic.cc` already used exactly that
+idiom (`auto* handler = new G4ExcitationHandler();`) for the same objects.
+
+**Why it took nineteen dumps to show.** Every dump that CONSTRUCTS a fresh handler rebuilds the
+pool on the way in, so a dumper whose every de-excitation user builds its own survives; the
+eighteen dumps without emextra do exactly that and exit 0 with 223 CSVs. `dump_emextra.cc` is
+the first dump that uses the SHARED model instead of building one - it has to, because
+`G4LowEGammaNuclearModel` takes QBBC's "PRECO" out of the registry and that is the configuration
+under test - so it is the first one that can see the damage. The dump that broke it and the
+dump that fell over are different files, and neither is wrong on its own.
+
+Proof: `ref/dump/build.bat` then `ref/oracle/run.bat tables`, **twice in a row, exit 0 both
+times**, 12.6 and 12.9 minutes, with 233 files named on "wrote" lines all present and all newer
+than the run that claimed them, and **zero CSVs left in `ref/oracle/` that the run did not
+refresh** - the mtime check by hand, since P9d's registry-side version is not on main yet. And
+then the configuration this entry's table called "dies in case 6, every time": the full
+nineteen-dump dumper with `G4GPU_EMEXTRA_EVENTS=20000`, which is **exit 0 in 18.7 minutes,
+126 of 126 cases**. The statistical oracle in `ref/oracle/` now comes from the real dumper
+rather than from a standalone build.
+
+One thing this does NOT fix, and the next person should know: an instance that was alive when
+the pool was deleted keeps a dangling `theDecay`, cached as `thePool->FermiDecayProbability()`
+in ITS constructor. Rebuilding the pool repairs `IsApplicable` and not that pointer. So
+"construct a fresh `G4FermiBreakUpVI` to heal it" is NOT a fix, and the only safe rule is the
+one applied here: **in a program that shares Geant4's de-excitation, never let a
+`G4FermiBreakUpVI`, a `G4ExcitationHandler` or a `G4PreCompoundModel` be destroyed.**
 
 It is not memory
 exhaustion**: the process was polled at 195 MB and 381 MB on its way to the failure and the
@@ -11090,23 +11166,15 @@ source and not of the process: `dump_precompound.cc` reconfigures `SetOPTxs`, `U
 `UseNGB` on purpose, to reach five transition configurations from one run, and any dump that
 does that changes what every other dump measures.
 
-**Until it is understood the campaign's default is ONE event per case**, which is enough to
-prove every model is reachable and every column is written and not enough to compare a
-distribution, and `tests/test_emextra_models.cu` says so loudly - it counts the cases whose
-oracle has under a hundred events and prints that they are NOT asserted statistically, because
-a five-sigma band against a one-event oracle passes whatever the port did. The statistical
-oracle is regenerated deliberately with `G4GPU_EMEXTRA_EVENTS=20000`, which works in the
-standalone build - 126 cases in 4.9 minutes - and the test reads the count out of the CSV's own
-`events` column, so it is correct either way and says which it had.
-
-That default no longer buys what it was meant to buy: one event per case dies too. It is kept
-because the eleven CSVs are complete when it dies, so a one-event `run.bat tables` still
-regenerates every emextra table correctly and `test_emextra_config.cu` and `test_emextra_xs.cu`
-pass against them - both were re-run against the tables from a crashing dumper and are green,
-34,995 comparisons at 7.2e-16. What is lost is everything AFTER emextra in the registry order,
-and until the bisect above is done the workaround for anyone regenerating the whole oracle is to
-build without `dump_emextra.cc` (the eighteen-dump row completes) or to run `run.bat tables`
-twice and take the second half from a build that excludes it.
+**The campaign's default stays at ONE event per case**, which is enough to prove every model is
+reachable and every column is written and not enough to compare a distribution, and
+`tests/test_emextra_models.cu` says so loudly - it counts the cases whose oracle has under a
+hundred events and prints that they are NOT asserted statistically, because a five-sigma band
+against a one-event oracle passes whatever the port did. The statistical oracle is regenerated
+deliberately with `G4GPU_EMEXTRA_EVENTS=20000` - 126 cases in 4.9 minutes - and the test reads
+the count out of the CSV's own `events` column, so it is correct either way and says which it
+had. That default is now a choice about the lead's integration chain taking twelve minutes
+rather than twenty, not a way round a crash.
 
 TWO LESSONS THAT COST MORE THAN THE BUG.
 

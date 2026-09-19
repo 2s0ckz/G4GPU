@@ -152,7 +152,11 @@ void dump_params() {
   // The constants that are NOT in the parameter class and that no UI command reaches. They
   // decide as much as the parameters do: which fragments Fermi break-up claims, and how many
   // channels evaporation offers.
-  G4ExcitationHandler handler;
+  // HEAP AND LEAKED, never a stack object - see dump_fermi() below for the whole story.
+  // `~G4ExcitationHandler()` does `delete theFermiModel`, that is a `G4FermiBreakUpVI`, and
+  // ITS destructor deletes `G4FermiBreakUpVI::thePool` - a class static shared with QBBC's own
+  // handler. One destroyed local handler disarms Fermi break-up for the rest of the process.
+  auto& handler = *new G4ExcitationHandler();
   handler.Initialise();
   std::fprintf(f, "HandlerMaxZForFermiBreakUp,%d,\n", 9);
   std::fprintf(f, "HandlerMaxAForFermiBreakUp,%d,\n", 17);
@@ -575,8 +579,29 @@ void dump_fission() {
 /// tell which.
 void dump_fermi() {
   G4FermiFragmentsPoolVI pool;
-  G4FermiBreakUpVI fbu;
-  fbu.Initialise();
+  // `fbu` IS LEAKED ON PURPOSE AND MUST NOT BE A STACK OBJECT. It was one, and that single
+  // line made the whole dumper exit 0xC0000005 - docs/RISK.md V174:
+  //
+  //     G4FermiBreakUpVI::~G4FermiBreakUpVI() {
+  //       if(G4Threading::IsMasterThread()) { delete thePool; thePool = nullptr; }
+  //     }
+  //
+  // and `G4FermiFragmentsPoolVI* G4FermiBreakUpVI::thePool` is a CLASS STATIC, one per
+  // process, shared by every G4FermiBreakUpVI there is - including the one inside QBBC's own
+  // G4ExcitationHandler, which `G4PreCompoundModel::DeExcite` reaches through the shared
+  // "PRECO" model. `Initialise()` only builds the pool when it is null, and it is called from
+  // the CONSTRUCTOR, so nothing ever rebuilds it: the instance that was already using the pool
+  // simply keeps a null pointer. Destroying a second, throwaway G4FermiBreakUpVI therefore
+  // disarms Fermi break-up for the rest of the run, and the next de-excitation of a fragment
+  // with A > 1 dereferences null at G4FermiBreakUpVI::IsApplicable -> HasChannels.
+  //
+  // The local `pool` above is a different object and is safe: its destructor frees only its
+  // own lists. It is the BREAK-UP MODEL that owns the class static, and one is enough.
+  //
+  // Leaking one object of a few hundred bytes for the life of a dump program is the smallest
+  // correct fix. `new` and never `delete` is deliberate, not an oversight.
+  auto* fbu = new G4FermiBreakUpVI();
+  fbu->Initialise();
 
   FILE* f = std::fopen("deex_fermi_pool.csv", "w");
   std::fprintf(f, "Z,A,Eexc_MeV,applicable,has_channels,is_physical,nch,ch_exc_MeV,"
@@ -592,7 +617,7 @@ void dump_fermi() {
       for (double e : {0.0, 0.001, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0}) {
         const double exc = e * MeV;
         const G4FermiChannels* c = pool.ClosestChannels(Z, A, gmass + exc);
-        const int app = fbu.IsApplicable(Z, A, exc) ? 1 : 0;
+        const int app = fbu->IsApplicable(Z, A, exc) ? 1 : 0;
         const int hc = pool.HasChannels(Z, A, exc) ? 1 : 0;
         const int ip = pool.IsPhysical(Z, A) ? 1 : 0;
         if (c == nullptr) {
@@ -712,7 +737,9 @@ void dump_channel_spectrum() {
 /// the two numbers that say whether the CHAIN inside one BreakFragment call agrees, separately
 /// from the handler's loop over the evaporation list.
 void dump_firststep() {
-  G4ExcitationHandler handler;
+  // Heap and leaked; see dump_fermi(). A destroyed G4ExcitationHandler deletes the shared
+  // G4FermiBreakUpVI pool out from under QBBC's own handler.
+  auto& handler = *new G4ExcitationHandler();
   handler.Initialise();
   G4VEvaporation* evap = handler.GetEvaporation();
 
@@ -771,7 +798,9 @@ void dump_firststep() {
 }
 
 void dump_breakup() {
-  G4ExcitationHandler handler;
+  // Heap and leaked; see dump_fermi(). A destroyed G4ExcitationHandler deletes the shared
+  // G4FermiBreakUpVI pool out from under QBBC's own handler.
+  auto& handler = *new G4ExcitationHandler();
   handler.Initialise();
 
   const Campaign cs[] = {

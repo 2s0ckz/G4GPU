@@ -854,11 +854,22 @@ void write_case(FILE* f, FILE* fs, const char* model, const char* particle, doub
 }
 
 void dump_emextra_apply(const DumpContext&) {
-  // THE DEFAULT IS ONE EVENT PER CASE, AND THAT IS NOT A CHOICE ABOUT STATISTICS.
+  // THE DEFAULT IS ONE EVENT PER CASE, AND IT IS A CHOICE ABOUT THE LEAD'S INTEGRATION CHAIN
+  // TAKING TWELVE MINUTES RATHER THAN TWENTY. It used to be a way round a crash; that crash is
+  // fixed and the history below is kept because the wrong conclusions in it were reasonable.
   //
-  // At 2,000 events per case this dump dies, with no message, somewhere inside its sixth case -
-  // a 10 MeV photon on carbon through `G4LowEGammaNuclearModel` - and takes the nine dumps that
-  // link after it down with it. Measured, four ways:
+  // THE CRASH, AND WHY IT WAS NOT THIS FILE'S. Until 2026-09-19 this dump died with no message
+  // inside its sixth case - a 10 MeV photon on carbon through `G4LowEGammaNuclearModel` - and
+  // took every dump after it down. The fault was four STACK objects in
+  // `ref/dump/dump_deexcitation.cc`: `~G4FermiBreakUpVI()` does
+  // `if(IsMasterThread()) { delete thePool; thePool = nullptr; }` and `thePool` is a CLASS
+  // STATIC shared with QBBC's own de-excitation, which is what this dump uses, because
+  // `G4LowEGammaNuclearModel` takes the shared "PRECO" model out of the registry rather than
+  // building its own. `~G4ExcitationHandler()` and `~G4PreCompoundModel()` reach the same
+  // destructor. This dump was simply the first one that could see the damage. docs/RISK.md
+  // V174 has the bisect, the cdb stack and the fix.
+  //
+  // What was measured on the way, and each row was true when it was taken:
   //
   //   this dump alone, 2,000 events                    126 of 126 cases, exit 0
   //   this dump alone, 20,000 events                   126 of 126 cases, exit 0, 4.9 minutes
@@ -868,14 +879,12 @@ void dump_emextra_apply(const DumpContext&) {
   //   this dump + all eighteen others, 1 event         0xC0000005 after this dump's files
   //   this dump + all eighteen others, 2,000           dies in case 6, every time
   //
-  // so THIS DUMP IS NECESSARY for the crash and the campaign size is not: one event per case
-  // dies too, with an access violation, after all eleven CSVs are written and closed and before
-  // dump_ftf writes any of its. It is not memory exhaustion - the process is at 380 MB and the
-  // machine has gigabytes - and it is not this file's `release()`, which was replaced with a
-  // leak and rebuilt and changed nothing. docs/RISK.md V174 has the table and the bisect the
-  // next person should run.
+  // so this dump was NECESSARY for the crash and the campaign size was not: one event per case
+  // died too. It was not memory exhaustion - the process is at 380 MB and the machine has
+  // gigabytes - and it was not this file's `release()`, which was replaced with a leak and
+  // rebuilt and changed nothing. It was two dumps away, in a destructor.
   //
-  // Until it is understood, the campaign that the lead's `ref/oracle/run.bat` runs is ONE event
+  // The campaign that the lead's `ref/oracle/run.bat` runs is ONE event
   // per case - enough to prove every model is reachable and every column is written, and not
   // enough to compare a distribution - and the statistical oracle is regenerated deliberately
   // with `G4GPU_EMEXTRA_EVENTS=20000`. `tests/test_emextra_models.cu` reads the count out of the
