@@ -22,16 +22,20 @@
 // distinction is the whole of the sizing problem, because the two numbers differ by four orders
 // of magnitude:
 //
-//   entry::Workspace       410,824 B   ion beams included (kMaxProjA = 64)
-//   entry::HadronWorkspace 266,344 B   projectile is a single hadron (kMaxProjA = 1)
+//   entry::Workspace       433,376 B   ion beams included (kMaxProjA = 64)
+//   entry::HadronWorkspace 352,368 B   projectile is a single hadron (kMaxProjA = 1)
 //
 //   slots      Workspace      HadronWorkspace
-//       64       26.3 MB           17.0 MB
-//      256      105.2 MB           68.2 MB
-//    1,024      420.7 MB          272.8 MB
-//   65,536       26.9 GB           17.5 GB     <- what a per-TRACK reading would cost
+//       64       26.5 MB           21.5 MB
+//      256      105.8 MB           86.0 MB
+//    1,024      423.2 MB          344.1 MB
+//   65,536       27.1 GB           22.0 GB     <- what a per-TRACK reading would cost
 //
-// A 65,536-track batch does not need 65,536 workspaces and could not have them: 26.9 GB is past
+// Both grew by 22,552 bytes in P11d part 2: `G4DecayKineticTracks` needs its own list, because
+// P9d's `bic::DecayTrack` and P6's `preco::CascadeTrack` are different shapes and neither is a
+// prefix of the other. The numbers above are `tests/test_ftf_entry.cu`'s own printout.
+//
+// A 65,536-track batch does not need 65,536 workspaces and could not have them: 27.1 GB is past
 // every card this project targets. What it needs is as many as the launch runs concurrently, and
 // since a thread cannot portably learn its own residency, the contract is the other way round:
 // **the caller states `n_slots`, a thread takes slot `tid`, and a thread whose `tid` is past the
@@ -69,7 +73,7 @@
 namespace g4gpu::hadronic::ftf::entry {
 
 /// The workspace for a run that can have an ION beam: `kMaxProjA = 64` covers every projectile a
-/// galactic-cosmic-ray problem contains, and 410,824 bytes is what it costs. The template
+/// galactic-cosmic-ray problem contains, and 433,376 bytes is what it costs. The template
 /// arguments are the ones `test_ftf_model.cu`'s device probe is measured with, so PORTED
 /// 2.1.11b's 255 registers and 864-byte frame are this type's numbers.
 using Workspace = FtfWorkspace<250, 64, 1024, 512, 256, 96>;
@@ -133,8 +137,18 @@ struct Handle {
 /// @param slot_index  which workspace to use; the global thread index is the intended value
 /// @param proj        the projectile, as P5's framework carries it
 /// @param target      (A, Z) of the target nucleus
-/// @param out         the final state; cleared by `apply_yourself` itself
+/// @param out         the final state. **`apply` REPLACES it, it does not append.** See below.
 /// @param rep         what happened, when the answer is not `kRan`
+///
+/// `out` IS CLEARED, AND A CALLER THAT HAD ALREADY PUT SOMETHING IN IT LOSES IT. `apply_yourself`
+/// opens with `out.clear()` because that is what `G4HadronicInteraction::ApplyYourself` is
+/// entitled to assume - `G4HadFinalState` is constructed fresh for each model call in Geant4 -
+/// and because a workspace is reused across calls, so a stale list is the likelier bug. P12b
+/// found the other side of it: `G4HadronicAbsorptionFritiof` appends the EM cascade's gammas to
+/// its final state BEFORE calling the hadronic model, and this call wiped them. The contract is
+/// therefore stated rather than left to be discovered: hand `apply` a final state you do not
+/// mind losing, and merge afterwards. P12b does exactly what the Bertini arm does - keep the
+/// gammas in a local list and re-append them after the call - and that remains the pattern.
 ///
 /// The call is `__host__ __device__` because that is what the model is: the tests run it on the
 /// host and `run_step_hadron` runs it on the device, from the same source.

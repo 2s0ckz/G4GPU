@@ -39,17 +39,25 @@
 // `G4HadronicProcess`. It is transcribed because `Scatter` is also callable directly and
 // because an identity rotation that is assumed is a bug waiting for a caller.
 //
-// ## The two exits, and QBBC takes the first
+// ## The two exits, and both are written
 //
 // `ApplyYourself` chooses between `theTransport->Propagate` (P6's interface) and
 // `theDecay.Propagate` by counting hit nucleons: if EVERY nucleon of the target was hit there
 // is no residual nucleus and the secondaries are simply decayed. The second path is
-// `G4DecayStrongResonances`, which QBBC reaches only for a hydrogen or very light target, and
-// it is REFUSED BY NAME (`kDecayStrongResonances`) rather than approximated by the first.
+// `G4DecayStrongResonances`, which QBBC reaches whenever the target is small enough - on
+// hydrogen it is the only path, because A = 1 and one collision wounds the whole nucleus.
+//
+// BOTH BEGIN WITH THE SAME LINE, and since P11d part 2 that line is written: `G4DecayKineticTracks`
+// over the string products, through P9d's shared engine in `bic/kinetic_decay.cuh`. It is
+// G4GeneratorPrecompoundInterface.cc:148 in `Propagate`, :484 in `PropagateNuclNucl` and the
+// first statement of `G4DecayStrongResonances::Propagate`, so `ftf_decay_kinetic_tracks` runs it
+// once, before the arms divide. What is left of `G4DecayStrongResonances` after that is a copy
+// into `G4ReactionProduct`s, which is `ftf_emit_tracks`.
 #pragma once
 #include <cmath>
 
 #include "core/units.cuh"
+#include "physics/hadronic/bic/kinetic_decay.cuh"
 #include "physics/hadronic/ftf/ftf_model.cuh"
 #include "physics/hadronic/ftf/string_fragmentation.cuh"
 #include "physics/hadronic/precompound/generator_interface.cuh"
@@ -96,6 +104,13 @@ struct FtfApplyReport {
   bool track_capacity = false;
   bool secondary_overflow = false;
   bool low_energy_dummy = false;        ///< the charm/bottom or hypernucleus <100 MeV branch
+  /// What P9d's shared decay engine reported. Carried whole rather than reduced to a bool,
+  /// because `unknown_species` in it is benign and the other four are not - see
+  /// `FtfRefusal::kDecayEngineRefused`.
+  bic::KineticDecayRefusal decay;
+  int decay_refused_pdg = 0;            ///< the code behind a kDecay* refusal
+  int n_decayed = 0;                    ///< tracks the pass removed: `n_before - n_after + made`
+  int n_decay_products = 0;             ///< tracks the pass added
 
   __host__ __device__ bool any() const {
     return refused != FtfRefusal::kNone || model.any() || generator.any() ||
@@ -136,6 +151,14 @@ struct FtfWorkspace {
   bool coal_consumed[kMaxTracks];
   int coal_partner[kMaxTracks];
   int n_coalesced = 0;
+  /// `G4DecayKineticTracks`' list, in P9d's own struct. It is a separate array and not a cast of
+  /// `tracks`, because the two structs are different shapes: a `CascadeTrack` carries the charge
+  /// and the short-lived flag that P6 reads and the engine does not, and a `DecayTrack` carries
+  /// the three parent-resonance fields that Geant4 sets on every daughter and the cascade does
+  /// not. The capacity is the same `kMaxTracks`, which is the right bound: whatever the pass
+  /// produces has to fit in `tracks` afterwards anyway, so an overflow here is the same event
+  /// that would overflow there, reported one step earlier as `KineticDecayRefusal::list_full`.
+  bic::DecayTrack decay_list[kMaxTracks];
 
   FtfApplyReport report;
 };
@@ -453,6 +476,124 @@ __host__ __device__ inline preco::WoundedNucleus ftf_wounded_projectile(
   return nuc;
 }
 
+/// `G4DecayStrongResonances::Propagate`'s first line and `G4GeneratorPrecompoundInterface`'s,
+/// which are the same line: `G4DecayKineticTracks decay(theSecondaries)` over the string
+/// products, through P9d's contract header `bic/kinetic_decay.cuh`.
+///
+/// IT RUNS FIRST, AND THAT IS A STATEMENT ABOUT THE RANDOM STREAM. In 11.1.1 the pass is
+/// G4GeneratorPrecompoundInterface.cc:148 in `Propagate` and :484 in `PropagateNuclNucl`, and
+/// the only `G4UniformRand` calls in that file are at :191 and :538-571, all of them after. So
+/// decaying here - before `ftf_propagate` and before `make_coalescence`, which :486 also puts
+/// after the pass - consumes the same deviates in the same order Geant4 does, which is what
+/// P9d's V151 says the contract is for.
+///
+/// THREE THINGS ARE CHECKED THAT THE ENGINE DOES NOT CHECK, and each is a refusal of its own:
+///
+///   1. BEFORE the pass, a track Geant4 would decay whose code the engine's table does not
+///      carry. `bic::kinetic_decay_is_short_lived` answers false for an unknown code, so the
+///      engine cannot tell "not a resonance" from "a resonance I have never heard of" - it sets
+///      `unknown_species` for both and carries on. The authority for "would Geant4 decay this"
+///      is `data/ftf_hadrons.hh`'s `shortlived`, which is the oracle's dump of
+///      `G4ParticleDefinition::IsShortLived()`, and it is what P6's `CascadeTrack` already
+///      carries. `kDecayEngineUnknownSpecies`.
+///   2. The engine's own refusals, minus `unknown_species`, which fires for every eta' and every
+///      Omega- and means nothing. `kDecayEngineRefused`.
+///   3. AFTER the pass, a track that is still short-lived. Geant4 leaves a resonance in the list
+///      when its `Decay()` returns nothing, and P9d's header records two ways that happens -
+///      a zero total actual width, and the channel search falling off the end - neither of which
+///      sets a flag. Asking the list again is the only sound test. `kDecayLeftShortLived`.
+///
+/// Returns false if it refused; `ws->report` then says which and for what code.
+template <int kA, int kP, int kI, int kS, int kT, int kPS, typename Rng>
+__host__ __device__ __noinline__ bool ftf_decay_kinetic_tracks(
+    FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws, Rng& rng) {
+  // 1. The pre-screen. It is a separate pass and not folded into the copy below, because a
+  // refusal has to happen before any deviate is drawn: a caller that retries the event would
+  // otherwise resume a stream that a half-finished decay had already advanced.
+  int n_resonances = 0;
+  for (int i = 0; i < ws->n_tracks; ++i) {
+    if (!ws->tracks[i].is_short_lived) { continue; }
+    ++n_resonances;
+    if (!bic::kinetic_decay_knows(ws->tracks[i].pdg)) {
+      ws->report.refused = FtfRefusal::kDecayEngineUnknownSpecies;
+      ws->report.decay_refused_pdg = ws->tracks[i].pdg;
+      return false;
+    }
+  }
+
+  for (int i = 0; i < ws->n_tracks; ++i) {
+    const preco::CascadeTrack& t = ws->tracks[i];
+    bic::DecayTrack d;
+    d.pdg = t.pdg;
+    d.momentum = t.momentum;
+    d.position = t.position;
+    d.formation_time = t.formation_time;
+    d.creator_model_id = t.creator_model_id;
+    ws->decay_list[i] = d;
+  }
+  const int n_before = ws->n_tracks;
+  int n = n_before;
+  ws->report.decay = bic::KineticDecayRefusal();
+  bic::decay_kinetic_tracks(ws->decay_list, n, kT, rng, ws->report.decay);
+
+  // 2. Everything the engine reports except `unknown_species`. See the enumerator's note: that
+  // one flag is set for any code the table lacks, and the codes FTFP produces in that class -
+  // eta', Omega-, the anti-Xis, the charm and bottom hadrons - are all ones Geant4 does not
+  // decay either. The pre-screen above is what covers the case where it would matter.
+  const bic::KineticDecayRefusal& ref = ws->report.decay;
+  if (ref.list_full || ref.too_many_daughters || ref.below_threshold || ref.phase_space_failed) {
+    ws->report.refused = FtfRefusal::kDecayEngineRefused;
+    ws->report.decay_refused_pdg = ref.refused_pdg;
+    return false;
+  }
+
+  // WITH NO RESONANCE IN THE LIST THE PASS CANNOT HAVE CHANGED IT - `G4DecayKineticTracks`
+  // touches only a track whose definition is short-lived - and returning here is a correctness
+  // point rather than a saving. This is the one path on which a track can carry a code
+  // `data/ftf_hadrons.hh` has no row for and cannot have one: the 1000-attempt fallback puts the
+  // ION primary in the list under its 10LZZZAAAI code (docs/RISK.md V89 and V146). Rebuilding
+  // that track's charge from the table below would refuse a track the model deliberately made.
+  if (n_resonances == 0) { return true; }
+
+  // The list comes back in the order `G4DecayKineticTracks` leaves it - the survivors first in
+  // their original order, then the daughters generation by generation - and that order is what
+  // every later deviate in the event depends on, so it is copied straight across.
+  for (int i = 0; i < n; ++i) {
+    const bic::DecayTrack& d = ws->decay_list[i];
+    const data::FtfHadron* def = data::ftf_find_hadron(d.pdg);
+    if (def == nullptr) {
+      ws->report.refused = FtfRefusal::kUnknownHadronCode;
+      ws->report.decay_refused_pdg = d.pdg;
+      return false;
+    }
+    preco::CascadeTrack t;
+    t.pdg = d.pdg;
+    t.charge = static_cast<int>(def->charge + ((def->charge < 0.0) ? -0.1 : 0.1));
+    t.momentum = d.momentum;
+    t.position = d.position;
+    t.formation_time = d.formation_time;
+    t.creator_model_id = d.creator_model_id;
+    t.is_short_lived = def->shortlived;
+    ws->tracks[i] = t;
+  }
+  ws->n_tracks = n;
+  // `n = n_before - removed + made`, so neither count can be read off the length alone. The
+  // parents removed are the resonances counted above - every one of them decayed, because a
+  // resonance the pass left behind is what step 3 refuses - and the products follow.
+  ws->report.n_decayed = n_resonances;
+  ws->report.n_decay_products = n - n_before + n_resonances;
+
+  // 3. The post-pass re-test.
+  for (int i = 0; i < n; ++i) {
+    if (ws->tracks[i].is_short_lived) {
+      ws->report.refused = FtfRefusal::kDecayLeftShortLived;
+      ws->report.decay_refused_pdg = ws->tracks[i].pdg;
+      return false;
+    }
+  }
+  return true;
+}
+
 /// The hand-over into P6, behind a `__noinline__` so that its 10 kB of stack
 /// (docs/PORTED.md 2.1.10: `preco::deexcite` inlines whole at about 10,080 bytes) is not added
 /// to every frame that merely calls FTF.
@@ -492,17 +633,24 @@ __host__ __device__ __noinline__ preco::NuclNuclResiduals ftf_propagate_nucl_nuc
                                               ws->report.generator, rng);
 }
 
-/// The escaped tracks, as `G4HadFinalState` secondaries.
+/// A list of tracks, as `G4HadFinalState` secondaries.
 ///
 /// `time = max(GetFormationTime(), 0)` and the primary's global time is added by the process,
 /// not here. The mass is the PDG one when the table has the code, because that is what the
 /// G4ReactionProduct the interface builds carries; a deuteron out of `MakeCoalescence` is not
 /// in `data/ftf_hadrons.hh` and falls back to its own invariant mass.
+///
+/// Both callers want the same three lines. `G4GeneratorPrecompoundInterface` fills its
+/// `G4ReactionProduct` with `SetDefinition`/`SetMomentum`/`SetTotalEnergy`, and
+/// `G4DecayStrongResonances::Propagate` fills its own with `SetMass(GetPDGMass())`,
+/// `SetTotalEnergy(Get4Momentum().t())` and `SetMomentum(Get4Momentum().vect())` - the same
+/// three fields from the same track, so one function serves the escaped list and the decay arm.
 template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS>
-__host__ __device__ inline void ftf_emit_escaped(FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
-                                                 HadFinalState<real_t, kMaxSec>& out) {
-  for (int i = 0; i < ws->n_escaped; ++i) {
-    const preco::CascadeTrack& t = ws->escaped[i];
+__host__ __device__ inline void ftf_emit_tracks(const preco::CascadeTrack* tracks, int n,
+                                                FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+                                                HadFinalState<real_t, kMaxSec>& out) {
+  for (int i = 0; i < n; ++i) {
+    const preco::CascadeTrack& t = tracks[i];
     const data::FtfHadron* d = data::ftf_find_hadron(t.pdg);
     HadSecondary<real_t> s;
     s.pdg = t.pdg;
@@ -526,6 +674,13 @@ __host__ __device__ inline void ftf_emit_escaped(FtfWorkspace<kA, kP, kI, kS, kT
     s.creator_model_id = t.creator_model_id;
     if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
   }
+}
+
+/// What escaped `G4GeneratorPrecompoundInterface`'s capture loop.
+template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS>
+__host__ __device__ inline void ftf_emit_escaped(FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+                                                 HadFinalState<real_t, kMaxSec>& out) {
+  ftf_emit_tracks(ws->escaped, ws->n_escaped, ws, out);
 }
 
 /// One excited residual, handed on as a (Z, A, E*) secondary in the LAB frame.
@@ -672,8 +827,14 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   }
   if (ws->report.refused != FtfRefusal::kNone) { return; }
 
+  // THE DECAY PASS, and it is the same line on all three arms. `G4DecayStrongResonances::
+  // Propagate` opens with it, and so do both of `G4GeneratorPrecompoundInterface`'s entry
+  // points - so it is done ONCE here rather than three times below, which is also the only
+  // placement that keeps the deviate order: every random in that file comes after it.
+  if (!ftf_decay_kinetic_tracks(ws, rng)) { return; }
+
   // `hitCount != GetMassNumber()` selects the residual path; the equality selects
-  // G4DecayStrongResonances, which is not written.
+  // G4DecayStrongResonances.
   int hit_count = 0;
   for (int i = 0; i < ws->model.target.my_a; ++i) {
     if (ws->model.target.nucleons[i].hit) { ++hit_count; }
@@ -699,8 +860,16 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
     ftf_emit_residual(both.projectile, back, ws, out);
     return;
   }
+  // G4DecayStrongResonances::Propagate, for the event that hit EVERY target nucleon: there is no
+  // residual nucleus to de-excite and no capture loop to run, so the decayed list IS the final
+  // state. The decay itself already happened above - that function is `G4DecayKineticTracks`
+  // followed by a copy into G4ReactionProducts, and nothing else - so all that is left is the
+  // copy. It takes `ws->tracks` and not `ws->escaped`, because nothing was ever captured.
+  //
+  // Reachable wherever the target is small enough that every nucleon can be wounded: on hydrogen
+  // it is the ONLY path, since A = 1 and one collision hits the whole nucleus.
   if (hit_count == ws->model.target.my_a) {
-    ws->report.refused = FtfRefusal::kDecayStrongResonances;
+    ftf_emit_tracks(ws->tracks, ws->n_tracks, ws, out);
     return;
   }
 

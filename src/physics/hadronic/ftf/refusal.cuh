@@ -220,6 +220,51 @@ enum class FtfRefusal : int {
   /// G4ExcitedStringDecay::FragmentStrings' 100 attempts, or EnergyAndMomentumCorrector's 500
   /// scale iterations without reaching |Scale - 1| <= 1e-5.
   kEnergyCorrectorFailed,
+
+  // ---- the shared decay engine, P9d's bic/kinetic_decay.cuh (P11d part 2) ----
+
+  /// A string product that Geant4 WOULD decay - `G4ParticleDefinition::IsShortLived()` is true
+  /// for it, from `data/ftf_hadrons.hh`, which is the oracle's own dump of the flag - and whose
+  /// PDG code P9d's generated table does not carry, so `bic::kinetic_decay_knows` is false. The
+  /// engine would leave such a track alone and only set `unknown_species`, which is NOT a
+  /// refusal there (see `kDecayEngineUnknownSpecies`'s note below), so it has to be caught
+  /// BEFORE the pass or it becomes a silently skipped decay.
+  ///
+  /// MEASURED: the only two codes in this class are `-3314` and `-3324`, anti-Xi(1530)- and
+  /// anti-Xi(1530)0. That is not a sample - `G4HadronBuilder::Meson`/`Barion` were enumerated
+  /// over every flavour, both signs, both spins and the mixing draw swept, and the builder can
+  /// return 27 short-lived codes of which 25 are in P9d's 126-species closure and these two are
+  /// not. Their rate is **0 of 161,568 string products over 14,000 events** on the seven
+  /// configurations of docs/HADRONIC_PLAN.md 9.3, because an anti-Xi* needs an anti-strange
+  /// diquark. The refusal carries the code in `FtfApplyReport::decay_refused_pdg`. Widening
+  /// P9d's table is one line in its extractor's `kSeeds` and is P9d's call, not this package's.
+  kDecayEngineUnknownSpecies,
+
+  /// `bic::decay_kinetic_tracks` reported something it could not do: `list_full` (the decayed
+  /// list outgrew `kMaxTracks`), `too_many_daughters`, `below_threshold` (Pmx would have thrown
+  /// after 10,000 resamplings) or `phase_space_failed`. Which one is in
+  /// `FtfApplyReport::decay`, and the code that caused it in `decay_refused_pdg`.
+  ///
+  /// `KineticDecayRefusal::unknown_species` is deliberately NOT in this list. The engine sets it
+  /// for ANY code its table lacks, including codes Geant4 never decays: eta' (331), Omega-
+  /// (3334), the anti-Xi pair and the charm and bottom hadrons all have `IsShortLived() == false`
+  /// in 11.1.1 - read off the `G4ParticleDefinition` constructor arguments, where the flag is
+  /// the second `false` - so `G4DecayKineticTracks` leaves them alone too and nothing is missed.
+  /// eta' alone is 17 of 161,568 products (0.011%), all on a pion beam, so treating that flag as
+  /// a refusal would refuse one FTFP event in several hundred for nothing. The flag is kept in
+  /// the report for a test to read and `kDecayLeftShortLived` below is what actually catches a
+  /// decay that did not happen.
+  kDecayEngineRefused,
+
+  /// A track that is STILL short-lived after the pass. Geant4 leaves such a track in the list -
+  /// `G4DecayKineticTracks` only nulls a parent's slot when daughters came back - so this is
+  /// reachable in 11.1.1 by a resonance whose total actual width evaluates to zero (every
+  /// channel closed at its sampled mass) or whose channel search falls off the end
+  /// (G4KineticTrack.cc:575, a `G4cerr` and `return 0`). P9d's contract header records both,
+  /// and neither sets a flag the caller can read, so the only sound test is to ask again.
+  /// Whatever the cause, handing a resonance to `G4GeneratorPrecompoundInterface` is what P6
+  /// refuses as `short_lived_track`, so it is named here instead, with its code.
+  kDecayLeftShortLived,
 };
 
 __host__ __device__ inline const char* ftf_refusal_name(FtfRefusal r) {
@@ -263,6 +308,12 @@ __host__ __device__ inline const char* ftf_refusal_name(FtfRefusal r) {
       return "G4LundStringFragmentation::Loop_toFragmentString's loop limits";
     case FtfRefusal::kEnergyCorrectorFailed:
       return "G4ExcitedStringDecay::EnergyAndMomentumCorrector";
+    case FtfRefusal::kDecayEngineUnknownSpecies:
+      return "a short-lived code absent from bic/im_r/decay_tables.hh (anti-Xi(1530))";
+    case FtfRefusal::kDecayEngineRefused:
+      return "bic::decay_kinetic_tracks (see FtfApplyReport::decay)";
+    case FtfRefusal::kDecayLeftShortLived:
+      return "G4KineticTrack::Decay left a resonance undecayed";
   }
   return "(unknown)";
 }
