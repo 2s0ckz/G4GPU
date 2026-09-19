@@ -1480,6 +1480,31 @@ Tests: `test_emextra_config.cu` - the configuration and the two overlaps;
 `test_emextra_xs.cu` - 34,995 comparisons, worst 7.2e-16, none refused, and the two CHIPS
 classes at exactly 0; `test_emextra_models.cu` - the four models, their thresholds and the
 statistical campaign against `emextra_apply.csv` and `emextra_apply_species.csv`.
+
+**The campaign.** 126 cases - `G4LowEGammaNuclearModel` at 10, 30, 100, 150 and 199 MeV,
+`G4CascadeInterface` at 200, 300, 1000, 3000 and 5000 MeV, `G4ElectroVDNuclearModel` for e- and
+e+ at 50, 200, 1000 and 10000 MeV and `G4MuonVDNuclearModel` for mu- at 200, 1000 and
+10000 MeV, each on H1, C12, O16, Al27, Fe56 and Pb208 - each driven DIRECTLY, because the model
+choice is a separate deterministic question that `test_emextra_config.cu` settles over 200,000
+draws per point and mixing it in would put two thirds of the 5 GeV events into a model this
+port refuses. 2,000 events per case on the oracle's side and ten times that on the port's, over
+which the campaign compares the secondary multiplicity, the summed kinetic energy and
+z-momentum, the scattered lepton's energy and angle, the fraction of events with no photon, and
+per species the yield, the rate of products above a tenth of the projectile energy, the
+spectrum of the rest and the angular mean: **5,118 comparisons in twelve buckets, every one
+inside its band**, with 5 of 2,520,000 port events refused (0.0002%, all of them Bertini's own
+`kFate` and `kSubModel`). Three of those buckets are not five-sigma bands and the reason is
+written where each is taken: the summed energy is an IDENTITY for `G4LowEGammaNuclearModel`
+(rms 1e-7 of its mean) and a random variable for the two lepton models, and the test chooses by
+the oracle's own rms; two means with unequal spreads get Welch's error and not a pooled one; and
+a species' hard component is a Poisson rate rather than part of its mean. docs/RISK.md V176 has
+what each of those cost before it was got right.
+
+**The campaign's oracle is regenerated with `G4GPU_EMEXTRA_EVENTS=2000` and not by default**,
+because at that size the dump dies inside the full dumper - docs/RISK.md V174, with the four
+measurements that bound it. The default is one event per case, which proves every model is
+reachable and every column is written, and `test_emextra_models.cu` prints LOUDLY how many
+cases have an oracle under a hundred events and that those are not asserted statistically.
 Device probes: `emextra_xs_probe` 58 registers / 0-byte frame / 215,586 bytes gmem;
 `emextra_lepton_probe` 255 registers, 2,448-byte frame, 240 bytes of spill stores;
 `emextra_photon_probe` 255 registers, 10,592-byte frame, 11,080 bytes of spill stores,
@@ -1491,10 +1516,21 @@ PreCompound arm entirely - docs/RISK.md V170.
 is a sub-process of `G4GammaGeneralProcess` and not a process on the gamma's manager, so the
 gamma stepper reaches it through the general process's own `SelectHadProcess` and not through a
 fourth discrete-process slot; `electronNuclear`, `positronNuclear` and `muonNuclear` ARE
-ordinary processes on their particles' managers. It was not done here because it is not a single
-call site: the gamma's general process already owns the interaction length for four EM
-processes and adding a fifth partial changes `ComputeGeneralLambda`'s table, which is
-`step_gamma`'s and therefore P1's and P15's.
+ordinary processes on their particles' managers.
+
+It was not done here because it is not a single call site. `G4GammaGeneralProcess::
+BuildPhysicsTable` builds ONE summed cross section per material-cuts couple over four energy
+zones, with the gamma-nuclear term - `sigN`, from `theGammaNuclear->GetCrossSectionDataStore()
+->ComputeCrossSection(...)` - added into the same `sum` as Compton, Rayleigh, the photoelectric
+effect and conversion, and each process's SHARE stored as a fraction in one of fifteen tables;
+`PostStepDoIt` draws one uniform against the summed lambda and then walks those fractions, so
+the photonuclear branch is `theGammaNuclear && q + GetProbability(14) <= 1.0`. Wiring it
+therefore means adding a fifth term to `step_gamma`'s own summed table and a fifth fraction to
+its selection, which is P1's structure and P15's decision, not a fourth discrete-process slot.
+The three lepton processes have no such coupling: each is one process with one cross section and
+one model, and `emextra::electro_vd_apply` / `emextra::muon_vd_apply` are already in P5's shape
+for them.
+
 ### 2.2 What QBBC needs and is not there
 
 | QBBC constructor | needs | status |
