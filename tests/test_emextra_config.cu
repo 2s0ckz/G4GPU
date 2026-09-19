@@ -398,6 +398,35 @@ int main() {
         std::printf("NOTE: G4LENDDATA is set; LEND is still unreachable in QBBC because "
                     "gLENDActivated is false and the gamma general process exists\n");
       }
+      // WHICH GAMMA CROSS SECTION THE TWO LEPTON MODELS FOUND.
+      //
+      // `G4ElectroVDNuclearModel`'s constructor asks the registry for "PhotoNuclearXS" and only
+      // falls back to "GammaNuclearXS" if that is absent. It is NOT absent: `G4GammaNuclearXS`'s
+      // own constructor asks for the same name, finds nothing, and does
+      // `new G4PhotoNuclearCrossSection()` - whose base constructor registers it - and
+      // `ConstructGammaElectroNuclear` builds the cross section before the model. So the
+      // electron and positron acceptance test runs on the pure CHIPS parameterisation while the
+      // photon process's own cross section is the IAEA-data one, and
+      // `emextra/lepton_vd.cuh` calls `chips::photo_element_xs` for exactly that reason.
+      //
+      // Asserted rather than reasoned: if this row is ever 0, the model took the other branch
+      // and that file is calling the wrong cross section.
+      const auto pnx = v.find("registry_has_PhotoNuclearXS");
+      if (pnx == v.end()) {
+        std::printf("NOTE: emextra_params.csv has no registry rows - regenerate the oracle to "
+                    "check which gamma cross section G4ElectroVDNuclearModel found\n");
+      } else if (pnx->second == 0.0) {
+        fail("G4PhotoNuclearCrossSection is NOT in the cross-section registry, so "
+             "G4ElectroVDNuclearModel fell back to G4GammaNuclearXS and lepton_vd.cuh's "
+             "acceptance test is calling the wrong class");
+      }
+      for (const char* n : {"registry_has_GammaNuclearXS", "registry_has_ElectroNuclearXS",
+                            "registry_has_KokoulinMuonNuclearXS"}) {
+        const auto it = v.find(n);
+        if (it != v.end() && it->second == 0.0) {
+          fail(std::string(n) + " is 0, so a data set emextra_xs.csv names is not registered");
+        }
+      }
       std::printf("emextra_params.csv: transition energies and both environment switches "
                   "checked\n");
     }
