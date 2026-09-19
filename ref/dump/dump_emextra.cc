@@ -55,10 +55,18 @@
 #include <string>
 #include <vector>
 
+#include "G4CascadeInterface.hh"
 #include "G4CrossSectionDataSetRegistry.hh"
 #include "G4CrossSectionDataStore.hh"
 #include "G4DynamicParticle.hh"
 #include "G4ElectroNuclearCrossSection.hh"
+#include "G4ElectroVDNuclearModel.hh"
+#include "G4HadFinalState.hh"
+#include "G4HadProjectile.hh"
+#include "G4HadSecondary.hh"
+#include "G4LowEGammaNuclearModel.hh"
+#include "G4MuonVDNuclearModel.hh"
+#include "G4Nucleus.hh"
 #include "G4Element.hh"
 #include "G4ElementTable.hh"
 #include "G4GammaNuclearXS.hh"
@@ -636,6 +644,337 @@ void dump_emextra_xs(const DumpContext&) {
   }
 }
 
+// =============================================================================================
+// The statistical oracle: the four models' final states, as distributions
+// =============================================================================================
+//
+// `emextra_apply.csv` and `emextra_apply_species.csv`, the same shape
+// `ref/dump/dump_bertini.cc` writes for `bertini_apply.csv` and for the same reason: the models
+// cannot be compared value for value. `G4LowEGammaNuclearModel` alone could be - it draws
+// nothing of its own - but everything under it is P6's and P3's rejection samplers, and
+// `G4CascadeInterface` has three nested retry loops in which a prescribed engine exhausts
+// rather than samples (docs/RISK.md V132). So each case is N events under a fixed seed and what
+// is dumped is moments and per-species yields.
+//
+// EACH MODEL IS DRIVEN DIRECTLY AND NOT THROUGH THE PROCESS. The model CHOICE - which of
+// GammaNPreco, Bertini and the QGS generator a photon of a given energy gets - is a
+// deterministic function plus one uniform, and `tests/test_emextra_config.cu` already compares
+// it against the closed form over 200,000 draws per point. Mixing it into this campaign would
+// put two thirds of the 5 GeV events into a model this port refuses and measure nothing. So the
+// choice is validated exactly, each model is validated statistically, and the two are separate.
+//
+// `G4GPU_EMEXTRA_EVENTS` sets N; the default is 2,000, which is what `bertini_apply.csv` uses
+// and what keeps a full oracle run inside a few minutes. The count is a COLUMN, so the port's
+// test pools the two standard errors correctly rather than assuming they match.
+
+struct SpeciesBucket {
+  long long count = 0;      ///< how many of this species over the whole case
+  long long events = 0;     ///< how many events contained at least one
+  double sum_n = 0.0;       ///< sum over events of the per-event multiplicity
+  double sum_n2 = 0.0;
+  double sum_e = 0.0;       ///< sum over particles of the kinetic energy
+  double sum_e2 = 0.0;
+  double sum_cos = 0.0;     ///< sum over particles of cos(theta) about the beam
+};
+
+/// The species this package can produce, bucketed the way `bertini_apply_species.csv` buckets
+/// them: by PDG code for a particle and by mass number for a nucleus, with everything above
+/// A = 4 in one "heavier" bucket.
+const char* species_bucket_name(int i) {
+  static const char* kNames[13] = {"n",   "p",   "d",    "t",     "He3", "alpha", "heavier",
+                                   "pi+", "pi-", "pi0",  "gamma", "e-",  "other"};
+  return (i >= 0 && i < 13) ? kNames[i] : "other";
+}
+
+int species_bucket_of(const G4ParticleDefinition* d) {
+  if (d == nullptr) { return 12; }
+  const G4int pdg = d->GetPDGEncoding();
+  switch (pdg) {
+    case 2112: return 0;
+    case 2212: return 1;
+    case 211: return 7;
+    case -211: return 8;
+    case 111: return 9;
+    case 22: return 10;
+    case 11: return 11;
+    default: break;
+  }
+  const G4int A = d->GetBaryonNumber();
+  const G4int Z = G4lrint(d->GetPDGCharge() / CLHEP::eplus);
+  if (A == 2 && Z == 1) { return 2; }
+  if (A == 3 && Z == 1) { return 3; }
+  if (A == 3 && Z == 2) { return 4; }
+  if (A == 4 && Z == 2) { return 5; }
+  if (A > 4) { return 6; }
+  return 12;
+}
+
+/// One case's accumulators.
+struct CaseStats {
+  long long events = 0;
+  long long empty = 0;          ///< no secondaries at all
+  long long no_photon = 0;      ///< the lepton models' three gates and the muon's CutFixed
+  double sum_n = 0.0, sum_n2 = 0.0;          ///< secondary multiplicity
+  double sum_ekin = 0.0, sum_ekin2 = 0.0;    ///< summed secondary kinetic energy per event
+  double sum_lep = 0.0, sum_lep2 = 0.0;      ///< the scattered lepton's kinetic energy
+  double sum_coslep = 0.0;
+  double sum_pz = 0.0;                       ///< summed secondary z-momentum per event
+  SpeciesBucket sp[13];
+};
+
+void accumulate(CaseStats& st, const G4HadFinalState* hfs, G4bool lepton_survives,
+                G4double lepton_kin) {
+  ++st.events;
+  const G4int n = (hfs != nullptr) ? G4int(hfs->GetNumberOfSecondaries()) : 0;
+  if (n == 0) { ++st.empty; }
+  st.sum_n += n;
+  st.sum_n2 += double(n) * double(n);
+  if (lepton_survives) {
+    st.sum_lep += lepton_kin;
+    st.sum_lep2 += lepton_kin * lepton_kin;
+  }
+  double ekin_sum = 0.0;
+  double pz_sum = 0.0;
+  G4int per_event[13] = {0};
+  for (G4int i = 0; i < n; ++i) {
+    const G4DynamicParticle* dp = hfs->GetSecondary(i)->GetParticle();
+    const G4int b = species_bucket_of(dp->GetDefinition());
+    ++per_event[b];
+    const G4double e = dp->GetKineticEnergy() / MeV;
+    const G4ThreeVector p = dp->GetMomentum();
+    const G4double pm = p.mag();
+    const G4double c = (pm > 0.0) ? (p.z() / pm) : 1.0;
+    SpeciesBucket& s = st.sp[b];
+    ++s.count;
+    s.sum_e += e;
+    s.sum_e2 += e * e;
+    s.sum_cos += c;
+    ekin_sum += e;
+    pz_sum += p.z() / MeV;
+  }
+  for (G4int b = 0; b < 13; ++b) {
+    st.sp[b].sum_n += per_event[b];
+    st.sp[b].sum_n2 += double(per_event[b]) * double(per_event[b]);
+    if (per_event[b] > 0) { ++st.sp[b].events; }
+  }
+  st.sum_ekin += ekin_sum;
+  st.sum_ekin2 += ekin_sum * ekin_sum;
+  st.sum_pz += pz_sum;
+}
+
+/// Delete the secondaries' `G4DynamicParticle`s and empty the list.
+///
+/// NOT optional bookkeeping. `G4HadSecondary::~G4HadSecondary()` is EMPTY - it does not delete
+/// `theP` - and `G4HadFinalState::ClearSecondaries()` is `theSecs.clear()`, which destroys
+/// G4HadSecondary values whose destructors free nothing. In a real run
+/// `G4HadronicProcess::FillResult` takes ownership into the G4ParticleChange; a program that
+/// calls `ApplyYourself` directly and does not, leaks one G4DynamicParticle per secondary.
+/// This campaign is 126 cases x 2,000 events x up to eighty secondaries, which is millions of
+/// them, and that is what killed the first version of it - see docs/RISK.md V174.
+void release(G4HadFinalState* hfs) {
+  if (hfs == nullptr) { return; }
+  const G4int n = G4int(hfs->GetNumberOfSecondaries());
+  for (G4int i = 0; i < n; ++i) { delete hfs->GetSecondary(i)->GetParticle(); }
+  hfs->Clear();
+}
+
+/// A marker row, flushed, written BEFORE a case runs. A dump that dies takes its buffered
+/// stdout with it - three runs of this file died invisibly before the gamma-nuclear block
+/// learned the lesson - so the progress is a row in the CSV, which survives because it is
+/// flushed. The test skips any row whose `model` is "start".
+void mark_case(FILE* f, const char* model, const char* particle, double ke, G4int Z, G4int A) {
+  std::fprintf(f, "start,%s|%s,%.17g,%d,%d,0,0,0,0,0,0,0,0,0,0,0\n", model, particle, ke, Z, A);
+  std::fflush(f);
+}
+
+void write_case(FILE* f, FILE* fs, const char* model, const char* particle, double ke, G4int Z,
+                G4int A, const CaseStats& st) {
+  const double n = double(st.events);
+  if (n <= 0.0) { return; }
+  std::fprintf(f, "%s,%s,%.17g,%d,%d,%lld,%lld,%lld,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                  "%.17g,%.17g\n",
+               model, particle, ke, Z, A, st.events, st.empty, st.no_photon,
+               st.sum_n / n, std::sqrt(std::max(0.0, st.sum_n2 / n - (st.sum_n / n) * (st.sum_n / n))),
+               st.sum_ekin / n,
+               std::sqrt(std::max(0.0, st.sum_ekin2 / n - (st.sum_ekin / n) * (st.sum_ekin / n))),
+               st.sum_lep / n,
+               std::sqrt(std::max(0.0, st.sum_lep2 / n - (st.sum_lep / n) * (st.sum_lep / n))),
+               st.sum_coslep / n, st.sum_pz / n);
+  for (G4int b = 0; b < 13; ++b) {
+    const SpeciesBucket& s = st.sp[b];
+    const double c = double(s.count);
+    std::fprintf(fs, "%s,%s,%.17g,%d,%d,%s,%lld,%lld,%.17g,%.17g,%.17g,%.17g,%.17g\n", model,
+                 particle, ke, Z, A, species_bucket_name(b), s.count, s.events, s.sum_n / n,
+                 std::sqrt(std::max(0.0, s.sum_n2 / n - (s.sum_n / n) * (s.sum_n / n))),
+                 c > 0.0 ? s.sum_e / c : 0.0,
+                 c > 0.0 ? std::sqrt(std::max(0.0, s.sum_e2 / c - (s.sum_e / c) * (s.sum_e / c)))
+                         : 0.0,
+                 c > 0.0 ? s.sum_cos / c : 0.0);
+  }
+}
+
+void dump_emextra_apply(const DumpContext&) {
+  long long n_events = 2000;
+  if (const char* e = std::getenv("G4GPU_EMEXTRA_EVENTS")) {
+    const long long v = std::atoll(e);
+    if (v > 0) { n_events = v; }
+  }
+
+  struct Target { G4int z, a; };
+  const Target targets[] = {{1, 1}, {6, 12}, {8, 16}, {13, 27}, {26, 56}, {82, 208}};
+
+  FILE* f = std::fopen("emextra_apply.csv", "w");
+  FILE* fs = std::fopen("emextra_apply_species.csv", "w");
+  if (f == nullptr || fs == nullptr) { return; }
+  std::fprintf(f, "model,particle,ke_MeV,Z,A,events,empty,no_photon,mult_mean,mult_rms,"
+                  "ekin_mean,ekin_rms,lep_mean,lep_rms,coslep_mean,pz_mean\n");
+  std::fprintf(fs, "model,particle,ke_MeV,Z,A,species,count,events,yield_mean,yield_rms,"
+                   "ekin_mean,ekin_rms,cos_mean\n");
+
+  // The models. Each is constructible after the run manager has initialised: the low-energy
+  // gamma model finds QBBC's "PRECO" in G4HadronicInteractionRegistry, and both lepton models
+  // find their cross sections in G4CrossSectionDataSetRegistry - which is exactly the order
+  // dependence `registry_has_PhotoNuclearXS` records.
+  auto* lemod = new G4LowEGammaNuclearModel();
+  auto* cascade = new G4CascadeInterface();
+  auto* evd = new G4ElectroVDNuclearModel();
+  auto* mvd = new G4MuonVDNuclearModel();
+
+  const double preco_energies[] = {10.0, 30.0, 100.0, 150.0, 199.0};
+  const double bert_energies[] = {200.0, 300.0, 1000.0, 3000.0, 5000.0};
+  const double lep_energies[] = {50.0, 200.0, 1000.0, 10000.0};
+  const double mu_energies[] = {200.0, 1000.0, 10000.0};
+
+  // A fixed seed per case, derived from the case itself so that adding a case does not move
+  // any other case's stream.
+  auto seed_for = [](const char* m, double ke, G4int Z, G4int A) {
+    long s = 20130000;
+    for (const char* p = m; *p != '\0'; ++p) { s = s * 31 + G4int(*p); }
+    s += G4long(ke * 10.0) * 1000 + Z * 17 + A;
+    return (s % 900000000L) + 1L;
+  };
+
+  for (const Target& t : targets) {
+    for (double ke : preco_energies) {
+      CaseStats st;
+      mark_case(f, "preco", "gamma", ke, t.z, t.a);
+      G4Random::setTheSeed(seed_for("preco", ke, t.z, t.a));
+      for (long long k = 0; k < n_events; ++k) {
+        G4DynamicParticle dp(G4Gamma::Gamma(), G4ThreeVector(0, 0, 1), ke * MeV);
+        G4HadProjectile proj(dp);
+        G4Nucleus nuc(t.a, t.z);
+        G4HadFinalState* hfs = lemod->ApplyYourself(proj, nuc);
+        accumulate(st, hfs, false, 0.0);
+        release(hfs);
+      }
+      write_case(f, fs, "preco", "gamma", ke, t.z, t.a, st);
+    }
+    std::fflush(f);
+    std::fflush(fs);
+  }
+
+  for (const Target& t : targets) {
+    for (double ke : bert_energies) {
+      CaseStats st;
+      mark_case(f, "bert", "gamma", ke, t.z, t.a);
+      G4Random::setTheSeed(seed_for("bert", ke, t.z, t.a));
+      for (long long k = 0; k < n_events; ++k) {
+        G4DynamicParticle dp(G4Gamma::Gamma(), G4ThreeVector(0, 0, 1), ke * MeV);
+        G4HadProjectile proj(dp);
+        G4Nucleus nuc(t.a, t.z);
+        G4HadFinalState* hfs = nullptr;
+        try {
+          hfs = cascade->ApplyYourself(proj, nuc);
+        } catch (...) {
+          // `throwNonConservationFailure()` is a G4HadronicException that ends the job in a
+          // real run. Counted as an empty event here, the same way dump_bertini.cc counts it.
+          hfs = nullptr;
+        }
+        accumulate(st, hfs, false, 0.0);
+        release(hfs);
+      }
+      write_case(f, fs, "bert", "gamma", ke, t.z, t.a, st);
+    }
+    std::fflush(f);
+    std::fflush(fs);
+  }
+
+  struct Lep { const char* name; G4ParticleDefinition* (*get)(); };
+  const Lep leps[] = {{"e-", get_electron}, {"e+", get_positron}};
+  for (const Lep& l : leps) {
+    for (const Target& t : targets) {
+      for (double ke : lep_energies) {
+        CaseStats st;
+        mark_case(f, "evd", l.name, ke, t.z, t.a);
+        G4Random::setTheSeed(seed_for(l.name, ke, t.z, t.a));
+        for (long long k = 0; k < n_events; ++k) {
+          G4DynamicParticle dp(l.get(), G4ThreeVector(0, 0, 1), ke * MeV);
+          G4HadProjectile proj(dp);
+          G4Nucleus nuc(t.a, t.z);
+          G4HadFinalState* hfs = nullptr;
+          try {
+            hfs = evd->ApplyYourself(proj, nuc);
+          } catch (...) { hfs = nullptr; }
+          // The model writes the SCATTERED LEPTON into the particle change rather than as a
+          // secondary, so its energy and angle come off GetEnergyChange/GetMomentumChange.
+          G4double lep = ke;
+          G4double cosl = 1.0;
+          G4bool none = false;
+          if (hfs != nullptr) {
+            lep = hfs->GetEnergyChange() / MeV;
+            cosl = hfs->GetMomentumChange().z();
+            // "No photon produced" is indistinguishable from outside except by its signature:
+            // the lepton keeps its energy exactly and there are no secondaries.
+            none = (hfs->GetNumberOfSecondaries() == 0 && std::fabs(lep - ke) < 1.0e-9);
+          }
+          if (none) { ++st.no_photon; }
+          st.sum_coslep += cosl;
+          accumulate(st, hfs, true, lep);
+          release(hfs);
+        }
+        write_case(f, fs, "evd", l.name, ke, t.z, t.a, st);
+      }
+      std::fflush(f);
+      std::fflush(fs);
+    }
+  }
+
+  for (const Target& t : targets) {
+    for (double ke : mu_energies) {
+      CaseStats st;
+      mark_case(f, "mvd", "mu-", ke, t.z, t.a);
+      G4Random::setTheSeed(seed_for("mu-", ke, t.z, t.a));
+      for (long long k = 0; k < n_events; ++k) {
+        G4DynamicParticle dp(G4MuonMinus::MuonMinus(), G4ThreeVector(0, 0, 1), ke * MeV);
+        G4HadProjectile proj(dp);
+        G4Nucleus nuc(t.a, t.z);
+        G4HadFinalState* hfs = nullptr;
+        try {
+          hfs = mvd->ApplyYourself(proj, nuc);
+        } catch (...) { hfs = nullptr; }
+        G4double lep = ke;
+        G4double cosl = 1.0;
+        G4bool none = false;
+        if (hfs != nullptr) {
+          lep = hfs->GetEnergyChange() / MeV;
+          cosl = hfs->GetMomentumChange().z();
+          none = (hfs->GetNumberOfSecondaries() == 0 && std::fabs(lep - ke) < 1.0e-9);
+        }
+        if (none) { ++st.no_photon; }
+        st.sum_coslep += cosl;
+        accumulate(st, hfs, true, lep);
+        release(hfs);
+      }
+      write_case(f, fs, "mvd", "mu-", ke, t.z, t.a, st);
+    }
+    std::fflush(f);
+    std::fflush(fs);
+  }
+
+  std::fclose(f);
+  std::fclose(fs);
+}
+
 }  // namespace
 
 G4GPU_REGISTER_DUMP("emextra",
@@ -645,3 +984,6 @@ G4GPU_REGISTER_DUMP("emextra_xs",
                     "emextra_photonuc.csv emextra_electronuc.csv emextra_eqphoton.csv "
                     "emextra_kokoulin.csv emextra_gammanuc.csv",
                     dump_emextra_xs);
+G4GPU_REGISTER_DUMP("emextra_apply",
+                    "emextra_apply.csv emextra_apply_species.csv",
+                    dump_emextra_apply);

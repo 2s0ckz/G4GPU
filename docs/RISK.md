@@ -10813,3 +10813,241 @@ The attempt count is asserted as well as the status, because a regression that f
 some other way and left the loop spinning would cost 1,000 rebuilds a call and pass a test that
 only looked at the answer. A proton through the same `HadronWorkspace` runs 200 of 200, which is
 what makes this a statement about the ion and not about the workspace.
+### V169: the photon's high-energy generator is QGS, and three documents call it FTFP
+
+`docs/HADRONIC_PLAN.md` section 2 gives `G4EmExtraPhysics` the row "gamma | `G4GammaNuclearXS` |
+`G4LowEGammaNuclearModel` (<200 MeV, via PreCompound), Bertini above", `docs/PORTED.md` 2.2 lists
+the same constructor's needs without naming a string model, and the P13 brief asks for "FTFP's
+photon arm into `ftf::apply_yourself` if QBBC's window reaches it". The window reaches a string
+model and it is not FTF.
+
+`G4EmExtraPhysics::ConstructGammaElectroNuclear` builds
+
+    G4QGSModel< G4GammaParticipants >* theStringModel = new G4QGSModel< G4GammaParticipants >;
+    G4QGSMFragmentation* theFrag = new G4QGSMFragmentation();
+    G4ExcitedStringDecay* theStringDecay = new G4ExcitedStringDecay(theFrag);
+    theStringModel->SetFragmentationModel(theStringDecay);
+
+wraps it in a `G4TheoFSGenerator` and registers that from `GetMinEnergyTransitionFTF_Cascade()`
+= 3 GeV to `GetMaxEnergy()` = 100 TeV. P11 ported FTF: `G4FTFModel`, `G4LundStringFragmentation`,
+`G4FTFParameters` and ten `G4FTFTunings`. QGS is a different model with different participants
+(`G4GammaParticipants` rather than `G4FTFParticipants`), a different fragmentation
+(`G4QGSMFragmentation` rather than Lund) and its own parameter set. Substituting one for the
+other would not be an approximation; it would be a different physics list.
+
+**Why no document caught it.** `G4TheoFSGenerator::GetModelName()` is "TheoFSGenerator"
+whatever is inside it, and that is the only name a physics-list dump sees. The distinction is
+one call down - `GetHighEnergyGenerator()->GetModelName()` - and it reads "Parton String Model"
+for the photon, which is `G4VPartonStringModel`'s DEFAULT argument, because
+`G4QGSModel<ParticipantType>::G4QGSModel()` passes none. A proton's row in
+`ref/oracle/ftf_windows.csv` reads "FTFP". So `ref/dump/dump_emextra.cc` now carries
+`high_energy_generator` as its own column and `tests/test_emextra_config.cu` fails if it ever
+contains "FTF".
+
+**What it costs, measured.** The QGS generator overlaps Bertini from 3 to 6 GeV and
+`G4EnergyRangeManager` picks between them with a probability linear across the overlap, so a
+photo-nuclear interaction is refused with probability (E - 3000)/3000: zero at 3 GeV, **two
+thirds at 5 GeV**, one above 6 GeV. Counted over 200,000 draws per point in
+`tests/test_emextra_config.cu`, and over 200 events at 5 GeV in `tests/test_emextra_models.cu`,
+where 149 of 200 chose it. `emextra::EmExtraRefusal::kQgsGammaString` is returned at the point
+the generator would have been called, with the energy in the result, so a campaign reports the
+rate rather than quietly running Bertini for the QGS share.
+
+The two LEPTON models' high-energy generators are FTF - `G4FTFModel` with
+`G4LundStringFragmentation`, one each, built inside `G4ElectroVDNuclearModel` and
+`G4MuonVDNuclearModel` - so QBBC holds three `G4TheoFSGenerator`s, two FTF and one QGS, and the
+only one the plan's table names is the one that is not FTF.
+
+### V170: QBBC builds Bertini six times, and the three photo-nuclear ones do not use PreCompound
+
+`docs/PORTED.md` 2.1.12 opens "QBBC contains Bertini three times, in two configurations" and
+V118 records the two. There are six.
+
+| built by | species | de-excitation |
+|---|---|---|
+| `G4HadronInelasticQBBC` | p, n, 1 - 6 GeV | PreCompound (P6) |
+| `G4HadronInelasticQBBC` | pi+, pi-, 1 - 12 GeV | PreCompound (P6) |
+| `G4HadronicBuilder::BuildFTFP_BERT` | K+, K-, K0S, K0L, six hyperons, 0 - 6 GeV | the cascade's own |
+| `G4EmExtraPhysics::ConstructGammaElectroNuclear` | gamma, 199 - 6000 MeV | **the cascade's own** |
+| `G4ElectroVDNuclearModel`'s own member | the equivalent photon, below 10 GeV | **the cascade's own** |
+| `G4MuonVDNuclearModel`'s own member | the equivalent photon, below 10 GeV | **the cascade's own** |
+
+All three of the new ones are plain `new G4CascadeInterface`, so the constructor's
+`if (G4CascadeParameters::usePreCompound()) usePreCompoundDeexcitation(); else
+useCascadeDeexcitation();` takes the else - the flag is false on this install, see
+`ref/oracle/bertini_params.csv` - and nothing in `G4EmExtraPhysics` overrides it, which is what
+`G4HadronInelasticQBBC::ConstructProcess` does for the nucleon and pion instances.
+
+So **the same residual nucleus de-excites through two different models depending on what made
+it**: a 3 GeV proton's residual goes to `G4PreCompoundModel` and P3's evaporation chain, and a
+3 GeV photon's residual - the same (Z, A, E\*) - goes to `G4NonEquilibriumEvaporator` and
+`G4EquilibriumEvaporator` inside the cascade. V118 made this point for kaons and hyperons, where
+it is a rare species; it is now also true of every photo-nuclear reaction above 199 MeV and of
+every electro- and muon-nuclear reaction, which are on the main path of any electromagnetic
+shower. `emextra::qbbc_gamma_deexcite_choice()` is the fact as a function and
+`tests/test_emextra_models.cu` runs the whole campaign through it.
+
+There is a measurable side effect on the device. `bert::apply_yourself`'s `choice` argument is a
+run-time value in P10's own probe, and P6's `preco::deexcite` is instantiated whether or not it
+is reached; supplying a CONSTANT `kCascade` lets ptxas fold the branch and drop the PreCompound
+arm entirely. `emextra_lepton_probe`, whose only Bertini call is through
+`qbbc_gamma_deexcite_choice()`, has a **2,448-byte** stack frame, where
+`emextra_photon_probe`, which also instantiates `low_e_gamma_apply` and therefore
+`preco::deexcite`, has **10,592**. The 8 kB difference is P6 plus P3, and V134's point applies:
+a frame measured on the whole kernel is not a measurement of any part of it.
+
+### V171: G4LowEGammaNuclearModel emits every secondary at exactly one nanosecond
+
+`G4LowEGammaNuclearModel::ApplyYourself` ends
+
+    G4HadSecondary* news = new G4HadSecondary(new G4DynamicParticle(...));
+    news->SetTime((*res)[i]->GetTOF());
+
+and `G4ReactionProduct::timeOfFlight` is never assigned by anything in the de-excitation chain.
+`G4ExcitationHandler::BreakItUp` calls `SetFormationTime(frag->GetCreationTime())` on every
+product it builds - the real time, which for an isomer can be microseconds - and never
+`SetTOF`. So `GetTOF()` returns what the constructor left there:
+
+    (aParticleDefinition->GetPDGEncoding()<0) ? timeOfFlight=-1.0 : timeOfFlight=1.0;
+
+a SIGN saying which side of the interaction the product is on, in the internal time unit, which
+is the nanosecond. Every de-excitation product has a positive PDG code - gammas 22, neutrons
+2112, protons 2212, ions 10LZZZAAAI - so **every secondary of this model is emitted +1 ns after
+the interaction**, uniformly, and the formation time is discarded.
+
+`G4HadronicProcess::FillResult` then does `time = max(secTime, 0) + globalTime`, so the 1 ns
+survives into the track. It is small next to a neutron's transport time and it is not small next
+to the 10 us `G4NeutronGeneralProcess` time cut multiplied by a few hundred thousand secondaries
+a shower makes, and it is wrong in a way that no dose comparison can see and no reading of the
+class would suggest. Transcribed as written in `emextra/low_e_gamma.cuh`'s `product_tof_ns`,
+which is a named function for that reason.
+
+The same model is also the reason **a photo-nuclear reaction below 200 MeV in QBBC has no
+pre-equilibrium stage at all**. `G4Fragment(A, Z, p_target + p_gamma)` leaves
+`numberOfParticles`, `numberOfCharged` and `numberOfHoles` at zero, and nothing calls
+`SetNumberOfExcitedParticle`. `G4PreCompoundModel::DeExcite` therefore enters its loop, calls
+`CalculateProbability` once - which returns 0.0 immediately on `0==N` - and exits on
+`GetNumberOfExcitons() <= 0`, straight to `PerformEquilibriumEmission`. So the exciton model
+contributes nothing and the whole final state is P3's evaporation from a compound nucleus. The
+port asserts `n_preco_products == 0` rather than describing it.
+
+One detail of that early return is worth its own line: `CalculateProbability` sets
+`TransitionProb2 = 0` and `TransitionProb3 = 0` BEFORE the `0==N` test and never touches
+`TransitionProb1`, which is a protected member with no initialiser in
+`G4VPreCompoundTransitions.hh`. The value `GetTransitionProb1()` returns for a zero-exciton
+fragment is therefore whatever the previous call left, or the constructor's indeterminate value
+on the first. It cannot change the outcome here, because the six-way equilibrium test is a
+left-to-right `||` chain whose last term - `GetNumberOfExcitons() <= 0` - is true either way,
+and that is the whole reason it is invisible.
+
+### V172: G4ElectroVDNuclearModel's acceptance test uses CHIPS, and only the registry can say so
+
+`G4ElectroVDNuclearModel`'s constructor asks the cross-section registry for
+`G4PhotoNuclearCrossSection::Default_Name()` - "PhotoNuclearXS" - and falls back to
+"GammaNuclearXS" only when that is absent:
+
+    gammaXS = GetCrossSectionDataSet(G4PhotoNuclearCrossSection::Default_Name());
+    if (gammaXS == nullptr) { gammaXS = GetCrossSectionDataSet(G4GammaNuclearXS::Default_Name());
+                              if (gammaXS == nullptr) gammaXS = new G4PhotoNuclearCrossSection; }
+
+It is never absent in QBBC. `G4GammaNuclearXS`'s own constructor asks for the same name, finds
+nothing, and does `new G4PhotoNuclearCrossSection()`, whose `G4VCrossSectionDataSet` base
+constructor registers it - and `ConstructGammaElectroNuclear` creates the cross section on its
+second line and the model forty lines later. So `gammaXS` is the CHIPS parameterisation.
+
+That decides the virtual-photon acceptance test for every electron and positron:
+
+    sigNu = gammaXS->GetElementCrossSection(real photon at nu)
+    sigK  = gammaXS->GetElementCrossSection(real photon at nu - Q2/dM)
+    if (sigNu*G4UniformRand() > sigK*GetVirtualFactor(nu, Q2)) return 0;   // no photon
+
+and the two cross sections are CHIPS's, not the IAEA-data-based ones the photon process itself
+uses. A reader who assumed the fallback - which is the branch the code is WRITTEN around - would
+have the port evaluating `G4GammaNuclearXS` here, which below 130 MeV is a different number
+entirely. `ref/oracle/emextra_params.csv` now carries `registry_has_PhotoNuclearXS`, read before
+the dump constructs any cross section of its own, and `tests/test_emextra_config.cu` fails if it
+is ever 0. It is an ORDER dependence and not a configuration: a physics list that built the
+model before the cross section would get the other branch and a different acceptance rate.
+
+Two more constants in the same two functions are not the constants they look like.
+`G4ElectroVDNuclearModel` computes `dM = G4Proton::Proton()->GetPDGMass() +
+G4Neutron::Neutron()->GetPDGMass()` = 1877.83739 MeV and uses it to shift the photon energy;
+`G4ElectroNuclearCrossSection::GetVirtualFactor`, called on the next line with the same physical
+meaning, uses its own file-static `dM = 938.27 + 939.57` = 1877.84, which is 3e-6 larger. And
+`G4ElectroNuclearCrossSection` carries its own seven-digit electron mass, `mel = 0.5109989`
+against CLHEP's 0.510998910, and its own seven-digit pi inside `alop = 1./137.036/3.14159265`.
+All four are transcribed as the class writes them; substituting CLHEP's values moves every
+sampled photon energy in the eighth digit and the test's tolerance is 1e-13.
+
+### V173: the muon model builds its sampling table for a nucleus of A = 6.3e21
+
+`G4KokoulinMuonNuclearXS::ComputeDDMicroscopicCrossSection(T, Z, A, epsilon)` takes A as a plain
+mass number - `aeff = 0.22*A + 0.78*G4Exp(0.89*G4Log(A))`. Its two callers disagree about what
+to pass.
+
+    G4KokoulinMuonNuclearXS::BuildCrossSectionTable    A = nistManager->GetAtomicMassAmu(Z)
+    G4MuonVDNuclearModel::MakeSamplingTable            AtomicWeight = adat[iz]*(g/mole)
+
+`g/mole` is **6.2415090744607617e21** in Geant4's internal units, not 1: `mole` is 1 but `gram`
+is `1e-3 * joule*second^2/meter^2` with joule = 1e-6/e_SI, second = 1e9 and meter = 1000. So the
+cross section the muon model integrates is evaluated for a nucleus with A = 6.3e21 and the one
+its own process uses for A = 1.01, and the two differ by twenty-one orders of magnitude.
+
+**It changes nothing, and only a measurement can say so.** A enters the double-differential
+cross section in exactly one place, `aeff`, which does not depend on the energy loss - so it
+factors out of `MakeSamplingTable`'s integral over epsilon and cancels exactly when the table is
+normalised by its own `CrossSection` total. The five per-Z tables are therefore IDENTICAL to each
+other as well: `zdat` is passed as the unnamed second argument and ignored, `adat` enters only
+through `aeff`, and nothing else in the loop depends on the nucleus. `G4MuonVDNuclearModel`'s
+5 x 73 x 800 "per element" sampling table has no element dependence at all.
+
+`ref/oracle/emextra_kokoulin.csv` dumps the cross section with BOTH arguments - 270 rows each,
+`dd` and `dd_gmole` - and `tests/test_emextra_xs.cu` compares the port against each, so the
+cancellation is two buckets of numbers rather than a paragraph. The port applies the factor
+where `MakeSamplingTable` applies it, because "this cancels" is not a licence to drop a line.
+
+`g/mole` itself is derived the way CLHEP derives it and checked against CLHEP's own value: the
+2019 SI value of e (1.602176634e-19) is what makes it 6.24150907e21 where the older
+1.602176487e-19 gives 6.24150648e21, a difference in the seventh digit.
+
+### V174: a dump that only crashes when the other dumps run first
+
+`ref/dump/dump_emextra.cc`'s statistical campaign - 126 cases of
+`G4LowEGammaNuclearModel::ApplyYourself`, `G4CascadeInterface::ApplyYourself` and the two
+equivalent-photon models - dies with no message on the FIRST event of its sixth case, a 10 MeV
+photon on carbon, every time. Built and run on its own, with only `g4dump.cc` and
+`dump_emextra.cc` in the executable, the same 126 cases complete and the program exits 0.
+
+So the crash is in state one of the eighteen dumps that link before it leaves behind, and it is
+worth an entry for two reasons beyond the fix.
+
+The first is that **the dump registry's isolation is a compile-time isolation, not a run-time
+one**. `ref/dump/dump_registry.hh`'s header says the point of one file per package is that
+"nothing shared is touched when a dump is added", and that is true of the source. It is not true
+of the Geant4 singletons every dump reaches through: `G4DeexPrecoParameters`,
+`G4NuclearLevelData`, `G4HadronicInteractionRegistry`, `G4CrossSectionDataSetRegistry`,
+`G4PhysicsModelCatalog` and the `G4ExcitationHandler` that `G4PreCompoundModel` owns are one
+object each for the whole process, and a dump that reconfigures one - which is exactly what
+`dump_precompound.cc` does on purpose, flipping `SetOPTxs`, `UseCEMtr` and `UseNGB` to reach five
+transition configurations from one run - changes what every later dump measures. The dumps that
+run before this one and touch that machinery are `dump_bertini`, `dump_bic`, `dump_capture`,
+`dump_deexcitation` and `dump_elastic`.
+
+The second is HOW it was localised, because the first three attempts were invisible. A dump that
+dies takes its buffered stdout with it: `std::printf` to a redirected stream is block-buffered,
+so progress markers printed before the crash never reached the log and the log's last line was
+whatever G4cerr had written minutes earlier. Two runs were spent believing the crash was
+somewhere else entirely. The markers are now ROWS IN THE CSV, written and flushed before each
+case, and the file is opened before any Geant4 call in its block; the CSV survives because it is
+flushed, and `emextra_apply.csv`'s six lines named the case in one run. The same technique found
+the earlier crash in this file's own gamma-nuclear block.
+
+The fix for that earlier one is itself worth recording, because it is a null pointer Geant4
+dereferences without a test. `G4KokoulinMuonNuclearXS::GetElementCrossSection` is
+`theCrossSection[Z]->Value(ekin)`, and `theCrossSection` is a static array filled only for the
+elements that existed when `BuildPhysicsTable` ran. `ref/dump/g4dump.cc` builds all 309 NIST
+materials AFTER initialisation, to write `nist_materials.hh`, so the element table grows from the
+detector's fourteen elements to ninety-two and every one of the new ones is a null pointer in
+that array. Calling the public and idempotent `BuildCrossSectionTable()` before the loop fixes
+it. A transport run cannot reach this - its elements are fixed before initialisation - but a
+dump, or any program that adds a material late, can.
