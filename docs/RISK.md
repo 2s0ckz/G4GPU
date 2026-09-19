@@ -10300,6 +10300,29 @@ dump function and another in the next; every one of the 648 rows the second func
 cross section of exactly zero and drew no random number at all. The dump now uses one leaked
 instance, `imr_scatterer()`, with the reason written beside it.
 
+**And then it found it again, from the other side, and cost four dump runs.** The sweep that MEASURES
+this - `write_imr_scatterlife`, whose whole content is the table above - destroys a `G4Scatterer` on
+purpose, and it ran in the middle of `dump_bic()`. Every sweep after it was therefore looking at a
+scatterer with no channels. That was invisible for as long as the sweeps that followed asked the
+scatterer nothing; the moment `write_imr_propagate` was added at the end and started calling
+`G4BinaryCascade::Propagate` directly, all forty of its cases came back with `Propagate` returning
+NULL, zero random draws, zero products, and `GetCrossSection` exactly 0.0 for a 400 MeV proton on a
+proton - the same pair that gives 25.6957 mb earlier in the same run. Four rounds of reading
+`GetTimeToInteraction`, its 500 mb and 200 mb gates and the impact-parameter arithmetic went past
+before a probe at eight points of `dump_bic()` put the boundary between two adjacent calls:
+
+```
+PROBE after write_imr_scatterer    sigma=25.6957 mb
+PROBE after write_imr_scatter      sigma=25.6957 mb
+PROBE after write_imr_scatterlife  sigma=0 mb
+PROBE after write_imr_ionmass      sigma=0 mb          ... and 0 for every sweep after it
+```
+
+`write_imr_scatterlife` is now the LAST thing `dump_bic()` calls, with that written above it and
+beside it. The lesson is the one the entry already makes and is worth the repetition: this failure
+mode is silent, it is not local to the object that caused it, and the symptom - no collisions - is
+indistinguishable from physics.
+
 Not reproduced, and it cannot be: the port has no static channel registry - `nn_scatter_final_state`
 and `meson_scatter_final_state` take the channel table and the buffers as arguments, and a caller
 that owns them cannot have them deleted out from under it by an unrelated object's destructor. The

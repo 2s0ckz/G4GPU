@@ -2042,6 +2042,116 @@ int main() {
   }
 
   // -------------------------------------------------------------------------------------------
+  // 3o-bis. WHAT `unknown_species` MEANS, which is the contract P11d reads.
+  //
+  //   `G4DecayKineticTracks` walks past a track that is not short-lived without a word. The port
+  //   can only do that for a code it CARRIES, because a code outside the table has no flag to
+  //   read - so before the closure was widened, the engine reported eta', Omega-, the anti-Xis
+  //   and every charm and bottom hadron as `unknown_species`, and a caller obeying that flag
+  //   would have refused eta' at 0.011% of FTFP's pion-beam products (P11d's measurement).
+  //
+  //   The two halves are asserted TOGETHER, and that is what makes either half mean anything:
+  //   a long-lived species the table carries must come through with the flag CLEAR, and a code
+  //   the table does not carry must set it. Dropping the second half would let a table that
+  //   claimed to know everything pass; dropping the first is the bug that was there.
+  // -------------------------------------------------------------------------------------------
+  {
+    // The codes P11d named, plus the two anti-Xi(1530)s that were missing outright.
+    struct Known { int pdg; int shortlived; };
+    const Known kKnown[] = {
+        {-3314, 1}, {-3324, 1},          // anti-Xi(1530)-, anti-Xi(1530)0: SHORT-LIVED, added
+        {331, 0},   {3334, 0},           // eta', Omega-
+        {-3312, 0}, {-3322, 0},          // anti-Xi-, anti-Xi0
+        {411, 0},   {-411, 0}, {421, 0}, // D+, D-, D0
+        {431, 0},   {443, 0}, {4122, 0}, // Ds+, J/psi, Lambda_c+
+        {511, 0},   {521, 0}, {5122, 0}, // B0, B+, Lambda_b
+        {221, 0},   {321, 0}, {3122, 0}, // eta, K+, Lambda - the ones already there
+        {2212, 0},  {2112, 0}, {211, 0}, // and the nucleons and the pion
+    };
+    for (const Known& k : kKnown) {
+      cmp_int(b_kdb, bic::kinetic_decay_knows(k.pdg) ? 1 : 0, 1,
+              "the table carries " + std::to_string(k.pdg));
+      cmp_int(b_kdb, bic::kinetic_decay_is_short_lived(k.pdg) ? 1 : 0, k.shortlived,
+              "IsShortLived(" + std::to_string(k.pdg) + ")");
+    }
+    // The two new short-lived ones have real channels, which is the point of adding them: they
+    // are the anti-particles of 3314 and 3324 and must decay the same way.
+    for (int pdg : {-3314, -3324}) {
+      const int si = imr::decay_species_index(pdg);
+      cmp_int(b_kdb, (si >= 0 && imr::decay_species_n_channels()[si] == 3) ? 1 : 0, 1,
+              "anti-Xi(1530) " + std::to_string(pdg) + " has three channels");
+    }
+
+    // A list of long-lived species goes through the engine UNCHANGED and sets nothing.
+    bic::DecayTrack quiet[8];
+    int nq = 0;
+    for (int pdg : {331, 3334, -3312, 411, 521, 5122, 221, 321}) {
+      const int si = imr::decay_species_index(pdg);
+      const double m = (si >= 0) ? imr::decay_species_mass()[si] : 0.0;
+      quiet[nq] = bic::DecayTrack{};
+      quiet[nq].pdg = pdg;
+      quiet[nq].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 300.0},
+                                              std::sqrt(300.0 * 300.0 + m * m));
+      quiet[nq].caller_tag = nq;
+      ++nq;
+    }
+    const int nq_in = nq;
+    CycleRng qrng;
+    qrng.reset(0);
+    bic::KineticDecayRefusal qref;
+    const int nq_out = bic::decay_kinetic_tracks(quiet, nq, 8, qrng, qref);
+    cmp_int(b_kdb, nq_out, nq_in, "a long-lived list comes back the same length");
+    cmp_int(b_kdb, qrng.n, 0, "and consumes not one uniform");
+    cmp_int(b_kdb, qref.any() ? 1 : 0, 0, "and sets no refusal");
+    cmp_int(b_kdb, qref.unknown_species ? 1 : 0, 0, "and does NOT claim an unknown species");
+    for (int k = 0; k < nq_out; ++k) {
+      cmp_int(b_kdb, quiet[k].caller_tag, k, "and leaves the caller's tag where it was");
+    }
+
+    // The other half: a code the table really does not carry. 9999 is not a PDG code any
+    // Geant4 build defines, so the flag has to fire - and the track has to stay in the list.
+    bic::DecayTrack alien[2];
+    alien[0] = bic::DecayTrack{};
+    alien[0].pdg = 9999;
+    alien[0].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 100.0}, 1000.0);
+    alien[0].caller_tag = 5;
+    int na = 1;
+    CycleRng arng;
+    arng.reset(0);
+    bic::KineticDecayRefusal aref2;
+    const int na_out = bic::decay_kinetic_tracks(alien, na, 2, arng, aref2);
+    cmp_int(b_kdb, na_out, 1, "an unknown code stays in the list");
+    cmp_int(b_kdb, aref2.unknown_species ? 1 : 0, 1, "and DOES set unknown_species");
+    cmp_int(b_kdb, aref2.refused_pdg, 9999, "and names itself");
+    cmp_int(b_kdb, alien[0].caller_tag, 5, "and keeps its tag");
+
+    // THE THIRD CASE, and the one with no flag at all before P11d asked: a track that IS
+    // short-lived, IS in the table, and has a total actual width of exactly zero. Geant4's
+    // `Decay` takes its `else` arm - `if (theTotalActualWidth != 0) {...} else { return 0; }`,
+    // G4KineticTrack.cc:527 and 758 - and returns nothing, silently. A Delta++ at an actual mass
+    // below m_p + m_pi+ is that track: its one channel is p pi+, `theActualWidth` for it is zero
+    // below threshold, and so is the sum. `zero_total_width` is a STATUS and not a refusal, so
+    // `any()` stays false; what it buys is that the track left in the list is explained.
+    {
+      const double below = g4gpu::units::proton_mass_c2<double>() + bic::pdg_mass_pion_charged() - 20.0;
+      bic::DecayTrack stuck[2];
+      stuck[0] = bic::DecayTrack{};
+      stuck[0].pdg = 2224;
+      stuck[0].momentum = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 0.0}, below);
+      int ns = 1;
+      CycleRng srng;
+      srng.reset(0);
+      bic::KineticDecayRefusal sref;
+      const int ns_out = bic::decay_kinetic_tracks(stuck, ns, 2, srng, sref);
+      cmp_int(b_kdb, ns_out, 1, "a zero-width resonance stays in the list");
+      cmp_int(b_kdb, stuck[0].pdg, 2224, "unchanged");
+      cmp_int(b_kdb, sref.zero_total_width ? 1 : 0, 1, "and says its total width was zero");
+      cmp_int(b_kdb, sref.any() ? 1 : 0, 0, "which is a status and not a refusal");
+      cmp_int(b_kdb, srng.n, 0, "and it draws nothing, because the channel is never chosen");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
   // 3p. G4Scatterer::Scatter - the whole collision tree from two tracks to their products. The
   //     leaves are compared on their own above; this is the DISPATCH, and what it checks that no
   //     leaf comparison can is which component, which middle composite and which of the 306
@@ -2635,8 +2745,10 @@ int main() {
   const int b_tab = new_bucket("TableInvariants", 0.0);
   {
     // The channel census the width machinery branches on, asserted rather than assumed. Over the
-    // 638 channels of the UNION closure - the binary cascade's species and FTFP's 27, see
-    // docs/HADRONIC_PLAN.md section 9.3 - no two-body channel has TWO short-lived daughters, so
+    // 702 channels of the UNION closure - the binary cascade's species, FTFP's 27 (see
+    // docs/HADRONIC_PLAN.md section 9.3) and every hadron Geant4 marks NOT short-lived, which
+    // are carried so that the engine can say "not short-lived" rather than "unknown" - no
+    // two-body channel has TWO short-lived daughters, so
     // `IntegrateCMMomentum2` with its Simpson-inside-a-Simpson is unreachable; two three-body
     // channels DO have one, so that branch is live, and it was not when the closure held only
     // the cascade's own species. docs/RISK.md V149. A release that adds a
@@ -2663,13 +2775,13 @@ int main() {
       }
     }
     cmp_int(b_tab, one_body, 4, "one-daughter channels");
-    cmp_int(b_tab, two_body[0], 220, "two-body channels with no short-lived daughter");
-    cmp_int(b_tab, two_body[1], 335, "two-body channels with one short-lived daughter");
+    cmp_int(b_tab, two_body[0], 249, "two-body channels with no short-lived daughter");
+    cmp_int(b_tab, two_body[1], 337, "two-body channels with one short-lived daughter");
     cmp_int(b_tab, two_body[2], 0, "two-body channels with TWO - the dead branch");
-    cmp_int(b_tab, three_body[0], 75, "three-body channels with no short-lived daughter");
+    cmp_int(b_tab, three_body[0], 106, "three-body channels with no short-lived daughter");
     cmp_int(b_tab, three_body[1], 2, "three-body channels with one - a2(1320)0's two");
     cmp_int(b_tab, three_body[2] + three_body[3], 0, "three-body channels with two or three");
-    cmp_int(b_tab, four_body[0], 2, "four-body channels - f2(1270) to 4 pi");
+    cmp_int(b_tab, four_body[0], 4, "four-body channels - f2(1270) to 4 pi and the two Lambda_b");
     cmp_int(b_tab, four_body[1] + four_body[2] + four_body[3] + four_body[4], 0,
             "four-body channels with a short-lived daughter");
     cmp_int(b_tab, one_body + two_body[0] + two_body[1] + three_body[0] + three_body[1] +

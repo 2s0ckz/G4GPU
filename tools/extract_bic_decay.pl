@@ -69,7 +69,15 @@ close $fh;
 
 # ---------------------------------------------------------------------------- assertions
 my $nsp = scalar @order;
-die "expected 126 species in the transitive closure, found $nsp\n" unless $nsp == 126;
+# 178 = the transitive closure of three seed groups: the cascade's own production set, FTFP's 27
+# short-lived species (docs/HADRONIC_PLAN.md section 9), and every hadron Geant4 defines whose
+# IsShortLived() is FALSE. The third group is what makes bic::KineticDecayRefusal's
+# `unknown_species` mean what it says - without it the engine reported eta', Omega-, the anti-Xis
+# and every charm and bottom hadron as unknown, when Geant4 simply walks past them. 95 of the 178
+# are short-lived and those are the only ones the engine ever decays.
+die "expected 178 species in the transitive closure, found $nsp\n" unless $nsp == 178;
+my $n_short = scalar grep { $sp{$_}{shortlived} } @order;
+die "expected 95 short-lived species, found $n_short\n" unless $n_short == 95;
 
 my $nchan_total = 0;
 my $max_chan    = 0;
@@ -100,7 +108,7 @@ for my $pdg (@order) {
         die "$s->{name}: channel charge $q against parent $s->{charge}\n" unless $q == $s->{charge};
         die "$s->{name}: channel baryon $b against parent $s->{baryon}\n" unless $b == $s->{baryon};
     }
-    # FIFTEEN species' branching ratios do not sum to one, and the set is asserted exactly rather
+    # SIXTEEN species' branching ratios do not sum to one, and the set is asserted exactly rather
     # than tolerated. Two of them are in the cascade's own production set: delta(1950)++ and
     # delta(1950)- come to 0.99, because G4ExcitedDeltaConstructor gives the multiplet an N gamma
     # mode with bRatio 0.01 and the two extreme charge states have no N gamma final state to put
@@ -113,8 +121,11 @@ for my $pdg (@order) {
 }
 die "expected 13 channels at most, found $max_chan\n" unless $max_chan == 13;
 
-# The exact set of ten, with the sum each one reaches. A release that renormalises any of them,
-# or that breaks a channel on one that is currently whole, fails here.
+# The exact set, with the sum each one reaches. A release that renormalises any of them, or that
+# breaks a channel on one that is currently whole, fails here. Adding every long-lived hadron to
+# the closure brought exactly ONE more - eta_prime, at 0.9915 - which is its own truncated PDG
+# table. The engine never decays it, but its branching ratios are in the file and a silent
+# renormalisation upstream would still be a change to it.
 my %kOffSum = (
     221   => 0.9926,   # eta
     321   => 0.99981,  # kaon+
@@ -122,6 +133,8 @@ my %kOffSum = (
     130   => 0.9964,   # kaon0L
     310   => 0.99890,  # kaon0S
     223   => 0.997,    # omega
+    331   => 0.9915,   # eta_prime    - long-lived, and in the closure so that the engine can
+                       #                say "not short-lived" rather than "unknown"
     333   => 0.985,    # phi          - the largest deficit in the set, 1.5%
     3122  => 0.997,    # lambda
     -3122 => 0.997,    # anti_lambda

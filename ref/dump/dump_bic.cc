@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
@@ -2216,11 +2217,52 @@ void write_imr_decay() {
       // anti-Deltas, and with them the first four-body channels in this file.
       113, 213, -213, 223, 313, 323, -313, -323, 333, 225, 115,
       3114, 3214, 3224, -3114, -3214, -3224, 3314, 3324,
-      -1114, -2114, -2214, -2224};
+      -1114, -2114, -2214, -2224,
+      // The two `G4HadronBuilder` can return that P11d found missing from the closure when it
+      // audited this table against docs/HADRONIC_PLAN.md section 9: anti-Xi(1530)- and
+      // anti-Xi(1530)0. They are the anti-particles of 3314 and 3324 on the line above, which
+      // were already here, and P11d measured them at 0 of 161,568 string products - so nothing
+      // has depended on them yet, and the point of adding them is that a refusal for a species
+      // this table simply forgot is indistinguishable from one for a species nobody produces.
+      -3314, -3324};
 
   std::vector<int> order;
   std::set<int> seen;
   std::vector<int> queue(std::begin(kSeeds), std::end(kSeeds));
+
+  // AND every hadron Geant4 defines whose `IsShortLived()` is FALSE.
+  //
+  // This is not about decaying them - the engine never does, because `G4DecayKineticTracks`
+  // decays only short-lived tracks. It is about the difference between "not short-lived" and
+  // "I have never heard of this code". P11d measured 50 codes FTFP produces that were in
+  // neither camp: eta' (331), Omega- (3334), the anti-Xis (-3312, -3322) and the charm and
+  // bottom hadrons. Geant4 walks past all of them in silence; the port had to set
+  // `unknown_species` for them, because a table that does not carry a code cannot say which
+  // kind of unknown it is - and a caller obeying that flag would have refused eta' at 0.011%
+  // of pion-beam products. With the rows here, the flag means what it says.
+  //
+  // The rule is `GetParticleType()` in {meson, baryon}, `!IsShortLived()`, and an encoding
+  // below 10000 in magnitude, which is what excludes the nuclei and the 100002210-style
+  // excited nucleons (the latter are short-lived and already seeds). It is a RULE and not a
+  // list of codes, so that nothing here can be mistyped; the set it picks out is QBBC's own,
+  // which is the same authority every other table in this file has. Their daughters join the
+  // closure like any others.
+  {
+    G4ParticleTableIterator<G4String, G4ParticleDefinition*>* it = ptable->GetIterator();
+    it->reset();
+    std::vector<int> longlived;
+    while ((*it)()) {
+      const G4ParticleDefinition* d = it->value();
+      if (d == nullptr || d->IsShortLived()) { continue; }
+      const G4String& type = d->GetParticleType();
+      if (type != "meson" && type != "baryon") { continue; }
+      const int code = d->GetPDGEncoding();
+      if (code == 0 || code >= 10000 || code <= -10000) { continue; }
+      longlived.push_back(code);
+    }
+    std::sort(longlived.begin(), longlived.end());
+    queue.insert(queue.end(), longlived.begin(), longlived.end());
+  }
   // WIDENING THIS SEED LIST, for a caller outside the binary cascade. The engine these tables
   // feed is shared - `G4DecayKineticTracks`, which the Fritiof string model runs over its own
   // products, is `G4KineticTrack::Decay` in a loop - so the species set has to cover whatever
@@ -2787,6 +2829,13 @@ G4Scatterer& imr_scatterer() {
 /// The lifetime bug itself, in three measurements on the same pair: from a scatterer built while
 /// the list is intact, then after ONE scatterer somewhere else has been destroyed, then from a
 /// freshly constructed one. The second and third are the same number and it is zero.
+// **THIS SWEEP POISONS THE PROCESS AND MUST RUN LAST.** `{ G4Scatterer doomed; }` below is the
+// whole point of it - it MEASURES what V155 costs - and the cost is that every `G4Scatterer` in
+// the process, including the leaked singleton and any made afterwards, has an empty channel list
+// from that line on. MEASURED, the second time: with this sweep in its old place, four dumps in
+// a row of `write_imr_propagate` came back with `Propagate` returning NULL for all forty cases,
+// zero random draws and `GetCrossSection` exactly 0.0 for a 400 MeV proton on a proton, where
+// the same pair gives 25.6957 mb earlier in the same run. `dump_bic()` calls this one last.
 void write_imr_scatterlife() {
   FILE* f = std::fopen("bic_imr_scatterlife.csv", "w");
   std::fprintf(f, "step,sigma_mb,time_ns\n");
@@ -3288,6 +3337,297 @@ void write_imr_mbselect() {
   std::fclose(g);
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4BinaryCascade::Propagate, called directly, with the random stream RECORDED
+// ---------------------------------------------------------------------------------------------
+//
+// `Propagate` is public and virtual, so the whole cascade can be run from here on a nucleus and
+// a secondary list this file built. That is the only way to get an EXACT per-call oracle for a
+// loop where every turn consumes random numbers: there is no intermediate quantity to compare,
+// only the products, and the products depend on every draw that came before them.
+//
+// ## THE TAPE IS WHAT MAKES THE COMPARISON BITWISE
+//
+// A prescribed cycle cannot drive this. Eight values put every nucleon of the nucleus at
+// essentially the same place, and they hang `BetaKopylov` outright (docs/RISK.md V157). So the
+// engine here is CLHEP's own `HepJamesRandom` at a fixed seed, wrapped so that every `flat()` it
+// serves is appended to a vector, and the vector is written out with the case. The port's test
+// replays it: its `Rng::uniform()` hands back `tape[i++]`.
+//
+// That is a far stronger check than a histogram. If the port draws a different NUMBER of
+// uniforms anywhere - one extra rejection, one missing `SampleResidualLifetime`, a
+// `FindCollisions` called before the list was updated instead of after - then its very next
+// number is somebody else's and every product after that point is wrong. The draw count goes out
+// with the row, so a divergence says WHERE.
+//
+// ## THE NUCLEUS IS DUMPED, NOT REPLAYED
+//
+// `G4Fancy3DNucleus::Init` consumes thousands of uniforms for lead and P9 has already validated
+// it bitwise. So the tape starts AFTER Init and the nucleus goes out as data - one row per
+// nucleon, position and momentum - which the port loads directly. Everything else about the
+// nucleus is a deterministic function of (A, Z): the density, the Fermi momentum table and
+// `nucleondistance`. This block is therefore a test of the CASCADE and of nothing else.
+//
+// ## THE PRECOMPOUND MODEL IS REPLACED BY ONE THAT RECORDS AND RETURNS NOTHING
+//
+// `G4BinaryCascade`'s constructor takes a `G4VPreCompoundModel*`, so `DeExcite`'s exit can be a
+// model of this file's own: `ImrCapturePreco` writes down the `G4Fragment` it is handed - A, Z,
+// the excitation energy, the three exciton counters and the four-momentum - and returns an EMPTY
+// product vector. What comes back from `Propagate` is then the CASCADE's final state alone, which
+// is exactly the boundary the port draws: `propagate` takes the de-excitation as a parameter so
+// that P6 can be called behind `__noinline__`, and P6's own output has its own oracle.
+//
+// ## THE IMPACT PARAMETER IS SAMPLED FROM THE TAPE, AND SO IS THE RETRY
+//
+// A single impact parameter is not enough to get a cascade, and that is not a defect of this
+// sweep - it is the reason `ApplyYourself` has a 200-try inner loop. MEASURED: a 400 MeV proton
+// aimed at the exact centre of C12 finds NO collision at all. The twelve nucleons sit at
+// transverse distances of 1.03 to 2.63 fermi from the axis, and `GetTimeToInteraction` needs
+// `b*b <= sigma/pi`, which for a 25 mb pp cross section is `b < 0.89` fermi. Nothing is that
+// close. The first version of this block ran 120 central-ish cases and every one of them came
+// back NULL with zero draws.
+//
+// So the sweep runs `ApplyYourself`'s INNER loop, exactly as the source writes it: resample the
+// position, build the track, call `Propagate`, and stop when it returns something. The tape
+// therefore holds the FAILED tries as well - two uniforms per rejection inside `GetSpherePoint`,
+// two more per accepted pair, and nothing at all from a `Propagate` that found no collision -
+// and the port has to reproduce all of them to stay in step. `ntries` goes out with the row.
+//
+// `GetSpherePoint` itself is private, so `imr_sphere_point` below rebuilds it from its public
+// ingredients - `Hep3Vector::orthogonal()`, the cross product, and the same rejection loop on
+// the same engine - which is the pattern `write_imr_pauli` uses and explains.
+
+/// CLHEP's HepJamesRandom, with every value it serves recorded in order.
+class ImrTapeEngine : public CLHEP::HepRandomEngine {
+ public:
+  explicit ImrTapeEngine(long seed) { base_.setSeed(seed, 0); }
+  void restart(long seed) {
+    base_.setSeed(seed, 0);
+    tape_.clear();
+  }
+  const std::vector<double>& tape() const { return tape_; }
+  double flat() override {
+    const double v = base_.flat();
+    tape_.push_back(v);
+    return v;
+  }
+  void flatArray(const int size, double* vect) override {
+    for (int i = 0; i < size; ++i) { vect[i] = flat(); }
+  }
+  void setSeed(long s, int i) override { base_.setSeed(s, i); }
+  void setSeeds(const long* s, int i) override { base_.setSeeds(s, i); }
+  void saveStatus(const char[]) const override {}
+  void restoreStatus(const char[]) override {}
+  void showStatus() const override {}
+  std::string name() const override { return "ImrTapeEngine"; }
+
+ private:
+  CLHEP::HepJamesRandom base_;
+  std::vector<double> tape_;
+};
+
+/// A `G4VPreCompoundModel` that records the fragment and de-excites nothing.
+class ImrCapturePreco : public G4VPreCompoundModel {
+ public:
+  ImrCapturePreco() : G4VPreCompoundModel(nullptr, "ImrCapturePreco") {}
+  G4HadFinalState* ApplyYourself(const G4HadProjectile&, G4Nucleus&) override { return nullptr; }
+  void DeExciteModelDescription(std::ostream&) const override {}
+  G4ReactionProductVector* DeExcite(G4Fragment& frag) override {
+    called = true;
+    a = frag.GetA_asInt();
+    z = frag.GetZ_asInt();
+    u = frag.GetExcitationEnergy();
+    holes = frag.GetNumberOfHoles();
+    particles = frag.GetNumberOfParticles();
+    charged = frag.GetNumberOfCharged();
+    mom = frag.GetMomentum();
+    return new G4ReactionProductVector();
+  }
+  void reset() {
+    called = false;
+    a = z = holes = particles = charged = 0;
+    u = 0.0;
+    mom = G4LorentzVector(0, 0, 0, 0);
+  }
+  bool called = false;
+  int a = 0, z = 0, holes = 0, particles = 0, charged = 0;
+  double u = 0.0;
+  G4LorentzVector mom;
+};
+
+/// `G4BinaryCascade::GetSpherePoint`, re-expressed from its public ingredients, drawing from
+/// whichever engine is installed - see the block comment above.
+///
+/// The 1.5 is the source's. Its own comment beside it says "plus -1*r*mom->vect()->unit()",
+/// i.e. one radius back, and the line says one and a half. docs/RISK.md V162.
+G4ThreeVector imr_sphere_point(double r, const G4LorentzVector& mom4) {
+  const G4ThreeVector mom = mom4.vect();
+  const G4ThreeVector o1 = mom.orthogonal();
+  const G4ThreeVector o2 = mom.cross(o1);
+  double x1 = 0.0;
+  double x2 = 0.0;
+  do {
+    x1 = (G4UniformRand() - .5) * 2;
+    x2 = (G4UniformRand() - .5) * 2;
+  } while (x1 * x1 + x2 * x2 > 1.);
+  return G4ThreeVector(r * (x1 * o1.unit() + x2 * o2.unit() - 1.5 * mom.unit()));
+}
+
+void write_imr_propagate() {
+  FILE* f = std::fopen("bic_imr_prop.csv", "w");
+  std::fprintf(f, "case,a,z,pdg,ekin,ntries,posx,posy,posz,px,py,pz,e,ndraws,nprod,"
+                  "fragcalled,fraga,fragz,fragu,fragholes,fragparticles,fragcharged,"
+                  "fragpx,fragpy,fragpz,frage,bicid,ncand,tmin\n");
+  FILE* g = std::fopen("bic_imr_propnuc.csv", "w");
+  std::fprintf(g, "case,i,pdg,x,y,z,px,py,pz,e\n");
+  FILE* h = std::fopen("bic_imr_proptape.csv", "w");
+  std::fprintf(h, "case,i,u\n");
+  FILE* dbg = std::fopen("bic_imr_propdiag.csv", "w");
+  std::fprintf(dbg, "case,ntry,pdg,dx_fm,dy_fm,dz_fm,sigma_mb,t\n");
+  FILE* q = std::fopen("bic_imr_propfs.csv", "w");
+  std::fprintf(q, "case,i,pdg,px,py,pz,e,newlyadded,creatorid\n");
+
+  const G4ParticleDefinition* kBeam[] = {
+      G4Proton::ProtonDefinition(), G4Neutron::NeutronDefinition(),
+      G4PionPlus::PionPlusDefinition(), G4PionMinus::PionMinusDefinition()};
+  // Two energies per species rather than the campaign's four: this block is the BITWISE check
+  // and one tape is thousands of numbers, so the grid here is small and the campaign's
+  // statistics are what covers the range.
+  const double kEkin[] = {400.0, 800.0};
+
+  auto* preco = new ImrCapturePreco();
+  auto* bic = new G4BinaryCascade(preco);
+  auto* eng = new ImrTapeEngine(20260918L);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  const int bicid = G4PhysicsModelCatalog::GetModelID("model_G4BinaryCascade");
+
+  int icase = 0;
+  for (const Nuclide& t : kReplay) {
+    for (const G4ParticleDefinition* d : kBeam) {
+      for (double ekin : kEkin) {
+        // The nucleus is built OUTSIDE the tape and LEAKED, for the reason write_imr_pauli
+        // gives at length: G4RKPropagation keeps the pointer and reads it for the whole run.
+        CLHEP::HepRandom::setTheEngine(saved);
+        CLHEP::HepRandom::setTheSeed(730000L + 17 * icase);
+        auto* nucleus = new G4Fancy3DNucleus;
+        nucleus->Init(t.a, t.z);
+
+        const double m = d->GetPDGMass();
+        const double e = ekin + m;
+        const G4LorentzVector p4(G4ThreeVector(0, 0, std::sqrt(e * e - m * m)), e);
+        const double radius = nucleus->GetOuterRadius() + 3 * fermi;
+
+        // The nucleus as Propagate will see it, before anything has touched it.
+        nucleus->StartLoop();
+        G4Nucleon* nuc = nullptr;
+        int in = 0;
+        while ((nuc = nucleus->GetNextNucleon()) != nullptr) {
+          const G4LorentzVector& nm = nuc->GetMomentum();
+          std::fprintf(g, "%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", icase, in,
+                       nuc->GetDefinition()->GetPDGEncoding(), nuc->GetPosition().x(),
+                       nuc->GetPosition().y(), nuc->GetPosition().z(), nm.x(), nm.y(), nm.z(),
+                       nm.t());
+          ++in;
+        }
+
+        preco->reset();
+        eng->restart(20260918L + icase);
+        CLHEP::HepRandom::setTheEngine(eng);
+
+        // `ApplyYourself`'s INNER loop, verbatim: sample the position, run the cascade, and stop
+        // when `Propagate` returns something. The nucleus is NOT rebuilt - that is the outer
+        // loop, and its ingredient is P9's oracle.
+        G4ReactionProductVector* products = nullptr;
+        G4ThreeVector pos(0, 0, 0);
+        int ncand = 0;
+        double tmin = DBL_MAX;
+        int ntries = 0;
+        int collision_loop_max_count = 200;
+        do {
+          pos = imr_sphere_point(1.1 * radius, p4);
+          ++ntries;
+          // `FindCollisions` for a nucleon or pion projectile reduces to
+          // `G4Scatterer::GetCollisions`, and THAT is public: the number of target nucleons with
+          // a finite `GetTimeToInteraction` is what `theCollisionMgr->Entries()` will be, and the
+          // earliest of their times is what `GetNextCollision` will return. Both go out with the
+          // row, so a case that found nothing says whether the port disagrees about the COUNT or
+          // about what happened afterwards. `GetTimeToInteraction` draws nothing, so asking it
+          // here does not move the tape. The target tracks are put on mass shell the way
+          // `BuildTargetList` puts them.
+          ncand = 0;
+          tmin = DBL_MAX;
+          {
+            G4KineticTrack probe(d, 0.0, pos, p4);
+            probe.SetState(G4KineticTrack::outside);
+            nucleus->StartLoop();
+            G4Nucleon* tn = nullptr;
+            while ((tn = nucleus->GetNextNucleon()) != nullptr) {
+              G4LorentzVector tm = tn->GetMomentum();
+              const double tmass = tn->GetDefinition()->GetPDGMass();
+              tm.setE(std::sqrt(tm.vect().mag2() + tmass * tmass));
+              G4KineticTrack tt(tn->GetDefinition(), 0.0, tn->GetPosition(), tm);
+              tt.SetState(G4KineticTrack::inside);
+              const double tc = imr_scatterer().GetTimeToInteraction(probe, tt);
+              if (dbg != nullptr && ntries <= 3) {
+                const G4ThreeVector dp = tt.GetPosition() - probe.GetPosition();
+                std::fprintf(dbg, "%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g\n", icase, ntries,
+                             tn->GetDefinition()->GetPDGEncoding(), dp.x() / fermi,
+                             dp.y() / fermi, dp.z() / fermi,
+                             imr_scatterer().GetCrossSection(probe, tt) / millibarn,
+                             (tc < DBL_MAX) ? tc : -1.0);
+              }
+              if (tc < DBL_MAX) {
+                ++ncand;
+                if (tc < tmin) { tmin = tc; }
+              }
+            }
+          }
+          auto* secondaries = new G4KineticTrackVector;
+          auto* kt = new G4KineticTrack(d, 0.0, pos, p4);
+          kt->SetState(G4KineticTrack::outside);
+          secondaries->push_back(kt);
+          products = bic->Propagate(secondaries, nucleus);
+        } while (!products && --collision_loop_max_count > 0);
+        CLHEP::HepRandom::setTheEngine(saved);
+
+        const int np = (products != nullptr) ? static_cast<int>(products->size()) : -1;
+        std::fprintf(f, "%d,%d,%d,%d,%.17g,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,"
+                        "%.17g,%d,%d,%d,%d,%d,%.17g,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d,"
+                        "%.17g\n",
+                     icase, t.a, t.z, d->GetPDGEncoding(), ekin, ntries, pos.x(), pos.y(),
+                     pos.z(), p4.x(), p4.y(), p4.z(), p4.t(),
+                     static_cast<int>(eng->tape().size()), np, preco->called ? 1 : 0, preco->a,
+                     preco->z, preco->u, preco->holes, preco->particles, preco->charged,
+                     preco->mom.x(), preco->mom.y(), preco->mom.z(), preco->mom.t(), bicid,
+                     ncand, (tmin < DBL_MAX) ? tmin : -1.0);
+        const std::vector<double>& tape = eng->tape();
+        for (size_t k = 0; k < tape.size(); ++k) {
+          std::fprintf(h, "%d,%d,%.17g\n", icase, static_cast<int>(k), tape[k]);
+        }
+        for (int k = 0; k < np; ++k) {
+          const G4ReactionProduct* rp = (*products)[k];
+          std::fprintf(q, "%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d\n", icase, k,
+                       rp->GetDefinition()->GetPDGEncoding(), rp->GetMomentum().x(),
+                       rp->GetMomentum().y(), rp->GetMomentum().z(), rp->GetTotalEnergy(),
+                       rp->GetNewlyAdded() ? 1 : 0, rp->GetCreatorModelID());
+        }
+        if (products != nullptr) {
+          for (auto* rp : *products) { delete rp; }
+          delete products;
+        }
+        ++icase;
+      }
+    }
+  }
+  delete eng;
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+  std::fclose(q);
+  std::fclose(dbg);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -3315,12 +3655,15 @@ void dump_bic(const DumpContext&) {
   write_imr_absorb();
   write_imr_kdecay();
   write_imr_scatter();
-  write_imr_scatterlife();
   write_imr_ionmass();
   write_imr_pauli();
   write_imr_capture();
   write_imr_boundary();
   write_imr_fps();
+  write_imr_propagate();
+  // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
+  // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
+  write_imr_scatterlife();
 }
 
 }  // namespace
@@ -3345,5 +3688,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_kdecay.csv bic_imr_scatter.csv bic_imr_scatterlife.csv "
                     "bic_imr_ionmass.csv bic_imr_pauli.csv "
                     "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv "
-                    "bic_imr_boundary.csv",
+                    "bic_imr_boundary.csv bic_imr_prop.csv bic_imr_propnuc.csv "
+                    "bic_imr_proptape.csv bic_imr_propfs.csv bic_imr_propdiag.csv",
                     dump_bic);

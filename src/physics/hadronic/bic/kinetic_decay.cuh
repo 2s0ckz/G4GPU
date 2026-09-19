@@ -79,20 +79,39 @@ struct DecayTrack {
   int creator_model_id = -1;
   int parent_resonance_pdg = 0;
   int parent_resonance_id = 0;
+  /// The caller's own identity for this track, untouched on a survivor and set to -1 on every
+  /// daughter. Geant4's identity is the `G4KineticTrack*` and the caller reads it off the list
+  /// afterwards - `G4BinaryCascade::ProductsAddFinalState` asks each survivor for
+  /// `IsParticipant()`, which is a property of the track OBJECT and of nothing in this struct.
+  /// A port with no pointers needs somewhere to put that, and this is it. The engine only
+  /// copies it, and sets it to -1 on a daughter.
+  int caller_tag = -1;
 };
 
 /// What the pass could not do. None of these is fatal: each leaves the track it concerns in the
 /// list, untouched, and the pass carries on.
 struct KineticDecayRefusal {
   bool list_full = false;          ///< a decay's daughters would not fit in `capacity`
-  bool unknown_species = false;    ///< a PDG code the generated table does not carry
+  /// A PDG code the generated table does not carry AT ALL. It does NOT mean "a code Geant4 would
+  /// not have decayed": the table carries every species either cascade produces together with
+  /// Geant4's own `IsShortLived()` flag, so a code that is in the table and not short-lived is
+  /// skipped in silence, exactly as `G4DecayKineticTracks` skips it. A caller that sees this flag
+  /// is looking at a species neither model was measured to produce.
+  bool unknown_species = false;
   bool too_many_daughters = false; ///< a channel with more than four daughters
+  bool too_many_channels = false;  ///< more channels than `kKineticDecayMaxChannels`
   bool below_threshold = false;    ///< Pmx would have thrown after 10,000 resamplings
   bool phase_space_failed = false; ///< a rejection loop gave up
+  bool no_channel_chosen = false;  ///< the cumulative channel search fell off the end
+  /// A STATUS, not a refusal, and the one case where the engine returns nothing and everything is
+  /// working: `EvaluateTotalActualWidth()` came back exactly zero, so Geant4's `Decay` returns 0
+  /// and leaves the track alone. `any()` leaves it out; it is here so that a track left
+  /// short-lived in the list is never unexplained.
+  bool zero_total_width = false;
   int refused_pdg = 0;
   __host__ __device__ bool any() const {
-    return list_full || unknown_species || too_many_daughters || below_threshold ||
-           phase_space_failed;
+    return list_full || unknown_species || too_many_daughters || too_many_channels ||
+           below_threshold || phase_space_failed || no_channel_chosen;
   }
 };
 
@@ -127,6 +146,7 @@ __host__ __device__ inline double kinetic_decay_residual_lifetime(int pdg,
                                                  kKineticDecayMaxChannels, dref);
   if (n < 0) {
     ref.unknown_species = dref.unknown_species;
+    ref.too_many_channels = dref.too_many_channels;
     ref.refused_pdg = dref.refused_pdg;
     return -1.0;
   }
@@ -151,16 +171,21 @@ __host__ __device__ inline int kinetic_decay_one(const DecayTrack& track, DecayT
   if (n < 0) {
     ref.unknown_species = dref.unknown_species;
     ref.too_many_daughters = dref.too_many_daughters;
+    ref.too_many_channels = dref.too_many_channels;
     ref.refused_pdg = dref.refused_pdg;
     return 0;
   }
   const imr::DecayResult res = imr::kinetic_track_decay(track.pdg, actual_mass, p, widths, n, rng,
                                                         dref);
+  // `zero_total_width` is outside `any()` on both sides, so it is carried on its own.
+  ref.zero_total_width = ref.zero_total_width || dref.zero_total_width;
   if (dref.any()) {
     ref.unknown_species = ref.unknown_species || dref.unknown_species;
     ref.too_many_daughters = ref.too_many_daughters || dref.too_many_daughters;
+    ref.too_many_channels = ref.too_many_channels || dref.too_many_channels;
     ref.below_threshold = ref.below_threshold || dref.below_threshold;
     ref.phase_space_failed = ref.phase_space_failed || dref.phase_space_failed;
+    ref.no_channel_chosen = ref.no_channel_chosen || dref.no_channel_chosen;
     ref.refused_pdg = dref.refused_pdg;
   }
   // "Use the integer round mass in keV to get an unique ID for the parent resonance" - the
@@ -174,6 +199,10 @@ __host__ __device__ inline int kinetic_decay_one(const DecayTrack& track, DecayT
     out[i].creator_model_id = track.creator_model_id;
     out[i].parent_resonance_pdg = track.pdg;
     out[i].parent_resonance_id = unique_id;
+    // A daughter is a NEW track, so it carries none of the caller identity: in Geant4 it is a
+    // `new G4KineticTrack` with a null `theNucleon`, which is exactly what makes
+    // `IsParticipant()` false on it.
+    out[i].caller_tag = -1;
   }
   return res.n;
 }

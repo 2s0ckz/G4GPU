@@ -19,23 +19,28 @@
 // is not a closed form but an integral of that momentum over the daughter's Breit-Wigner, done
 // with `G4Integrator::Simpson` at 100 iterations, i.e. 201 evaluations.
 //
-// ## TWO OF THE FOUR BRANCHES ARE DEAD, and that is a measurement and not a reading
+// ## ONE OF THE FOUR BRANCHES IS DEAD, and that is a measurement and not a reading
 //
 // The constructor splits on how many of a channel's daughters are short-lived. MEASURED over
-// every one of the 563 channels in `decay_tables.hh`: of the 491 two-body channels, 159 have no
-// short-lived daughter and 332 have exactly one - and **none has two**. Of the 70 three-body
-// channels, **all 70 have none**. So:
+// every one of the 638 channels in `decay_tables.hh` - 4 one-body, 555 two-body, 77 three-body
+// and 2 four-body:
 //
-//   * `IntegrateCMMomentum2`, `IntegrandFunction3` and `IntegrandFunction4` - the two-resonance
-//     branch - are never entered by the binary cascade, and
-//   * the three-body `nShortLived >= 1` branch, with its second swap and its `theDaughterMass[0]
-//     += theDaughterMass[2]`, is never entered either.
+//   * of the 555 two-body channels, 220 have no short-lived daughter and 335 have exactly one,
+//     and **none has two**. So `IntegrateCMMomentum2`, `IntegrandFunction3` and
+//     `IntegrandFunction4` - the two-resonance branch - are never entered.
+//   * of the 77 three-body channels, 75 have no short-lived daughter and **two have one**, so
+//     the three-body `nShortLived >= 1` branch, with its second swap and its
+//     `theDaughterMass[0] += theDaughterMass[2]`, **is live**. The two are a2(1320)0 -> omega
+//     pi- pi+ and a2(1320)0 -> omega pi0 pi0, which P11d measured at 0.032% of FTFP's
+//     products; before FTFP's species joined the closure that branch was dead too, and the
+//     earlier version of this header said so.
 //
-// The reason is `IsShortLived`: it is true for the baryon resonances and for the rho and the
-// omega, and false for the pion, the nucleon, the eta, the kaons and the lambda. Every channel
-// in the closure pairs at most one short-lived daughter with long-lived ones. The assertion is
-// in tests/test_bic_imr.cu over the port's own table, so a Geant4 release that adds a
-// resonance-to-two-resonances channel fails there rather than running code nothing has checked.
+// The reason the two-resonance branch stays dead is `IsShortLived`: it is true for the baryon
+// resonances and for the rho and the omega, and false for the pion, the nucleon, the eta, the
+// kaons and the lambda. Every channel in the closure pairs at most one short-lived daughter
+// with long-lived ones. The assertion is in tests/test_bic_imr.cu over the port's own table,
+// so a Geant4 release that adds a resonance-to-two-resonances channel fails there rather than
+// running code nothing has checked.
 //
 // Both branches are transcribed anyway, and both carry a bug that would show the moment they
 // woke up. `IntegrateCMMomentum2` reads `theActualMass` for its upper limit and never
@@ -72,10 +77,12 @@
 //
 //   * the **G4Integrator adaptive methods**. Only `Simpson(ptrT, f, a, b, n)` is reachable from
 //     G4KineticTrack and only that one is here.
-//   * **four-daughter channels**. `G4KineticTrack`'s constructor sends anything that is not two
-//     or three daughters down the `theActualWidth = BR * PDGWidth` branch, which this file
-//     reproduces, but `Decay`'s `ManyBodyDecayIt` is not here. Nothing in the transitive closure
-//     of `decay_tables.hh` has four, and `tools/extract_bic_decay.pl` asserts that.
+//   * nothing else. **Four-daughter channels are NOT refused**: `G4KineticTrack`'s constructor
+//     sends anything that is not two or three daughters down the `theActualWidth = BR *
+//     PDGWidth` branch, which this file reproduces, and `Decay` dispatches them to
+//     `ManyBodyDecayIt`, which is here. The closure has exactly two of them, f2(1270) -> 4 pi,
+//     and tests/test_bic_imr.cu drives both. An earlier version of this header refused them,
+//     from before FTFP's species joined the closure and brought the f2.
 #ifndef G4GPU_BIC_IMR_DECAY_CUH
 #define G4GPU_BIC_IMR_DECAY_CUH
 
@@ -95,6 +102,12 @@ struct DecayRefusal {
   bool below_threshold = false;   ///< Pmx would have thrown: the daughters do not fit
   bool phase_space_failed = false;///< ThreeBodyDecayIt's rejection loop hit 10,000
   bool no_channel_chosen = false; ///< the cumulative search fell off the end
+  /// `EvaluateTotalActualWidth()` came back exactly zero, so `Decay` took its `else` arm and
+  /// returned 0 with nothing printed (G4KineticTrack.cc:758-761). It is a STATUS and not a
+  /// refusal - `any()` leaves it out - because it is what Geant4 does and the caller's right
+  /// response is Geant4's: leave the track in the list. But a caller that saw no products and
+  /// no flag at all could not tell this apart from a bug, so it is reported.
+  bool zero_total_width = false;
   int refused_pdg = 0;
   __host__ __device__ bool any() const {
     return unknown_species || too_many_daughters || too_many_channels || below_threshold ||
@@ -104,7 +117,8 @@ struct DecayRefusal {
 
 /// The index of a PDG code in `decay_tables.hh`, or -1.
 ///
-/// A linear scan over 94 entries. The table is in the order the closure found the species, which
+/// A linear scan over `kDecaySpeciesCount` entries, 126 today. The table is in the order the
+/// closure found the species, which
 /// is not sorted, and sorting it would lose the property that the seeds come first - which is
 /// what makes the generated file readable next to the dump it came from.
 __host__ __device__ inline int decay_species_index(int pdg) {
@@ -136,7 +150,8 @@ __host__ __device__ inline int kinetic_track_substitute_k0(int pdg, Rng& rng) {
 ///
 /// Geant4 caches this in a thread-local map keyed by particle definition and computes it once;
 /// the column is that cached value, dumped. `compute_min_mass` below is the recursion itself,
-/// and tests/test_bic_imr.cu checks it against all 94 columns rather than assuming they agree.
+/// and tests/test_bic_imr.cu checks it against every one of the 126 columns rather than assuming
+/// they agree.
 __host__ __device__ inline double species_min_mass(int pdg, DecayRefusal& ref) {
   const int i = decay_species_index(pdg);
   if (i < 0) {
@@ -363,7 +378,9 @@ __host__ __device__ inline int kinetic_track_actual_widths(int pdg, double actua
     const int nd = decay_channel_n_daughters()[ch];
     const double br = decay_channel_br()[ch];
     if (nd != 2 && nd != 3) {
-      // nDaughters 1 - and 0, and 4 and more, which the closure does not contain.
+      // nDaughters 1 - and 0, and 4 and more. The closure HAS two four-body channels, f2(1270)
+      // -> 4 pi; the width branch is `BR * PDGWidth` for them, which is what Geant4 does for
+      // anything that is not two or three daughters, and `many_body_decay` handles the kinematics.
       out[index] = br * mother_width;
       continue;
     }
@@ -857,7 +874,13 @@ __host__ __device__ inline DecayResult kinetic_track_decay(int pdg, double actua
   }
   if (n_channels == 0) { return out; }
   const double total = evaluate_total_actual_width(widths, n_channels);
-  if (total == 0.0) { return out; }
+  if (total == 0.0) {
+    // `if (theTotalActualWidth != 0) { ... } else { return 0; }` - a silent exit in Geant4, and
+    // a reported one here; see `DecayRefusal::zero_total_width`.
+    ref.zero_total_width = true;
+    ref.refused_pdg = pdg;
+    return out;
+  }
   const int first = decay_species_first_channel()[si];
 
   int chosen = -1;
