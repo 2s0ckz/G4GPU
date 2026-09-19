@@ -141,16 +141,47 @@ bool load_csv(const std::string& path, Csv& out) {
   return true;
 }
 
-/// P11's FTF entry point is not yet callable from a test - no workspace builder exists outside
-/// its own model tests - so the anti-baryon arm is REFUSED BY NAME and counted, which is what the
-/// brief asks for until P11d lands. The count is printed per species, so "the Fritiof arm did not
-/// run" is a number rather than a silence.
-struct FtfNotYet {
+/// The Fritiof arm, through P11d's caller-side contract - the "two lines" it measured, which are
+/// the handle below and its use in the functor. This test runs on the HOST, so the handle comes
+/// from `entry::host_handle` over storage the test owns rather than from `entry::build`'s
+/// cudaMalloc; `apply` cannot tell the two apart, which is the point of the contract.
+///
+/// ONE slot, because this campaign is a single-threaded host loop and a slot is what a thread in
+/// flight takes. `entry::HadronWorkspace` is **329,816 bytes** of it.
+struct FtfArm {
+  g4gpu::hadronic::ftf::entry::Handle<g4gpu::hadronic::ftf::entry::HadronWorkspace> h;
   mutable long long calls = 0;
+  mutable std::map<int, long long> refused_by_name;   ///< FtfRefusal code -> count
+  mutable long long primary_unchanged = 0;
+  mutable long long ran = 0;
+  /// A refusal whose `FtfRefusal` code is `kNone` is not nameless - `entry::apply` returns
+  /// `kRefused` for three DIFFERENT things and only one of them sets that code. These three
+  /// counters are the other two plus the silent one, because "(none) x 82,554" was the first
+  /// run's largest line and a count without a name is not a report.
+  mutable long long capacity = 0;          ///< a buffer in P11's workspace filled
+  mutable long long generator = 0;         ///< P6's GeneratorPrecompoundInterface refused
+  mutable long long empty_no_reason = 0;   ///< zero secondaries and nothing reported at all
+
   template <typename P, typename N, typename F, typename R>
-  stopping::StoppingRefusal operator()(const P&, const N&, F&, R&) const {
+  stopping::StoppingRefusal operator()(const P& p, const N& n, F& out, R& rng) const {
     ++calls;
-    return stopping::StoppingRefusal::kFtfRefused;
+    g4gpu::hadronic::ftf::entry::Report rep;
+    const stopping::StoppingRefusal s =
+        stopping::fritiof_at_rest(h, 0, p, n, out, rep, rng);
+    if (s == stopping::StoppingRefusal::kNone) {
+      ++ran;
+    } else if (s == stopping::StoppingRefusal::kFtfPrimaryUnchanged) {
+      ++primary_unchanged;
+    } else if (rep.refused != g4gpu::hadronic::ftf::FtfRefusal::kNone) {
+      ++refused_by_name[static_cast<int>(rep.refused)];
+    } else if (rep.capacity) {
+      ++capacity;
+    } else if (rep.generator_refused) {
+      ++generator;
+    } else {
+      ++empty_no_reason;
+    }
+    return s;
   }
 };
 
@@ -178,18 +209,38 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
                           {"Al", 1, {13, 0}, {1.0, 0.0}, {27, 0}},
                           {"Fe", 1, {26, 0}, {1.0, 0.0}, {56, 0}},
                           {"Pb", 1, {82, 0}, {1.0, 0.0}, {207, 0}}};
+  // Every species QBBC gives an at-rest process. The six Bertini/muon ones, then the whole
+  // Fritiof list from `G4StoppingPhysics::ConstructProcess` - including the four NEUTRAL
+  // antiparticles that pass only because the gate is `charge <= 0` - and one anti-nucleus, which
+  // is the `GetBaryonNumber() < -1` arm and which `HadronWorkspace` is expected to refuse by
+  // capacity with its mass number named.
   struct Sp { int pdg; double mass; const char* name; };
-  const Sp species[8] = {{-211, 139.57061, "pi-"},   {-321, 493.677, "K-"},
-                         {3112, 1197.449, "Sigma-"}, {3312, 1321.71, "Xi-"},
-                         {3334, 1672.45, "Omega-"},  {13, 105.6583715, "mu-"},
-                         {-2212, 938.272013, "anti-p"}, {-2112, 939.56536, "anti-n"}};
+  const Sp species[13] = {
+      {-211, 139.57061, "pi-"},       {-321, 493.677, "K-"},
+      {3112, 1197.449, "Sigma-"},     {3312, 1321.71, "Xi-"},
+      {3334, 1672.45, "Omega-"},      {13, 105.6583715, "mu-"},
+      {-2212, 938.272013, "anti-p"},  {-2112, 939.56536, "anti-n"},
+      {-3122, 1115.683, "anti-Lam"},  {-3212, 1192.642, "anti-Sig0"},
+      {-3222, 1189.37, "anti-Sig+"},  {-3322, 1314.86, "anti-Xi0"},
+      {-1000010020, 1875.613, "anti-d"}};
+  const int kNumSp = 13;
   const long long kN = 20000;
 
   std::printf("\n  == stopping::at_rest, %lld events per (species, material) ==\n", kN);
   std::printf("  %-8s %-5s %9s %8s %8s %8s %9s %9s %s\n", "species", "mat", "mean nsec",
               "mean EM", "mean nuc", "refused", "dio frac", "mean Edep", "captured on");
-  FtfNotYet ftf;
-  for (int si = 0; si < 8; ++si) {
+  static g4gpu::hadronic::ftf::entry::HadronWorkspace ftf_slot;
+  static g4gpu::hadronic::ftf::LundTables<double> ftf_lund;
+  // One point per completed event: the atomic cascade's secondaries are still in the final state
+  // after the nuclear model ran. Zero tolerance - it is a count, not a measurement.
+  const int b_survive = new_bucket("AtomicCascadeSurvives", 0.0);
+  FtfArm ftf;
+  ftf.h = g4gpu::hadronic::ftf::entry::host_handle(&ftf_slot, 1, &ftf_lund);
+  namespace ftfe = g4gpu::hadronic::ftf::entry;
+  std::printf("  entry::HadronWorkspace %zu bytes/slot; 1 slot for this single-threaded host"
+              " campaign, so bytes_for<HadronWorkspace>(1) = %zu with the shared Lund table\n",
+              sizeof(ftfe::HadronWorkspace), ftfe::bytes_for<ftfe::HadronWorkspace>(1));
+  for (int si = 0; si < kNumSp; ++si) {
     for (int mi = 0; mi < 5; ++mi) {
       const MatDef& m = mats[mi];
       int offs[2] = {0, 1};
@@ -230,6 +281,31 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
         nsec += fs.n_secondaries;
         nem += r.n_em_cascade;
         edep += r.local_deposit_MeV;
+
+        // **THE ATOMIC CASCADE MUST SURVIVE THE NUCLEAR MODEL.** `entry::apply` forwards to
+        // `ftf::apply_yourself`, which opens with `out.clear()`; the first wiring of the Fritiof
+        // arm handed it the final state that already held the cascade's electrons and gammas and
+        // they were gone. Nothing in the campaign's other columns can see that - a smaller
+        // multiplicity looks like different physics - so it is asserted here, per event, as the
+        // arithmetic it is: the final state cannot hold FEWER particles than the cascade put in
+        // it, and the first `n_em_cascade` of them must still be the cascade's own electrons and
+        // gammas. docs/RISK.md V164; this is the check the bug needed and did not have.
+        if (fs.n_secondaries < r.n_em_cascade) {
+          cmp_int(b_survive, fs.n_secondaries, r.n_em_cascade,
+                  std::string(species[si].name) + " on " + m.name +
+                      ": the nuclear model replaced the atomic cascade instead of appending");
+        } else {
+          ++buckets[b_survive].n;
+          for (int k = 0; k < r.n_em_cascade; ++k) {
+            const int pdg = fs.secondaries[k].pdg;
+            if (pdg != 11 && pdg != 22) {
+              cmp_int(b_survive, pdg, 11,
+                      std::string(species[si].name) + " on " + m.name + ": secondary " +
+                          std::to_string(k) + " is not an EM-cascade particle");
+              break;
+            }
+          }
+        }
       }
       const double d = (ndone > 0) ? double(ndone) : 1.0;
       char cap[64];
@@ -252,9 +328,35 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
       }
     }
   }
-  std::printf("  the Fritiof arm was asked %lld times and refused every one: P11's"
-              " ftf::apply_yourself has no workspace builder outside its own model tests yet,"
-              " so anti-p and anti-n are counted rather than approximated\n", ftf.calls);
+  // What the Fritiof arm did, by NAME. `DecayStrongResonances` is the one P11d is landing on
+  // phys/ftf3 in parallel, so a count there today is expected and is printed under its own name
+  // rather than folded into a total.
+  std::printf("\n  == the Fritiof arm: %lld calls ==\n", ftf.calls);
+  std::printf("    ran (a real final state)     %8lld   %6.2f%%\n", ftf.ran,
+              100.0 * double(ftf.ran) / double(ftf.calls > 0 ? ftf.calls : 1));
+  std::printf("    primary returned unchanged   %8lld   %6.2f%%\n", ftf.primary_unchanged,
+              100.0 * double(ftf.primary_unchanged) / double(ftf.calls > 0 ? ftf.calls : 1));
+  long long n_ref_total = ftf.capacity + ftf.generator + ftf.empty_no_reason;
+  for (const auto& kv : ftf.refused_by_name) { n_ref_total += kv.second; }
+  std::printf("    refused                      %8lld   %6.2f%%\n", n_ref_total,
+              100.0 * double(n_ref_total) / double(ftf.calls > 0 ? ftf.calls : 1));
+  for (const auto& kv : ftf.refused_by_name) {
+    std::printf("      %-46s %8lld\n",
+                g4gpu::hadronic::ftf::ftf_refusal_name(
+                    static_cast<g4gpu::hadronic::ftf::FtfRefusal>(kv.first)),
+                kv.second);
+  }
+  if (ftf.capacity > 0) {
+    std::printf("      %-46s %8lld\n", "a buffer in P11's workspace filled", ftf.capacity);
+  }
+  if (ftf.generator > 0) {
+    std::printf("      %-46s %8lld\n", "P6's GeneratorPrecompoundInterface refused",
+                ftf.generator);
+  }
+  if (ftf.empty_no_reason > 0) {
+    std::printf("      %-46s %8lld\n", "no secondaries and no reason reported",
+                ftf.empty_no_reason);
+  }
 }
 
 }  // namespace

@@ -78,6 +78,7 @@
 #include <cmath>
 
 #include "physics/hadronic/bertini/cascade_interface.cuh"
+#include "physics/hadronic/ftf/ftf_entry.cuh"
 #include "physics/hadronic/stopping/element_selector.cuh"
 #include "physics/hadronic/stopping/em_capture_cascade.cuh"
 #include "physics/hadronic/stopping/muon_bound_decay.cuh"
@@ -98,7 +99,15 @@ enum class StoppingRefusal : int {
   kNotApplicable,        ///< QBBC gives this species no at-rest process
   kSelector,             ///< G4ElementSelector refused - see SelectorRefusal
   kBertiniRefused,       ///< bert::apply_yourself refused
-  kFtfRefused,           ///< ftf::apply_yourself refused
+  kFtfRefused,           ///< ftf::apply_yourself refused, for a reason with no code of its own
+  /// The caller's workspace pool had no slot for this thread. Not physics: grow the pool or
+  /// chunk the launch. It is here so that an under-provisioned run says so instead of looking
+  /// like a model that refuses everything.
+  kFtfNoSlot,
+  /// FTFP gave the primary back unchanged - 1,000 Scatter attempts without an interaction, or
+  /// the model's own fallback. Geant4 calls that a final state and so does the port; at rest it
+  /// means the capture produced nothing, which is worth its own count.
+  kFtfPrimaryUnchanged,
   /// FTF at rest reached `DecayStrongResonances`, which is P11d's and is not ported. Counted
   /// rather than approximated; the campaign reports how often.
   kFtfResonanceDecay,
@@ -170,6 +179,56 @@ struct AtRestResult {
   double local_deposit_MeV = 0.0;  ///< what the step deposits: the NUCLEAR model's only
   bert::ApplyResult bertini;       ///< when the arm ran Bertini
 };
+
+/// `G4HadronicAbsorptionFritiof`'s nuclear model, through P11d's caller-side contract.
+///
+/// **This is the whole of the Fritiof arm, and it is two lines at the call site.** P11d's
+/// `ftf/ftf_entry.cuh` is the door: the caller holds an `entry::Handle<entry::HadronWorkspace>`
+/// - built once per run by `entry::build` beside the other uploads, or by `entry::host_handle`
+/// over host storage - copies it by value into the launch, and each thread takes slot `tid`.
+/// Nothing else of P11's model is reached from here and nothing of it is included beyond that
+/// one header, which is what the contract is for.
+///
+/// **`HadronWorkspace` and not `Workspace`.** The at-rest projectile is always a single
+/// anti-hadron, so `kMaxProjA = 1` removes the projectile nucleus and its scratch: **329,816
+/// bytes a slot** against 410,824. An ion handed to it is refused by capacity with its mass
+/// number named, never truncated - which for this arm is the anti-nuclei QBBC also stops, and
+/// they are counted rather than silently dropped.
+///
+/// The at-rest projectile has `kin_energy = 0`, which is inside FTFP's window at the bottom and
+/// is exactly the case `test_ftf_entry.cu` measures at 0.015 ms on carbon and 0.162 ms on lead -
+/// as against 7 ms and 185-242 ms for a projectile OUTSIDE the window, where all 1,002 Scatter
+/// attempts run and none can succeed. An anti-proton at rest is the cheap case, not the
+/// expensive one, because annihilation is open.
+template <typename real_t, int kCap, typename Rng>
+__host__ __device__ inline StoppingRefusal fritiof_at_rest(
+    const g4gpu::hadronic::ftf::entry::Handle<g4gpu::hadronic::ftf::entry::HadronWorkspace>& h,
+    int slot_index, const HadProjectile<real_t>& proj, const HadNucleus& target,
+    HadFinalState<real_t, kCap>& out, g4gpu::hadronic::ftf::entry::Report& rep, Rng& rng) {
+  namespace entry = g4gpu::hadronic::ftf::entry;
+  const entry::Status st = entry::apply(h, slot_index, proj, target, out, rep, rng);
+  switch (st) {
+    case entry::Status::kRan:
+      return StoppingRefusal::kNone;
+    case entry::Status::kNoWorkspaceSlot:
+      // The caller under-provisioned the pool. Not a physics refusal and not silent.
+      return StoppingRefusal::kFtfNoSlot;
+    case entry::Status::kPrimaryUnchanged:
+      // 1,000 Scatter attempts without an interaction, or the model handing the primary back.
+      // Geant4 does the same thing and calls it a final state; this port reports it so that the
+      // campaign can say how often, because at rest it means the capture produced nothing.
+      return StoppingRefusal::kFtfPrimaryUnchanged;
+    default:
+      break;
+  }
+  // A real refusal. `DecayStrongResonances` is the one P11d is landing on phys/ftf3 in parallel;
+  // until it does, a refusal naming it is expected and is COUNTED under its own name rather
+  // than folded into the generic one.
+  if (rep.refused == g4gpu::hadronic::ftf::FtfRefusal::kDecayStrongResonances) {
+    return StoppingRefusal::kFtfResonanceDecay;
+  }
+  return StoppingRefusal::kFtfRefused;
+}
 
 /// Everything the Bertini arm needs, bundled so the entry point's signature stays readable. Every
 /// member is the caller's storage; nothing here is owned.
@@ -296,8 +355,23 @@ __host__ __device__ inline AtRestResult at_rest(
 
   const int n_before = fs.n_secondaries;
   if (r.arm == NuclearArm::kFritiof) {
-    r.refusal = ftf_invoke(stopped, nuc, fs, rng);
+    // **The nuclear model gets its OWN final state, exactly as the Bertini arm does, and for
+    // exactly the same reason.** `entry::apply` forwards to `ftf::apply_yourself`, which opens
+    // with `out.clear()` - it REPLACES the buffer, it does not append to it. Handing it `fs`
+    // destroys the atomic cascade's electrons and gammas that are already in there, silently:
+    // the first wiring did that, and the symptom was a campaign row with mean multiplicity 5.7
+    // and mean EM-cascade count 9.7, a negative difference that is arithmetically impossible
+    // and was the only reason it was noticed. docs/RISK.md V164.
+    HadFinalState<real_t, kCap>& nucfs = *nuclear_fs;
+    r.refusal = ftf_invoke(stopped, nuc, nucfs, rng);
     if (r.refusal != StoppingRefusal::kNone) { return r; }
+    r.local_deposit_MeV = double(nucfs.local_energy_deposit);
+    for (int i = 0; i < nucfs.n_secondaries; ++i) {
+      if (!fs.add_secondary(nucfs.secondaries[i])) {
+        r.refusal = StoppingRefusal::kSecondaryOverflow;
+        return r;
+      }
+    }
   } else {
     // Bertini, with the de-excitation the instance was BUILT with - see the header.
     // `nucfs` is the CALLER's second buffer and not a local, and the reason is measured: a
