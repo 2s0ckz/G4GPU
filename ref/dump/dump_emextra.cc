@@ -872,9 +872,17 @@ void dump_emextra_apply(const DumpContext&) {
   // Until it is understood, the campaign that the lead's `ref/oracle/run.bat` runs is ONE event
   // per case - enough to prove every model is reachable and every column is written, and not
   // enough to compare a distribution - and the statistical oracle is regenerated deliberately
-  // with `G4GPU_EMEXTRA_EVENTS=2000`. `tests/test_emextra_models.cu` reads the count out of the
+  // with `G4GPU_EMEXTRA_EVENTS=20000`. `tests/test_emextra_models.cu` reads the count out of the
   // `events` column and pools the two standard errors, so it is correct either way and says
   // which it had.
+  //
+  // TWENTY thousand and not two, since docs/RISK.md V177. At 2,000 events a rare species'
+  // SOFT spectrum can rest on two samples - 23 of 991 rows did - and a two-sample standard
+  // deviation has one degree of freedom, so a row read 7.54 sigma on an oracle spread of 0.77
+  // MeV that the same case at 20,000 events measured as 4.75. Ten times the events costs four
+  // and a half minutes for all 126 cases standalone, which is nothing, and leaves only 10 rows
+  // of 1,034 on two samples; the comparison itself was corrected as well, because no event
+  // count removes the last of them.
   long long n_events = 1;
   if (const char* e = std::getenv("G4GPU_EMEXTRA_EVENTS")) {
     const long long v = std::atoll(e);

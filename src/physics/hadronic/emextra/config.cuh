@@ -155,9 +155,12 @@ struct ProcessConfig {
 /// this and not the 50 GeV a reading of the model classes would suggest (docs/PORTED.md
 /// 2.1.11b makes the same point for FTFP).
 __host__ __device__ inline constexpr double max_energy_MeV() { return 1.0e8; }
-/// `G4HadronicInteraction`'s own ceiling for the two VD models: `SetMaxEnergy(1*PeV)`, which is
-/// 1e9 MeV and is ten times `max_energy_MeV()`. A model is allowed a window wider than the
+/// The two VD models' own ceiling, set in each model's CONSTRUCTOR - `SetMinEnergy(0.0);
+/// SetMaxEnergy(1*PeV);` in both `G4ElectroVDNuclearModel` and `G4MuonVDNuclearModel` - which
+/// overrides the `max_energy_MeV()` above that `G4HadronicInteraction` starts them with. So it
+/// is 1e9 MeV, ten times the parameters' ceiling. A model is allowed a window wider than the
 /// parameters' ceiling because nothing clips it; the process simply never sees such a track.
+/// And with one model registered the window is never read at all - docs/RISK.md V178.
 __host__ __device__ inline constexpr double vd_max_energy_MeV() { return 1.0e9; }
 /// `fGNLowEnergyLimit`, the G4EmExtraPhysics constructor's `200*CLHEP::MeV`.
 __host__ __device__ inline constexpr double gn_low_energy_limit_MeV() { return 200.0; }

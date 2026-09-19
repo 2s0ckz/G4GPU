@@ -1,4 +1,4 @@
-// The four G4EmExtraPhysics final-state models, end to end.
+﻿// The four G4EmExtraPhysics final-state models, end to end.
 //
 //   G4LowEGammaNuclearModel   a photon below 200 MeV, absorbed whole into a compound nucleus
 //                             and de-excited through P6 and P3
@@ -42,6 +42,7 @@
 #include "core/rng.cuh"
 #include "data/level_data.cuh"
 #include "host/g4data.cuh"
+#include "physics/hadronic/emextra/lepton_nuclear.cuh"
 #include "physics/hadronic/emextra/lepton_vd.cuh"
 #include "physics/hadronic/emextra/photon_nuclear.cuh"
 
@@ -112,11 +113,14 @@ __global__ void emextra_lepton_probe(int pdg, double ke, int a, int z, bert::Nuc
   ws.epo = epo;
   ws.bert_ws = bws;
   ws.preco = pws;
-  const ee::LeptonVdResult e = ee::electro_vd_apply(p, n, *fs, ws, lt, pool, rng);
-  const ee::LeptonVdResult m = ee::muon_vd_apply(p, n, *fs, *mutab, ws, lt, pool, rng);
+  // The PROCESS entry points and not the models, because these are what P15 calls: the
+  // register and stack numbers below are then the ones a stepper pays. The wrapper adds the
+  // range manager, which with one registered model is a branch and not a draw.
+  const ee::LeptonNuclearResult e = ee::electron_nuclear(p, n, *fs, ws, lt, pool, rng);
+  const ee::LeptonNuclearResult m = ee::muon_nuclear(p, n, *fs, *mutab, ws, lt, pool, rng);
   out[0] = fs->n_secondaries;
-  out[1] = static_cast<int>(e.no_photon);
-  out[2] = static_cast<int>(m.no_photon);
+  out[1] = static_cast<int>(e.vd.no_photon);
+  out[2] = static_cast<int>(m.vd.no_photon);
 }
 
 namespace {
@@ -182,7 +186,8 @@ void cmp_sigma(int bi, double got, double want, double sigma, long long n_got, l
 }
 
 /// Compare two sample means with WELCH'S standard error - each sample's own spread over its own
-/// count - which is what a comparison of two means with unequal variances is.
+/// count - which is what a comparison of two means with unequal variances is, EXCEPT that a
+/// spread estimated from two samples is not a spread and the rule below says what is done then.
 ///
 /// `cmp_sigma` above uses one pooled sigma, as test_bertini_apply.cu does, and that is right
 /// when both samples estimate the same spread. It is wrong by a factor of four when they do not:
@@ -191,13 +196,54 @@ void cmp_sigma(int bi, double got, double want, double sigma, long long n_got, l
 /// spread used for both, 2.2 with the oracle's, and 2.25 under Welch. The difference is not a
 /// band to choose - it is a question about what the error of a mean IS - so wherever the oracle
 /// dumps its own rms beside its mean, the comparison uses both.
+///
+/// AND WELCH ALONE IS NOT ENOUGH, because a sample standard deviation has degrees of freedom.
+/// The 2,000-event oracle gives 23 of the 991 species spectra exactly TWO soft samples, and 20
+/// more between three and four; a two-sample sd has one degree of freedom, its expected value is
+/// only sqrt(2/pi) = 0.80 of the true sigma, and it is five times too small a few per cent of
+/// the time. Over 43 such rows that is not a possibility, it is an arrival time. The row that
+/// found it is `evd e- 200 MeV on O16`, pi+ soft spectrum: two oracle pions at 16.99 and 18.53
+/// MeV, so sd 0.77 and a Welch error of 0.88, against thirty port pions of mean 11.10 and
+/// spread 3.81 - which reads 7.54 sigma and is a one-degree-of-freedom sd, not a discrepancy.
+/// docs/RISK.md V177 has the escalation that proved it: at 20,000 oracle events the same row's
+/// soft sample is ten times bigger and the disagreement is gone.
+///
+/// So the error used is the LARGER of two estimates of the same standard error:
+///
+///   SE_welch = sqrt(s1^2/n1 + s2^2/n2)              each sample's own spread, unequal variances
+///   SE_equal = max(s1, s2) * sqrt(1/n1 + 1/n2)      one spread, the larger, variances equal
+///
+/// They agree to a per cent for the 700 rows with more than a hundred samples a side, so the
+/// rule changes nothing where the data can tell the two models apart. Where it cannot - one df
+/// against twenty-nine - it takes the conservative one, which is the only honest answer to "is
+/// the spread 0.77 or 3.81?" when one side has two samples. Checked BOTH ways round: the twelve
+/// against a hundred and forty row keeps Welch's 4.98 - its SE_equal is 5.17, so the two are
+/// within four per cent of each other - and reads 2.15, and the two against thirty row takes
+/// SE_equal's 2.78 over Welch's 0.88 and reads 2.39. Neither number was chosen; both fall out
+/// of the same max.
+///
+/// `max(s1, s2)` and not "the spread of the sample with more degrees of freedom", which is what
+/// this said first. That rule has no answer when the two counts are equal, and its tie-break
+/// towards the port picked a spread of 0.53 over one of 12.44 on a two-against-two row and
+/// reported 6.80 sigma for a difference two samples a side cannot resolve. The larger spread
+/// needs no tie-break and is conservative in the direction that matters.
 void cmp_welch(int bi, double got, double got_sd, long long n_got, double want, double want_sd,
                long long n_want, const std::string& where) {
   Bucket& b = buckets[bi];
   ++b.n;
   double dev = 0.0;
-  const double v = (n_got > 0 ? got_sd * got_sd / double(n_got) : 0.0) +
-                   (n_want > 0 ? want_sd * want_sd / double(n_want) : 0.0);
+  const double v_welch = (n_got > 0 ? got_sd * got_sd / double(n_got) : 0.0) +
+                         (n_want > 0 ? want_sd * want_sd / double(n_want) : 0.0);
+  // The LARGER of the two spreads, used for both sides. Not "the one with more degrees of
+  // freedom": that is ambiguous when the two counts are equal, and the first version of this
+  // broke its tie towards the port, which on a two-against-two row picked a spread of 0.53
+  // over one of 12.44 and reported 6.80 sigma for a difference the data cannot resolve. The
+  // larger spread is the conservative estimate of a common sigma and needs no tie-break.
+  const double sd_big = (got_sd > want_sd) ? got_sd : want_sd;
+  const double inv_n = (n_got > 0 ? 1.0 / double(n_got) : 0.0) +
+                       (n_want > 0 ? 1.0 / double(n_want) : 0.0);
+  const double v_equal = sd_big * sd_big * inv_n;
+  const double v = (v_equal > v_welch) ? v_equal : v_welch;
   if (v > 0.0) {
     dev = std::fabs(got - want) / std::sqrt(v);
   } else {
@@ -609,6 +655,145 @@ int main() {
   }
 
   // -------------------------------------------------------------------------------------------
+  // THE THREE LEPTO-NUCLEAR PROCESSES AS PROCESSES
+  //
+  // `emextra::electron_nuclear` and `emextra::muon_nuclear` are the process-level entry points -
+  // `G4EnergyRangeManager` plus the model - and P15 calls these, not `electro_vd_apply` and
+  // `muon_vd_apply`. Four things are asserted about them, and the third is the one that was
+  // assumed wrong first.
+  //
+  //  1. THE WRAPPER IS NOT A SECOND SAMPLER. Driven from the same seed, the process and the
+  //     model it wraps produce the SAME equivalent photon, the same scattered lepton and the
+  //     same secondary count, bit for bit. That is only true if the range manager draws no
+  //     random number, which with one registered model it does not - and if it ever started to,
+  //     every lepton case in the campaign would shift by one draw and this row would catch it.
+  //  2. A wrong pdg is named, not run.
+  //  3. THE 1 PeV WINDOW IS INERT. `G4EnergyRangeManager::GetHadronicInteraction` returns the
+  //     single registered model without looking at its range ("VI shortcut" in the source), so
+  //     a 10 PeV muon is handed to `G4MuonVDNuclearModel` in Geant4 and here. This asserts that
+  //     both 1 PeV and 10 PeV CHOOSE the model; what happens next is the >= 10 GeV FTF arm's
+  //     refusal, which is a different thing and is asserted as `kSubModel` rather than as the
+  //     absence of a model. See lepton_nuclear.cuh.
+  //  4. A hyper-nuclear target is refused by name before any of it.
+  // -------------------------------------------------------------------------------------------
+  {
+    auto lepton = [](int pdg, double ke) {
+      HadProjectile<double> p;
+      p.pdg = pdg;
+      p.mass = (pdg == 13 || pdg == -13) ? 105.6583715 : 0.510998910;
+      p.kin_energy = ke;
+      return p;
+    };
+    HadNucleus n56;
+    n56.a = 56;
+    n56.z = 26;
+
+    // 1. process == model, from the same seed.
+    struct Same { int pdg; double ke; const char* what; };
+    const Same same[] = {{11, 1000.0, "e- 1 GeV"},
+                         {-11, 1000.0, "e+ 1 GeV"},
+                         {13, 1000.0, "mu- 1 GeV"},
+                         {-13, 5000.0, "mu+ 5 GeV"}};
+    for (const Same& s : same) {
+      Philox<double> ra(7u, 8u, 9u), rb(7u, 8u, 9u);
+      const HadProjectile<double> p = lepton(s.pdg, s.ke);
+      ee::LeptonNuclearResult pr;
+      ee::LeptonVdResult mr;
+      if (s.pdg == 13 || s.pdg == -13) {
+        pr = ee::muon_nuclear(p, n56, *fs, *mutab, ws, lt, pool, ra);
+        mr = ee::muon_vd_apply(p, n56, *fs, *mutab, ws, lt, pool, rb);
+      } else {
+        pr = ee::electron_nuclear(p, n56, *fs, ws, lt, pool, ra);
+        mr = ee::electro_vd_apply(p, n56, *fs, ws, lt, pool, rb);
+      }
+      const bool ok = pr.vd.photon_energy == mr.photon_energy &&
+                      pr.vd.lepton_final_kin == mr.lepton_final_kin &&
+                      pr.vd.lepton_cos_theta == mr.lepton_cos_theta &&
+                      pr.n_secondaries == mr.n_secondaries &&
+                      pr.vd.no_photon == mr.no_photon && pr.vd.refusal == mr.refusal;
+      if (!ok) {
+        std::printf("FAIL: %s through the process differs from the model on the same seed "
+                    "(nu %.17g vs %.17g, T_lep %.17g vs %.17g, n_sec %d vs %d)\n",
+                    s.what, pr.vd.photon_energy, mr.photon_energy, pr.vd.lepton_final_kin,
+                    mr.lepton_final_kin, pr.n_secondaries, mr.n_secondaries);
+        ++fails;
+      }
+      const ee::Process want_proc = (s.pdg == 11)    ? ee::Process::kElectronNuclear
+                                    : (s.pdg == -11) ? ee::Process::kPositronNuclear
+                                                     : ee::Process::kMuonNuclear;
+      if (pr.process != want_proc) {
+        std::printf("FAIL: %s got process %s, want %s\n", s.what,
+                    ee::process_name(pr.process), ee::process_name(want_proc));
+        ++fails;
+      }
+    }
+
+    // 2. A wrong pdg. A proton has an inelastic process of its own and no business here.
+    {
+      Philox<double> r(1u, 1u, 1u);
+      HadProjectile<double> p = lepton(11, 1000.0);
+      p.pdg = 2212;
+      p.mass = 938.272013;
+      const ee::LeptonNuclearResult e = ee::electron_nuclear(p, n56, *fs, ws, lt, pool, r);
+      const ee::LeptonNuclearResult m = ee::muon_nuclear(p, n56, *fs, *mutab, ws, lt, pool, r);
+      if (e.refusal != ee::EmExtraRefusal::kNoModelInRange ||
+          m.refusal != ee::EmExtraRefusal::kNoModelInRange ||
+          e.model != ee::Model::kNone || m.model != ee::Model::kNone) {
+        std::printf("FAIL: a proton was not refused by the two lepto-nuclear entry points "
+                    "(e %d/%d, mu %d/%d)\n",
+                    int(e.refusal), int(e.model), int(m.refusal), int(m.model));
+        ++fails;
+      }
+      // And an electron must not be accepted by the muon's process either.
+      const ee::LeptonNuclearResult x =
+          ee::muon_nuclear(lepton(11, 1000.0), n56, *fs, *mutab, ws, lt, pool, r);
+      if (x.refusal != ee::EmExtraRefusal::kNoModelInRange) {
+        std::printf("FAIL: muon_nuclear accepted an electron (refusal %d)\n", int(x.refusal));
+        ++fails;
+      }
+    }
+
+    // 3. The window is inert: 1 PeV is the registered maximum and 10 PeV is ten times past it,
+    //    and both must still choose the model. `vd_max_energy_MeV()` is 1e9.
+    for (double ke : {1.0e9, 1.0e10}) {
+      Philox<double> r(3u, 4u, 5u);
+      const ee::LeptonNuclearResult m =
+          ee::muon_nuclear(lepton(13, ke), n56, *fs, *mutab, ws, lt, pool, r);
+      if (m.model != ee::Model::kMuonVD || m.choice != ModelChoice::kOk) {
+        std::printf("FAIL: a %.3g MeV mu- found no model (model %d choice %d) - the 1 PeV "
+                    "window is INERT with one registered model, see lepton_nuclear.cuh\n",
+                    ke, int(m.model), int(m.choice));
+        ++fails;
+      }
+      if (!m.vd.used_ftf || m.refusal != ee::EmExtraRefusal::kSubModel) {
+        std::printf("FAIL: a %.3g MeV mu- did not reach the FTF arm's refusal (used_ftf %d "
+                    "refusal %d)\n",
+                    ke, int(m.vd.used_ftf), int(m.refusal));
+        ++fails;
+      }
+    }
+
+    // 4. A hyper-nuclear target, refused before the model.
+    {
+      Philox<double> r(6u, 7u, 8u);
+      HadNucleus hyp;
+      hyp.a = 56;
+      hyp.z = 26;
+      hyp.l = 1;
+      const ee::LeptonNuclearResult e =
+          ee::electron_nuclear(lepton(11, 1000.0), hyp, *fs, ws, lt, pool, r);
+      const ee::LeptonNuclearResult m =
+          ee::muon_nuclear(lepton(13, 1000.0), hyp, *fs, *mutab, ws, lt, pool, r);
+      if (e.refusal != ee::EmExtraRefusal::kHyperNucleus ||
+          m.refusal != ee::EmExtraRefusal::kHyperNucleus) {
+        std::printf("FAIL: a hyper-nuclear target was not refused by name (e %d, mu %d)\n",
+                    int(e.refusal), int(m.refusal));
+        ++fails;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
   // WHERE THE HARD PHOTONS COME FROM
   //
   // The campaign below found that the port's gamma SPECTRUM for a 3 GeV photon on oxygen has a
@@ -668,11 +853,14 @@ int main() {
   // The statistical campaign against emextra_apply.csv and emextra_apply_species.csv
   //
   // Four models, 126 cases, N events each side. The oracle's N is in its own `events` column -
-  // 2,000 by default, which is what bertini_apply.csv uses - and the port runs
-  // `G4GPU_EMEXTRA_EVENTS` times that, 10 by default, so the port's own side is 20,000 as the
-  // P13 brief asks. Raising it does not tighten the comparison: the pooled error is then
-  // dominated by the ORACLE's two thousand. What it does is separate a real difference from
-  // noise on the port's side.
+  // 20,000 when the campaign has been regenerated - and the port runs `G4GPU_EMEXTRA_EVENTS`
+  // times that, 10 by default, so the port's own side is 200,000, which is the size the P13
+  // brief prescribes for a row that sits above three sigma. It was 2,000 against 20,000 until
+  // docs/RISK.md V177: at 2,000 oracle events one species spectrum rested on TWO samples and
+  // read 7.54 sigma, and at 20,000 the same row's oracle mean moved from 17.76 to 12.53 MeV -
+  // towards the port's 11.10 - and its spread from 0.77 to 4.75. Raising the PORT's side alone
+  // would not have found it: the error of a comparison of two means is dominated by whichever
+  // side has fewer samples, and that was the oracle.
   //
   // FIVE SIGMA, over about four thousand comparisons, is the band. The exceptions are stated
   // where they are taken:
@@ -723,6 +911,12 @@ int main() {
       std::string grand_where;
       std::map<int, long long> port_refusals;
       long long total_port_events = 0, total_port_refused = 0;
+      // The pdgs the port put in the catch-all species bucket, and the spectrum rows that were
+      // not comparable because one side had too few samples to estimate a spread.
+      std::map<int, long long> other_pdgs;
+      long long n_thin = 0;
+      std::string thin_worst;
+      double thin_worst_gap = 0.0;
 
       for (std::size_t r = 0; r < ca.rows.size(); ++r) {
         const std::string model = ca.s(r, "model");
@@ -840,6 +1034,12 @@ int main() {
             // energy. See `SpeciesBucket` in ref/dump/dump_emextra.cc.
             if (s.kin_energy >= 0.1 * ke) { ++n_hard[b]; }
             else { ske[b].add(s.kin_energy); }
+            // WHAT IS IN THE CATCH-ALL. Bucket 12 is "none of the other twelve" - a kaon, a
+            // hyperon, a K0, an e+ - and its mean energy is therefore a mean over unlike
+            // things, which is why the spectrum comparison treats it as it does. The oracle
+            // does not record which species went in, so the port's list is printed at the end
+            // and half the hole is named rather than none of it.
+            if (b == 12) { ++other_pdgs[s.pdg]; }
             smax[b] = (s.kin_energy > smax[b]) ? s.kin_energy : smax[b];
             scos[b].add(s.direction.z);
             esum += s.kin_energy;
@@ -856,7 +1056,7 @@ int main() {
         // AN ORACLE OF ONE EVENT PER CASE IS NOT A DISTRIBUTION, and comparing against it in
         // sigma would pass whatever the port did - the pooled standard error is then the
         // population sigma itself. `ref/oracle/run.bat` regenerates this campaign at ONE event
-        // per case by default, because at 2,000 the dump dies inside the full dumper (see
+        // per case by default, because at 2,000 and above it dies inside the full dumper (see
         // ref/dump/dump_emextra.cc and docs/RISK.md V174), so the weak case is the NORMAL one
         // and it must be loud rather than silently green. What is still asserted at one event:
         // that every case ran, that every model was reached, and that no case produced neither
@@ -898,8 +1098,8 @@ int main() {
           {
             const double want = ca.d(r, "pz_mean");
             const double wrms = pz.sigma();   // the oracle dumps no pz rms; the port's will do
-            // 1e-6 and not 1e-9: the two sides average over different numbers of events - 2,000
-            // against 2,000 x `G4GPU_EMEXTRA_EVENTS` - so the same identity is summed in a
+            // 1e-6 and not 1e-9: the two sides average over different numbers of events - the
+            // oracle's N against `G4GPU_EMEXTRA_EVENTS` times it - so the identity is summed in a
             // different order on each side and the last digits do not survive. Measured: the
             // worst of the 61 identity rows is 2.2e-8 of a 199 MeV momentum, which is 4.5 eV.
             if (std::fabs(wrms) <= 1e-6 * std::fabs(want)) {
@@ -913,12 +1113,24 @@ int main() {
                       w0 + " lep");
             cmp_sigma(bCos, coslep.mean(), ca.d(r, "coslep_mean"), coslep.sigma(), coslep.n,
                       oev, w0 + " coslep");
-            // The fraction of events in which no photon was produced. A binomial, so its
-            // standard deviation is sqrt(p(1-p)) and a zero fraction on both sides falls
-            // through to the relative comparison.
-            const double got_p = double(no_photon) / double(mult.n);
-            const double want_p = double(ca.ll(r, "no_photon")) / double(oev);
-            const double sp = std::sqrt(std::max(0.0, got_p * (1.0 - got_p)));
+            // The fraction of events in which no photon was produced: a binomial, compared
+            // with the POOLED proportion's sqrt(p(1-p)) and not the port's own.
+            //
+            // The port's own is what this had, and it is degenerate exactly where the answer
+            // matters. `evd e- 10 GeV on Fe56` produced no such event in 20,000 while Geant4
+            // produced one in 20,000; the port's p is then 0, its sqrt(p(1-p)) is 0, and
+            // `cmp_sigma`'s zero-variance branch - which exists for quantities that are exact,
+            // not for rates that happen to be unobserved - reported 1e12 sigma for two rates
+            // that differ by one event. Pooling gives p = 1/40,000, an error of 5e-5 on the
+            // difference, and 1.0 sigma, which is what a single event in forty thousand is
+            // worth. Same trap as docs/RISK.md V177 and the same shape as the species yields,
+            // where a zero count on one side is already compared against the pooled rate.
+            const long long got_k = no_photon, want_k = ca.ll(r, "no_photon");
+            const double got_p = double(got_k) / double(mult.n);
+            const double want_p = double(want_k) / double(oev);
+            const double p_pool =
+                double(got_k + want_k) / double(mult.n + oev);
+            const double sp = std::sqrt(std::max(0.0, p_pool * (1.0 - p_pool)));
             cmp_sigma(bNoPh, got_p, want_p, sp, mult.n, oev, w0 + " no_photon");
           }
           for (int b = 0; b < 13; ++b) {
@@ -978,9 +1190,31 @@ int main() {
             // skipped rather than compared against a zero.
             double want_soft_sd = cs.d(sr, "ekin_soft_rms");
             if (want_soft_sd == 0.0 && ohard == 0) { want_soft_sd = cs.d(sr, "ekin_rms"); }
-            if (ske[b].n > 1 && ocount - ohard > 1 && want_soft > 0.0 && want_soft_sd > 0.0) {
+            // FIVE SAMPLES A SIDE, and the rows that have fewer are COUNTED rather than
+            // compared. A spread estimated from two samples has one degree of freedom and is
+            // five times too small a few per cent of the time (docs/RISK.md V177); at five it
+            // has four, which is still poor but is an estimate. The rows this drops are the
+            // species that appear a handful of times in twenty thousand events, and they keep
+            // their YIELD and their HARD-RATE comparisons - only the spectrum goes, because a
+            // spectrum is the one thing four products cannot show. The count is printed, with
+            // the widest gap among them, so that a real difference hiding in a thin row is
+            // visible as a number to go and measure rather than as silence.
+            const long long osoft = ocount - ohard;
+            if (ske[b].n >= 5 && osoft >= 5 && want_soft > 0.0 && want_soft_sd > 0.0) {
               cmp_welch(bKe, ske[b].mean(), ske[b].sigma(), ske[b].n, want_soft, want_soft_sd,
-                        ocount - ohard, ws2 + " soft ekin");
+                        osoft, ws2 + " soft ekin");
+            } else if (ske[b].n > 0 && osoft > 0 && want_soft > 0.0) {
+              ++n_thin;
+              const double gap = (want_soft > 0.0)
+                                     ? std::fabs(ske[b].mean() - want_soft) / want_soft
+                                     : 0.0;
+              if (gap > thin_worst_gap) {
+                thin_worst_gap = gap;
+                char buf[200];
+                std::snprintf(buf, sizeof buf, "%s soft ekin %.4g (n %lld) vs %.4g (n %lld)",
+                              ws2.c_str(), ske[b].mean(), ske[b].n, want_soft, osoft);
+                thin_worst = buf;
+              }
             }
             if (scos[b].n > 1 && ocount > 1) {
               // cos(theta) of an isotropic population has variance 1/3 on both sides, so the
@@ -1008,9 +1242,19 @@ int main() {
         std::printf("*** %lld of %lld cases have an ORACLE OF UNDER 100 EVENTS and are NOT "
                     "asserted statistically - only that they ran, reached a model and produced "
                     "either a final state or a named refusal. Regenerate the campaign with "
-                    "G4GPU_EMEXTRA_EVENTS=2000 to compare distributions; see "
+                    "G4GPU_EMEXTRA_EVENTS=20000 to compare distributions; see "
                     "ref/dump/dump_emextra.cc on why that is not the default.\n",
                     n_weak, n_cases);
+      }
+      if (n_thin > 0) {
+        std::printf("species spectra NOT compared because one side had under five samples: "
+                    "%lld rows; widest relative gap among them %.1f%% at %s\n",
+                    n_thin, 100.0 * thin_worst_gap, thin_worst.c_str());
+      }
+      if (!other_pdgs.empty()) {
+        std::printf("the port's catch-all species bucket held:");
+        for (const auto& kv : other_pdgs) { std::printf(" %d x%lld", kv.first, kv.second); }
+        std::printf("  (the oracle does not record which, so only this side is named)\n");
       }
       if (!port_refusals.empty()) {
         std::printf("port refusals by kind:");

@@ -11213,3 +11213,200 @@ conversion electron are perfectly compatible with a rate of one in two thousand,
 the port produced, and the check failed on exactly that. A zero count is now compared like any
 other, with the pooled rate as the variance - which still fails loudly for a species the port
 invents at a real rate, and says nothing about one neither sample can resolve.
+
+### V177: a standard deviation from two samples has one degree of freedom, and Welch believes it
+
+The campaign's last red row was `evd e- 200 MeV on O16`, the pi+ soft spectrum, at **7.54
+sigma**:
+
+    port     30 soft pi+   mean 11.1016 MeV   sd 3.806
+    oracle    2 soft pi+   mean 17.757  MeV   sd 0.7695
+    Welch SE = sqrt(3.806^2/30 + 0.7695^2/2) = 0.8825   ->   6.655 / 0.8825 = 7.54
+
+Every number in it is correct and the conclusion is wrong. The oracle's two pions are at 16.99
+and 18.53 MeV - both just under the 20 MeV hard threshold, which is a tenth of the 200 MeV
+projectile - so their sample standard deviation is 0.77. A sample standard deviation from TWO
+samples has one degree of freedom: its expected value is only sqrt(2/pi) = 0.798 of the true
+sigma, and the chance it comes out below a fifth of the truth is a few per cent. Welch's error
+takes that 0.77 at face value, divides it by sqrt(2), and produces a standard error four times
+smaller than the one the same population supports. The 2,000-event oracle had **23 of 991**
+species spectra resting on exactly two soft samples and 20 more on three or four, so one of them
+reading five sigma was not a possibility, it was an arrival time.
+
+And it is reproducible, which is the trap. The 2,000-event campaign was regenerated from a clean
+build to check, and the row came back with `ekin_soft_mean` = 17.756971735993361 to the last
+digit - the per-case seed is derived from the case, so the same two pions are drawn every time.
+A number that reproduces exactly looks like a measurement of something. It is a measurement of
+two pions.
+
+**The measurement that settled it.** The oracle was regenerated at ten times the events -
+`G4GPU_EMEXTRA_EVENTS=20000`, 126 cases, **4.9 minutes** standalone, which is why nobody should
+have been economising - and the same row came back as
+
+    oracle   50 pi+ total, 23 hard, 27 soft   mean 12.525 MeV   sd 4.746
+
+The oracle's soft mean moved from 17.76 to 12.53, TOWARDS the port's 11.10, and its spread from
+0.77 to 4.75, which is the port's 3.81 to within what 27 samples can say. The port was right and
+the two-sample mean was the outlier. Raising the PORT's side - the knob that was there, and the
+tempting one - could not have found this: the error of a comparison of two means is dominated by
+whichever side has fewer samples, and that was the oracle by four orders of magnitude.
+
+So the campaign's oracle is now 20,000 events per case and the port's 200,000, which is also the
+size the P13 brief prescribes for a row that sits above three sigma.
+
+**And the event count does not remove the problem, so the statistic was corrected too.** At
+20,000 events there are still 10 rows of 1,034 with exactly two soft samples and 5 more with
+three or four: they are the species that appear a handful of times in twenty thousand events,
+and no affordable event count makes a rare species common. `cmp_welch` now uses the LARGER of
+two estimates of the same standard error,
+
+    SE_welch = sqrt(s1^2/n1 + s2^2/n2)            each sample's own spread, variances unequal
+    SE_equal = max(s1, s2) * sqrt(1/n1 + 1/n2)    one spread, the larger, variances equal
+
+because when one side has two samples the data cannot tell the two models of the variance apart,
+and "is the spread 0.77 or 3.81?" has no answer from two pions. The two forms agree to a per
+cent for the 700-odd rows with more than a hundred samples a side, so the rule changes nothing
+where the data CAN tell them apart. Checked both ways round, on the two rows that made the two
+corrections: the twelve-against-a-hundred-and-forty row of the Welch entry above keeps Welch's
+4.98 - its SE_equal is 5.17, four per cent away - and reads 2.15, and the two-against-thirty row
+takes SE_equal's 2.78 over Welch's 0.88 and reads 2.39. Neither number was chosen.
+
+**`max(s1, s2)` is the second version of that line, and the first one cost a campaign.** It read
+"the spread of whichever sample has more degrees of freedom", which sounds better and has no
+answer when the two counts are equal. Its tie-break went to the port, and the 200,000-event
+campaign then failed on `evd e+ 1000 MeV on Pb208`, the catch-all species' soft spectrum, at
+**6.80 sigma**: two products on each side, the port's two at 22.01 MeV with a spread of 0.53 and
+Geant4's two at 81.88 with a spread of 12.44. The tie-break picked 0.53 - the smaller, from a
+one-degree-of-freedom estimate, to stand for the spread of both samples - which is precisely the
+mistake the whole entry is about, made a second time in the fix for it. With `max` the same row
+reads 4.81 and that number is not a pass either: **two samples a side cannot resolve a factor of
+3.7, and a row that lands at 4.81 against a band of 5.00 is noise that happened to fall inside.**
+
+So the row is not compared at all any more, and that is the third correction: **a species'
+SPECTRUM is compared only when BOTH sides have five or more products in it**, and the rows that
+have fewer are counted and printed with the widest relative gap among them, rather than either
+compared on one degree of freedom or dropped in silence. They keep their YIELD and HARD-RATE
+comparisons - those are counts, and a count of two is a perfectly good Poisson observation - so
+what is given up is a spectrum, which is the one thing four products cannot show. At the
+20,000-event oracle that is 15 rows of 1,034.
+
+**A fourth instance of the same mistake, found by dropping the event count rather than raising
+it.** Re-running the campaign at 20,000 port events instead of 200,000 failed on
+`NoPhotonFraction` for `evd e- 10 GeV on Fe56` at **1e12 sigma**: the port produced no
+no-photon event in 20,000 and Geant4 produced one in 20,000. The fraction was compared with
+`sqrt(p(1-p))` taken from the PORT's sample, which is 0 when the port's count is 0, and a zero
+sigma sends `cmp_sigma` into its relative branch - a branch that exists for quantities that are
+exact, not for rates that happen to be unobserved. The pooled proportion is 1/40,000, the error
+on the difference is 5e-5, and the answer is **1.0 sigma**, which is what one event in forty
+thousand is worth. It had passed at 200,000 events only because the port then had one of its
+own. That is the whole entry in miniature: a variance estimated from one side, degenerate
+exactly at the boundary where the comparison matters, and invisible until the sample size moved.
+
+The catch-all row is worth one more sentence, because it is the worst case by construction and
+not by luck. Bucket 12 is "none of the other twelve" - a kaon, a hyperon, a K0, a positron - so
+its mean kinetic energy is a mean over unlike species and the two sides need not even be
+averaging the same particles. V176 found a bucket with two populations; this is a bucket with as
+many populations as there are leftover species, and no event count fixes it. The port now prints
+the pdg codes it put there, so at least one side of that hole is named; the dump does not record
+them, which is the other half and is left as a known gap rather than guessed at.
+
+Over the 126 cases at 20,000 port events each, the port's catch-all held
+
+    K+ 4102   K0S 2931   K0L 2777   K- 1831   Lambda 1659   Sigma0 738   Sigma+ 424
+    Sigma- 325   Xi0 2   Xi- 1   and  H4 x2, Li4 x8, Be4 x2
+
+- four kaon species and five hyperons, which is a mean over particles from 494 to 1,321 MeV of
+rest mass, plus **three light nuclei that are there by accident**. `species_bucket_of` sends
+A = 4 with Z = 2 to the alpha bucket and A > 4 to "heavier", so A = 4 with any other Z falls
+through to the catch-all: hydrogen-4, lithium-4 and beryllium-4, twelve of them in 2.5 million
+events. That is not a bug worth changing a shared bucketing for - `bertini_apply_species.csv`
+uses the same twelve buckets and the port must match the dump, not improve on it - but it is
+exactly the kind of thing that makes a catch-all mean meaningless, and it was invisible until
+the pdgs were printed.
+
+**This is not a tolerance that was widened, and it was made to prove it.** The five-sigma band
+is untouched; what changed is the estimate of one sigma and which rows have enough samples to
+have one. Anti-vacuity, five campaigns at 20,000 port events against the 20,000-event oracle:
+
+    run                                     SpeciesSoftSpectrum   rows    other buckets
+    ------------------------------------------------------------------------------------
+    as committed                            3.12  (1013 pts)      24 thin     all green
+    the max() removed - plain Welch         3.14  (1013 pts)      24 thin     all green
+    port's soft energies x 1.05             435.97 FAIL           24 thin     all green
+    oracle back at 2,000 events             3.49  ( 931 pts)      61 thin     coslep 8.60 FAIL
+    oracle at 2,000 AND the max() removed   3.90  ( 931 pts)      61 thin     coslep 8.60 FAIL
+
+and three things fall out of it that were not what was expected.
+
+**The perturbation is caught by a factor of eighty.** A five per cent shift in the port's soft
+spectrum reads **435.97 sigma**, on `preco gamma 10 MeV on C12`'s de-excitation photons - 34 port
+samples of spread 1.7e-4 against 47 oracle samples of spread 1.8e-4, where a five per cent shift
+is five hundred times the error of either mean. The conservative standard error did not blunt
+the test: where the samples are real the band is still tight enough to see a part in a thousand.
+
+**The `max()` is worth 0.02 sigma, and saying otherwise would have been the easy lie.** With the
+five-sample gate in front of it, the rows where Welch's error and the equal-variance error
+disagree have already been excluded, so removing the max moves the bucket's worst from 3.12 to
+3.14 (and from 3.49 to 3.90 against the 2,000-event oracle, where more thin rows survive the
+gate). The load-bearing corrections are the EVENT COUNT and the GATE; the max is a guard on the
+five-to-ten-sample rows that remain, and it is kept because it costs nothing and because the
+6.80-sigma row above is what happens when it is absent. It is not what made the campaign green.
+
+**The 2,000-event oracle fails on a different row entirely, which is the point.** Both 2,000-event
+runs fail `ScatteredLeptonCosTheta` for `evd e+ 10 GeV on Pb208` at **8.60 sigma** - port
+0.999902 against Geant4 0.999511 - with the corrected statistic and without it, and the same row
+reads 2.51 against the 20,000-event oracle. A 10 GeV positron on lead scatters within a
+milliradian of forward and the mean cosine is 1 minus a part in ten thousand; two thousand events
+is not enough to place that mean, and no choice of standard error repairs a sample that small.
+So the answer to "was it the statistic or the statistics?" is measured rather than argued: it
+was both, and the event count first.
+
+The lesson is the third face of V133 and V176. V133: a five-sigma band on a conserved quantity
+is a band of zero width. V176: a five-sigma band on a mean with a component a thousand times the
+mode is a band of the wrong width. V177: a five-sigma band is a band of nothing at all when the
+sigma in it was estimated from two numbers. All three are the same question - what IS this
+quantity - asked before the band is chosen, and all three were found by a row that failed rather
+than by thinking about it first.
+
+### V178: the lepto-nuclear processes' 1 PeV window does not exist, and neither does the cross section's
+
+`G4ElectroVDNuclearModel` and `G4MuonVDNuclearModel` each set their own window in their own
+constructor - `SetMinEnergy(0.0); SetMaxEnergy(1*PeV);`, overriding the 100 TeV that
+`G4HadronicInteraction` takes from `G4HadronicParameters::GetMaxEnergy()` - and
+`emextra_windows.csv` dumps exactly that from the running list: `[0, 1e9]` MeV for all three of
+`electronNuclear`, `positronNuclear` and `muonNuclear`. Two authors wrote that limit
+deliberately. The obvious thing to do with it is enforce it. It is not there to enforce:
+
+    // VI shortcut: if only one interaction is registered skip all checks
+    if(1 == theHadronicInteractionCounter) { return theHadronicInteraction[0]; }
+
+is the first statement of `G4EnergyRangeManager::GetHadronicInteraction`, and each of these three
+processes has exactly one model. A 10 PeV muon gets `G4MuonVDNuclearModel`. P5's
+`choose_hadronic_interaction` already reproduced the shortcut - its comment records it for
+QBBC's elastic, where every particle has one model and the whole window table is decoration, and
+`capture/capture_process.cuh` records it a third time - so the port agreed with Geant4 by
+inheritance rather than by intent, which is worth a numbered entry because the FIRST version of
+`lepton_nuclear.cuh` was written with a comment claiming the range manager "returns a null
+pointer and PostStepDoIt throws" above 1 PeV. It does not. The comment was wrong and the code it
+described was right, which is the failure mode this file exists to catch.
+
+`tests/test_emextra_models.cu` now drives 1 PeV and 10 PeV through `emextra::muon_nuclear` and
+asserts that BOTH choose the model. What stops a 10 PeV muon is the model's own arm - a 10 GeV
+equivalent photon goes to FTF, refused by name as `kSubModel` - and that assertion is written
+separately so that the two cannot be confused.
+
+**The same number is inert a second time, in the cross section, and there it costs accuracy
+rather than nothing.** `G4KokoulinMuonNuclearXS` builds a 61-node `G4PhysicsLogVector` from
+1 GeV to 1 PeV (`LowestKineticEnergy(1*GeV), HighestKineticEnergy(1*PeV), TotBin(60)`) and
+`GetElementCrossSection` is one line: `theCrossSection[Z]->Value(E)`. `G4PhysicsVector::Value`
+clamps above its top node, so a 10 PeV muon's microscopic cross section is a 1 PeV muon's - not
+extrapolated, not zero, not an error. Below 1 GeV it clamps the other way onto the 1 GeV node,
+and the real threshold is the model's own `CutFixed` of 200 MeV, which is a separate gate in
+`ComputeMicroscopicCrossSection` (`if (KineticEnergy <= CutFixed) return CrossSection;` with
+`CrossSection` still zero). Two clamps and a gate, none of them a window, and the port
+reproduces all three because it transcribes the same table lookup - 11,132 element points at
+7.2e-16.
+
+For P15 this reduces to one sentence: **do not add an upper energy check to the lepto-nuclear
+processes.** Geant4 does not have one, and a track above 1 PeV must produce the 1 PeV cross
+section and the model's own refusal, not a silently dropped interaction.

@@ -1421,8 +1421,11 @@ note is in the entry point's header so the call site is not guessed at.
 
 The four processes `G4EmExtraPhysics` builds in QBBC, their three cross sections, and the four
 final-state models between the lepton and the engines P3, P6 and P10 already provide. The entry
-points are `emextra::photon_nuclear(...)`, `emextra::electro_vd_apply(...)` and
-`emextra::muon_vd_apply(...)`, all in P5's shapes.
+points are `emextra::photon_nuclear(...)`, `emextra::electron_nuclear(...)` and
+`emextra::muon_nuclear(...)`, all in P5's shapes - each one a `G4EnergyRangeManager` plus its
+models, which is what a `G4HadronInelasticProcess` IS. The four models underneath them are
+`emextra::low_e_gamma_apply`, `light_target_collide`, `electro_vd_apply` and `muon_vd_apply`,
+and a caller that reached those directly would be skipping the range manager.
 
 **The configuration is measured, and three documents were wrong about it.** `G4EmExtraPhysics`'
 eleven switches are private with no getters, so `ref/dump/dump_emextra.cc` reads the RUNNING
@@ -1478,8 +1481,9 @@ light-target collider's pion arms (which exist in Geant4 and have no caller in i
 
 Tests: `test_emextra_config.cu` - the configuration and the two overlaps;
 `test_emextra_xs.cu` - 34,995 comparisons, worst 7.2e-16, none refused, and the two CHIPS
-classes at exactly 0; `test_emextra_models.cu` - the four models, their thresholds and the
-statistical campaign against `emextra_apply.csv` and `emextra_apply_species.csv`.
+classes at exactly 0; `test_emextra_models.cu` - the four models, their thresholds, the three
+process entry points and the statistical campaign against `emextra_apply.csv` and
+`emextra_apply_species.csv`.
 
 **The campaign.** 126 cases - `G4LowEGammaNuclearModel` at 10, 30, 100, 150 and 199 MeV,
 `G4CascadeInterface` at 200, 300, 1000, 3000 and 5000 MeV, `G4ElectroVDNuclearModel` for e- and
@@ -1487,30 +1491,53 @@ e+ at 50, 200, 1000 and 10000 MeV and `G4MuonVDNuclearModel` for mu- at 200, 100
 10000 MeV, each on H1, C12, O16, Al27, Fe56 and Pb208 - each driven DIRECTLY, because the model
 choice is a separate deterministic question that `test_emextra_config.cu` settles over 200,000
 draws per point and mixing it in would put two thirds of the 5 GeV events into a model this
-port refuses. 2,000 events per case on the oracle's side and ten times that on the port's, over
+port refuses. 20,000 events per case on the oracle's side and ten times that on the port's, over
 which the campaign compares the secondary multiplicity, the summed kinetic energy and
 z-momentum, the scattered lepton's energy and angle, the fraction of events with no photon, and
 per species the yield, the rate of products above a tenth of the projectile energy, the
-spectrum of the rest and the angular mean: **5,118 comparisons in twelve buckets, every one
-inside its band**, with 5 of 2,520,000 port events refused (0.0002%, all of them Bertini's own
-`kFate` and `kSubModel`). Three of those buckets are not five-sigma bands and the reason is
-written where each is taken: the summed energy is an IDENTITY for `G4LowEGammaNuclearModel`
-(rms 1e-7 of its mean) and a random variable for the two lepton models, and the test chooses by
-the oracle's own rms; two means with unequal spreads get Welch's error and not a pooled one; and
-a species' hard component is a Poisson rate rather than part of its mean. docs/RISK.md V176 has
-what each of those cost before it was got right.
+spectrum of the rest and the angular mean: **CAMPAIGN_N comparisons in twelve buckets, every one
+inside its band**, with CAMPAIGN_REF of CAMPAIGN_EV port events refused (CAMPAIGN_PCT, all of
+them Bertini's own `kFate` and `kSubModel`). Five of those buckets are not a plain five-sigma
+band on a pooled error, and the reason is written where each is taken: the summed energy is an
+IDENTITY for `G4LowEGammaNuclearModel` (rms 1e-7 of its mean) and a random variable for the two
+lepton models, and the test chooses by the oracle's own rms; a species' hard component is a
+Poisson rate rather than part of its mean (docs/RISK.md V176); a fraction is compared with the
+POOLED proportion, because the port's own `sqrt(p(1-p))` is zero exactly when its count is;
+two means get the LARGER of Welch's error and an equal-variance error built on the larger of
+the two spreads, because a spread from two samples is not a spread; and a species' spectrum is
+compared only where both sides have five or more products, the thinner rows being counted and
+printed with the widest gap among them rather than compared on one degree of freedom or dropped
+in silence. docs/RISK.md V176 and V177 have what each of those cost before it was got right -
+between them, five wrong answers of 67.79, 8.02, 7.54, 6.80 and 1e12 sigma, none of which was a
+disagreement about physics.
 
-**The campaign's oracle is regenerated with `G4GPU_EMEXTRA_EVENTS=2000` and not by default**,
-because at that size the dump dies inside the full dumper - docs/RISK.md V174, with the four
-measurements that bound it. The default is one event per case, which proves every model is
+**The campaign's oracle is regenerated with `G4GPU_EMEXTRA_EVENTS=20000` and not by default**,
+because at 2,000 and above the dump dies inside the full dumper - docs/RISK.md V174, with the
+four measurements that bound it. The default is one event per case, which proves every model is
 reachable and every column is written, and `test_emextra_models.cu` prints LOUDLY how many
 cases have an oracle under a hundred events and that those are not asserted statistically.
-Device probes: `emextra_xs_probe` 58 registers / 0-byte frame / 215,586 bytes gmem;
-`emextra_lepton_probe` 255 registers, 2,448-byte frame, 240 bytes of spill stores;
-`emextra_photon_probe` 255 registers, 10,592-byte frame, 11,080 bytes of spill stores,
-2,103,460 bytes gmem. The 8 kB between the two probes is P6 plus P3: the lepton probe's only
-de-excitation is the cascade's own, and a CONSTANT `DeexciteChoice` lets ptxas drop the
-PreCompound arm entirely - docs/RISK.md V170.
+Twenty thousand and not two thousand since V177, and the whole 126-case campaign takes 4.9
+minutes of Geant4 standalone, so the earlier economy bought nothing and cost a false 7.54.
+Device probes, on sm_86, each instantiating an ENTRY POINT and never launched:
+`emextra_xs_probe` 58 registers / 0-byte frame / 215,586 bytes gmem; `emextra_lepton_probe`
+(`electron_nuclear` + `muon_nuclear`) 255 registers, **2,544-byte frame**, 240 bytes of spill
+stores, 920 of spill loads, 672 bytes cmem[0], **65,528 bytes cmem[2]**; `emextra_photon_probe`
+255 registers, 10,592-byte frame, 11,080 bytes of spill stores, 5,108 of spill loads, 664 bytes
+cmem[0], 58,224 bytes cmem[2], 2,103,460 bytes gmem. The 8 kB of stack between the two probes is
+P6 plus P3: the lepton probe's only de-excitation is the cascade's own, and a CONSTANT
+`DeexciteChoice` lets ptxas drop the PreCompound arm entirely - docs/RISK.md V170. **The range
+manager costs 96 bytes of frame**: the same probe calling the two MODELS rather than the two
+processes is 2,448 bytes with 568 of spill loads, so wrapping them cost +96 and +352 and no
+registers, which is the price of the window check and the model identity.
+
+**The lepton probe fills the constant bank**: 65,528 of the 65,536 bytes sm_86 gives cmem[2],
+which is where nvcc puts the function-scope `static const` tables this call tree reaches. It is
+its own call tree's number and not the module's - the same probe compiled alone in a scratch
+translation unit reports the same 65,528 and the same 2,448-byte frame - and it is not a wall
+that fails a build: an 8 kB `__constant__` array added to that unit and read by a second kernel
+compiled fine and landed in a different bank. What it does mean is that further constant data
+inside this call tree will be placed in global memory instead, so P15 should read `-Xptxas -v`
+after any change here rather than assume the tables stayed in constant.
 
 **Not wired into a stepper.** P15 owns that, and the note it needs is short: `photonNuclear`
 is a sub-process of `G4GammaGeneralProcess` and not a process on the gamma's manager, so the
@@ -1528,8 +1555,21 @@ the photonuclear branch is `theGammaNuclear && q + GetProbability(14) <= 1.0`. W
 therefore means adding a fifth term to `step_gamma`'s own summed table and a fifth fraction to
 its selection, which is P1's structure and P15's decision, not a fourth discrete-process slot.
 The three lepton processes have no such coupling: each is one process with one cross section and
-one model, and `emextra::electro_vd_apply` / `emextra::muon_vd_apply` are already in P5's shape
-for them.
+one model, and `emextra::electron_nuclear` / `emextra::muon_nuclear` are already in P5's shape
+for them - one call, the pdg decides which of `electronNuclear` and `positronNuclear` it is, and
+the result says which model ran and whether anything was refused.
+
+**And their energy window is inert, which is a thing to know before enforcing it.** With ONE
+model registered, `G4EnergyRangeManager::GetHadronicInteraction` returns it without reading its
+range - "VI shortcut: if only one interaction is registered skip all checks" - so the 1 PeV
+`SetMaxEnergy` the two VD models carry stops nothing, and a 10 PeV muon is handed to
+`G4MuonVDNuclearModel` in Geant4 exactly as it is here. `tests/test_emextra_models.cu` drives
+1 PeV and 10 PeV through `muon_nuclear` and asserts that both find the model; what refuses them
+is the >= 10 GeV FTF arm, by name, which is a different statement. The cross section is where
+1 PeV does bite: `G4KokoulinMuonNuclearXS`'s table is a 61-node log vector from 1 GeV to 1 PeV
+and `G4PhysicsVector::Value` clamps above the top node, so a 10 PeV muon's mean free path is a
+1 PeV muon's. Neither of those is a P15 decision; both are recorded so that P15 does not add a
+window Geant4 does not have.
 
 ### 2.2 What QBBC needs and is not there
 
