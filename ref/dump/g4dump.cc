@@ -1558,10 +1558,56 @@ int main() {
 
   std::printf("wrote rayleigh_angular.csv urban_msc.csv ion_fluctuation.csv nucleon_xs.csv icru73qo.csv nuclear_stopping.csv atomic_masses.csv bragg.csv wentzel.csv hadron_radiative.csv muon_models.csv corrections.csv ionisation_params.csv density_correction.csv bethe_bloch.csv brems_rel.csv cuts.csv gamma_xs.csv electron_tables.csv materials.csv annihilation.csv hadron_tables.csv coulomb.csv\n");
   // Every dump_<package>.cc that registered itself; see dump_registry.hh.
+  //
+  // The "wrote" line is CHECKED against the disk, name by name, and that is not belt and
+  // braces: twice now a dump has misnamed an oracle and the printed line has covered for it.
+  // The second time was `std::fopen("bic_imr_boundary.csv bic_imr_fps.csv", "w")` - one string
+  // with two names in it, so the CorrectBarionsOnBoundary rows went to a file whose name
+  // contains a space, `bic_imr_boundary.csv` was never written at all, and this loop cheerfully
+  // printed that it had been. Nobody noticed until an integration gate on a machine with no
+  // stale copy failed with "MISSING ref/oracle/bic_imr_boundary.csv". The first time, a registry
+  // string edit matched the wrong occurrence of a filename and built a 250-character name over
+  // six successive edits, and the test kept passing against the stale file for six hours.
+  //
+  // So every name in `files` is split out and stat-ed, and a name that is absent or empty is
+  // reported and makes the dumper exit non-zero. It is checked HERE rather than inside each
+  // dump because the registry string is the CONTRACT - it is what says which files a package
+  // promises - and a promise nobody checks is exactly what both failures were.
+  int missing = 0;
   for (const DumpEntry& d : dump_registry()) {
     const DumpContext ctx{mats};
     d.fn(ctx);
     std::printf("wrote %s (%s)\n", d.files, d.name);
+    const std::string names(d.files);
+    size_t at = 0;
+    while (at < names.size()) {
+      // Separators: a space or a comma, because the registry strings use both - dump_isotopes
+      // writes "isotopes.csv, isotope_zanda.csv" and this check reported the comma as part of
+      // the name the first time it ran.
+      const size_t sp = names.find_first_of(" ,", at);
+      const std::string one =
+          (sp == std::string::npos) ? names.substr(at) : names.substr(at, sp - at);
+      at = (sp == std::string::npos) ? names.size() : sp + 1;
+      if (one.empty()) { continue; }
+      FILE* chk = std::fopen(one.c_str(), "rb");
+      long size = -1;
+      if (chk != nullptr) {
+        std::fseek(chk, 0, SEEK_END);
+        size = std::ftell(chk);
+        std::fclose(chk);
+      }
+      if (size <= 0) {
+        std::printf("  *** %s promised %s and it is %s\n", d.name, one.c_str(),
+                    (size < 0) ? "not on disk" : "empty");
+        ++missing;
+      }
+    }
+  }
+  if (missing > 0) {
+    std::printf("\nFATAL: %d promised oracle file(s) missing or empty - see the *** lines.\n",
+                missing);
+    delete rm;
+    return 1;
   }
 
   delete rm;
