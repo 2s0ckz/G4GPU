@@ -10638,3 +10638,82 @@ Three things worth keeping:
     secondaries as the cascade put in it and that the first `n_em_cascade` of them are still
     electrons or gammas: 1,080,164 points over the campaign at zero tolerance. A count that cannot
     legally go down would have caught this on the first run instead of on a hand-read table.
+
+### V165: the sizing table a caller budgets from is 63,472 bytes a slot short
+
+`ftf/ftf_entry.cuh` opens with the best thing in the header - a table of what a workspace costs,
+so that a caller sizes a pool from a number instead of a guess:
+
+    entry::Workspace       410,824 B   ion beams included (kMaxProjA = 64)
+    entry::HadronWorkspace 266,344 B   projectile is a single hadron (kMaxProjA = 1)
+
+Measured with `sizeof` on the alias as it is written today, nvcc 11.6 / MSVC:
+
+    entry::Workspace        410,824 B    agrees to the byte
+    entry::HadronWorkspace  329,816 B    the table says 266,344
+
+The first line agreeing exactly is what makes the second line a fact rather than a compiler
+difference: the same compiler, the same header, one alias right and one wrong by **63,472 bytes,
+23.8%**. `bytes_for<HadronWorkspace>(1)` is 339,464 with the 9,648-byte Lund table shared across
+slots.
+
+It matters at the only place the table is for. A caller sizing 1,024 concurrent slots reads
+272.8 MB from the header and needs 337.7 MB - 65 MB short, and short in device memory at launch
+rather than at compile time. (The header's table is in decimal MB; that is a units choice and not
+the error. 329,816 x 1,024 + 9,648 = 337,738,832 B either way.)
+
+Both aliases are declared in the same commit as the table, so this is not a number that went stale
+- it was computed for template arguments the alias does not have. Which is the general point:
+**a size in a comment is a claim no compiler checks.** `bytes_for` is right there, is
+`constexpr`, and a one-line static assertion beside the table would have failed the build the day
+the alias changed.
+
+### V166: a capacity refusal that sets the wrong field is a silent 1,002-attempt loop
+
+`entry::HadronWorkspace` documents what happens when it is handed something too big for it:
+
+    an ion handed to this one is refused by capacity (`FtfModelReport::involved_capacity`, with
+    `refused_a` naming the mass number), never truncated
+
+The refusal is written and does set both fields (`ftf_model.cuh`, the anti-nucleus arm):
+
+```
+if (abs_b > kP) { w->report.involved_capacity = true; w->report.refused_a = abs_b; return; }
+```
+
+The caller of that function does not look at either. `theo_fs_generator.cuh`'s Scatter loop tests
+the model report with
+
+```
+if (ws->model.report.refused != FtfRefusal::kNone || ws->model.report.nucleus_failed) { ... }
+```
+
+two of the eight terms that `FtfModelReport::any()` ORs - and `involved_capacity` is not one of
+them. So the aborted init reads as a successful one, the attempt finds no strings, `success` goes
+false, and the loop **retries a refusal that cannot change**: 1,000 times, then the
+`attempts_exhausted` branch rebuilds the nucleus once more and hands the primary back.
+
+MEASURED through the contract, anti-deuteron, anti-triton and anti-alpha at rest on carbon with
+B = -2, -3, -4 and Philox, 50 events each on `entry::HadronWorkspace`:
+
+    50/50 Status::kPrimaryUnchanged    rep.capacity false    rep.refused (none)    attempts 1,002
+
+Nothing names the mass number; nothing says capacity; the status a caller gets is the one
+documented as "Scatter used all 1000 attempts", which here means "this workspace was one nucleon
+too small". The same three on `entry::Workspace` (kMaxProjA = 64), where the check does not fire:
+50/50 refused, and the refusal is P6's hand-over turning down `primary_baryon_number < -1` -
+exactly the path `ftf_model.cuh`'s own comment says an anti-alpha stops at. So the model is right
+about where an anti-nucleus ends; only the undersized-workspace door is mislabelled.
+
+Two things this cost, and both are the kind that do not show up as a failure:
+
+  * **P12's at-rest arm sees `kPrimaryUnchanged` for every anti-nucleus QBBC stops.** A caller
+    that treats that status as "nothing happened" - which is what it means everywhere else -
+    silently drops them. This port counts it under its own name (`kFtfPrimaryUnchanged`) because
+    of this measurement, not because the contract suggested it.
+  * **1,002 nucleus builds per call, to reach a conclusion available in the first one.** That is
+    the expensive path the same header warns about at 185-242 ms on lead.
+
+The fix is one word in the guard - `ws->model.report.any()`, which exists, covers all eight terms
+and is what the loop meant. Naming it here rather than changing it: `theo_fs_generator.cuh` is
+P11's and this package wires through `ftf_entry.cuh` and nothing else of the model.
