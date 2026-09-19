@@ -1495,9 +1495,17 @@ port refuses. 20,000 events per case on the oracle's side and ten times that on 
 which the campaign compares the secondary multiplicity, the summed kinetic energy and
 z-momentum, the scattered lepton's energy and angle, the fraction of events with no photon, and
 per species the yield, the rate of products above a tenth of the projectile energy, the
-spectrum of the rest and the angular mean: **CAMPAIGN_N comparisons in twelve buckets, every one
-inside its band**, with CAMPAIGN_REF of CAMPAIGN_EV port events refused (CAMPAIGN_PCT, all of
-them Bertini's own `kFate` and `kSubModel`). Five of those buckets are not a plain five-sigma
+spectrum of the rest and the angular mean: **5,251 comparisons in twelve buckets, every one
+inside its band, worst 3.72 sigma** (a pi0 yield, 0.5132 against 0.5333 on a 3 GeV photon on
+lead), with 17 of 25,200,000 port events refused (0.0001%, all of them Bertini's own `kFate` and
+`kSubModel`). Per bucket: multiplicity 3.01 over 126 points, summed kinetic energy 2.50 over 109
+and its identity form 0.00 over 17, summed z-momentum 2.71 over 68 and its identity 0.02 over
+58, scattered lepton energy 2.69 and angle 2.26 over 66 each, no-photon fraction 1.61 over 66,
+species yield 3.72 over 1,638, hard rate 3.02 over 943, soft spectrum 3.59 over 1,019 and
+angular mean 2.90 over 1,075. Twenty-eight species spectra had under five products on one side
+and are counted and printed rather than compared - see below.
+
+Five of those buckets are not a plain five-sigma
 band on a pooled error, and the reason is written where each is taken: the summed energy is an
 IDENTITY for `G4LowEGammaNuclearModel` (rms 1e-7 of its mean) and a random variable for the two
 lepton models, and the test chooses by the oracle's own rms; a species' hard component is a

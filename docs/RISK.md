@@ -11035,7 +11035,41 @@ measurements bound it:
 | the same + ALL eighteen other dumps | 1 | 126 of 126 cases, exit 0 |
 | the same + ALL eighteen other dumps | 2,000 | dies in case 6 |
 
-So it is the full executable AND the full campaign together, not either alone. **It is not memory
+**THE THIRD ROW NO LONGER HOLDS, AND THE ATTRIBUTION IS NOW DECISIVE.** Re-measured on
+2026-09-19 against the current dumper, six more runs:
+
+| executable | events per case | result |
+|---|--:|---|
+| `g4dump.cc` + `dump_emextra.cc` only | 20,000 | 126 of 126, exit 0, 4.9 minutes |
+| `g4dump.cc` + `dump_emextra.cc` only | 2,000 | 126 of 126, exit 0 |
+| `g4dump.cc` + `dump_ftf.cc`, NO emextra | - | exit 0, 74 CSVs |
+| `g4dump.cc` + `dump_emextra.cc` + `dump_ftf.cc` | 1 | exit 0, 85 CSVs |
+| `g4dump.cc` + ALL EIGHTEEN OTHERS, **no emextra** | - | **exit 0, 223 CSVs, every dump ran** |
+| the real dumper, all nineteen (`run.bat tables`) | 1 | **0xC0000005, twice, same place** |
+
+So the dump is NECESSARY for the crash - eighteen dumps without it complete - and it is not the
+campaign size: **one event per case now dies too**. The exit code taken from the process itself
+rather than through `run.bat`'s `|| exit /b 1` is `0xC0000005`, an access violation, so it is a
+hard memory fault and not a G4Exception or a clean failure. It dies AFTER `dump_emextra` has
+written and closed all eleven of its CSVs (their timestamps are the newest in `ref/oracle/`, both
+times) and BEFORE `dump_ftf` writes any of its, leaving 82 files stale - which is a break in
+SHARED infrastructure, because every package downstream of emextra in the registry order now
+gets a stale oracle from `run.bat tables`.
+
+Ruled out since: **the campaign's own `release()`**. The heap-corruption hypothesis - that
+deleting the secondaries' `G4DynamicParticle`s frees something a model still owns, and that the
+damage detonates in the next dump's first large allocation - was tested directly by replacing
+the `delete` with a leak and rebuilding the real dumper. It still dies, 0xC0000005, same place.
+So `release()` is not it, and the leak it prevents is real and stays.
+
+What is left, and what the next person should do: bisect the eighteen dumps against emextra,
+four builds of a binary search over `scratchpad/noemextra/run.ps1`'s `EXTRA` list, which names
+the pair. The pair is what matters, because `dump_precompound.cc` reconfigures `SetOPTxs`,
+`UseCEMtr` and `UseNGB` on the shared `G4DeexPrecoParameters` on purpose and any dump that does
+that changes what every other dump measures - the registry's isolation is a compile-time
+isolation, not a run-time one.
+
+It is not memory
 exhaustion**: the process was polled at 195 MB and 381 MB on its way to the failure and the
 machine has gigabytes; the standalone build that completes the same 126 cases at the same size
 reaches 4 GB. It is not a G4Exception either - `G4cerr` is unbuffered and the log's last line is
@@ -11061,9 +11095,18 @@ prove every model is reachable and every column is written and not enough to com
 distribution, and `tests/test_emextra_models.cu` says so loudly - it counts the cases whose
 oracle has under a hundred events and prints that they are NOT asserted statistically, because
 a five-sigma band against a one-event oracle passes whatever the port did. The statistical
-oracle is regenerated deliberately with `G4GPU_EMEXTRA_EVENTS=2000`, which works in the
-standalone build, and the test reads the count out of the CSV's own `events` column and pools
-the two standard errors, so it is correct either way and says which it had.
+oracle is regenerated deliberately with `G4GPU_EMEXTRA_EVENTS=20000`, which works in the
+standalone build - 126 cases in 4.9 minutes - and the test reads the count out of the CSV's own
+`events` column, so it is correct either way and says which it had.
+
+That default no longer buys what it was meant to buy: one event per case dies too. It is kept
+because the eleven CSVs are complete when it dies, so a one-event `run.bat tables` still
+regenerates every emextra table correctly and `test_emextra_config.cu` and `test_emextra_xs.cu`
+pass against them - both were re-run against the tables from a crashing dumper and are green,
+34,995 comparisons at 7.2e-16. What is lost is everything AFTER emextra in the registry order,
+and until the bisect above is done the workaround for anyone regenerating the whole oracle is to
+build without `dump_emextra.cc` (the eighteen-dump row completes) or to run `run.bat tables`
+twice and take the second half from a build that excludes it.
 
 TWO LESSONS THAT COST MORE THAN THE BUG.
 

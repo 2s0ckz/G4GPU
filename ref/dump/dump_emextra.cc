@@ -861,13 +861,19 @@ void dump_emextra_apply(const DumpContext&) {
   // link after it down with it. Measured, four ways:
   //
   //   this dump alone, 2,000 events                    126 of 126 cases, exit 0
+  //   this dump alone, 20,000 events                   126 of 126 cases, exit 0, 4.9 minutes
   //   this dump + the nine that link before it, 2,000  126 of 126 cases, exit 0
-  //   this dump + all eighteen others, 1 event         126 of 126 cases, exit 0
+  //   this dump + dump_ftf.cc, 1 event                 exit 0
+  //   the EIGHTEEN OTHERS WITHOUT THIS ONE             exit 0, every dump ran
+  //   this dump + all eighteen others, 1 event         0xC0000005 after this dump's files
   //   this dump + all eighteen others, 2,000           dies in case 6, every time
   //
-  // so it is the combination of the full executable and the full campaign, not either alone,
-  // and it is not memory exhaustion: the process is at 380 MB when it dies and the machine has
-  // gigabytes. docs/RISK.md V174 has what is known.
+  // so THIS DUMP IS NECESSARY for the crash and the campaign size is not: one event per case
+  // dies too, with an access violation, after all eleven CSVs are written and closed and before
+  // dump_ftf writes any of its. It is not memory exhaustion - the process is at 380 MB and the
+  // machine has gigabytes - and it is not this file's `release()`, which was replaced with a
+  // leak and rebuilt and changed nothing. docs/RISK.md V174 has the table and the bisect the
+  // next person should run.
   //
   // Until it is understood, the campaign that the lead's `ref/oracle/run.bat` runs is ONE event
   // per case - enough to prove every model is reachable and every column is written, and not
