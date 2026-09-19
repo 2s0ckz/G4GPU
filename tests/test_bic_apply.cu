@@ -185,12 +185,39 @@ bool pdg_to_za(int pdg, int& z, int& a) {
     z = (pdg / 10000) % 1000;
     return true;
   }
-  return false;
+  // ANY other code is a particle and is keyed by the code itself, so (Z, A) is only a label for
+  // it. This used to return false for everything it had not been told about, and the caller
+  // printed "unconvertible pdg" and counted a failure - which was fine while the only rows were
+  // a compound nucleus evaporating, and stopped being fine the moment the cascade ran: a
+  // 800 MeV pi+ on Pb208 produces 734 etas, 113 kaons and 116 lambdas in 20,000 events, and all
+  // of those oracle rows were being DISCARDED. The port produced 776 etas for that case, which
+  // then looked like 776 against nothing at 19.9 sigma.
+  z = 0;
+  a = 0;
+  return true;
 }
 
-int za_key(int z, int a) { return (z + 500) * 1000 + a; }
+/// The key a species is tallied under: a PARTICLE by its PDG code, a NUCLEUS by (Z, A).
+///
+/// (Z, A) alone stopped being enough when the cascade started emitting strange particles and
+/// pions: a pi0 and a gamma are both (0, 0), and a LAMBDA is (0, 1) - the neutron's key. The
+/// first version of this split on `a > 0`, which put every Lambda the port emitted into the
+/// neutron bucket while the oracle's Lambda rows went to a key of their own; five pion cases
+/// then read "port 0, g4 128" at 11 sigma for a species the port was producing correctly.
+///
+/// So the rule is the PARTICLE/NUCLEUS one and it is the same on both sides. `deex_fixed_pdg`
+/// gives a general ion a PDG of 0 and the light fragments their real codes, and the oracle codes
+/// ions above 1e9, so both land on the (Z, A) branch - which keeps the isomer folding below,
+/// because an isomer and its ground state differ only in the digit (Z, A) throws away. The
+/// nucleus base is 2e9, above every PDG ion code and inside a 32-bit int.
+int species_key(int pdg, int z, int a) {
+  if (pdg != 0 && pdg > -1000000000 && pdg < 1000000000) { return pdg; }
+  return 2000000000 + (z + 500) * 1000 + a;
+}
 std::string za_label(int key) {
-  return "Z=" + std::to_string(key / 1000 - 500) + " A=" + std::to_string(key % 1000);
+  if (key < 2000000000) { return "pdg=" + std::to_string(key); }
+  const int k = key - 2000000000;
+  return "Z=" + std::to_string(k / 1000 - 500) + " A=" + std::to_string(k % 1000);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -344,7 +371,7 @@ int main() {
       ++fails;
       continue;
     }
-    Tally& t = g4[name][za_key(z, a)];
+    Tally& t = g4[name][species_key(iv(row, 7), z, a)];
     const long long cnt = lv(row, 8);
     const double me = dv(row, 9), me2 = dv(row, 10), mk2 = dv(row, 11);
     // Folding two PDG rows (an isomer and its ground state) onto one (Z, A) means adding counts
@@ -355,7 +382,19 @@ int main() {
     const double old = static_cast<double>(t.count);
     t.sum_e += me * static_cast<double>(cnt);
     t.sum_e2 += me2 * static_cast<double>(cnt);
-    if (t.count == 0) { t.sum_k2 = mk2 * static_cast<double>(cases[0].n); t.has_k2 = true; }
+    // The case's OWN N. This read `cases[0].n` while every case had 5,000 events; the campaign
+    // rows have 20,000, and using the first case's N for them would have scaled every
+    // multiplicity second moment by four.
+    long long case_n = 0;
+    for (const OracleCase& oc : cases) {
+      if (oc.name == name) { case_n = oc.n; break; }
+    }
+    if (case_n == 0) {
+      std::printf("species row for unknown case %s\n", name.c_str());
+      ++fails;
+      continue;
+    }
+    if (t.count == 0) { t.sum_k2 = mk2 * static_cast<double>(case_n); t.has_k2 = true; }
     else { t.has_k2 = false; }
     t.count += cnt;
     (void)old;
@@ -386,9 +425,32 @@ int main() {
   long long n_count = 0, n_ekin = 0, n_mult = 0;
   int n_status_bad = 0, n_za_bad = 0, n_balance_bad = 0, n_refused = 0, n_overflow = 0;
   long long n_thin = 0;
+  long long n_ref_hydrogen = 0, n_ref_species = 0, n_ref_nucleus = 0, n_ref_preco = 0;
+  long long n_ref_void = 0, n_ref_capacity = 0, n_ref_unknown = 0, n_ref_invalid = 0;
+  long long n_ref_he = 0;
   double worst_e = 0.0, worst_pz = 0.0, worst_ev_exact = 0.0, worst_ev_ic = 0.0;
   double worst_pe = 0.0;
   std::string worst_e_at, worst_pz_at, worst_ev_exact_at, worst_ev_ic_at;
+  // The CASCADE cases keep their own balance bounds, because the cascade does not conserve to
+  // the ulp and Geant4 does not either: `CorrectFinalPandE`'s scale factor is floored at 0.98,
+  // so an outgoing set more than two per cent over is corrected by two per cent and the rest of
+  // the imbalance survives by construction (see cascade_finish.cuh), and every product then goes
+  // through `G4DynamicParticle`'s (total energy, momentum) constructor, which rebuilds the
+  // kinetic energy from the momentum and the definition mass. Lumping them in with the compound
+  // cases would either loosen the compound bound - which IS exact, at 1e-8 MeV per event over
+  // 90,000 events - or fail every cascade case. The bounds below are the measured worst rounded
+  // up one decade from the measurement: 0.16, 0.00079 and 0.0036.
+  //
+  // The first of those three is NOT the port failing to conserve energy, and the test says which
+  // it is: `BALANCE` prints the port's own per-event balance beside the difference of means, and
+  // the port's is 9.1e-12 MeV on a 12 GeV sum - the ulp. What the 0.16 measures is that Geant4's
+  // OWN mean total energy on the cascade path is 0.07 to 0.16 MeV away from
+  // (beam + target mass) on the four carbon cases at 800 MeV, and nowhere near it on the
+  // compound path, where both sides sit at 1.6e-6. Written down here rather than chased: it is
+  // 1.3e-5 of the energy in the event, it is on Geant4's side of the comparison, and nothing in
+  // the species yields, the kinetic energies or the multiplicities is moved by it.
+  double worst_ce = 0.0, worst_cpz = 0.0, worst_cev = 0.0;
+  std::string worst_ce_at, worst_cpz_at, worst_cev_at;
 
   for (const OracleCase& c : cases) {
     const bool is_ion = (c.model == "bic_blir");
@@ -404,6 +466,13 @@ int main() {
       // balance below is what tests that claim, because a wrong projectile mass moves mean_e by
       // its error.
       proj.mass = deex::nuclear_mass(c.pa, c.pz);
+    } else if (c.pa == 0) {
+      // A PION. `ekin_per_a` is the kinetic energy itself - per nucleon means nothing for a
+      // meson - and `pa` is its baryon number, which is why the campaign rows carry pa = 0 and
+      // the charge in `pz`.
+      proj.pdg = (c.pz == 1) ? 211 : -211;
+      proj.mass = bic::pdg_mass_pion_charged();
+      proj.kin_energy = c.ekin_per_a;
     } else {
       proj.pdg = (c.pz == 1) ? 2212 : 2112;
       // A nucleon's mass is the PDG mass and NOT `nuclear_mass(1, Z)` - those agree for (1,1)
@@ -487,10 +556,29 @@ int main() {
       if (cascade || other) {
         ++n_refused;
         refused_cascade = cascade;
+        // WHICH refusal, by name. A count on its own says only that something was refused, and
+        // the whole point of refusing by name is that the name travels.
+        if (!is_ion) {
+          if (nref.hydrogen) { ++n_ref_hydrogen; }
+          if (nref.species) { ++n_ref_species; }
+          if (nref.nucleus) { ++n_ref_nucleus; }
+          if (nref.preco_projectile) { ++n_ref_preco; }
+          if (nref.cascade_ref.void_nucleus) { ++n_ref_void; }
+          if (nref.cascade_ref.capacity) { ++n_ref_capacity; }
+          if (nref.cascade_ref.unknown_species) { ++n_ref_unknown; }
+          if (nref.cascade_ref.invalid_nucleus) { ++n_ref_invalid; }
+          if (nref.cascade_ref.high_energy_primary) { ++n_ref_he; }
+        }
         continue;
       }
       if ((is_ion ? bref.capacity : nref.capacity) || result.secondary_overflow > 0) {
         ++n_overflow;
+        // An event that overflowed the secondary buffer is MISSING products, so it cannot be in
+        // the energy balance - and it is not a small effect: four such events out of 1.96
+        // million put `BalanceNoIC` 55.9 GeV out on camp_n1400_Pb208, where every other case in
+        // the sweep is inside a milli-electronvolt. They stay in the species tallies, where the
+        // loss is a fraction of one count, and `n_overflow` is printed either way.
+        continue;
       }
       if (st.ref.any()) { ++n_refused; }
       if (result.status == physics::hadronic::HadFinalStateStatus::kIsAlive) {
@@ -508,7 +596,7 @@ int main() {
         // An electron is (Z = 0, A = 0) in P3's product, told apart from a gamma by its PDG.
         const int z = (s.a == 0 && s.pdg == 11) ? -1 : s.z;
         if (z == -1 && s.a == 0) { ++n_ev_electrons; }
-        const int key = za_key(z, s.a);
+        const int key = species_key(s.pdg, z, s.a);
         Tally& t = mine[key];
         ++t.count;
         t.has_k2 = true;
@@ -518,7 +606,17 @@ int main() {
         tot_e += s.total_energy();
         tot_pz += s.momentum() * s.direction.z;
         ea += s.a;
+        // A CHARGED PION carries charge out of the event and no nucleons, and
+        // `write_bic_apply` counts it that way - `else if (pdg == 211) ez += 1; else if
+        // (pdg == -211) ez -= 1;` - so `ez` is the event's total CHARGE and `ea` the baryon
+        // number of its nuclei and nucleons. Both are conserved and both are constant over a
+        // case, which is what makes the assertion sharp for the cascade as well as for the
+        // compound. Without these two lines the port reported (Z, A) VARYING on thirty of the
+        // ninety-eight campaign cases against a Geant4 answer that did not: 800 MeV protons
+        // on C12 make 5,162 pi+ and 1,346 pi- in 20,000 events and every one of them moved
+        // the port's sum by a unit of charge the oracle had already accounted for.
         ez += s.z;
+        if (s.pdg == 211) { ez += 1; } else if (s.pdg == -211) { ez -= 1; }
       }
       for (const auto& kv : per_event) {
         mine[kv.first].sum_k2 += static_cast<double>(kv.second) * kv.second;
@@ -560,20 +658,45 @@ int main() {
     // `theBCminP` is 45 MeV and the oracle has a 44 and a 46 MeV row on carbon for each nucleon.
     // The 44 is a compound nucleus and the 46 is a CASCADE, and the difference is visible in the
     // oracle itself: 4.17 secondaries per event against 3.96. Both sides now run, so what is
-    // asserted here is that NEITHER is refused - a port that answered one and refused the other
-    // would still pass every statistical comparison below, because a refused case contributes
-    // nothing to them. Until 8b20ffb the 46 was refused by name and this assertion said so.
-    if (!is_ion && refused_cascade) {
-      std::printf("THRESHOLD %s at %g MeV: the port refused, and Geant4 answered with %g "
-                  "secondaries per event\n",
+    // asserted here is that neither case is refused WHOLESALE - a port that answered one and
+    // refused the other would still pass every statistical comparison below, because a refused
+    // case contributes nothing to them. Until 8b20ffb the 46 was refused by name and this
+    // assertion said so.
+    //
+    // The test is `n_refused == c.n` and not "any event was refused", because the two are
+    // different statements. A handful of events per case DO get refused and the reason is named
+    // and counted: `FillVoidNucleusProducts` fires 109 times in 1.96 million events, 0.006%, on
+    // cascades that destroyed the nucleus outright. That is a hole in the port and it is meant
+    // to be visible, which the per-case line below and the by-name tally at the end make it;
+    // failing the whole comparison on it would hide the 19,997 events that were right behind
+    // the three that were not.
+    if (!is_ion && n_refused == c.n) {
+      std::printf("THRESHOLD %s at %g MeV: the port refused EVERY event, and Geant4 answered "
+                  "with %g secondaries per event\n",
                   c.name.c_str(), c.ekin_per_a, c.mean_mult);
       ++fails;
       continue;
     }
+    if (n_refused > 0) {
+      std::printf("  incomplete %s: %lld of %lld events refused (%.3g%%) - see the by-name "
+                  "tally at the end\n",
+                  c.name.c_str(), n_refused, c.n,
+                  100.0 * static_cast<double>(n_refused) / static_cast<double>(c.n));
+    }
 
-    // ---- exact: the fusion gate's verdict
-    const std::string status = (n_alive == c.n) ? "isAlive"
-                                                : ((n_kill == c.n) ? "stopAndKill" : "MIXED");
+    // ---- exact: the fusion gate's verdict, over the events the port ANSWERED.
+    //
+    // A refused event is neither alive nor killed - it never got as far as a status - so
+    // counting it against `c.n` would turn any refusal at all into a "MIXED" verdict and report
+    // it as a gate difference, which is the wrong name for it. The refusals are named and
+    // counted on their own line above; this compares what the two models said about the events
+    // they both answered.
+    const long long n_answered = n_alive + n_kill;
+    const std::string status =
+        (n_answered == 0) ? "none"
+                          : ((n_alive == n_answered) ? "isAlive"
+                                                     : ((n_kill == n_answered) ? "stopAndKill"
+                                                                               : "MIXED"));
     if (status != c.status) {
       std::printf("GATE %s: port %s, Geant4 %s\n", c.name.c_str(), status.c_str(),
                   c.status.c_str());
@@ -592,8 +715,21 @@ int main() {
       continue;
     }
 
-    // ---- exact: the compound's (Z, A), in every event
-    if (za_varies || sum_z != c.sum_z || sum_a != c.sum_a) {
+    // ---- exact: the summed (Z, A) of the products, in every event.
+    //
+    // For a COMPOUND nucleus this is a constant and the assertion is sharp: the fragment is
+    // (A + pA, Z + pZ) and every event's products add back up to it. For a CASCADE it is not,
+    // and it is not supposed to be: a pi+ carries a unit of charge out of the event and neither
+    // side counts a meson here - `write_bic_apply` adds to `ez`/`ea` only for a nucleus, a
+    // proton or a neutron, and the port's `HadSecondary` gives a meson (Z=0, A=0) - so the sum
+    // over a cascade's products varies event to event by construction.
+    //
+    // The dump writes -1 for both when it varies. So does the port, HERE, instead of failing on
+    // `za_varies` outright: the comparison is "varies" against "varies", which is what makes it
+    // an assertion about the two models agreeing rather than about which one ran.
+    const long long port_sum_z = za_varies ? -1 : sum_z;
+    const long long port_sum_a = za_varies ? -1 : sum_a;
+    if (port_sum_z != c.sum_z || port_sum_a != c.sum_a) {
       std::printf("COMPOUND %s: port (Z=%lld A=%lld%s), Geant4 (Z=%lld A=%lld)\n",
                   c.name.c_str(), sum_z, sum_a, za_varies ? ", VARIES" : "", c.sum_z, c.sum_a);
       ++n_za_bad;
@@ -611,8 +747,7 @@ int main() {
     // few times 1e-7 MeV per electron here. Anything at 1e-3 is a physics difference and
     // anything at 0.5 is an electron.
     const double nk = (n_kill > 0) ? static_cast<double>(n_kill) : 1.0;
-    const long long o_electrons = g4[c.name].count(za_key(-1, 0))
-                                      ? g4[c.name][za_key(-1, 0)].count : 0;
+    const long long o_electrons = g4[c.name].count(11) ? g4[c.name][11].count : 0;
     const double o_mean_e = c.mean_e - static_cast<double>(o_electrons) /
                                            static_cast<double>(c.n) * kMe;
     const double o_mean_pz = c.mean_pz - static_cast<double>(o_electrons) /
@@ -620,12 +755,21 @@ int main() {
                                              (c.mean_pz / c.mean_e);
     const double de = std::fabs(sum_tot_e / nk - o_mean_e);
     const double dp = std::fabs(sum_tot_pz / nk - o_mean_pz);
-    if (de > worst_e) { worst_e = de; worst_e_at = c.name; }
-    if (dp > worst_pz) { worst_pz = dp; worst_pz_at = c.name; }
-    if (worst_ev_e > worst_ev_exact) { worst_ev_exact = worst_ev_e; worst_ev_exact_at = c.name; }
+    // Which of the two answered: a pion always runs the cascade, a nucleon runs it at or above
+    // `theBCminP`, and an ion below its fusion threshold never does. See the bounds above.
+    const bool cascade_path = !is_ion && (c.pa == 0 || c.ekin_per_a >= 45.0);
+    if (cascade_path) {
+      if (de > worst_ce) { worst_ce = de; worst_ce_at = c.name; }
+      if (dp > worst_cpz) { worst_cpz = dp; worst_cpz_at = c.name; }
+      if (worst_ev_e > worst_cev) { worst_cev = worst_ev_e; worst_cev_at = c.name; }
+    } else {
+      if (de > worst_e) { worst_e = de; worst_e_at = c.name; }
+      if (dp > worst_pz) { worst_pz = dp; worst_pz_at = c.name; }
+      if (worst_ev_e > worst_ev_exact) { worst_ev_exact = worst_ev_e; worst_ev_exact_at = c.name; }
+    }
     if (worst_ev_e_ic > worst_ev_ic) { worst_ev_ic = worst_ev_e_ic; worst_ev_ic_at = c.name; }
     if (worst_per_electron > worst_pe) { worst_pe = worst_per_electron; }
-    if (de > 1e-5 || worst_ev_e > 1e-8) {
+    if (de > (cascade_path ? 5e-1 : 1e-5) || worst_ev_e > (cascade_path ? 2e-2 : 1e-8)) {
       std::printf("BALANCE %s: mean dE %.3g, worst dE with no conversion electron %.3g MeV "
                   "(port %lld electrons, Geant4 %lld)\n",
                   c.name.c_str(), de, worst_ev_e, n_electrons, o_electrons);
@@ -721,6 +865,14 @@ int main() {
     // Per event, against the port's own compound - no oracle. The first is the sharp one.
     {"BalanceNoIC(MeV/event)", static_cast<long long>(cases.size()), worst_ev_exact, 1e-8,
      worst_ev_exact_at},
+    // And the same three for the cases the CASCADE answered, at their own bounds - see the
+    // declaration of `worst_ce` for why they cannot be the ones above.
+    {"CascadeEnergyBalance(MeV)", static_cast<long long>(cases.size()), worst_ce, 5e-1,
+     worst_ce_at},
+    {"CascadeMomentumBalance(MeV)", static_cast<long long>(cases.size()), worst_cpz, 5e-3,
+     worst_cpz_at},
+    {"CascadeBalanceNoIC(MeV/event)", static_cast<long long>(cases.size()), worst_cev, 2e-2,
+     worst_cev_at},
     {"BalanceWithIC(MeV/event)", static_cast<long long>(cases.size()), worst_ev_ic, 2e-3,
      worst_ev_ic_at},
     {"SpeciesYield(sigma)", n_count, worst_count, 5.0, worst_count_at},
@@ -735,6 +887,13 @@ int main() {
   }
   std::printf("  worst residue left by the flat m_e correction: %.3g MeV per conversion "
               "electron\n", worst_pe);
+  if (n_refused > 0) {
+    std::printf("  refusals by name: Propagate1H1 %lld, species %lld, nucleus %lld, preco %lld, "
+                "FillVoidNucleusProducts %lld, capacity %lld, unknown species %lld, invalid "
+                "(A,Z) %lld, high-energy primary %lld\n",
+                n_ref_hydrogen, n_ref_species, n_ref_nucleus, n_ref_preco, n_ref_void,
+                n_ref_capacity, n_ref_unknown, n_ref_invalid, n_ref_he);
+  }
   std::printf("  refused %d, overflowed %d, Poisson variance fallbacks %lld, %lld of %lld "
               "species too thin for a mean test (under 25 a side)\n",
               n_refused, n_overflow, n_poisson_fallback, n_thin, n_count);

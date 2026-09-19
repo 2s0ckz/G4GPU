@@ -675,19 +675,92 @@ void write_bic_apply() {
   auto* bic = new G4BinaryCascade(preco);
   bic->SetMaxEnergy(1.5 * CLHEP::GeV);
 
-  struct NCase { int pdg; double ekin; int tz, ta; const char* name; };
+  struct NCase { int pdg; double ekin; int tz, ta; const char* name; int n; };
+  // The eighteen sub-threshold cases this file started with, at 5,000 events, and then THE
+  // CAMPAIGN: {p, n} at 100, 400, 800 and 1400 MeV and {pi+, pi-} at 200 and 800 MeV, on each of
+  // the five QBBC targets, at 20,000 events. Sixty cascade cases, 1.2 million events.
+  //
+  // WATER is in the brief and is not a row here, because a material is not a target: the
+  // hadronic framework samples an ELEMENT per interaction and water offers hydrogen and oxygen.
+  // O16 is below; H1 is `G4BinaryCascade::Propagate1H1`, which this package refuses by name, so
+  // water is answered for its oxygen and refused for its hydrogen. Adding a row called "water"
+  // would hide that behind a number.
   const NCase kCases[] = {
-    {2212,  5.0,  6,  12, "p5_C12"},     {2112,  5.0,  6,  12, "n5_C12"},
-    {2212, 20.0,  6,  12, "p20_C12"},    {2112, 20.0,  6,  12, "n20_C12"},
-    {2212, 44.0,  6,  12, "p44_C12"},    {2112, 44.0,  6,  12, "n44_C12"},
-    {2212, 46.0,  6,  12, "p46_C12"},    {2112, 46.0,  6,  12, "n46_C12"},
-    {2212, 20.0,  8,  16, "p20_O16"},    {2112, 20.0,  8,  16, "n20_O16"},
-    {2212, 20.0, 13,  27, "p20_Al27"},   {2112, 20.0, 13,  27, "n20_Al27"},
-    {2212, 44.0, 26,  56, "p44_Fe56"},   {2112, 44.0, 26,  56, "n44_Fe56"},
-    {2212, 20.0, 82, 208, "p20_Pb208"},  {2112, 20.0, 82, 208, "n20_Pb208"},
-    {2212, 44.0, 82, 208, "p44_Pb208"},  {2112, 44.0, 82, 208, "n44_Pb208"},
+    {2212,  5.0,  6,  12, "p5_C12", 5000},     {2112,  5.0,  6,  12, "n5_C12", 5000},
+    {2212, 20.0,  6,  12, "p20_C12", 5000},    {2112, 20.0,  6,  12, "n20_C12", 5000},
+    {2212, 44.0,  6,  12, "p44_C12", 5000},    {2112, 44.0,  6,  12, "n44_C12", 5000},
+    {2212, 46.0,  6,  12, "p46_C12", 5000},    {2112, 46.0,  6,  12, "n46_C12", 5000},
+    {2212, 20.0,  8,  16, "p20_O16", 5000},    {2112, 20.0,  8,  16, "n20_O16", 5000},
+    {2212, 20.0, 13,  27, "p20_Al27", 5000},   {2112, 20.0, 13,  27, "n20_Al27", 5000},
+    {2212, 44.0, 26,  56, "p44_Fe56", 5000},   {2112, 44.0, 26,  56, "n44_Fe56", 5000},
+    {2212, 20.0, 82, 208, "p20_Pb208", 5000},  {2112, 20.0, 82, 208, "n20_Pb208", 5000},
+    {2212, 44.0, 82, 208, "p44_Pb208", 5000},  {2112, 44.0, 82, 208, "n44_Pb208", 5000},
+
+    {2212,  100.0,  6,  12, "camp_p100_C12", 20000},
+    {2212,  400.0,  6,  12, "camp_p400_C12", 20000},
+    {2212,  800.0,  6,  12, "camp_p800_C12", 20000},
+    {2212, 1400.0,  6,  12, "camp_p1400_C12", 20000},
+    {2112,  100.0,  6,  12, "camp_n100_C12", 20000},
+    {2112,  400.0,  6,  12, "camp_n400_C12", 20000},
+    {2112,  800.0,  6,  12, "camp_n800_C12", 20000},
+    {2112, 1400.0,  6,  12, "camp_n1400_C12", 20000},
+    { 211,  200.0,  6,  12, "camp_pip200_C12", 20000},
+    { 211,  800.0,  6,  12, "camp_pip800_C12", 20000},
+    {-211,  200.0,  6,  12, "camp_pim200_C12", 20000},
+    {-211,  800.0,  6,  12, "camp_pim800_C12", 20000},
+
+    {2212,  100.0,  8,  16, "camp_p100_O16", 20000},
+    {2212,  400.0,  8,  16, "camp_p400_O16", 20000},
+    {2212,  800.0,  8,  16, "camp_p800_O16", 20000},
+    {2212, 1400.0,  8,  16, "camp_p1400_O16", 20000},
+    {2112,  100.0,  8,  16, "camp_n100_O16", 20000},
+    {2112,  400.0,  8,  16, "camp_n400_O16", 20000},
+    {2112,  800.0,  8,  16, "camp_n800_O16", 20000},
+    {2112, 1400.0,  8,  16, "camp_n1400_O16", 20000},
+    { 211,  200.0,  8,  16, "camp_pip200_O16", 20000},
+    { 211,  800.0,  8,  16, "camp_pip800_O16", 20000},
+    {-211,  200.0,  8,  16, "camp_pim200_O16", 20000},
+    {-211,  800.0,  8,  16, "camp_pim800_O16", 20000},
+
+    {2212,  100.0, 13,  27, "camp_p100_Al27", 20000},
+    {2212,  400.0, 13,  27, "camp_p400_Al27", 20000},
+    {2212,  800.0, 13,  27, "camp_p800_Al27", 20000},
+    {2212, 1400.0, 13,  27, "camp_p1400_Al27", 20000},
+    {2112,  100.0, 13,  27, "camp_n100_Al27", 20000},
+    {2112,  400.0, 13,  27, "camp_n400_Al27", 20000},
+    {2112,  800.0, 13,  27, "camp_n800_Al27", 20000},
+    {2112, 1400.0, 13,  27, "camp_n1400_Al27", 20000},
+    { 211,  200.0, 13,  27, "camp_pip200_Al27", 20000},
+    { 211,  800.0, 13,  27, "camp_pip800_Al27", 20000},
+    {-211,  200.0, 13,  27, "camp_pim200_Al27", 20000},
+    {-211,  800.0, 13,  27, "camp_pim800_Al27", 20000},
+
+    {2212,  100.0, 26,  56, "camp_p100_Fe56", 20000},
+    {2212,  400.0, 26,  56, "camp_p400_Fe56", 20000},
+    {2212,  800.0, 26,  56, "camp_p800_Fe56", 20000},
+    {2212, 1400.0, 26,  56, "camp_p1400_Fe56", 20000},
+    {2112,  100.0, 26,  56, "camp_n100_Fe56", 20000},
+    {2112,  400.0, 26,  56, "camp_n400_Fe56", 20000},
+    {2112,  800.0, 26,  56, "camp_n800_Fe56", 20000},
+    {2112, 1400.0, 26,  56, "camp_n1400_Fe56", 20000},
+    { 211,  200.0, 26,  56, "camp_pip200_Fe56", 20000},
+    { 211,  800.0, 26,  56, "camp_pip800_Fe56", 20000},
+    {-211,  200.0, 26,  56, "camp_pim200_Fe56", 20000},
+    {-211,  800.0, 26,  56, "camp_pim800_Fe56", 20000},
+
+    {2212,  100.0, 82, 208, "camp_p100_Pb208", 20000},
+    {2212,  400.0, 82, 208, "camp_p400_Pb208", 20000},
+    {2212,  800.0, 82, 208, "camp_p800_Pb208", 20000},
+    {2212, 1400.0, 82, 208, "camp_p1400_Pb208", 20000},
+    {2112,  100.0, 82, 208, "camp_n100_Pb208", 20000},
+    {2112,  400.0, 82, 208, "camp_n400_Pb208", 20000},
+    {2112,  800.0, 82, 208, "camp_n800_Pb208", 20000},
+    {2112, 1400.0, 82, 208, "camp_n1400_Pb208", 20000},
+    { 211,  200.0, 82, 208, "camp_pip200_Pb208", 20000},
+    { 211,  800.0, 82, 208, "camp_pip800_Pb208", 20000},
+    {-211,  200.0, 82, 208, "camp_pim200_Pb208", 20000},
+    {-211,  800.0, 82, 208, "camp_pim800_Pb208", 20000},
   };
-  const int kN = 5000;
 
   FILE* f = std::fopen("bic_apply.csv", "w");
   std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
@@ -697,11 +770,26 @@ void write_bic_apply() {
                   "mean_e_MeV,mean_pz_MeV,mean_mult\n");
 
   for (const NCase& c : kCases) {
-    const G4ParticleDefinition* part =
-        (c.pdg == 2212) ? static_cast<const G4ParticleDefinition*>(G4Proton::Proton())
-                        : static_cast<const G4ParticleDefinition*>(G4Neutron::Neutron());
-    const int pz = (c.pdg == 2212) ? 1 : 0;
-    CLHEP::HepRandom::setTheSeed(666000L + c.ta * 100 + G4int(c.ekin) + pz);
+    const G4ParticleDefinition* part = nullptr;
+    switch (c.pdg) {
+      case 2212: part = G4Proton::Proton(); break;
+      case 2112: part = G4Neutron::Neutron(); break;
+      case 211:  part = G4PionPlus::PionPlus(); break;
+      default:   part = G4PionMinus::PionMinus(); break;
+    }
+    // `pz` is the PROJECTILE's charge, which is what the case key carries; for a pion it is
+    // still the charge and its baryon number is zero, so a pi- row has pz = -1 and pa = 0.
+    const int pz = (c.pdg == 2212 || c.pdg == 211) ? 1 : ((c.pdg == -211) ? -1 : 0);
+    const int pa = (c.pdg == 2212 || c.pdg == 2112) ? 1 : 0;
+    const int kN = c.n;
+    // The seed is a function of the target, the energy, the charge and the event count, and
+    // NOT of the species: `camp_p800_C12` and `camp_pip800_C12` agree in all four and so start
+    // from the same stream. Every nucleus those two cases build is therefore the same nucleus,
+    // which correlates their fluctuations with each other. It does not touch the per-case
+    // comparison - the port drives its own Philox and each case is judged against its own
+    // oracle row - and it is written down rather than fixed because fixing it reseeds all 78
+    // cases and the 21 minutes that regenerates buys nothing that is being measured.
+    CLHEP::HepRandom::setTheSeed(666000L + c.ta * 100 + G4int(c.ekin) + pz + 7 * kN);
 
     std::map<int, long long> count;
     std::map<int, double> sum_e, sum_e2, sum_k2;
@@ -753,12 +841,12 @@ void write_bic_apply() {
 
     const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
     std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g\n", c.name,
-                 pz, 1, c.ekin, c.tz, c.ta, kN,
+                 pz, pa, c.ekin, c.tz, c.ta, kN,
                  (n_alive == kN) ? "isAlive" : ((n_kill == kN) ? "stopAndKill" : "MIXED"),
                  n_sec, za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
                  sum_tot_pz / nk, double(n_sec) / nk);
     for (const auto& kv : count) {
-      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, 1,
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, pa,
                    c.ekin, c.tz, c.ta, kN, kv.first, kv.second,
                    sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second),
                    sum_k2[kv.first] / nk);

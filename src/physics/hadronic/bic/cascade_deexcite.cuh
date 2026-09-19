@@ -283,8 +283,15 @@ __host__ __device__ inline int products_add_final_state(const BicCascadeState& s
     // emitted was filed under (Z=0, A=0) - the gamma bucket - so n46_C12 came out 1,726
     // neutrons and 1,112 protons short of the oracle, at 30 and 22 sigma, with the missing
     // ones piled up somewhere the comparison could not see them.
-    out[n].nucleus_z = (t.baryon != 0) ? t.charge : 0;
-    out[n].nucleus_a = t.baryon;
+    //
+    // It is the NUCLEON test and not the baryon-number test, and that is the second measurement.
+    // A Lambda has baryon number 1 and is not a nucleus; with `nucleus_a = t.baryon` it counted
+    // as one nucleon in the summed (Z, A) of the event, where `G4BinaryCascade`'s own accounting
+    // - and `deex_fixed_pdg`, and the dump - count only a proton, a neutron or an ion. Thirty of
+    // the ninety-eight campaign cases then reported a summed (Z, A) that VARIED event to event
+    // against a Geant4 answer that did not.
+    out[n].nucleus_z = (t.pdg == imr::kPdgProton) ? 1 : 0;
+    out[n].nucleus_a = (t.pdg == imr::kPdgProton || t.pdg == imr::kPdgNeutron) ? 1 : 0;
     out[n].momentum = t.momentum;
     out[n].newly_added = is_participant(st, t);
     out[n].creator_model_id = bic_model_id;

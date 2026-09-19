@@ -350,7 +350,13 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
                      coulomb_barrier_mev(target.a, target.z), de, rng, cref);
       ref.cascade_ref = cref;
       ++rep.inner_tries;
-      if (pr.outcome == kPropagateRefused) {
+      // A VOID NUCLEUS is a refusal too, and not an empty result. `Propagate` reaches it when
+      // the cascade has destroyed the nucleus and `FillVoidNucleusProducts` would have had to
+      // run; that branch is refused by name, so the event cannot be completed. Letting it fall
+      // through as an empty product vector would send the OUTER loop off to rebuild the
+      // nucleus a hundred times and then return the primary alive - an event that looks like a
+      // miss and is really a hole in the port.
+      if (pr.outcome == kPropagateRefused || pr.outcome == kPropagateVoidNucleus) {
         ref.cascade = true;
         ref.refused_pdg = cref.refused_pdg;
         return status;
