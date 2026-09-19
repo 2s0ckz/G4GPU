@@ -587,7 +587,14 @@ struct Campaign {
 /// rule the port applies to its own list, and the boundary itself is checked independently by
 /// preco_deexcite_mult.csv, which histograms `n` per event.
 void dump_deexcite() {
-  G4PreCompoundModel model;
+  // HEAP AND NEVER DELETED. `~G4PreCompoundModel()` does `delete GetExcitationHandler()`,
+  // `~G4ExcitationHandler()` does `delete theFermiModel`, and `~G4FermiBreakUpVI()` does
+  // `delete thePool` on a CLASS STATIC shared with QBBC's own de-excitation - which nothing
+  // ever rebuilds, because `Initialise()` runs from the constructor. A stack instance here
+  // therefore disarms Fermi break-up for every dump that runs after this one. docs/RISK.md
+  // V174, where four stack objects in dump_deexcitation.cc did exactly that and cost the
+  // whole dumper an 0xC0000005.
+  auto& model = *new G4PreCompoundModel();
   model.InitialiseModel();
   const G4int preco_id = G4PhysicsModelCatalog::GetModelID("model_PRECO");
 
@@ -747,7 +754,10 @@ void dump_deexcite() {
 /// reason: ApplyYourself copies `*result` in order, so the pre-equilibrium ejectiles are the
 /// first entries of the secondary list.
 void dump_applyyourself() {
-  G4PreCompoundModel model;
+  // Heap and never deleted; see dump_deexcite() above and docs/RISK.md V174. Destroying a
+  // G4PreCompoundModel deletes the class-static Fermi break-up pool that QBBC's own
+  // de-excitation is still holding.
+  auto& model = *new G4PreCompoundModel();
   model.InitialiseModel();
   const G4int preco_id = G4PhysicsModelCatalog::GetModelID("model_PRECO");
 

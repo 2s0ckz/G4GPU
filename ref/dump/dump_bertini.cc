@@ -317,23 +317,43 @@ void dump_params() {
   // The objects QBBC builds. A default-constructed G4CascadeInterface carries
   // G4HadronicInteraction's own limits; the three below are set exactly as the two
   // constructors set them.
-  G4CascadeInterface bareBert;
+  //
+  // ALL FOUR ARE HEAP AND NEVER DELETED, and this one is DEFENSIVE rather than a fix for a
+  // live fault - docs/RISK.md V174 is the rule and this is the border of it. The rule: in a
+  // program that shares Geant4's de-excitation, never destroy a `G4FermiBreakUpVI`, a
+  // `G4ExcitationHandler` or a `G4PreCompoundModel`, because `~G4FermiBreakUpVI()` frees a
+  // CLASS STATIC pool that QBBC's own de-excitation is still holding and nothing rebuilds it.
+  // `~G4CascadeInterface()` deletes its `G4InuclCollider`, which deletes `theDeexcitation`,
+  // which for the PreCompound arm is a `G4PreCompoundDeexcitation` - and THAT destructor is
+  // empty on purpose:
+  //
+  //     G4PreCompoundDeexcitation::~G4PreCompoundDeexcitation() {
+  //       // Per V.I. -- do not delete locally; handled in hadronic registry
+  //     }
+  //
+  // so the chain stops there today and a destroyed G4CascadeInterface does NOT reach the pool.
+  // Checked, not assumed: nothing else under `cascade/src` owns a G4ExcitationHandler. The
+  // instances below are heaped anyway so that the rule is uniform and so that a change to that
+  // one comment in Geant4 - or a G4InuclCollider given a different de-excitation - cannot turn
+  // this file into the next dump_deexcitation.cc. Four objects leaked for the life of a dump
+  // program is not a cost.
+  auto& bareBert = *new G4CascadeInterface();
   std::fprintf(f, "interface_default_minE_MeV,%.17g\n", bareBert.GetMinEnergy() / MeV);
   std::fprintf(f, "interface_default_maxE_MeV,%.17g\n", bareBert.GetMaxEnergy() / MeV);
 
-  G4CascadeInterface nucleonBert;
+  auto& nucleonBert = *new G4CascadeInterface();
   nucleonBert.SetMinEnergy(1.0 * CLHEP::GeV);
   nucleonBert.SetMaxEnergy(hp->GetMaxEnergyTransitionFTF_Cascade());
   std::fprintf(f, "qbbc_nucleon_minE_MeV,%.17g\n", nucleonBert.GetMinEnergy() / MeV);
   std::fprintf(f, "qbbc_nucleon_maxE_MeV,%.17g\n", nucleonBert.GetMaxEnergy() / MeV);
 
-  G4CascadeInterface pionBert;
+  auto& pionBert = *new G4CascadeInterface();
   pionBert.SetMinEnergy(1.0 * CLHEP::GeV);
   pionBert.SetMaxEnergy(12.0 * CLHEP::GeV);
   std::fprintf(f, "qbbc_pion_minE_MeV,%.17g\n", pionBert.GetMinEnergy() / MeV);
   std::fprintf(f, "qbbc_pion_maxE_MeV,%.17g\n", pionBert.GetMaxEnergy() / MeV);
 
-  G4CascadeInterface kaonBert;   // G4HadronicBuilder::BuildFTFP_BERT, bert = true
+  auto& kaonBert = *new G4CascadeInterface();  // G4HadronicBuilder::BuildFTFP_BERT, bert = true
   kaonBert.SetMaxEnergy(hp->GetMaxEnergyTransitionFTF_Cascade());
   std::fprintf(f, "qbbc_kaon_hyperon_minE_MeV,%.17g\n", kaonBert.GetMinEnergy() / MeV);
   std::fprintf(f, "qbbc_kaon_hyperon_maxE_MeV,%.17g\n", kaonBert.GetMaxEnergy() / MeV);
@@ -1038,9 +1058,14 @@ void dump_apply() {
 
   // Two instances, because `usePreCompoundDeexcitation()` is a one-way switch on the object and
   // QBBC really does build one of each.
-  G4CascadeInterface bert;
+  // Heap and never deleted, for the reason given above the four in dump_interface():
+  // docs/RISK.md V174's rule, applied here defensively because the chain from
+  // ~G4CascadeInterface to the class-static Fermi pool is broken only by one deliberately
+  // empty destructor in G4PreCompoundDeexcitation.
+  auto& bert = *new G4CascadeInterface();
   bert.usePreCompoundDeexcitation();
-  G4CascadeInterface bert_casc;     // the kaon/hyperon instance: the cascade's own evaporators
+  // the kaon/hyperon instance: the cascade's own evaporators
+  auto& bert_casc = *new G4CascadeInterface();
 
   for (const Case& c : cases) {
     CLHEP::HepRandom::setTheSeed(20260911);
