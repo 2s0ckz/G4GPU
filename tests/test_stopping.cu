@@ -212,22 +212,44 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
   // Every species QBBC gives an at-rest process. The six Bertini/muon ones, then the whole
   // Fritiof list from `G4StoppingPhysics::ConstructProcess` - including the four NEUTRAL
   // antiparticles that pass only because the gate is `charge <= 0` - and one anti-nucleus, which
-  // is the `GetBaryonNumber() < -1` arm and which `HadronWorkspace` is expected to refuse by
-  // capacity with its mass number named.
-  struct Sp { int pdg; double mass; const char* name; };
-  const Sp species[13] = {
-      {-211, 139.57061, "pi-"},       {-321, 493.677, "K-"},
-      {3112, 1197.449, "Sigma-"},     {3312, 1321.71, "Xi-"},
-      {3334, 1672.45, "Omega-"},      {13, 105.6583715, "mu-"},
-      {-2212, 938.272013, "anti-p"},  {-2112, 939.56536, "anti-n"},
-      {-3122, 1115.683, "anti-Lam"},  {-3212, 1192.642, "anti-Sig0"},
-      {-3222, 1189.37, "anti-Sig+"},  {-3322, 1314.86, "anti-Xi0"},
-      {-1000010020, 1875.613, "anti-d"}};
-  const int kNumSp = 13;
+  // is the `GetBaryonNumber() < -1` arm.
+  //
+  // **B AND Q ARE CARRIED, AND LEAVING THEM AT ZERO WAS A BUG THAT LOOKED LIKE PHYSICS.** Nothing
+  // in `stopping::at_rest` reads either one - it dispatches on the PDG code and the Bertini arm
+  // never asks - so the first version of this table had neither, and the six Bertini species
+  // were unaffected. The Fritiof arm reads both: `ftf_model_init` branches on
+  // `abs(baryon_number) <= 1` to choose the single-hadron arm over the anti-nucleus one, and
+  // `projectile_residual_z` is `int(charge)`. With B = 0 an anti-deuteron took the HADRON arm and
+  // was refused as "a PDG code absent from data/ftf_hadrons.hh" 20,000 times - a refusal with a
+  // plausible name, from a model that had never been asked the question. Measured with B = -2 it
+  // reaches the anti-nucleus arm instead.
+  //
+  // The six anti-BARYONS were equally mis-formed - B = 0 where Geant4 has -1 - and it changed
+  // nothing, which is worth writing down rather than being quietly grateful for: both values
+  // satisfy `abs(baryon_number) <= 1`, so both take the single-hadron arm. Measured on anti-p at
+  // rest, 200 events with Philox: carbon 173 ran / 27 refused at B = 0 AND at B = -1, lead 178 /
+  // 22 at both. Those rows were right by luck. The anti-NUCLEUS is where the same defect showed,
+  // because it is the only species whose |B| crosses 1.
+  struct Sp { int pdg; int b; double q; double mass; const char* name; };
+  const Sp species[16] = {
+      {-211, 0, -1.0, 139.57061, "pi-"},       {-321, 0, -1.0, 493.677, "K-"},
+      {3112, 1, -1.0, 1197.449, "Sigma-"},     {3312, 1, -1.0, 1321.71, "Xi-"},
+      {3334, 1, -1.0, 1672.45, "Omega-"},      {13, 0, -1.0, 105.6583715, "mu-"},
+      {-2212, -1, -1.0, 938.272013, "anti-p"}, {-2112, -1, 0.0, 939.56536, "anti-n"},
+      {-3122, -1, 0.0, 1115.683, "anti-Lam"},  {-3212, -1, 0.0, 1192.642, "anti-Sig0"},
+      {-3222, -1, -1.0, 1189.37, "anti-Sig+"}, {-3322, -1, 0.0, 1314.86, "anti-Xi0"},
+      // The four anti-NUCLEI `GetBaryonNumber() < -1` covers, all of them, because they are the
+      // species this workspace cannot take and a single representative would have looked like a
+      // spot check. They cost 0.50 ms an event - see V166, where that number is the surprise.
+      {-1000010020, -2, -1.0, 1875.613, "anti-d"},
+      {-1000010030, -3, -1.0, 2808.921, "anti-t"},
+      {-1000020030, -3, -2.0, 2808.391, "anti-He3"},
+      {-1000020040, -4, -2.0, 3727.379, "anti-alpha"}};
+  const int kNumSp = 16;
   const long long kN = 20000;
 
   std::printf("\n  == stopping::at_rest, %lld events per (species, material) ==\n", kN);
-  std::printf("  %-8s %-5s %9s %8s %8s %8s %9s %9s %s\n", "species", "mat", "mean nsec",
+  std::printf("  %-10s %-5s %9s %8s %8s %8s %9s %9s %s\n", "species", "mat", "mean nsec",
               "mean EM", "mean nuc", "refused", "dio frac", "mean Edep", "captured on");
   static g4gpu::hadronic::ftf::entry::HadronWorkspace ftf_slot;
   static g4gpu::hadronic::ftf::LundTables<double> ftf_lund;
@@ -265,6 +287,8 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
         HadProjectile<double> p;
         p.pdg = species[si].pdg;
         p.mass = species[si].mass;
+        p.baryon_number = species[si].b;   // read only by the Fritiof arm - see the table above
+        p.charge = species[si].q;
         p.kin_energy = 0.0;
         const stopping::AtRestResult r = stopping::at_rest(
             p, mat, fs, &nucfs, bert::default_cascade_params(),
@@ -316,15 +340,15 @@ void run_campaign(const data::LevelTable& lt, const deex::FermiPool& pool,
       } else {
         std::snprintf(cap, sizeof cap, "Z%d", m.z[0]);
       }
-      std::printf("  %-8s %-5s %9.3f %8.3f %8.3f %8lld %9.4f %9.4g %s\n", species[si].name,
+      std::printf("  %-10s %-5s %9.3f %8.3f %8.3f %8lld %9.4f %9.4g %s\n", species[si].name,
                   m.name, double(nsec) / d, double(nem) / d,
                   (double(nsec) - double(nem)) / d, nref, double(ndio) / d, edep / d, cap);
       if (nref > 0) {
-        std::printf("        refusals:");
         for (const auto& kv : refkind) {
-          std::printf(" kind %d x %lld", kv.first, kv.second);
+          std::printf("        %8lld x %s\n", kv.second,
+                      stopping::stopping_refusal_name(
+                          static_cast<stopping::StoppingRefusal>(kv.first)));
         }
-        std::printf("\n");
       }
     }
   }

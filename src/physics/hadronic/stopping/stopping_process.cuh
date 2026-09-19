@@ -106,7 +106,9 @@ enum class StoppingRefusal : int {
   kFtfNoSlot,
   /// FTFP gave the primary back unchanged - 1,000 Scatter attempts without an interaction, or
   /// the model's own fallback. Geant4 calls that a final state and so does the port; at rest it
-  /// means the capture produced nothing, which is worth its own count.
+  /// means the capture produced nothing, which is worth its own count. In this campaign it is
+  /// also what an anti-NUCLEUS gets, because a capacity refusal the Scatter loop cannot see
+  /// arrives here wearing this status instead - docs/RISK.md V166.
   kFtfPrimaryUnchanged,
   /// FTF at rest reached `DecayStrongResonances`, which is P11d's and is not ported. Counted
   /// rather than approximated; the campaign reports how often.
@@ -116,6 +118,27 @@ enum class StoppingRefusal : int {
   /// FatalException here; a kernel cannot throw, so this is carried out by name.
   kReentryExhausted
 };
+
+/// Every code above, spelled. It exists because the campaign printed its refusals as raw enum
+/// ordinals - `kind 6 x 20000` on a row - and a count without a name is not a report, which is
+/// the same objection this package raised against `(none) x 82,554` on the FTF side and then
+/// spent a while committing itself. `__host__` only: it returns a string literal and no kernel
+/// has anything to do with one.
+__host__ inline const char* stopping_refusal_name(StoppingRefusal r) {
+  switch (r) {
+    case StoppingRefusal::kNone:                return "(ran)";
+    case StoppingRefusal::kNotApplicable:       return "QBBC gives this species no at-rest process";
+    case StoppingRefusal::kSelector:            return "G4ElementSelector refused";
+    case StoppingRefusal::kBertiniRefused:      return "Bertini refused";
+    case StoppingRefusal::kFtfRefused:          return "FTFP refused, no code of its own";
+    case StoppingRefusal::kFtfNoSlot:           return "no workspace slot for this thread";
+    case StoppingRefusal::kFtfPrimaryUnchanged: return "FTFP handed the primary back unchanged";
+    case StoppingRefusal::kFtfResonanceDecay:   return "FTFP reached G4DecayStrongResonances";
+    case StoppingRefusal::kSecondaryOverflow:   return "the caller's HadFinalState filled up";
+    case StoppingRefusal::kReentryExhausted:    return "AtRestDoIt's 100 attempts ran out";
+  }
+  return "(unnamed StoppingRefusal - add it here)";
+}
 
 /// G4StoppingPhysics::ConstructProcess, as a function of the PDG code.
 ///
@@ -191,9 +214,19 @@ struct AtRestResult {
 ///
 /// **`HadronWorkspace` and not `Workspace`.** The at-rest projectile is always a single
 /// anti-hadron, so `kMaxProjA = 1` removes the projectile nucleus and its scratch: **329,816
-/// bytes a slot** against 410,824. An ion handed to it is refused by capacity with its mass
-/// number named, never truncated - which for this arm is the anti-nuclei QBBC also stops, and
-/// they are counted rather than silently dropped.
+/// bytes a slot measured with `sizeof`** against 410,824 - and not the 266,344 the entry
+/// header's own sizing table states, docs/RISK.md V165. `bytes_for<HadronWorkspace>(1)` is
+/// 339,464 with the Lund table, which is shared across slots and paid once.
+///
+/// **The anti-NUCLEI QBBC also stops do not fit this workspace, and the contract does not say
+/// so out loud.** `|B| > 1` is past `kMaxProjA = 1`; the entry header says such a projectile is
+/// "refused by capacity with `refused_a` naming the mass number, never truncated". Measured, it
+/// is not: the capacity refusal sets a field the Scatter loop's guard does not read, so the
+/// model retries it 1,000 times and hands the primary back as `Status::kPrimaryUnchanged` with
+/// no name and no mass number (docs/RISK.md V166). That status is why `kFtfPrimaryUnchanged`
+/// exists as its own refusal code here rather than being folded into "nothing happened" - an
+/// anti-deuteron at rest is a real capture that this port cannot yet do, and it is counted
+/// under a name because the alternative is 100,000 events disappearing quietly.
 ///
 /// The at-rest projectile has `kin_energy = 0`, which is inside FTFP's window at the bottom and
 /// is exactly the case `test_ftf_entry.cu` measures at 0.015 ms on carbon and 0.162 ms on lead -
