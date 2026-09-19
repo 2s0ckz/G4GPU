@@ -56,13 +56,20 @@
 //
 // WHAT IS REFUSED
 //
-// G4GammaNuclearXS is PARTIAL. Below the data files' top energy - 130 MeV for most elements -
-// it is exact, element and isotope. Above it Geant4 needs G4PhotoNuclearCrossSection, the
-// 1821-line CHIPS parameterisation, which is not ported: the transition region between the
-// table's top and 150 MeV is a straight line to `xs150[Z]`, which is CHIPS at 150 MeV, so even
-// the transition needs it. Refused by name (XsRefusal::kPhotoNuclearCrossSection) at the point
-// it would have been needed - which is what makes the low-energy branch usable and the gap
-// visible.
+// G4GammaNuclearXS was PARTIAL and is NOT any more (P13). Below the data files' top energy -
+// 130 MeV for most elements - it is exact, element and isotope, from the IAEA vectors. Above
+// it Geant4 needs G4PhotoNuclearCrossSection, the 1821-line CHIPS parameterisation, which is
+// now `xs/chips_photonuclear.cuh`: the four branches that used to refuse -
+//
+//   element,  emax < E < 150 MeV     a straight line to `xs150[Z]` = CHIPS element at 150 MeV
+//   element,  E >= 150 MeV           CHIPS element
+//   isotope,  emaxiso < E < 150 MeV  a straight line to CHIPS ISOTOPE at 150 MeV
+//   isotope,  E >= 150 or Z == 1     CHIPS isotope, times `coeff[Z][A-amin[Z]]` for Z <= 2
+//                                    above 10 GeV, which is CHIPS's own iso/elem ratio there
+//
+// are all evaluated. `XsRefusal::kPhotoNuclearCrossSection` survives for the one case CHIPS
+// itself cannot answer: a Z outside 1..98, where this port has no NIST mean atomic mass.
+// docs/PORTED.md 2.1.1's 1,128 element and 760 isotope refusals are now comparisons.
 //
 // HYDROGEN IS AN ISOTOPE-PATH SPECIAL CASE ONLY
 //
@@ -86,6 +93,7 @@
 
 #include "data/isotope_list.hh"
 #include "data/particlexs_data.cuh"
+#include "physics/hadronic/xs/chips_photonuclear.cuh"
 #include "physics/hadronic/xs/gg_hadron_nucleus_xsc.cuh"
 #include "physics/hadronic/xs/gg_nucl_nucl_xsc.cuh"
 #include "physics/hadronic/xs/physics_vector.cuh"
@@ -239,9 +247,19 @@ __host__ __device__ inline XsValue<real_t> pxs_element_xs(const PxsDataSet<real_
     if (pv.empty()) { return {real_t(0), XsRefusal::kPhotoNuclearCrossSection}; }
     const real_t emax = pv.max_energy();
     if (ekin <= emax) { return {phys_vec_value(pv, ekin), XsRefusal::kNone}; }
-    // Both remaining branches need CHIPS: above 150 MeV directly, and between emax and
-    // 150 MeV through xs150[Z], which is CHIPS evaluated at 150 MeV.
-    return {real_t(0), XsRefusal::kPhotoNuclearCrossSection};
+    // (P13) Both remaining branches needed CHIPS and now have it: above 150 MeV directly, and
+    // between the data file's top and 150 MeV as a straight line to `xs150[Z]`, which IS
+    // `G4PhotoNuclearCrossSection::GetElementCrossSection` evaluated at exactly 150 MeV -
+    // `G4GammaNuclearXS::Initialise` computes it that way and keeps it in a private static.
+    if (ekin >= pxs_gamma_transition<real_t>()) {
+      return chips::photo_element_xs<real_t>(ekin, Z);
+    }
+    const XsValue<real_t> r150 =
+        chips::photo_element_xs<real_t>(pxs_gamma_transition<real_t>(), Z);
+    if (!r150.ok()) { return r150; }
+    const real_t lxs = phys_vec_value(pv, emax);
+    return {lxs + (ekin - emax) * (r150.value - lxs) / (pxs_gamma_transition<real_t>() - emax),
+            XsRefusal::kNone};
   }
 
   if (pv.empty()) { return {real_t(0), XsRefusal::kMissingParticleXSData}; }
@@ -317,15 +335,51 @@ __host__ __device__ inline XsValue<real_t> pxs_iso_xs(const PxsDataSet<real_t>& 
       if (!pvi.empty()) {
         const real_t emaxiso = pvi.max_energy();
         if (ekin <= emaxiso) { return {phys_vec_value(pvi, ekin), XsRefusal::kNone}; }
-        // The straight line from the isotope table's top to CHIPS at 150 MeV.
-        return {real_t(0), XsRefusal::kPhotoNuclearCrossSection};
+        // (P13) The straight line from the ISOTOPE table's top to CHIPS at 150 MeV. Note the
+        // right-hand anchor is `GetIsoCrossSection(150 MeV, Z, A)` and not `xs150[Z]`: the
+        // element path uses the element value and this one the isotope value, which for Z > 2
+        // is the same number because CHIPS's isotope arm falls through to its element arm with
+        // A discarded, and for Z <= 2 is not.
+        const XsValue<real_t> r150 =
+            chips::photo_iso_xs<real_t>(pxs_gamma_transition<real_t>(), Z, A);
+        if (!r150.ok()) { return r150; }
+        const real_t lxs = phys_vec_value(pvi, emaxiso);
+        return {lxs
+                    + (ekin - emaxiso) * (r150.value - lxs)
+                          / (pxs_gamma_transition<real_t>() - emaxiso),
+                XsRefusal::kNone};
       }
     }
     if (ekin <= emax && Z != 1) {
       return {phys_vec_value(pv, ekin) * af / data::isotope_aeff_of<real_t>(Z),
               XsRefusal::kNone};
     }
-    return {real_t(0), XsRefusal::kPhotoNuclearCrossSection};
+    // (P13) `ekin >= rTransitionBound || Z == 1` - CHIPS, with a per-(Z,A) continuity factor
+    // for Z <= 2 above 10 GeV. `coeff[Z][A-amin[Z]]` is CHIPS's own isotope-over-element ratio
+    // at 10 GeV, computed in `G4GammaNuclearXS::Initialise`; it is recomputed here rather than
+    // tabulated because both halves of it are this file's own functions.
+    if (ekin >= pxs_gamma_transition<real_t>() || Z == 1) {
+      if (Z <= 2 && ekin > real_t(10) * units::GeV<real_t>()) {
+        const real_t e10 = real_t(10) * units::GeV<real_t>();
+        const XsValue<real_t> sig1 = chips::photo_iso_xs<real_t>(e10, Z, A);
+        const XsValue<real_t> sig2 = chips::photo_element_xs<real_t>(e10, Z);
+        const XsValue<real_t> el = chips::photo_element_xs<real_t>(ekin, Z);
+        if (!sig1.ok() || !sig2.ok() || !el.ok()) {
+          return {real_t(0), XsRefusal::kPhotoNuclearCrossSection};
+        }
+        const real_t coeff = (sig2.value > real_t(0)) ? (sig1.value / sig2.value) : real_t(1);
+        return {coeff * el.value, XsRefusal::kNone};
+      }
+      return chips::photo_iso_xs<real_t>(ekin, Z, A);
+    }
+    // The transition on the ELEMENT path: no isotope file, energy between the element table's
+    // top and 150 MeV. `lxs` is scaled by A/aeff[Z] and `rxs` is `xs150[Z]`, unscaled.
+    const XsValue<real_t> r150 =
+        chips::photo_element_xs<real_t>(pxs_gamma_transition<real_t>(), Z);
+    if (!r150.ok()) { return r150; }
+    const real_t lxs = phys_vec_value(pv, emax) * af / data::isotope_aeff_of<real_t>(Z);
+    return {lxs + (ekin - emax) * (r150.value - lxs) / (pxs_gamma_transition<real_t>() - emax),
+            XsRefusal::kNone};
   }
 
   // G4ParticleInelasticXS / G4NeutronInelasticXS

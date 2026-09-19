@@ -58,6 +58,12 @@ enum class XsRefusal : int {
   /// A per-element G4PARTICLEXS data file that is not loaded. Missing data is fatal, never a
   /// silent zero (docs/HADRONIC_PLAN.md section 2, src/host/g4data.cuh).
   kMissingParticleXSData,
+  /// (P13) `G4NistManager::GetAtomicMassAmu(Z)` for a Z this port has no NIST mean mass for.
+  /// `data/atomic_masses.cuh` stops at Z = 98; the two CHIPS classes resize their caches to
+  /// 120 and would read a NIST entry that is not here. Distinct from
+  /// kNuclearMassNotTabulated, which is a missing NUCLIDE in AME2012 and which Geant4 itself
+  /// turns into an infinite threshold rather than into a gap.
+  kPhotoNuclearNoAtomicMass,
 };
 
 __host__ __device__ inline const char* xs_refusal_name(XsRefusal r) {
@@ -73,6 +79,8 @@ __host__ __device__ inline const char* xs_refusal_name(XsRefusal r) {
     case XsRefusal::kIsotopeListOutOfRange:
       return "G4IsotopeList.hh aeff[] beyond Z = 94";
     case XsRefusal::kMissingParticleXSData: return "a G4PARTICLEXS data file that is absent";
+    case XsRefusal::kPhotoNuclearNoAtomicMass:
+      return "G4NistManager::GetAtomicMassAmu beyond Z = 98";
   }
   return "(unknown)";
 }

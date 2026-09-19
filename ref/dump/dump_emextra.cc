@@ -294,6 +294,26 @@ void dump_emextra(const DumpContext&) {
     std::fprintf(f, "G4CASCADE_CHECK_PHOTONUCLEAR_set,%d\n",
                  std::getenv("G4CASCADE_CHECK_PHOTONUCLEAR") != nullptr ? 1 : 0);
     std::fprintf(f, "G4LENDDATA_set,%d\n", std::getenv("G4LENDDATA") != nullptr ? 1 : 0);
+    // WHICH GAMMA CROSS SECTION G4ElectroVDNuclearModel FOUND. Its constructor asks the
+    // registry for "PhotoNuclearXS" first and only falls back to "GammaNuclearXS" when that is
+    // absent. `G4GammaNuclearXS`'s own constructor asks for "PhotoNuclearXS" too and, finding
+    // none, does `new G4PhotoNuclearCrossSection()` - whose base constructor REGISTERS it under
+    // that name. `ConstructGammaElectroNuclear` builds the G4GammaNuclearXS before it builds the
+    // model, so by the time the model looks the CHIPS object is there and the model takes it.
+    // The electron and positron acceptance test therefore runs on the pure CHIPS photo-nuclear
+    // cross section and NOT on the IAEA-data-based G4GammaNuclearXS the photon process uses.
+    //
+    // This is dumped BEFORE any dump in this file constructs a G4PhotoNuclearCrossSection of
+    // its own, which would put one in the registry and make the answer trivially yes.
+    auto* reg = G4CrossSectionDataSetRegistry::Instance();
+    std::fprintf(f, "registry_has_PhotoNuclearXS,%d\n",
+                 reg->GetCrossSectionDataSet("PhotoNuclearXS") != nullptr ? 1 : 0);
+    std::fprintf(f, "registry_has_GammaNuclearXS,%d\n",
+                 reg->GetCrossSectionDataSet("GammaNuclearXS") != nullptr ? 1 : 0);
+    std::fprintf(f, "registry_has_ElectroNuclearXS,%d\n",
+                 reg->GetCrossSectionDataSet("ElectroNuclearXS") != nullptr ? 1 : 0);
+    std::fprintf(f, "registry_has_KokoulinMuonNuclearXS,%d\n",
+                 reg->GetCrossSectionDataSet("KokoulinMuonNuclearXS") != nullptr ? 1 : 0);
     std::fclose(f);
   }
 }
@@ -456,6 +476,23 @@ void dump_emextra_xs(const DumpContext&) {
 
     // The double-differential form on a grid that includes CutFixed = 200 MeV exactly (where
     // it returns zero) and `TotalEnergy - 0.5*m_p` (the upper limit, likewise).
+    //
+    // TWO ROWS PER POINT, WITH TWO DIFFERENT `A`, BECAUSE GEANT4'S TWO CALLERS DISAGREE.
+    //
+    //   kind = dd        `A` in plain amu, which is what
+    //                    G4KokoulinMuonNuclearXS::BuildCrossSectionTable passes:
+    //                    `A = nistManager->GetAtomicMassAmu(Z)`.
+    //   kind = dd_gmole  `A * (g/mole)`, which is what G4MuonVDNuclearModel::MakeSamplingTable
+    //                    passes: `AtomicWeight = adat[iz]*(g/mole)`. In Geant4's internal units
+    //                    `g/mole` is 6.2415e21, not 1, so the muon model's sampling table is
+    //                    built from a nucleus with A = 6.3e21 rather than 1.01.
+    //
+    // It changes nothing, and only measurement can say so: `A` enters the double-differential
+    // cross section in exactly one place, `aeff = 0.22*A + 0.78*A^0.89`, which is independent
+    // of the energy loss and therefore factors out of `MakeSamplingTable`'s integral and
+    // cancels when the table is normalised by its own total. Both rows are dumped so that the
+    // port can be compared against the argument each caller actually passes, and so that the
+    // cancellation is a number in a test rather than an argument in a comment.
     const double as[] = {1.01, 9.01, 26.98, 63.55, 238.03};  // G4MuonVDNuclearModel::adat
     const double ts[] = {1.e3, 1.e4, 1.e5, 1.e6, 1.e9, 1.e11};
     for (double A : as) {
@@ -465,15 +502,26 @@ void dump_emextra_xs(const DumpContext&) {
                               epmax - 1.0, epmax, epmax + 1.0};
         for (double ep : eps) {
           if (ep <= 0.0) { continue; }
-          const G4double v =
+          const G4double v1 = mu->ComputeDDMicroscopicCrossSection(T * MeV, 0.0, A, ep * MeV);
+          std::fprintf(f, "dd,0,%.17g,%.17g,%.17g,%.17g\n", A, T, ep, v1 / millibarn);
+          const G4double v2 =
               mu->ComputeDDMicroscopicCrossSection(T * MeV, 0.0, A * (g / mole), ep * MeV);
-          std::fprintf(f, "dd,0,%.17g,%.17g,%.17g,%.17g\n", A, T, ep, v / millibarn);
+          std::fprintf(f, "dd_gmole,0,%.17g,%.17g,%.17g,%.17g\n", A, T, ep, v2 / millibarn);
         }
       }
     }
+    // `g/mole` itself, so the port's own constant is checked rather than assumed.
+    std::fprintf(f, "gmole,0,0,0,0,%.17g\n", g / mole);
+    std::fflush(f);
 
     // The element cross section, at the 61 log nodes of G4PhysicsLogVector(1 GeV, 1 PeV, 60)
     // and at the geometric midpoints between them.
+    // `theCrossSection[Z]` is a NULL POINTER for every Z the table was never built for, and
+    // `GetElementCrossSection` dereferences it without a test. `BuildCrossSectionTable` is
+    // public and idempotent (`if(Z < MAXZMUN && !theCrossSection[Z])`), so it is called here
+    // rather than assumed to have run: whether the physics list built it depends on
+    // `BuildPhysicsTable`'s `isMaster` latch, which returns early if ANY Z is already filled.
+    mu->BuildCrossSectionTable();
     const G4ElementTable* et = G4Element::GetElementTable();
     G4DynamicParticle dmu(G4MuonMinus::MuonMinus(), G4ThreeVector(0, 0, 1), 1.0 * GeV);
     std::vector<G4int> zs;
@@ -492,6 +540,7 @@ void dump_emextra_xs(const DumpContext&) {
         const G4double v = mu->GetElementCrossSection(&dmu, Z, nullptr);
         std::fprintf(f, "elem,%d,%.17g,%.17g,0,%.17g\n", Z, A, e, v / millibarn);
       }
+      std::fflush(f);
     }
     std::fclose(f);
   }
