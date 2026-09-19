@@ -30,12 +30,22 @@
 //   photonEnergy > photonQ2/dM         `dM` here is `m_p + m_n` from the PARTICLE TABLE, not
 //                                      the CHIPS class's own 938.27+939.57 - two different
 //                                      numbers one function apart
-//   sigNu*rand() <= sigK*rndFraction   the virtual-photon acceptance
+//   sigNu*rand() <= sigK*rndFraction   the virtual-photon acceptance - WHICH CANNOT REJECT
+//                                      ANYTHING, because `sigNu` is identically zero. See
+//                                      `evd_probe_kinetic_energy` and docs/RISK.md V175: the
+//                                      probe photon is built with the (definition, TOTAL
+//                                      ENERGY, MOMENTUM VECTOR) overload and a UNIT momentum,
+//                                      so it has a dynamical mass of sqrt(E^2 - 1) and a
+//                                      kinetic energy of at most 1 MeV, which is under
+//                                      G4PhotoNuclearCrossSection's 2 MeV threshold at every
+//                                      photon energy. The 2,573-line cross section and
+//                                      `GetVirtualFactor` behind this test are dead code.
 //
-// Failing any of them returns the initial state: status isAlive, the lepton's own energy and
-// direction, no secondaries. That is a real outcome of a real interaction in Geant4 - the
-// process has already decided the electron interacts - so it is NOT a refusal here either, and
-// `LeptonVdResult::no_photon` records which gate closed.
+// Failing either of the first two returns the initial state: status isAlive, the lepton's own
+// energy and direction, no secondaries. That is a real outcome of a real interaction in Geant4 -
+// the process has already decided the electron interacts - so it is NOT a refusal here either,
+// and `LeptonVdResult::no_photon` records which gate closed. Measured over the campaign, the
+// first gate closes for 1 to 7% of events and the third for none.
 //
 // THE MUON MODEL'S LOW-ENERGY RETURN
 //
@@ -64,10 +74,22 @@
 //
 // WHAT IS REFUSED, BY NAME
 //
-//   * The FTF arm above 10 GeV, when no FTF workspace is supplied. It is WIRED - P11's
-//     `ftf::apply_yourself` takes the pi0 - but the workspace is 332 kB (docs/RISK.md V101) and
-//     a caller that has not allocated one gets `kSubModel` rather than a silent nothing. It is
-//     also unreachable from a lepton below 10 GeV, which is every case in this package's grid.
+//   * The FTF arm above a 10 GeV equivalent photon. Refused by name, `kSubModel`, at the point
+//     the pi0 would have been handed over, with `used_ftf` recording that the arm was chosen.
+//
+//     HOW IT IS TO BE WIRED, when it is: through `src/physics/hadronic/ftf/ftf_entry.cuh` and
+//     nothing else - P11d's caller-side contract, which is not in this branch (it lands on
+//     main; this package is branched from `integ/bertini`). Its shape is a host
+//     `build`/`free` over a pool of `entry::HadronWorkspace`, **329,816 bytes PER THREAD IN
+//     FLIGHT**, and a `Handle` a thread takes one slot of before calling `apply`. The slot
+//     count this arm needs is ONE PER THREAD THAT CAN HAVE A LEPTON ABOVE 10 GeV IN FLIGHT -
+//     not one per lepton, because the arm is entered only for an equivalent photon above
+//     10 GeV and that photon is always below the lepton's own kinetic energy. For a
+//     galactic-cosmic-ray problem that is a real fraction of the lepton flux and the pool
+//     cannot be sized at one.
+//
+//     It is unreachable from any lepton below 10 GeV, which is every case in this package's
+//     campaign, so nothing here is validated against it and nothing here pretends to be.
 //   * A hyper-nuclear target.
 //   * Every buffer capacity.
 #ifndef G4GPU_HADRONIC_EMEXTRA_LEPTON_VD_CUH
@@ -171,7 +193,11 @@ __host__ __device__ inline void lepton_hadronic_vertex(double gamma_total_energy
   // give a pi0 whose TOTAL energy is the photon's. Transcribed as the kinetic energy P5's
   // HadProjectile carries, which is `gammaE - piMass` either way.
   r.used_ftf = true;
-  r.refusal = EmExtraRefusal::kSubModel;   // no FTF workspace here; see the file header
+  // Refused by name at the point the hand-over would have happened. It goes through
+  // `ftf/ftf_entry.cuh` - P11d's caller-side contract, one 329,816-byte
+  // `entry::HadronWorkspace` slot per thread that can have a lepton above 10 GeV in flight -
+  // and through nothing else; that header is not in this branch. See the file header.
+  r.refusal = EmExtraRefusal::kSubModel;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -183,6 +209,32 @@ __host__ __device__ inline void lepton_hadronic_vertex(double gamma_total_energy
 /// `938.27 + 939.57`, which is 3e-6 smaller and which `GetVirtualFactor` uses one call later.
 __host__ __device__ inline constexpr double evd_dM() {
   return units::proton_mass_c2<double>() + units::neutron_mass_c2<double>();
+}
+
+/// The kinetic energy of the probe photon `CalculateEMVertex` builds for its acceptance test,
+/// which is NOT the photon energy. See the acceptance test below and docs/RISK.md V175.
+///
+///     G4DynamicParticle photon(G4Gamma::Gamma(), photonEnergy, G4ThreeVector(0.,0.,1.));
+///
+/// resolves to `G4DynamicParticle(const G4ParticleDefinition*, G4double totalEnergy,
+/// const G4ThreeVector& aParticleMomentum)`, and the momentum is the UNIT vector, so:
+///
+///     pModule2 = 1;  mass2 = E^2 - 1;  PDGmass2 = 0
+///     mass2 < EnergyMRA2 (1 keV squared) ?  dynamicalMass = 0, kinetic = E
+///     |PDGmass2 - mass2| > EnergyMRA2   ?  dynamicalMass = sqrt(mass2),
+///                                          kinetic = E - sqrt(E^2 - 1)
+///
+/// `E - sqrt(E^2 - 1)` is 1 at E = 1 and falls monotonically - 0.27 at 2 MeV, 0.05 at 10 MeV,
+/// 2.7 keV at 188 MeV - so it never reaches `G4PhotoNuclearCrossSection`'s `THmin` of 2 MeV and
+/// the cross section is always zero. The `mass2 < EnergyMRA2` arm (E within 5e-7 of 1 MeV) is
+/// written out too, and gives E itself, which is also below THmin.
+__host__ __device__ inline double evd_probe_kinetic_energy(double photon_energy) {
+  // CLHEP's EnergyMomentumRelationAllowance is 1 keV; G4DynamicParticle squares it.
+  const double kEnergyMRA = 1.0e-3;                  // 1 keV in MeV
+  const double kEnergyMRA2 = kEnergyMRA * kEnergyMRA;
+  const double mass2 = photon_energy * photon_energy - 1.0;   // |p| = 1 by construction
+  if (mass2 < kEnergyMRA2) { return photon_energy; }
+  return photon_energy - std::sqrt(mass2);
 }
 
 /// G4ElectroVDNuclearModel::ApplyYourself + CalculateEMVertex.
@@ -234,22 +286,32 @@ __host__ __device__ inline LeptonVdResult electro_vd_apply(
     return r;
   }
 
-  // CalculateEMVertex's acceptance test.
+  // CalculateEMVertex's acceptance test, which CANNOT REJECT ANYTHING. See this file's header
+  // and docs/RISK.md V175: the probe photon is built with
   //
-  // `gammaXS` IS `G4PhotoNuclearCrossSection` AND NOT `G4GammaNuclearXS`, and that is an order
-  // dependence rather than a configuration. The model's constructor asks the registry for
-  // "PhotoNuclearXS" first; `G4GammaNuclearXS`'s own constructor has already asked for the same
-  // name, found nothing, and done `new G4PhotoNuclearCrossSection()`, whose base constructor
-  // registers it - and `ConstructGammaElectroNuclear` builds the cross section before the model.
-  // So the acceptance test runs on the pure CHIPS parameterisation, with no IAEA data and no
-  // 150 MeV transition, while the photon process's own cross section is the IAEA one. Measured:
-  // `emextra_params.csv` carries `registry_has_PhotoNuclearXS`.
+  //     G4DynamicParticle photon(G4Gamma::Gamma(), photonEnergy, G4ThreeVector(0.,0.,1.));
   //
-  // Both evaluations are at Q2 = 0 - a REAL photon - and differ only in the energy: the second
-  // is at `photonEnergy - photonQ2/dM`, with `dM` the particle table's m_p + m_n and not the
-  // CHIPS class's own 938.27 + 939.57 that `GetVirtualFactor` uses two lines later.
+  // which selects the `(definition, TOTAL ENERGY, MOMENTUM VECTOR)` overload with a momentum of
+  // magnitude ONE, so the constructor computes `mass2 = E^2 - 1`, gives the "photon" a dynamical
+  // mass of sqrt(E^2 - 1) and a kinetic energy of `E - sqrt(E^2 - 1)` - at most 1 MeV for any E
+  // and 2.7 keV at 188 MeV. `G4PhotoNuclearCrossSection::GetElementCrossSection` reads
+  // `GetKineticEnergy()` and returns 0 below `THmin` = 2 MeV, so **`sigNu` is identically zero
+  // for every lepton, every energy and every element** and `sigNu*rand() > sigK*rndFraction` is
+  // `0 > something >= 0`, which is false. Every virtual photon is accepted.
+  //
+  // `gammaXS` is `G4PhotoNuclearCrossSection` and not `G4GammaNuclearXS` - an order dependence,
+  // measured through `registry_has_PhotoNuclearXS`, docs/RISK.md V172 - and it does not matter
+  // either, for the same reason.
+  //
+  // Reproduced rather than simplified: the probe's kinetic energy is computed the way the
+  // constructor computes it and handed to the same cross section, the second evaluation is at
+  // `photonEnergy - photonQ2/dM` as `SetKineticEnergy` leaves it, `GetVirtualFactor` is called,
+  // and the deviate is DRAWN. Collapsing this to "always accept" would lose the draw and
+  // desynchronise the stream, and would hide the fact that a future Geant4 which fixes the
+  // constructor call would start rejecting.
+  const double probe_kin = evd_probe_kinetic_energy(photonEnergy);
   const g4gpu::hadronic::xs::XsValue<double> snu =
-      chips::photo_element_xs<double>(photonEnergy, target.z);
+      chips::photo_element_xs<double>(probe_kin, target.z);
   const double shifted = photonEnergy - photonQ2 / evd_dM();
   const g4gpu::hadronic::xs::XsValue<double> sk =
       chips::photo_element_xs<double>(shifted, target.z);

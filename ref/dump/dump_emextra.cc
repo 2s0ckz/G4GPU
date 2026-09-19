@@ -675,6 +675,21 @@ struct SpeciesBucket {
   double sum_e = 0.0;       ///< sum over particles of the kinetic energy
   double sum_e2 = 0.0;
   double sum_cos = 0.0;     ///< sum over particles of cos(theta) about the beam
+  /// THE HARD COMPONENT, SPLIT OFF, and it is not tidiness.
+  ///
+  /// A gamma-p collision inside the nucleus has an ELASTIC channel - `{gam, pro}` is the first
+  /// two-body final state of `G4CascadeT1GamNChannel`, with a cross section of 0.1 to 2.7
+  /// microbarn against a total of a hundred times that - so a few events in a thousand let the
+  /// projectile photon out with nearly its full energy. The de-excitation gammas that make up
+  /// the rest of the bucket are one or two MeV. A MEAN over both is not a statistic: seven
+  /// events in two thousand carrying 2.9 GeV each move the gamma bucket's mean by a factor of
+  /// four and its rms by a factor of forty, and two samples of two thousand cannot agree on it
+  /// however right they both are. So the bucket is split at a tenth of the projectile energy
+  /// and the two halves are compared as what they are: a spectrum, and a RATE.
+  long long count_hard = 0;
+  double sum_e_hard = 0.0;
+  double sum_e2_hard = 0.0;
+  double max_e = 0.0;
 };
 
 /// The species this package can produce, bucketed the way `bertini_apply_species.csv` buckets
@@ -723,7 +738,7 @@ struct CaseStats {
 };
 
 void accumulate(CaseStats& st, const G4HadFinalState* hfs, G4bool lepton_survives,
-                G4double lepton_kin) {
+                G4double lepton_kin, G4double hard_threshold) {
   ++st.events;
   const G4int n = (hfs != nullptr) ? G4int(hfs->GetNumberOfSecondaries()) : 0;
   if (n == 0) { ++st.empty; }
@@ -749,6 +764,12 @@ void accumulate(CaseStats& st, const G4HadFinalState* hfs, G4bool lepton_survive
     s.sum_e += e;
     s.sum_e2 += e * e;
     s.sum_cos += c;
+    if (e > s.max_e) { s.max_e = e; }
+    if (e >= hard_threshold) {
+      ++s.count_hard;
+      s.sum_e_hard += e;
+      s.sum_e2_hard += e * e;
+    }
     ekin_sum += e;
     pz_sum += p.z() / MeV;
   }
@@ -803,18 +824,58 @@ void write_case(FILE* f, FILE* fs, const char* model, const char* particle, doub
   for (G4int b = 0; b < 13; ++b) {
     const SpeciesBucket& s = st.sp[b];
     const double c = double(s.count);
-    std::fprintf(fs, "%s,%s,%.17g,%d,%d,%s,%lld,%lld,%.17g,%.17g,%.17g,%.17g,%.17g\n", model,
-                 particle, ke, Z, A, species_bucket_name(b), s.count, s.events, s.sum_n / n,
+    // The SOFT moments - everything below the hard threshold - are what a spectrum comparison
+    // can use; `count_hard`, `ekin_hard_mean` and `max_ekin` are the rare component, compared
+    // as a rate. See SpeciesBucket's comment for why the two cannot share a mean.
+    const double csoft = double(s.count - s.count_hard);
+    const double soft_sum = s.sum_e - s.sum_e_hard;
+    const double soft_sum2 = s.sum_e2 - s.sum_e2_hard;
+    const double soft_mean = (csoft > 0.0) ? soft_sum / csoft : 0.0;
+    // The SOFT rms as well as the soft mean, because the test compares the two means with
+    // Welch's standard error and needs both samples' own spreads: for one row of this campaign
+    // the oracle's spread is fourteen times the port's, twelve samples against a hundred and
+    // forty, and using either side's alone gives 2.2 sigma or 8.0.
+    const double soft_rms =
+        (csoft > 0.0) ? std::sqrt(std::max(0.0, soft_sum2 / csoft - soft_mean * soft_mean)) : 0.0;
+    std::fprintf(fs,
+                 "%s,%s,%.17g,%d,%d,%s,%lld,%lld,%.17g,%.17g,%.17g,%.17g,%.17g,%lld,%.17g,"
+                 "%.17g,%.17g,%.17g\n",
+                 model, particle, ke, Z, A, species_bucket_name(b), s.count, s.events,
+                 s.sum_n / n,
                  std::sqrt(std::max(0.0, s.sum_n2 / n - (s.sum_n / n) * (s.sum_n / n))),
                  c > 0.0 ? s.sum_e / c : 0.0,
                  c > 0.0 ? std::sqrt(std::max(0.0, s.sum_e2 / c - (s.sum_e / c) * (s.sum_e / c)))
                          : 0.0,
-                 c > 0.0 ? s.sum_cos / c : 0.0);
+                 c > 0.0 ? s.sum_cos / c : 0.0,
+                 s.count_hard,
+                 s.count_hard > 0 ? s.sum_e_hard / double(s.count_hard) : 0.0,
+                 soft_mean, s.max_e, soft_rms);
   }
 }
 
 void dump_emextra_apply(const DumpContext&) {
-  long long n_events = 2000;
+  // THE DEFAULT IS ONE EVENT PER CASE, AND THAT IS NOT A CHOICE ABOUT STATISTICS.
+  //
+  // At 2,000 events per case this dump dies, with no message, somewhere inside its sixth case -
+  // a 10 MeV photon on carbon through `G4LowEGammaNuclearModel` - and takes the nine dumps that
+  // link after it down with it. Measured, four ways:
+  //
+  //   this dump alone, 2,000 events                    126 of 126 cases, exit 0
+  //   this dump + the nine that link before it, 2,000  126 of 126 cases, exit 0
+  //   this dump + all eighteen others, 1 event         126 of 126 cases, exit 0
+  //   this dump + all eighteen others, 2,000           dies in case 6, every time
+  //
+  // so it is the combination of the full executable and the full campaign, not either alone,
+  // and it is not memory exhaustion: the process is at 380 MB when it dies and the machine has
+  // gigabytes. docs/RISK.md V174 has what is known.
+  //
+  // Until it is understood, the campaign that the lead's `ref/oracle/run.bat` runs is ONE event
+  // per case - enough to prove every model is reachable and every column is written, and not
+  // enough to compare a distribution - and the statistical oracle is regenerated deliberately
+  // with `G4GPU_EMEXTRA_EVENTS=2000`. `tests/test_emextra_models.cu` reads the count out of the
+  // `events` column and pools the two standard errors, so it is correct either way and says
+  // which it had.
+  long long n_events = 1;
   if (const char* e = std::getenv("G4GPU_EMEXTRA_EVENTS")) {
     const long long v = std::atoll(e);
     if (v > 0) { n_events = v; }
@@ -829,7 +890,8 @@ void dump_emextra_apply(const DumpContext&) {
   std::fprintf(f, "model,particle,ke_MeV,Z,A,events,empty,no_photon,mult_mean,mult_rms,"
                   "ekin_mean,ekin_rms,lep_mean,lep_rms,coslep_mean,pz_mean\n");
   std::fprintf(fs, "model,particle,ke_MeV,Z,A,species,count,events,yield_mean,yield_rms,"
-                   "ekin_mean,ekin_rms,cos_mean\n");
+                   "ekin_mean,ekin_rms,cos_mean,count_hard,ekin_hard_mean,ekin_soft_mean,"
+                   "max_ekin,ekin_soft_rms\n");
 
   // The models. Each is constructible after the run manager has initialised: the low-energy
   // gamma model finds QBBC's "PRECO" in G4HadronicInteractionRegistry, and both lepton models
@@ -864,7 +926,7 @@ void dump_emextra_apply(const DumpContext&) {
         G4HadProjectile proj(dp);
         G4Nucleus nuc(t.a, t.z);
         G4HadFinalState* hfs = lemod->ApplyYourself(proj, nuc);
-        accumulate(st, hfs, false, 0.0);
+        accumulate(st, hfs, false, 0.0, 0.1 * ke);
         release(hfs);
       }
       write_case(f, fs, "preco", "gamma", ke, t.z, t.a, st);
@@ -890,7 +952,7 @@ void dump_emextra_apply(const DumpContext&) {
           // real run. Counted as an empty event here, the same way dump_bertini.cc counts it.
           hfs = nullptr;
         }
-        accumulate(st, hfs, false, 0.0);
+        accumulate(st, hfs, false, 0.0, 0.1 * ke);
         release(hfs);
       }
       write_case(f, fs, "bert", "gamma", ke, t.z, t.a, st);
@@ -929,7 +991,7 @@ void dump_emextra_apply(const DumpContext&) {
           }
           if (none) { ++st.no_photon; }
           st.sum_coslep += cosl;
-          accumulate(st, hfs, true, lep);
+          accumulate(st, hfs, true, lep, 0.1 * ke);
           release(hfs);
         }
         write_case(f, fs, "evd", l.name, ke, t.z, t.a, st);
@@ -962,7 +1024,7 @@ void dump_emextra_apply(const DumpContext&) {
         }
         if (none) { ++st.no_photon; }
         st.sum_coslep += cosl;
-        accumulate(st, hfs, true, lep);
+        accumulate(st, hfs, true, lep, 0.1 * ke);
         release(hfs);
       }
       write_case(f, fs, "mvd", "mu-", ke, t.z, t.a, st);

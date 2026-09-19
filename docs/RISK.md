@@ -10896,6 +10896,16 @@ arm entirely. `emextra_lepton_probe`, whose only Bertini call is through
 `preco::deexcite`, has **10,592**. The 8 kB difference is P6 plus P3, and V134's point applies:
 a frame measured on the whole kernel is not a measurement of any part of it.
 
+One number from the same measurement is a HAZARD and not an observation:
+`emextra_lepton_probe` reports **65,528 bytes of cmem[2]**, and the constant bank on sm_86 is
+65,536. Eight bytes of headroom. The translation unit that holds it includes both CHIPS tables,
+the Kokoulin table builder, P10's whole INUCL tree and P6's and P3's; the next `__constant__`
+anything in that set, or the next compiler-generated jump table, does not fit. `ptxas` fails
+rather than silently spilling, so it is a build break and not a wrong answer - but it is a build
+break that will look like it came from whatever file was edited last, and the 22,393 CHIPS
+doubles are in gmem (2,103,460 bytes total) rather than cmem precisely because they would not
+have fitted.
+
 ### V171: G4LowEGammaNuclearModel emits every secondary at exactly one nanosecond
 
 `G4LowEGammaNuclearModel::ApplyYourself` ends
@@ -11010,44 +11020,196 @@ where `MakeSamplingTable` applies it, because "this cancels" is not a licence to
 2019 SI value of e (1.602176634e-19) is what makes it 6.24150907e21 where the older
 1.602176487e-19 gives 6.24150648e21, a difference in the seventh digit.
 
-### V174: a dump that only crashes when the other dumps run first
+### V174: a dump that dies only in the full dumper, at the full campaign size, and neither alone
 
 `ref/dump/dump_emextra.cc`'s statistical campaign - 126 cases of
 `G4LowEGammaNuclearModel::ApplyYourself`, `G4CascadeInterface::ApplyYourself` and the two
-equivalent-photon models - dies with no message on the FIRST event of its sixth case, a 10 MeV
-photon on carbon, every time. Built and run on its own, with only `g4dump.cc` and
-`dump_emextra.cc` in the executable, the same 126 cases complete and the program exits 0.
+equivalent-photon models, N events each - dies with no message inside its SIXTH case, a 10 MeV
+photon on carbon, every time, and takes the nine dumps that link after it down with it. Four
+measurements bound it:
 
-So the crash is in state one of the eighteen dumps that link before it leaves behind, and it is
-worth an entry for two reasons beyond the fix.
+| executable | events per case | result |
+|---|--:|---|
+| `g4dump.cc` + `dump_emextra.cc` only | 2,000 | 126 of 126 cases, exit 0 |
+| the same + the nine dumps that link BEFORE it | 2,000 | 126 of 126 cases, exit 0 |
+| the same + ALL eighteen other dumps | 1 | 126 of 126 cases, exit 0 |
+| the same + ALL eighteen other dumps | 2,000 | dies in case 6 |
 
-The first is that **the dump registry's isolation is a compile-time isolation, not a run-time
-one**. `ref/dump/dump_registry.hh`'s header says the point of one file per package is that
-"nothing shared is touched when a dump is added", and that is true of the source. It is not true
-of the Geant4 singletons every dump reaches through: `G4DeexPrecoParameters`,
-`G4NuclearLevelData`, `G4HadronicInteractionRegistry`, `G4CrossSectionDataSetRegistry`,
-`G4PhysicsModelCatalog` and the `G4ExcitationHandler` that `G4PreCompoundModel` owns are one
-object each for the whole process, and a dump that reconfigures one - which is exactly what
-`dump_precompound.cc` does on purpose, flipping `SetOPTxs`, `UseCEMtr` and `UseNGB` to reach five
-transition configurations from one run - changes what every later dump measures. The dumps that
-run before this one and touch that machinery are `dump_bertini`, `dump_bic`, `dump_capture`,
-`dump_deexcitation` and `dump_elastic`.
+So it is the full executable AND the full campaign together, not either alone. **It is not memory
+exhaustion**: the process was polled at 195 MB and 381 MB on its way to the failure and the
+machine has gigabytes; the standalone build that completes the same 126 cases at the same size
+reaches 4 GB. It is not a G4Exception either - `G4cerr` is unbuffered and the log's last line is
+minutes older than the crash - so it is a hard fault, which prints nothing.
 
-The second is HOW it was localised, because the first three attempts were invisible. A dump that
-dies takes its buffered stdout with it: `std::printf` to a redirected stream is block-buffered,
-so progress markers printed before the crash never reached the log and the log's last line was
-whatever G4cerr had written minutes earlier. Two runs were spent believing the crash was
-somewhere else entirely. The markers are now ROWS IN THE CSV, written and flushed before each
-case, and the file is opened before any Geant4 call in its block; the CSV survives because it is
-flushed, and `emextra_apply.csv`'s six lines named the case in one run. The same technique found
-the earlier crash in this file's own gamma-nuclear block.
+What is NOT yet known is the mechanism, and the entry says so rather than guessing. Two things
+are ruled out by the table above (the dumps that run before it, and the campaign's own size),
+one is ruled out by measurement (memory), and what is left is the one difference between rows
+three and four: the campaign running long enough to reach whatever the later-linking dumps'
+static data has changed about the heap. The candidates are the Geant4 singletons every dump
+reaches through - `G4DeexPrecoParameters`, `G4NuclearLevelData` and its lazily-read level
+schemes, `G4HadronicInteractionRegistry`, `G4CrossSectionDataSetRegistry`,
+`G4PhysicsModelCatalog`, and the `G4ExcitationHandler` that the shared "PRECO"
+`G4PreCompoundModel` owns - because the dump registry's isolation is a COMPILE-TIME isolation
+and not a run-time one. `ref/dump/dump_registry.hh`'s header says the point of one file per
+package is that "nothing shared is touched when a dump is added", and that is true of the
+source and not of the process: `dump_precompound.cc` reconfigures `SetOPTxs`, `UseCEMtr` and
+`UseNGB` on purpose, to reach five transition configurations from one run, and any dump that
+does that changes what every other dump measures.
 
-The fix for that earlier one is itself worth recording, because it is a null pointer Geant4
-dereferences without a test. `G4KokoulinMuonNuclearXS::GetElementCrossSection` is
-`theCrossSection[Z]->Value(ekin)`, and `theCrossSection` is a static array filled only for the
-elements that existed when `BuildPhysicsTable` ran. `ref/dump/g4dump.cc` builds all 309 NIST
-materials AFTER initialisation, to write `nist_materials.hh`, so the element table grows from the
-detector's fourteen elements to ninety-two and every one of the new ones is a null pointer in
-that array. Calling the public and idempotent `BuildCrossSectionTable()` before the loop fixes
-it. A transport run cannot reach this - its elements are fixed before initialisation - but a
-dump, or any program that adds a material late, can.
+**Until it is understood the campaign's default is ONE event per case**, which is enough to
+prove every model is reachable and every column is written and not enough to compare a
+distribution, and `tests/test_emextra_models.cu` says so loudly - it counts the cases whose
+oracle has under a hundred events and prints that they are NOT asserted statistically, because
+a five-sigma band against a one-event oracle passes whatever the port did. The statistical
+oracle is regenerated deliberately with `G4GPU_EMEXTRA_EVENTS=2000`, which works in the
+standalone build, and the test reads the count out of the CSV's own `events` column and pools
+the two standard errors, so it is correct either way and says which it had.
+
+TWO LESSONS THAT COST MORE THAN THE BUG.
+
+**A dump that dies takes its buffered stdout with it.** `std::printf` to a redirected stream is
+block-buffered, so progress markers printed before the crash never reached the log and the
+log's last line was whatever `G4cerr` had written minutes earlier. Three runs were spent
+believing the crash was somewhere else entirely. The markers are now ROWS IN THE CSV, written
+and flushed before each case, and the file is opened before any Geant4 call in its block: the
+CSV survives because it is flushed, and `emextra_apply.csv`'s twelve lines named the case in one
+run. The same technique had already been needed for this file's gamma-nuclear block.
+
+**Two dumper processes can run at once, and they write the same CSVs.** A background oracle run
+that the harness reports as failed may leave its `g4dump.exe` alive; a second run then starts,
+both write `ref/oracle/*.csv`, and the file on disk is from whichever wrote last - which for a
+while made an old binary's crash look like a new binary's. `Get-Process g4dump` showed two of
+them at once. Nothing in `ref/oracle/run.bat` prevents it, and a per-invocation lock or a
+refusal to start when one is already running is worth the three lines: the same `%TEMP%`
+collision `docs/HADRONIC_PLAN.md` section 7 flags for `build_all.bat` applies to the oracle.
+
+The fix for the earlier crash in this file's own gamma-nuclear block is worth recording
+separately, because it is a null pointer Geant4 dereferences without a test.
+`G4KokoulinMuonNuclearXS::GetElementCrossSection` is `theCrossSection[Z]->Value(ekin)`, and
+`theCrossSection` is a static array filled only for the elements that existed when
+`BuildPhysicsTable` ran. `ref/dump/g4dump.cc` builds all 309 NIST materials AFTER
+initialisation, to write `nist_materials.hh`, so the element table grows from the detector's
+fourteen elements to ninety-two and every one of the new ones is a null pointer in that array.
+Calling the public and idempotent `BuildCrossSectionTable()` before the loop fixes it. A
+transport run cannot reach this - its elements are fixed before initialisation - but a dump, or
+any program that adds a material late, can.
+
+And one real leak was found on the way, which is why the campaign frees its own secondaries:
+`G4HadSecondary::~G4HadSecondary()` is EMPTY - it does not delete `theP` - and
+`G4HadFinalState::ClearSecondaries()` is `theSecs.clear()`, which destroys `G4HadSecondary`
+values whose destructors free nothing. In a real run `G4HadronicProcess::FillResult` takes
+ownership into the `G4ParticleChange`; a program that calls `ApplyYourself` directly and does
+not, leaks one `G4DynamicParticle` per secondary - millions of them over this campaign.
+`release()` in `dump_emextra.cc` is that, and it is correct whether or not it was the crash.
+
+### V175: a three-line acceptance test that cannot reject, and a 2,573-line cross section behind it
+
+`G4ElectroVDNuclearModel::CalculateEMVertex` decides whether the virtual photon it has just
+sampled becomes a real one:
+
+    G4DynamicParticle photon(G4Gamma::Gamma(), photonEnergy, G4ThreeVector(0.,0.,1.) );
+    G4double sigNu = gammaXS->GetElementCrossSection(&photon, targZ, mat);
+    photon.SetKineticEnergy(photonEnergy - photonQ2/dM);
+    G4double sigK = gammaXS->GetElementCrossSection(&photon, targZ, mat);
+    G4double rndFraction = electroXS->GetVirtualFactor(photonEnergy, photonQ2);
+    if (sigNu*G4UniformRand() > sigK*rndFraction) return 0;      // no gamma produced
+
+`sigNu` is identically zero, so the test is `0 > something >= 0` and **every virtual photon is
+accepted, at every lepton energy, on every element.**
+
+The first line is why. `G4DynamicParticle` has five constructors and the one that matches
+`(definition, G4double, G4ThreeVector)` is
+
+    G4DynamicParticle(const G4ParticleDefinition*, G4double totalEnergy,
+                      const G4ThreeVector& aParticleMomentum);
+
+- total energy and a MOMENTUM VECTOR, not a direction. The vector passed is the unit vector, so
+`pModule2` is 1 and the constructor computes `mass2 = E^2 - 1`, finds it differs from the
+gamma's `PDGmass2` of zero by more than the 1 keV allowance, and sets
+
+    theDynamicalMass = sqrt(E^2 - 1);   SetKineticEnergy(E - sqrt(E^2 - 1));
+
+`E - sqrt(E^2 - 1)` is 1 MeV at E = 1 MeV and falls monotonically: 0.27 at 2 MeV, 0.05 at
+10 MeV, 2.7 keV at 188 MeV. It never reaches `G4PhotoNuclearCrossSection`'s `THmin` of 2 MeV, so
+the cross section returns 0 for every photon the model will ever sample. The probe particle is
+not a photon at all - it is a 188 MeV-mass object at rest to within a few keV.
+
+The second evaluation is unaffected: `SetKineticEnergy(photonEnergy - photonQ2/dM)` sets the
+kinetic energy directly, so `sigK` is the cross section at the intended energy and is non-zero.
+It is multiplied by `rndFraction` and compared against zero, so it cannot matter - and neither
+can `G4ElectroNuclearCrossSection::GetVirtualFactor`, nor the 2,573-line class it belongs to, as
+far as this test is concerned. (That class is still load-bearing: `GetEquivalentPhotonEnergy`
+and `GetEquivalentPhotonQ2` are what sample the photon in the first place, and the process's
+cross section is `G4ElectroNuclearCrossSection` too.)
+
+**How it was found, and what it was worth.** The port's first version evaluated `sigNu` at the
+photon's true energy, which is what the line looks like it does, and the campaign measured the
+difference: for a 200 MeV electron on hydrogen the port produced no photon in 82% of events and
+Geant4 in 0% of 2,000, because hydrogen's photo-nuclear cross section is zero below the
+144.68 MeV pion threshold and `GetVirtualFactor` returns zero whenever `GetEquivalentPhotonQ2`
+returns zero - which it does for six of the eight phases of the prescribed engine, since
+`y >= 1 - 1/(2*lastG)` holds for most of the photon spectrum. Both of those are correct
+transcriptions; the acceptance test was the error. Reproducing the constructor's arithmetic -
+`evd_probe_kinetic_energy` in `emextra/lepton_vd.cuh` - moved the campaign's worst multiplicity
+comparison from 67.6 sigma to 3.6, its worst species yield from 54.7 to 4.2, and the
+no-photon fraction from 67.6 to 0.7.
+
+Reproduced and not simplified. The port computes the probe's kinetic energy the way the
+constructor computes it, hands it to the same cross section, evaluates `sigK` and
+`GetVirtualFactor`, and DRAWS the deviate - because collapsing it to "always accept" would lose
+the draw and desynchronise the stream, and would hide the fact that a Geant4 which fixed the
+constructor call would start rejecting.
+
+### V176: a species mean is not a statistic when the species has two populations
+
+The campaign's first run reported 67.79 sigma for the gamma SPECTRUM of a 3 GeV photon on
+oxygen: the port's mean gamma kinetic energy was 6.97 MeV and Geant4's 1.756, with the same
+yield (1.935 per event against 1.942) and the same summed event energy. A four-fold difference
+in a mean, with the yields agreeing, is the shape of a real physics discrepancy, and it was not
+one.
+
+`max_ekin` is what said so. The port's largest gamma in that case is **2,996 MeV out of a
+3,000 MeV projectile**, and its rms is 125 MeV against the oracle's 3.39. Printing the whole
+final state of the first three such events showed what they are:
+
+    HARD-GAMMA event 294: tries 1 collider 1 trivialised 0 no_interaction 0  n_sec 9
+        pdg 22   T 2931.7603  cos  0.9897      <- the projectile, forward, nearly intact
+        pdg 2112 T   25.4989  cos -0.6193
+        pdg 2212 T    3.2016  cos  0.0587
+        pdg 22   T    0.7765 / 0.4408 / 0.1650 / 0.1003   <- de-excitation
+        pdg 1000070130 (N13) T 4.2121
+        summed T = 2966.48, balance dE = -5.3e-06 GeV
+
+an ELASTIC gamma-nucleon scatter inside the nucleus. `{gam, pro}` is the FIRST two-body final
+state of `G4CascadeT1GamNChannel` - "gamma p elastic ( = gamma n elastic )" - with a cross
+section of 0.1 to 2.7 microbarn against a total a hundred times larger, so a few events in a
+thousand end that way, and `retryInelasticNucleus` does not regenerate them because the final
+state has nine products and its elastic arm needs fewer than three.
+
+So the gamma bucket holds two populations three orders of magnitude apart: de-excitation photons
+at one or two MeV, and once in a few hundred events the projectile. Seven such events in two
+thousand move the bucket's MEAN by a factor of four and its RMS by forty, and two samples of two
+thousand cannot agree on that mean however right both are - Geant4's own zero in 2,000 is
+compatible with a rate of 0.07% (which would give 1.4 events) at 25% probability. The
+comparison was wrong, not the physics.
+
+The fix is the split the dump now writes: `count_hard`, `ekin_hard_mean`, `ekin_soft_mean` and
+`max_ekin` per species, at a tenth of the projectile energy, so that the rare component is
+compared as a POISSON RATE and the spectrum as a spectrum. It is the same lesson as V133 - a
+five-sigma band on a conserved quantity is a band of zero width - from the other end: a
+five-sigma band on a mean whose distribution has a component at a thousand times the mode is a
+band of the wrong width, and both come from asking what the quantity IS before choosing the
+band. The same run's `SummedKineticEnergy` needed the opposite treatment in the same test: for
+`G4LowEGammaNuclearModel` it is the photon energy less the recoil every single event, an
+identity whose sample rms is 1e-7 of its mean, and a 1e-3 relative band on it is right where a
+five-sigma band is a band of nothing; for the two lepton models the same quantity is a function
+of the sampled photon energy and the relative band reported 217 for two means a fifth of a
+standard error apart. The test now chooses by the ORACLE'S OWN RMS - an rms under 1e-6 of the
+mean is an identity - rather than by which model it is.
+
+One more of the same kind, found by the same run: a species the oracle never produced used to
+be a hard failure if the port produced any at all. Two thousand events that contain no internal
+conversion electron are perfectly compatible with a rate of one in two thousand, which is what
+the port produced, and the check failed on exactly that. A zero count is now compared like any
+other, with the pooled rate as the variance - which still fails loudly for a species the port
+invents at a real rate, and says nothing about one neither sample can resolve.

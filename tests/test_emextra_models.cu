@@ -11,19 +11,25 @@
 //
 // WHAT IS COMPARED, AND WHY IT IS NOT ONE THING
 //
-// The deterministic half is the EM vertex: `emextra_eqphoton.csv` already pins the CHIPS
-// sampler's photon energy, Q2 and virtual factor exactly under the eight-value cycle
-// (tests/test_emextra_xs.cu), and `emextra_muvertex.csv` does the same for the muon model's
-// table lookup and its t-rejection loop. What cannot be pinned is the whole model: below the EM
-// vertex sits Bertini, whose three nested retry loops mean no prescribed engine survives to the
-// top (docs/PORTED.md 2.1.12 and docs/RISK.md V132). So the assembly is compared as a
-// DISTRIBUTION, against `emextra_apply.csv`, exactly as test_bertini_apply.cu compares its own.
+// The deterministic half is the EM vertex, and it is pinned ELSEWHERE:
+// `tests/test_emextra_xs.cu` compares `GetEquivalentPhotonEnergy`, `GetEquivalentPhotonQ2`,
+// `GetVirtualFactor` and their three draw counts against `emextra_eqphoton.csv` bit for bit
+// under the prescribed eight-value cycle, and the Kokoulin double-differential cross section
+// every term of the muon model's sampling table is built from against `emextra_kokoulin.csv`.
+// What cannot be pinned is the whole model: below the EM vertex sits Bertini, whose three
+// nested retry loops mean no prescribed engine survives to the top (docs/PORTED.md 2.1.12 and
+// docs/RISK.md V132). So the assembly is compared as a DISTRIBUTION, against
+// `emextra_apply.csv`, exactly as test_bertini_apply.cu compares its own.
 //
-// THE REFUSAL RATE IS PART OF THE ANSWER AND IS REPORTED PER CASE. A 5 GeV photon chooses the
-// unported QGS generator with probability (5000-3000)/3000 = 2/3, so two thirds of that case's
-// events are refused by name and the third that run are compared against an oracle that ran all
-// of them - which is only legitimate because the model choice is independent of the event, and
-// the test says so rather than hiding it.
+// AND THE MODEL CHOICE IS NOT IN THIS CAMPAIGN. Which of GammaNPreco, Bertini and the unported
+// QGS generator a photon of a given energy gets is a deterministic function plus one uniform,
+// and `tests/test_emextra_config.cu` compares it against the closed form over 200,000 draws at
+// each of seven points. Mixing it in here would put two thirds of the 5 GeV events into a model
+// this port refuses and measure nothing about the model that ran. So the choice is validated
+// exactly, each model is driven directly and validated statistically, and the two are separate.
+//
+// THE REFUSAL RATE IS STILL PART OF THE ANSWER and is reported per case, because Bertini has
+// refusals of its own.
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -120,6 +126,204 @@ int fails = 0;
 std::string oracle_dir() {
   const char* e = std::getenv("G4GPU_ORACLE");
   return (e != nullptr && e[0] != '\0') ? std::string(e) : std::string("ref/oracle");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Statistical comparison, as tests/test_bertini_apply.cu defines it
+// ---------------------------------------------------------------------------------------------
+
+struct Bucket {
+  const char* name;
+  long long n = 0;
+  double worst = 0.0;      ///< worst deviation in units of the pooled standard error
+  std::string where;
+  double tol = 5.0;
+};
+
+std::vector<Bucket> buckets;
+
+int new_bucket(const char* name, double tol) {
+  Bucket b;
+  b.name = name;
+  b.tol = tol;
+  buckets.push_back(b);
+  return static_cast<int>(buckets.size()) - 1;
+}
+
+double case_worst = 0.0;
+
+/// Compare two sample means in units of the pooled standard error, with the population
+/// standard deviation estimated from the PORT's sample - the same function and the same
+/// reasoning as test_bertini_apply.cu's. A zero variance on both sides falls back to a relative
+/// comparison at 1e-12, because a zero band fails on a rounding difference.
+void cmp_sigma(int bi, double got, double want, double sigma, long long n_got, long long n_want,
+               const std::string& where) {
+  Bucket& b = buckets[bi];
+  ++b.n;
+  double dev;
+  if (sigma > 0.0 && n_got > 0 && n_want > 0) {
+    const double se = sigma * std::sqrt(1.0 / double(n_got) + 1.0 / double(n_want));
+    dev = (se > 0.0) ? std::fabs(got - want) / se : 0.0;
+  } else {
+    const double scale = (std::fabs(want) > 0.0) ? std::fabs(want) : 1.0;
+    dev = std::fabs(got - want) / scale / 1e-12;
+  }
+  if (dev > 3.5) {
+    std::printf("  DIAG %-22s %-46s %6.2f sigma got %.6g want %.6g  (sigma %.4g, n %lld/%lld)\n",
+                b.name, where.c_str(), dev, got, want, sigma, n_got, n_want);
+  }
+  if (dev > case_worst) { case_worst = dev; }
+  if (dev > b.worst) {
+    b.worst = dev;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, " got %.6g want %.6g", got, want);
+    b.where = where + buf;
+  }
+}
+
+/// Compare two sample means with WELCH'S standard error - each sample's own spread over its own
+/// count - which is what a comparison of two means with unequal variances is.
+///
+/// `cmp_sigma` above uses one pooled sigma, as test_bertini_apply.cu does, and that is right
+/// when both samples estimate the same spread. It is wrong by a factor of four when they do not:
+/// this campaign has a species row with twelve oracle samples of spread 17.2 against a hundred
+/// and forty port samples of spread 4.7, and the same row reads 8.02 sigma with the port's
+/// spread used for both, 2.2 with the oracle's, and 2.25 under Welch. The difference is not a
+/// band to choose - it is a question about what the error of a mean IS - so wherever the oracle
+/// dumps its own rms beside its mean, the comparison uses both.
+void cmp_welch(int bi, double got, double got_sd, long long n_got, double want, double want_sd,
+               long long n_want, const std::string& where) {
+  Bucket& b = buckets[bi];
+  ++b.n;
+  double dev = 0.0;
+  const double v = (n_got > 0 ? got_sd * got_sd / double(n_got) : 0.0) +
+                   (n_want > 0 ? want_sd * want_sd / double(n_want) : 0.0);
+  if (v > 0.0) {
+    dev = std::fabs(got - want) / std::sqrt(v);
+  } else {
+    const double scale = (std::fabs(want) > 0.0) ? std::fabs(want) : 1.0;
+    dev = std::fabs(got - want) / scale / 1e-12;
+  }
+  if (dev > 3.5) {
+    std::printf("  DIAG %-22s %-46s %6.2f sigma got %.6g +- %.4g (n %lld)  want %.6g +- %.4g "
+                "(n %lld)\n",
+                b.name, where.c_str(), dev, got, got_sd, n_got, want, want_sd, n_want);
+  }
+  if (dev > case_worst) { case_worst = dev; }
+  if (dev > b.worst) {
+    b.worst = dev;
+    char buf[200];
+    std::snprintf(buf, sizeof buf, " got %.6g +-%.4g n=%lld want %.6g +-%.4g n=%lld", got,
+                  got_sd, n_got, want, want_sd, n_want);
+    b.where = where + buf;
+  }
+}
+
+/// A conserved quantity compared RELATIVELY and not in sigma. docs/RISK.md V133: the total
+/// energy of a final state is an identity, its sample variance is rounding, and a five-sigma
+/// band on it is a band of zero width that reports hundreds of sigma for six digits of
+/// agreement.
+void cmp_rel(int bi, double got, double want, double tol, const std::string& where) {
+  Bucket& b = buckets[bi];
+  ++b.n;
+  const double scale = (std::fabs(want) > 0.0) ? std::fabs(want) : 1.0;
+  const double rel = std::fabs(got - want) / scale;
+  const double dev = rel / tol;   // in units of the stated band
+  if (dev > case_worst) { case_worst = dev; }
+  if (dev > b.worst) {
+    b.worst = dev;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, " got %.6g want %.6g (rel %.3e)", got, want, rel);
+    b.where = where + buf;
+  }
+}
+
+/// Running moments for one quantity, plus the largest value seen.
+///
+/// The maximum is not decoration. A species whose mean is out by a factor of four and whose rms
+/// is out by a factor of forty has a few enormous entries, not a shifted distribution, and the
+/// largest one names what they are: a secondary above the projectile's own energy is a
+/// mis-binned particle or an unphysical one, and either is a finding rather than a tolerance.
+struct Moments {
+  long long n = 0;
+  double s1 = 0.0, s2 = 0.0;
+  double max = 0.0;
+  void add(double x) { ++n; s1 += x; s2 += x * x; if (x > max) { max = x; } }
+  double mean() const { return (n > 0) ? s1 / double(n) : 0.0; }
+  double var() const {
+    if (n < 2) { return 0.0; }
+    const double m = mean();
+    const double v = s2 / double(n) - m * m;
+    return (v > 0.0) ? v : 0.0;
+  }
+  double sigma() const { return std::sqrt(var()); }
+};
+
+std::vector<std::string> split(const std::string& s) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (const char c : s) {
+    if (c == ',') { out.push_back(cur); cur.clear(); }
+    else if (c != '\n' && c != '\r') { cur.push_back(c); }
+  }
+  out.push_back(cur);
+  return out;
+}
+
+struct Csv {
+  std::map<std::string, std::size_t> ix;
+  std::vector<std::vector<std::string>> rows;
+  bool load(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (f == nullptr) { return false; }
+    static char line[8192];
+    bool first = true;
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+      const std::vector<std::string> v = split(line);
+      if (first) {
+        for (std::size_t i = 0; i < v.size(); ++i) { ix[v[i]] = i; }
+        first = false;
+      } else if (!v.empty() && !v[0].empty()) {
+        rows.push_back(v);
+      }
+    }
+    std::fclose(f);
+    return !first;
+  }
+  const std::string& s(std::size_t r, const char* col) const {
+    static const std::string empty;
+    const auto it = ix.find(col);
+    if (it == ix.end() || it->second >= rows[r].size()) { return empty; }
+    return rows[r][it->second];
+  }
+  double d(std::size_t r, const char* col) const { return std::atof(s(r, col).c_str()); }
+  long long ll(std::size_t r, const char* col) const { return std::atoll(s(r, col).c_str()); }
+};
+
+/// The same thirteen species buckets `dump_emextra.cc` uses, by the port's (pdg, Z, A).
+int species_bucket_of(int pdg, int z, int a) {
+  switch (pdg) {
+    case 2112: return 0;
+    case 2212: return 1;
+    case 211: return 7;
+    case -211: return 8;
+    case 111: return 9;
+    case 22: return 10;
+    case 11: return 11;
+    default: break;
+  }
+  if (a == 2 && z == 1) { return 2; }
+  if (a == 3 && z == 1) { return 3; }
+  if (a == 3 && z == 2) { return 4; }
+  if (a == 4 && z == 2) { return 5; }
+  if (a > 4) { return 6; }
+  return 12;
+}
+
+const char* species_bucket_name(int i) {
+  static const char* kNames[13] = {"n",   "p",   "d",    "t",     "He3", "alpha", "heavier",
+                                   "pi+", "pi-", "pi0",  "gamma", "e-",  "other"};
+  return (i >= 0 && i < 13) ? kNames[i] : "other";
 }
 
 }  // namespace
@@ -403,6 +607,436 @@ int main() {
       }
     }
   }
+
+  // -------------------------------------------------------------------------------------------
+  // WHERE THE HARD PHOTONS COME FROM
+  //
+  // The campaign below found that the port's gamma SPECTRUM for a 3 GeV photon on oxygen has a
+  // mean of 6.97 MeV against Geant4's 1.756, with the same yield (1.94 per event) and the same
+  // summed event energy - so about fourteen events in two thousand contain one gamma of a GeV
+  // or so where Geant4 contains none. This block finds such an event and prints the whole final
+  // state, because "the mean is four times out" is not a finding and "one secondary in 0.7% of
+  // events is the projectile coming back out" is.
+  // -------------------------------------------------------------------------------------------
+  // Off by default: it costs twenty thousand 3 GeV Bertini events and the finding it produced
+  // is recorded in docs/RISK.md V176. `G4GPU_EMEXTRA_HARDGAMMA=1` runs it again.
+  if (std::getenv("G4GPU_EMEXTRA_HARDGAMMA") != nullptr) {
+    Philox<double> drng(0xD1A6u, 1u, 2u);
+    int printed = 0;
+    for (int k = 0; k < 20000 && printed < 3; ++k) {
+      HadProjectile<double> p;
+      p.pdg = 22;
+      p.mass = 0.0;
+      p.kin_energy = 3000.0;
+      HadNucleus n;
+      n.a = 16;
+      n.z = 8;
+      const bert::ApplyResult rr = bert::apply_yourself(
+          p, n, *fs, ee::qbbc_gamma_deexcite_choice(), bert::default_cascade_params(),
+          bert::default_interface_limits(), *ws.model, *ws.global_out, *ws.out, *ws.dex_out,
+          *ws.tmp, *ws.epo, *ws.bert_ws, lt, pool, ws.preco, 0, drng);
+      double maxg = 0.0;
+      for (int i = 0; i < fs->n_secondaries; ++i) {
+        if (fs->secondaries[i].pdg == 22 && fs->secondaries[i].kin_energy > maxg) {
+          maxg = fs->secondaries[i].kin_energy;
+        }
+      }
+      if (maxg < 100.0) { continue; }
+      ++printed;
+      std::printf("HARD-GAMMA event %d: tries %d collider %d trivialised %d no_interaction %d "
+                  "would_throw %d refusal %d fate %d  n_sec %d\n",
+                  k, rr.n_tries, rr.n_collider_tries, int(rr.trivialised),
+                  int(rr.no_interaction), int(rr.would_throw), int(rr.refusal),
+                  int(rr.fate_refusal), fs->n_secondaries);
+      double esum = 0.0;
+      for (int i = 0; i < fs->n_secondaries; ++i) {
+        const HadSecondary<double>& s = fs->secondaries[i];
+        esum += s.kin_energy;
+        std::printf("    pdg %11d Z %3d A %3d  T %10.4f  m %10.4f  cos %7.4f\n", s.pdg, s.z,
+                    s.a, s.kin_energy, s.mass, s.direction.z);
+      }
+      std::printf("    summed T = %.4f, balance dE = %.6g dP = %.6g\n", esum,
+                  rr.balance.delta_e(), rr.balance.delta_p());
+    }
+    if (printed == 0) {
+      std::printf("HARD-GAMMA: none in 20,000 events - the campaign's finding does not "
+                  "reproduce\n");
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The statistical campaign against emextra_apply.csv and emextra_apply_species.csv
+  //
+  // Four models, 126 cases, N events each side. The oracle's N is in its own `events` column -
+  // 2,000 by default, which is what bertini_apply.csv uses - and the port runs
+  // `G4GPU_EMEXTRA_EVENTS` times that, 10 by default, so the port's own side is 20,000 as the
+  // P13 brief asks. Raising it does not tighten the comparison: the pooled error is then
+  // dominated by the ORACLE's two thousand. What it does is separate a real difference from
+  // noise on the port's side.
+  //
+  // FIVE SIGMA, over about four thousand comparisons, is the band. The exceptions are stated
+  // where they are taken:
+  //   * the summed secondary kinetic energy is compared RELATIVELY at 1e-3, not in sigma -
+  //     docs/RISK.md V133, and this is the same trap: for GammaNPreco the total is the photon
+  //     energy less the recoil every single time, so its sample variance is rounding;
+  //   * `pz_mean` likewise, at 1e-3;
+  //   * a species whose oracle count is zero is not compared, it is COUNTED - a yield the port
+  //     produces and Geant4 never did is reported as a coverage failure instead, which is the
+  //     direction that matters;
+  //   * a case whose refusal fraction is above 5% reports its worst sigma rather than
+  //     asserting it, because the port's sample is then a conditional distribution and the
+  //     oracle's is not. Only the 5 GeV Bertini rows can be in that bracket, and they are not:
+  //     the QGS refusal belongs to the model CHOICE, which this campaign does not run.
+  // -------------------------------------------------------------------------------------------
+  const int bMult = new_bucket("Multiplicity", 5.0);
+  const int bEkinId = new_bucket("SummedEnergyIdentity", 1.0);   // relative, 1e-9 band
+  const int bEkin = new_bucket("SummedKineticEnergy", 5.0);      // sigma
+  const int bPzId = new_bucket("SummedZMomentumIdentity", 1.0);  // relative, 1e-9 band
+  const int bPz = new_bucket("SummedZMomentum", 5.0);            // sigma
+  const int bLep = new_bucket("ScatteredLeptonEnergy", 5.0);
+  const int bCos = new_bucket("ScatteredLeptonCosTheta", 5.0);
+  const int bNoPh = new_bucket("NoPhotonFraction", 5.0);
+  const int bYield = new_bucket("SpeciesYield", 5.0);
+  const int bHard = new_bucket("SpeciesHardRate", 5.0);
+  const int bKe = new_bucket("SpeciesSoftSpectrum", 5.0);
+  const int bAng = new_bucket("SpeciesCosTheta", 5.0);
+  {
+    long long mult_events = 10;
+    if (const char* m = std::getenv("G4GPU_EMEXTRA_EVENTS")) {
+      const long long v = std::atoll(m);
+      if (v > 0) { mult_events = v; }
+    }
+    Csv ca, cs;
+    if (!ca.load(dir + "/emextra_apply.csv") ||
+        !cs.load(dir + "/emextra_apply_species.csv")) {
+      std::printf("FAIL: cannot read %s/emextra_apply{,_species}.csv\n", dir.c_str());
+      ++fails;
+    } else {
+      // Index the species rows by (model, particle, ke, Z, A, species).
+      std::map<std::string, std::size_t> sidx;
+      for (std::size_t r = 0; r < cs.rows.size(); ++r) {
+        sidx[cs.s(r, "model") + "|" + cs.s(r, "particle") + "|" + cs.s(r, "ke_MeV") + "|" +
+             cs.s(r, "Z") + "|" + cs.s(r, "A") + "|" + cs.s(r, "species")] = r;
+      }
+      long long n_cases = 0, n_high_refusal = 0, n_weak = 0;
+      double grand_worst = 0.0;
+      std::string grand_where;
+      std::map<int, long long> port_refusals;
+      long long total_port_events = 0, total_port_refused = 0;
+
+      for (std::size_t r = 0; r < ca.rows.size(); ++r) {
+        const std::string model = ca.s(r, "model");
+        // The dump writes a flushed `start` marker before each case, so that a crash names the
+        // case it died in rather than taking its buffered stdout with it (docs/RISK.md V174).
+        // They are progress, not data.
+        if (model == "start") { continue; }
+        const std::string part = ca.s(r, "particle");
+        const double ke = ca.d(r, "ke_MeV");
+        const int Z = static_cast<int>(ca.ll(r, "Z"));
+        const int A = static_cast<int>(ca.ll(r, "A"));
+        const long long oev = ca.ll(r, "events");
+        const long long nev = oev * mult_events;
+        const std::string w0 = model + " " + part + " " + ca.s(r, "ke_MeV") + " MeV on Z=" +
+                               ca.s(r, "Z") + " A=" + ca.s(r, "A");
+        case_worst = 0.0;
+        ++n_cases;
+
+        Moments mult, ekin, lep, coslep, pz;
+        Moments syield[13], ske[13], scos[13];
+        // The hard component is a COUNT, not a moment - see the species comparison below.
+        long long n_hard[13] = {0};
+        double smax[13] = {0.0};
+        long long refused = 0, no_photon = 0;
+        // One stream per case, seeded from the case, so that adding a case does not move
+        // another case's numbers.
+        Philox<double> crng(0xE1EAu, static_cast<unsigned>(Z * 1000 + A),
+                            static_cast<unsigned>(ke * 10.0) + 1u);
+        for (long long k = 0; k < nev; ++k) {
+          HadProjectile<double> p;
+          double lep_kin = ke;
+          double lep_cos = 1.0;
+          bool none = false;
+          bool bad = false;
+          if (model == "preco" || model == "bert") {
+            p.pdg = 22;
+            p.mass = 0.0;
+            p.kin_energy = ke;
+          } else if (model == "evd") {
+            p.pdg = (part == "e-") ? 11 : -11;
+            p.mass = 0.510998910;
+            p.charge = (part == "e-") ? -1.0 : 1.0;
+            p.kin_energy = ke;
+          } else {
+            p.pdg = 13;
+            p.mass = 105.6583715;
+            p.charge = -1.0;
+            p.kin_energy = ke;
+          }
+          HadNucleus n;
+          n.a = A;
+          n.z = Z;
+
+          if (model == "preco") {
+            const ee::LowEGammaResult rr =
+                ee::low_e_gamma_apply(p, n, *fs, lt, pool, ws.preco, crng);
+            if (rr.refusal != ee::EmExtraRefusal::kNone) {
+              bad = true;
+              ++port_refusals[static_cast<int>(rr.refusal)];
+            }
+          } else if (model == "bert") {
+            if (A < 3) {
+              const ee::LightTargetResult rr = ee::light_target_collide(
+                  p, n, *fs, bert::default_cascade_params(), ws.bert_ws, *ws.epo,
+                  *ws.global_out, crng);
+              if (rr.refusal != ee::EmExtraRefusal::kNone) {
+                bad = true;
+                ++port_refusals[static_cast<int>(rr.refusal)];
+              }
+            } else {
+              const bert::ApplyResult rr = bert::apply_yourself(
+                  p, n, *fs, ee::qbbc_gamma_deexcite_choice(), bert::default_cascade_params(),
+                  bert::default_interface_limits(), *ws.model, *ws.global_out, *ws.out,
+                  *ws.dex_out, *ws.tmp, *ws.epo, *ws.bert_ws, lt, pool, ws.preco, 0, crng);
+              if (rr.refusal != bert::InterfaceRefusal::kNone) {
+                bad = true;
+                ++port_refusals[100 + static_cast<int>(rr.refusal)];
+              }
+            }
+          } else if (model == "evd") {
+            const ee::LeptonVdResult rr = ee::electro_vd_apply(p, n, *fs, ws, lt, pool, crng);
+            if (rr.refusal != ee::EmExtraRefusal::kNone) {
+              bad = true;
+              ++port_refusals[static_cast<int>(rr.refusal)];
+            }
+            lep_kin = rr.lepton_final_kin;
+            lep_cos = rr.lepton_cos_theta;
+            none = (rr.no_photon != ee::NoPhotonReason::kNone);
+          } else {
+            const ee::LeptonVdResult rr =
+                ee::muon_vd_apply(p, n, *fs, *mutab, ws, lt, pool, crng);
+            if (rr.refusal != ee::EmExtraRefusal::kNone) {
+              bad = true;
+              ++port_refusals[static_cast<int>(rr.refusal)];
+            }
+            lep_kin = rr.lepton_final_kin;
+            lep_cos = rr.lepton_cos_theta;
+            none = (rr.no_photon != ee::NoPhotonReason::kNone);
+          }
+          ++total_port_events;
+          if (bad) {
+            ++refused;
+            ++total_port_refused;
+            continue;
+          }
+          if (none) { ++no_photon; }
+          mult.add(double(fs->n_secondaries));
+          double esum = 0.0, pzsum = 0.0;
+          int per[13] = {0};
+          for (int i = 0; i < fs->n_secondaries; ++i) {
+            const HadSecondary<double>& s = fs->secondaries[i];
+            const int b = species_bucket_of(s.pdg, s.z, s.a);
+            ++per[b];
+            // The same split the dump makes, at the same threshold: a tenth of the projectile
+            // energy. See `SpeciesBucket` in ref/dump/dump_emextra.cc.
+            if (s.kin_energy >= 0.1 * ke) { ++n_hard[b]; }
+            else { ske[b].add(s.kin_energy); }
+            smax[b] = (s.kin_energy > smax[b]) ? s.kin_energy : smax[b];
+            scos[b].add(s.direction.z);
+            esum += s.kin_energy;
+            pzsum += s.momentum() * s.direction.z;
+          }
+          for (int b = 0; b < 13; ++b) { syield[b].add(double(per[b])); }
+          ekin.add(esum);
+          pz.add(pzsum);
+          lep.add(lep_kin);
+          coslep.add(lep_cos);
+        }
+
+        const double frac = (nev > 0) ? double(refused) / double(nev) : 0.0;
+        // AN ORACLE OF ONE EVENT PER CASE IS NOT A DISTRIBUTION, and comparing against it in
+        // sigma would pass whatever the port did - the pooled standard error is then the
+        // population sigma itself. `ref/oracle/run.bat` regenerates this campaign at ONE event
+        // per case by default, because at 2,000 the dump dies inside the full dumper (see
+        // ref/dump/dump_emextra.cc and docs/RISK.md V174), so the weak case is the NORMAL one
+        // and it must be loud rather than silently green. What is still asserted at one event:
+        // that every case ran, that every model was reached, and that no case produced neither
+        // a final state nor a named refusal.
+        const bool weak = (oev < 100);
+        if (weak) { ++n_weak; }
+        const bool assertable = (frac <= 0.05) && (mult.n > 0) && !weak;
+        if (!assertable && !weak) { ++n_high_refusal; }
+        if (mult.n == 0 && refused == 0) {
+          std::printf("FAIL: %s produced neither a final state nor a refusal in %lld events\n",
+                      w0.c_str(), nev);
+          ++fails;
+        }
+
+        if (assertable) {
+          cmp_welch(bMult, mult.mean(), mult.sigma(), mult.n, ca.d(r, "mult_mean"),
+                    ca.d(r, "mult_rms"), oev, w0 + " mult");
+          // THE ORACLE'S OWN RMS DECIDES WHICH COMPARISON THE SUMMED ENERGY GETS, and the two
+          // are not interchangeable - docs/RISK.md V133.
+          //
+          // For `preco` the summed secondary kinetic energy IS the photon energy less the
+          // recoil, every single event, so its rms is 1e-7 of its mean and it is a conservation
+          // identity: a five-sigma band on it is a band of zero width and would report hundreds
+          // of sigma for twelve digits of agreement. For `evd` and `mvd` the same quantity is a
+          // function of the SAMPLED photon energy and has an rms comparable to its mean, so a
+          // relative band at 1e-3 is absurdly tight - it reported 217 for two means that differ
+          // by a fifth of one standard error. So the rule is the data's: an rms under 1e-6 of
+          // the mean is an identity and is compared relatively at 1e-9; anything else is a
+          // random variable and is compared in sigma.
+          {
+            const double want = ca.d(r, "ekin_mean");
+            const double wrms = ca.d(r, "ekin_rms");
+            if (std::fabs(wrms) <= 1e-6 * std::fabs(want)) {
+              cmp_rel(bEkinId, ekin.mean(), want, 1e-6, w0 + " ekin (identity)");
+            } else {
+              cmp_welch(bEkin, ekin.mean(), ekin.sigma(), ekin.n, want, wrms, oev, w0 + " ekin");
+            }
+          }
+          {
+            const double want = ca.d(r, "pz_mean");
+            const double wrms = pz.sigma();   // the oracle dumps no pz rms; the port's will do
+            // 1e-6 and not 1e-9: the two sides average over different numbers of events - 2,000
+            // against 2,000 x `G4GPU_EMEXTRA_EVENTS` - so the same identity is summed in a
+            // different order on each side and the last digits do not survive. Measured: the
+            // worst of the 61 identity rows is 2.2e-8 of a 199 MeV momentum, which is 4.5 eV.
+            if (std::fabs(wrms) <= 1e-6 * std::fabs(want)) {
+              cmp_rel(bPzId, pz.mean(), want, 1e-6, w0 + " pz (identity)");
+            } else {
+              cmp_welch(bPz, pz.mean(), pz.sigma(), pz.n, want, pz.sigma(), oev, w0 + " pz");
+            }
+          }
+          if (model == "evd" || model == "mvd") {
+            cmp_welch(bLep, lep.mean(), lep.sigma(), lep.n, ca.d(r, "lep_mean"), ca.d(r, "lep_rms"), oev,
+                      w0 + " lep");
+            cmp_sigma(bCos, coslep.mean(), ca.d(r, "coslep_mean"), coslep.sigma(), coslep.n,
+                      oev, w0 + " coslep");
+            // The fraction of events in which no photon was produced. A binomial, so its
+            // standard deviation is sqrt(p(1-p)) and a zero fraction on both sides falls
+            // through to the relative comparison.
+            const double got_p = double(no_photon) / double(mult.n);
+            const double want_p = double(ca.ll(r, "no_photon")) / double(oev);
+            const double sp = std::sqrt(std::max(0.0, got_p * (1.0 - got_p)));
+            cmp_sigma(bNoPh, got_p, want_p, sp, mult.n, oev, w0 + " no_photon");
+          }
+          for (int b = 0; b < 13; ++b) {
+            const std::string key = model + "|" + part + "|" + ca.s(r, "ke_MeV") + "|" +
+                                    ca.s(r, "Z") + "|" + ca.s(r, "A") + "|" +
+                                    species_bucket_name(b);
+            const auto it = sidx.find(key);
+            if (it == sidx.end()) { continue; }
+            const std::size_t sr = it->second;
+            const long long ocount = cs.ll(sr, "count");
+            const std::string ws2 = w0 + " " + species_bucket_name(b);
+
+            // THE YIELD, INCLUDING WHEN GEANT4 PRODUCED NONE.
+            //
+            // A zero oracle count used to be a hard failure if the port produced anything at
+            // all, and that is not a statistic: two thousand events that contain no internal
+            // conversion electron are perfectly compatible with a rate of one in two thousand,
+            // and the first version of this check failed on exactly that. So a zero count is
+            // compared like any other, with the POOLED rate as the variance - which still fails
+            // loudly for a species the port invents at a real rate, and says nothing about one
+            // neither sample can resolve.
+            const double want_yield = cs.d(sr, "yield_mean");
+            const double pooled = 0.5 * (syield[b].mean() + want_yield);
+            const double ys = (syield[b].sigma() > 0.0)
+                                  ? syield[b].sigma()
+                                  : std::sqrt(pooled > 0.0 ? pooled : 1.0);
+            cmp_sigma(bYield, syield[b].mean(), want_yield, ys, syield[b].n, oev, ws2 + " yield");
+
+            // THE HARD COMPONENT AS A RATE, AND THE SOFT ONE AS A SPECTRUM.
+            //
+            // The gamma bucket of a GeV photo-nuclear event holds two populations: one or two
+            // MeV de-excitation photons, and - a few events in a thousand - the projectile
+            // itself, elastically scattered off a bound nucleon (`{gam, pro}` is the first
+            // two-body final state of `G4CascadeT1GamNChannel`, cross section 0.1 to 2.7
+            // microbarn against a total a hundred times larger). Seven such events in two
+            // thousand move the bucket's mean by a factor of four and its rms by forty, and no
+            // pair of two-thousand-event samples can agree on that mean however right both are.
+            // The first version of this comparison reported 67.79 sigma for exactly that and it
+            // was the comparison that was wrong, not the physics: `max_ekin` said the port's
+            // outlier was a 2,996 MeV photon out of a 3,000 MeV projectile, and printing the
+            // whole final state showed a forward photon at cos 0.99 with an energy balance of
+            // 5e-6 GeV - an elastic scatter, not a bug.
+            //
+            // So the hard count is a Poisson rate and the soft moments are the spectrum.
+            const long long ohard = cs.ll(sr, "count_hard");
+            const double ghard_rate = double(n_hard[b]) / double(mult.n);
+            const double ohard_rate = double(ohard) / double(oev);
+            const double hpool = 0.5 * (ghard_rate + ohard_rate);
+            if (ohard > 0 || n_hard[b] > 0) {
+              cmp_sigma(bHard, ghard_rate, ohard_rate,
+                        std::sqrt(hpool > 0.0 ? hpool : 1.0), mult.n, oev, ws2 + " hard rate");
+            }
+            const double want_soft = cs.d(sr, "ekin_soft_mean");
+            // The oracle's soft rms when it has one; `ekin_rms` IS the soft rms when the hard
+            // count is zero, which is most rows, and the column is absent in an oracle written
+            // before the split - in which case there is nothing to compare and the row is
+            // skipped rather than compared against a zero.
+            double want_soft_sd = cs.d(sr, "ekin_soft_rms");
+            if (want_soft_sd == 0.0 && ohard == 0) { want_soft_sd = cs.d(sr, "ekin_rms"); }
+            if (ske[b].n > 1 && ocount - ohard > 1 && want_soft > 0.0 && want_soft_sd > 0.0) {
+              cmp_welch(bKe, ske[b].mean(), ske[b].sigma(), ske[b].n, want_soft, want_soft_sd,
+                        ocount - ohard, ws2 + " soft ekin");
+            }
+            if (scos[b].n > 1 && ocount > 1) {
+              // cos(theta) of an isotropic population has variance 1/3 on both sides, so the
+              // pooled form is right here and Welch has nothing extra to say.
+              cmp_sigma(bAng, scos[b].mean(), cs.d(sr, "cos_mean"),
+                        std::sqrt(std::max(0.0, 1.0 / 3.0)), scos[b].n, ocount, ws2 + " cos");
+            }
+          }
+        }
+        if (case_worst > grand_worst) { grand_worst = case_worst; grand_where = w0; }
+        if (frac > 0.001 || case_worst > 4.0) {
+          std::printf("  CASE %-40s refused %6.3f%%  worst %7.2f\n", w0.c_str(), 100.0 * frac,
+                      case_worst);
+        }
+      }
+
+      std::printf("\nstatistical campaign: %lld cases, %lld port events, %lld refused "
+                  "(%.4f%%), %lld cases above the 5%% refusal bracket\n",
+                  n_cases, total_port_events, total_port_refused,
+                  total_port_events > 0
+                      ? 100.0 * double(total_port_refused) / double(total_port_events)
+                      : 0.0,
+                  n_high_refusal);
+      if (n_weak > 0) {
+        std::printf("*** %lld of %lld cases have an ORACLE OF UNDER 100 EVENTS and are NOT "
+                    "asserted statistically - only that they ran, reached a model and produced "
+                    "either a final state or a named refusal. Regenerate the campaign with "
+                    "G4GPU_EMEXTRA_EVENTS=2000 to compare distributions; see "
+                    "ref/dump/dump_emextra.cc on why that is not the default.\n",
+                    n_weak, n_cases);
+      }
+      if (!port_refusals.empty()) {
+        std::printf("port refusals by kind:");
+        for (const auto& kv : port_refusals) {
+          if (kv.first >= 100) {
+            std::printf(" bertini(%d)=%lld", kv.first - 100, kv.second);
+          } else {
+            std::printf(" %s=%lld",
+                        ee::refusal_name(static_cast<ee::EmExtraRefusal>(kv.first)), kv.second);
+          }
+        }
+        std::printf("\n");
+      }
+      std::printf("worst single comparison: %.2f in %s\n", grand_worst, grand_where.c_str());
+    }
+  }
+
+  long long total = 0;
+  for (const Bucket& b : buckets) {
+    total += b.n;
+    const bool bad = (b.worst > b.tol);
+    std::printf("%-26s %8lld pts  worst %7.2f  tol %5.2f%s%s\n", b.name, b.n, b.worst, b.tol,
+                bad ? "  FAIL " : "", bad ? b.where.c_str() : "");
+    if (bad) { ++fails; }
+  }
+  std::printf("%lld statistical comparisons\n", total);
 
   delete mutab;
   delete fs;
