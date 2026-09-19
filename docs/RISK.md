@@ -10599,3 +10599,42 @@ MEASURED with the flag on the track and the predicate read the obvious way round
 product of case 0 of `bic_imr_prop.csv` came back not-newly-added where Geant4 has it added, and
 so did the pi+ and the pi0 of case 28. The port now keeps the flag on the nucleon, through
 `BicCascadeState::nucleons`, and `is_participant` has the `return true` first.
+### V164: `apply` replaces the caller's final state and the contract does not say which
+
+P11d's `ftf/ftf_entry.cuh` is a good door: one header, a handle copied by value, a slot per thread,
+the byte cost stated, and `apply`'s doc comment names every parameter. Of `out` it says the final
+state is cleared by `apply_yourself` itself. That is true, and it is the whole of the contract on
+the question that matters to a caller which already has something in that buffer. P12's Fritiof
+arm is such a caller: the atomic cascade has just put ten electrons and gammas into the final
+state, and the nuclear model is the SECOND thing to write to it. The first wiring passed `fs`
+straight through and every one of them was gone.
+
+**What made it visible was arithmetic that cannot be true, not a test.** The campaign prints mean
+multiplicity and mean EM-cascade count per row, and the anti-proton row read
+
+    anti-p  C   mean nsec 5.750   mean EM 10.037
+
+A total smaller than one of its parts. Every other number on the row was plausible - 5.75
+secondaries from an annihilation at rest is right, and so is a ten-step cascade on carbon - and a
+reader checking either against Geant4 would have agreed with both. It was the subtraction of two
+correct numbers that was impossible.
+
+The fix is the one the Bertini arm already had: a second `HadFinalState`, the nuclear model writes
+into it, the caller appends. Both arms now do the same thing for the same reason and say so.
+
+Three things worth keeping:
+
+  * **"Cleared by X itself" says what happens to the buffer, not what the caller must do about
+    it.** The sentence a caller needs is that `apply` REPLACES the contents of `out`, so a caller
+    with secondaries already in flight must pass a separate final state and merge - a statement
+    about ownership rather than about behaviour. The lead has asked P11 to put it in the header,
+    and that is where it belongs, because the next caller will read the header and not this file.
+  * **A buffer two producers write to needs the question asked once, in the type.** Nothing in
+    `HadFinalState` distinguishes "fill this" from "add to this", so every caller of every model
+    in this port has to know by reading. That is eleven models and rising, and this is the second
+    arm of the second one to get it wrong.
+  * **The check it needed is a conservation law on counts, and it is cheap.**
+    `AtomicCascadeSurvives` now asserts per event that the final state holds at least as many
+    secondaries as the cascade put in it and that the first `n_em_cascade` of them are still
+    electrons or gammas: 1,080,164 points over the campaign at zero tolerance. A count that cannot
+    legally go down would have caught this on the first run instead of on a hand-read table.
