@@ -102,7 +102,7 @@ struct CycleRng {
 /// brief asks to be reported: the entry point instantiated for the device, with the P6
 /// hand-over behind its `__noinline__` so that `preco::deexcite`'s 10 kB frame
 /// (docs/PORTED.md 2.1.10) is not added to every caller's.
-using ProbeWS = ftf::FtfWorkspace<250, 64, 512, 320, 256, 96>;
+using ProbeWS = ftf::FtfWorkspace<250, 64, 512, 320, 512, 96>;
 
 __global__ void ftf_apply_device_probe(ftf::LundTables<double>* lund, ProbeWS* ws,
                                        physics::hadronic::HadProjectile<double>* proj,
@@ -1020,7 +1020,7 @@ int main(int argc, char** argv) {
       }
     }
     if (have) {
-      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
       WS* ws = new WS();
       const int n_events = quick ? 2000 : 20000;
       for (size_t ci = 0; ci < kModelCases.size(); ++ci) {
@@ -1464,7 +1464,7 @@ int main(int argc, char** argv) {
   {
     Csv ca, cc3;
     if (ca.load(dir + "/ftf_aaradius.csv") && cc3.load(dir + "/ftf_modelcases.csv")) {
-      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
       WS* ws = new WS();
       const int n_events = quick ? 2000 : 20000;
       std::map<std::string, int> seen;
@@ -1561,7 +1561,7 @@ int main(int argc, char** argv) {
   {
     Csv cp, cc4;
     if (cp.load(dir + "/ftf_prescatter.csv") && cc4.load(dir + "/ftf_modelcases.csv")) {
-      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
       WS* ws = new WS();
       const int n_events = quick ? 2000 : 20000;
       std::map<std::string, int> seen;
@@ -1694,7 +1694,7 @@ int main(int argc, char** argv) {
     Csv cs, cm, cc2;
     if (cs.load(dir + "/ftf_modelbig_strings.csv") && cm.load(dir + "/ftf_modelbig_mult.csv") &&
         cc2.load(dir + "/ftf_modelcases.csv")) {
-      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
       WS* ws = new WS();
       const int n_events = quick ? 20000 : 200000;
       for (const char* cname : kBig) {
@@ -1823,7 +1823,7 @@ int main(int argc, char** argv) {
   {
     Csv cw2;
     if (cw2.load(dir + "/ftf_windows.csv")) {
-      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+      using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
       WS* ws = new WS();
       static physics::hadronic::HadFinalState<double, 128> out;
       int n_rows = 0, n_points = 0, n_ran = 0, n_refused = 0, n_silent = 0;
@@ -1934,7 +1934,7 @@ int main(int argc, char** argv) {
   // wall are made of.
   // -------------------------------------------------------------------------------------------
   {
-    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
     WS* ws = new WS();
     // 512 AND NOT 128, AND THE NUMBER IS MEASURED. Before P11d part 2 the ion arm averaged 14
     // secondaries and 128 was never reached; the decay pass turns every resonance into two or
@@ -1953,6 +1953,7 @@ int main(int argc, char** argv) {
     long long secondaries = 0, with_two_residuals = 0;
     std::map<int, long long> ion_refusals;
     long long decay_full = 0, decay_nd = 0, decay_thr = 0, decay_ps = 0;
+    std::map<std::string, long long> full_where;
     for (const Ion& b : beams) {
       const double mass = deex::nuclear_mass(b.a, b.z);
       for (const Ion& t : targets) {
@@ -1987,7 +1988,17 @@ int main(int argc, char** argv) {
               // WHICH of the engine's four, since `kDecayEngineRefused` covers them all and
               // `list_full` (the decayed list outgrowing `kMaxTracks`) is a capacity while
               // `below_threshold` and `phase_space_failed` are Geant4 giving up on the physics.
-              if (ws->report.decay.list_full) { ++decay_full; }
+              if (ws->report.decay.list_full) {
+                ++decay_full;
+                // WHERE, not just how many. `kMaxTracks` went 256 -> 512 in P11d part 2 and took
+                // this from 323 events to 66; what is left is worth naming by (beam, target,
+                // energy) rather than counting, because the answer to "is 512 enough" is a
+                // statement about which collisions, not about a total.
+                char key[96];
+                std::snprintf(key, sizeof key, "%s on %s at %g GeV/n", b.name, t.name,
+                              pn / 1000.0);
+                ++full_where[key];
+              }
               if (ws->report.decay.too_many_daughters) { ++decay_nd; }
               if (ws->report.decay.below_threshold) { ++decay_thr; }
               if (ws->report.decay.phase_space_failed) { ++decay_ps; }
@@ -2040,6 +2051,10 @@ int main(int argc, char** argv) {
     if (decay_full + decay_nd + decay_thr + decay_ps > 0) {
       std::printf("      of which list_full %lld, too_many_daughters %lld, below_threshold "
                   "%lld, phase_space_failed %lld\n", decay_full, decay_nd, decay_thr, decay_ps);
+      for (const auto& kv : full_where) {
+        std::printf("      list_full at %-28s %5lld of %d events\n", kv.first.c_str(),
+                    kv.second, n_events);
+      }
     }
     if (ran == 0) {
       std::printf("FAIL: the ion arm produced no final state at any of the %lld points\n",
@@ -2071,7 +2086,7 @@ int main(int argc, char** argv) {
   // moves it by GeV.
   // -------------------------------------------------------------------------------------------
   {
-    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
     WS* ws = new WS();
     static physics::hadronic::HadFinalState<double, 128> out2;
     const int beams[] = {-2212, -2112};

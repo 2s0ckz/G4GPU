@@ -22,20 +22,23 @@
 // distinction is the whole of the sizing problem, because the two numbers differ by four orders
 // of magnitude:
 //
-//   entry::Workspace       433,376 B   ion beams included (kMaxProjA = 64)
-//   entry::HadronWorkspace 352,368 B   projectile is a single hadron (kMaxProjA = 1)
+//   entry::Workspace       539,104 B   ion beams included (kMaxProjA = 64)
+//   entry::HadronWorkspace 458,096 B   projectile is a single hadron (kMaxProjA = 1)
 //
 //   slots      Workspace      HadronWorkspace
-//       64       26.5 MB           21.5 MB
-//      256      105.8 MB           86.0 MB
-//    1,024      423.2 MB          344.1 MB
-//   65,536       27.1 GB           22.0 GB     <- what a per-TRACK reading would cost
+//       64       32.9 MB           28.0 MB
+//      256      131.6 MB          111.9 MB
+//    1,024      526.5 MB          447.4 MB
+//   65,536       33.7 GB           28.6 GB     <- what a per-TRACK reading would cost
 //
-// Both grew by 22,552 bytes in P11d part 2: `G4DecayKineticTracks` needs its own list, because
-// P9d's `bic::DecayTrack` and P6's `preco::CascadeTrack` are different shapes and neither is a
-// prefix of the other. The numbers above are `tests/test_ftf_entry.cu`'s own printout.
+// Both grew twice in P11d part 2, and both for the decay pass. 22,552 bytes for
+// `G4DecayKineticTracks`' own list, because P9d's `bic::DecayTrack` and P6's
+// `preco::CascadeTrack` are different shapes and neither is a prefix of the other; then 105,728
+// more when `kMaxTracks` went from 256 to 512, because decaying the resonances takes an ion event
+// from 14 secondaries to 33 and 323 of 36,000 heavy-ion events overflowed the old list
+// (docs/RISK.md V160). The numbers above are `tests/test_ftf_entry.cu`'s own printout.
 //
-// A 65,536-track batch does not need 65,536 workspaces and could not have them: 27.1 GB is past
+// A 65,536-track batch does not need 65,536 workspaces and could not have them: 33.7 GB is past
 // every card this project targets. What it needs is as many as the launch runs concurrently, and
 // since a thread cannot portably learn its own residency, the contract is the other way round:
 // **the caller states `n_slots`, a thread takes slot `tid`, and a thread whose `tid` is past the
@@ -73,17 +76,17 @@
 namespace g4gpu::hadronic::ftf::entry {
 
 /// The workspace for a run that can have an ION beam: `kMaxProjA = 64` covers every projectile a
-/// galactic-cosmic-ray problem contains, and 433,376 bytes is what it costs. The template
+/// galactic-cosmic-ray problem contains, and 539,104 bytes is what it costs. The template
 /// arguments are the ones `test_ftf_model.cu`'s device probe is measured with, so PORTED
 /// 2.1.11b's 255 registers and 864-byte frame are this type's numbers.
-using Workspace = FtfWorkspace<250, 64, 1024, 512, 256, 96>;
+using Workspace = FtfWorkspace<250, 64, 1024, 512, 512, 96>;
 
 /// The workspace for a run whose projectile is always a single hadron - P12's at-rest captures,
 /// P13's photons, and any beam of p, n, pi, K, anti-nucleon or hyperon. `kMaxProjA = 1` removes
 /// the projectile nucleus and its scratch; an ion handed to this one is refused by capacity
 /// (`FtfModelReport::involved_capacity`, with `refused_a` naming the mass number), never
 /// truncated.
-using HadronWorkspace = FtfWorkspace<250, 1, 256, 256, 256, 96>;
+using HadronWorkspace = FtfWorkspace<250, 1, 256, 256, 512, 96>;
 
 /// What `apply` did, in the four terms a caller can act on.
 enum class Status : int {

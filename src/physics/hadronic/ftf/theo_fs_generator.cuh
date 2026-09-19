@@ -123,9 +123,18 @@ struct FtfApplyReport {
 /// `kMaxTracks` bounds the hadrons one interaction can produce: P11's string-decay workspace
 /// caps a single FragmentStrings call at `kMaxOut` hadrons, and this list holds the same set
 /// converted to P6's `CascadeTrack` plus whatever `Propagate` lets escape.
+///
+/// IT IS 512 AND IT USED TO BE 256, and the change is P11d part 2's. Wiring
+/// `G4DecayKineticTracks` in turns every resonance into two or more tracks and took an ion event
+/// from 14 secondaries to 33, so a list that had never overflowed began to: 323 of 36,000 events
+/// of the ion campaign - {alpha, C12, O16, Fe56} on {H, C, O, Al, Fe, Pb} at {3, 8, 20} GeV per
+/// nucleon - reported `KineticDecayRefusal::list_full`, all of them heavy-on-heavy at the top of
+/// the range, which is precisely where an iron nucleus on spacecraft shielding sits. It bounds
+/// five arrays at once (the tracks, the escaped list, the coalescence list and its two scratch
+/// arrays, the decay list) and `StringsWorkspace`'s `kMaxOut` as well. docs/RISK.md V160.
 template <int kMaxTargetA = bic::kMaxNucleons, int kMaxProjA = bic::kMaxNucleons,
           int kMaxInteractions = 1024, int kMaxStrings = 2 * bic::kMaxNucleons + 2,
-          int kMaxTracks = 256, int kPerString = 96>
+          int kMaxTracks = 512, int kPerString = 96>
 struct FtfWorkspace {
   FtfModelWorkspace<kMaxTargetA, kMaxProjA, kMaxInteractions, kMaxStrings> model;
   StringsWorkspace<double, kMaxTracks, kPerString> strings;

@@ -10484,30 +10484,44 @@ Wiring `G4DecayKineticTracks` in changes the size of an FTFP final state, becaus
 becomes two or more tracks and 10-14% of FTFP's products are resonances. MEASURED on the ion
 campaign, before and after:
 
-    secondaries per ion event        14  ->  33.03
+    secondaries per ion event        14  ->  33.03 at kMaxTracks = 256
+                                           ->  35.93 at kMaxTracks = 512
 
 Two buffers that had never been reached now are, and both are capacities rather than physics:
 
-  * **`kMaxTracks = 256`**, the workspace's track list, which is also what
-    `decay_kinetic_tracks` is given as its capacity. It overflows in **323 of 36,000 ion events
-    (0.90%)**, all of them heavy-on-heavy at the top of the energy range, and reports
-    `KineticDecayRefusal::list_full` -> `FtfRefusal::kDecayEngineRefused`. Raising it is a
-    workspace-size decision: the track list, the escaped list, the coalescence list and the decay
-    list are all `kMaxTracks` long, so 512 would cost roughly another 120 kB on top of the
-    433,376 B a slot already takes. Left as a named refusal with its rate, the way the 64-track
-    coalescence cap was (V114), rather than raised silently.
+  * **`kMaxTracks`**, the workspace's track list, which is also what `decay_kinetic_tracks` is
+    given as its capacity. At **256** it overflowed in **323 of 36,000 ion events (0.90%)**,
+    reporting `KineticDecayRefusal::list_full` -> `FtfRefusal::kDecayEngineRefused`. It is
+    **512** since the third commit of P11d part 2, and that is a deliberate spend rather than a
+    default: the events it was losing are heavy-on-heavy at the top of the energy range, which
+    is exactly where a galactic-cosmic-ray iron nucleus on spacecraft shielding sits. The
+    constant bounds five arrays and `StringsWorkspace`'s `kMaxOut` at once, so doubling it cost
+    **105,728 B a slot** - `entry::Workspace` 433,376 -> **539,104 B**, `entry::HadronWorkspace`
+    352,368 -> **458,096 B**, and a 1 GB budget 2,477 -> **1,991** slots.
+
+    At 512 the refusal is **66 of 36,000 (0.18%)**, and they are not spread over the grid:
+    **every one is at Fe56 on Pb207 at 20 GeV per nucleon**, 66 of that point's 500 events
+    (13.2%). The other 71 of the 72 (beam, target, energy) points are clean. That is the corner
+    of the campaign - the heaviest beam on the heaviest target at the top of the range - and it
+    is named here rather than chased with a third doubling, because the next 1,024 would cost
+    another 200 kB a slot to buy one point.
   * **`kMaxSec = 128`**, the FINAL STATE buffer, which is the caller's template argument in P5's
     framework and not the model's. `tests/test_ftf_model.cu`'s ion block overflowed it in 1,269
     of 36,000 events; it is 512 there now and the number is recorded for whoever sizes the
     transport's.
 
+The device probe moved with it: `ftf_apply_device_probe` is 255 registers and a **1,376-byte**
+stack frame where it was 864, because `ftf_decay_kinetic_tracks` is behind a `__noinline__` but
+`bic::decay_kinetic_tracks` carries a four-slot daughter buffer and `kinetic_decay_one` a
+13-slot width array, and those are frames of their own.
+
 The three arms' totals, before this wiring and after, at N = 500 per point:
 
     96-point generality sweep    44 ran, 52 refused  ->  96 ran, 0 refused
-    ion arm (36,000 events)    7,081 ran (19.7%)     ->  35,675 ran (99.10%), 325 refused
+    ion arm (36,000 events)    7,081 ran (19.7%)     ->  35,932 ran (99.81%), 68 refused
     sub-GeV anti-nucleon arm  24,366 ran (67.7%)     ->  36,000 ran (100%), 0 refused
 
-with baryon number and charge exact in all 35,675 ion events and all 20,000 events of
+with baryon number and charge exact in all 35,932 ion events and all 20,000 events of
 `tests/test_ftf_entry.cu`, which went from 7,563 ran / 12,437 refused to 20,000 ran / 0 refused.
 
 ### V161: the stale header of the shared decay engine says the branch a2(1320) wakes is dead
