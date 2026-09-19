@@ -10739,7 +10739,7 @@ The fix is one word in the guard - `ws->model.report.any()`, which exists, cover
 and is what the loop meant. Naming it here rather than changing it: `theo_fs_generator.cuh` is
 P11's and this package wires through `ftf_entry.cuh` and nothing else of the model.
 
-### V191: a sizing table in a comment drifted 24% below `sizeof`, and a caller budgeted from it
+### V167: a sizing table in a comment drifted 24% below `sizeof`, and a caller budgeted from it
 
 `ftf/ftf_entry.cuh` carried the per-slot byte counts as prose - a table a reader had to trust -
 and prose does not recompile. P12b, wiring the at-rest Fritiof arm on main b05d13b, measured the
@@ -10769,7 +10769,7 @@ The general lesson is not about this file. Any number that appears both in a com
 type is a number that will diverge, and the only fix that survives a year of edits is to make the
 comment unable to compile when it is wrong.
 
-### V192: the retry loop tested two of eight failure terms, so an over-capacity ion span 1,000 attempts and came back unnamed
+### V168: the retry loop tested two of eight failure terms, so an over-capacity ion span 1,000 attempts and came back unnamed
 
 `ftf/ftf_entry.cuh` documents `entry::HadronWorkspace` (`kMaxProjA = 1`) as refusing an ion "by
 capacity (`FtfModelReport::involved_capacity`, with `refused_a` naming the mass number), never

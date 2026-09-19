@@ -287,7 +287,7 @@ __host__ __device__ inline bool ftf_scatter(FtfWorkspace<kA, kP, kI, kS, kT, kPS
     // promises "refused by capacity, with `refused_a` naming the mass number". P12b measured the
     // cost of that: 0.50 ms per call and FLAT IN Z, which is itself the proof that nothing was
     // being built - the capacity test at ftf_model.cuh:1554 returns before BOTH `nucleus_init`
-    // calls, so all 1,002 attempts rebuilt nothing at all. docs/RISK.md V192.
+    // calls, so all 1,002 attempts rebuilt nothing at all. docs/RISK.md V168.
     //
     // Using `any()` here is safe as well as right: `ftf_model_init` spans ftf_model.cuh:1483-1619
     // and the only flags it sets are `refused`, `involved_capacity` and `nucleus_failed`. The

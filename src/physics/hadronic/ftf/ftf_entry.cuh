@@ -32,7 +32,7 @@
 //   65,536       33.7 GB           28.6 GB     <- what a per-TRACK reading would cost
 //
 // THOSE TWO CONSTANTS ARE `sizeof`, AND A static_assert PINS THEM (see below, and docs/RISK.md
-// V191): this table was prose once, it drifted by 24%, and a caller budgeted from it and came up
+// V167): this table was prose once, it drifted by 24%, and a caller budgeted from it and came up
 // short. `bytes_for<WS>(n)` computes any row of it, `slots_for_bytes<WS>(budget)` inverts it, and
 // `tests/test_ftf_entry.cu` prints the whole table from the types themselves.
 //
@@ -100,7 +100,7 @@ using HadronWorkspace = FtfWorkspace<250, 1, 256, 256, 512, 96>;
 // had to trust. They drifted: it said `HadronWorkspace` was 266,344 B when `sizeof` gave 329,816
 // on the same commit, so a caller sizing 1,024 slots from the table budgeted 272.8 MB and needed
 // 337.7 MB - a 24% under-allocation, found by P12b when it wired the at-rest Fritiof arm.
-// docs/RISK.md V191.
+// docs/RISK.md V167.
 //
 // So the numbers below are `sizeof`, and the static_asserts pin them. A change to any array in
 // `FtfWorkspace` now FAILS THE BUILD with the new figure in the message, which is the only way a
@@ -116,11 +116,11 @@ inline constexpr std::size_t kLundTableBytes = sizeof(LundTables<double>);
 
 static_assert(kWorkspaceBytes == 539104,
               "entry::Workspace changed size. The header's sizing table, docs/PORTED.md 2.1.11b "
-              "and this assertion all carry the number - update all three. docs/RISK.md V191.");
+              "and this assertion all carry the number - update all three. docs/RISK.md V167.");
 static_assert(kHadronWorkspaceBytes == 458096,
               "entry::HadronWorkspace changed size. The header's sizing table, docs/PORTED.md "
               "2.1.11b and this assertion all carry the number - update all three. "
-              "docs/RISK.md V191.");
+              "docs/RISK.md V167.");
 static_assert(kLundTableBytes == 9648,
               "LundTables<double> changed size; the sizing table adds it once per run.");
 /// A hadron-only slot must be the cheaper of the two, or the two typedefs have been swapped.
@@ -156,7 +156,7 @@ struct Report {
   /// The mass number a capacity refusal is ABOUT - `FtfModelReport::refused_a`. The contract has
   /// always promised that an ion too big for the workspace comes back "refused by capacity, with
   /// its mass number named", and the name had nowhere to go: `capacity` is a bool and `refused`
-  /// is `kNone` for a capacity. 0 when `capacity` is false. docs/RISK.md V192.
+  /// is `kNone` for a capacity. 0 when `capacity` is false. docs/RISK.md V168.
   int capacity_a = 0;
 };
 

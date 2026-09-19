@@ -345,7 +345,7 @@ int main(int argc, char** argv) {
   //
   // `entry::HadronWorkspace` has `kMaxProjA = 1`, so ANY ion is over its capacity. The header
   // promises such a call comes back "refused by capacity, with `refused_a` naming the mass
-  // number", and until docs/RISK.md V192 it came back `kPrimaryUnchanged` with nothing named:
+  // number", and until docs/RISK.md V168 it came back `kPrimaryUnchanged` with nothing named:
   // the Scatter loop's guard tested two of `FtfModelReport::any()`'s eight terms and
   // `involved_capacity` was not one of them, so it retried a refusal no retry can change 1,000
   // times. P12b measured that: 0.50 ms per call, FLAT IN Z, which is the proof that nothing was
@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
       std::printf("  %-9s A=%d over kMaxProjA=1: %lld of 50 refused by capacity, "
                   "mass number wrong in %lld, %lld primary-unchanged, worst attempts %lld\n",
                   ion.name, ion.a, named, wrong_a, unchanged_here, worst_attempts);
-      // THE THREE THINGS V192 WAS: refused and not unchanged, named by mass number, and ONE
+      // THE THREE THINGS V168 WAS: refused and not unchanged, named by mass number, and ONE
       // attempt rather than 1,002. The attempt count is the assertion that catches a regression
       // to the old guard even if the status were fixed some other way.
       if (named != 50 || wrong_a != 0 || unchanged_here != 0 || worst_attempts != 1) {
