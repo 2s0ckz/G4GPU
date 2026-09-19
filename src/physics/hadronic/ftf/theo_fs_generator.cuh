@@ -278,7 +278,23 @@ __host__ __device__ inline bool ftf_scatter(FtfWorkspace<kA, kP, kI, kS, kT, kPS
     success = true;
 
     ftf_model_init(&ws->model, proj, p_primary_z, target_a, target_z, lund, rng);
-    if (ws->model.report.refused != FtfRefusal::kNone || ws->model.report.nucleus_failed) {
+    // `report.any()` AND NOT TWO OF ITS EIGHT TERMS. This guard used to read
+    // `refused != kNone || nucleus_failed`, which let `involved_capacity` through - and that is
+    // the one flag `ftf_model_init` can set that a retry cannot possibly clear, because it is a
+    // comparison of the projectile's or the target's mass number against a template argument.
+    // An ion handed to `entry::HadronWorkspace` (`kMaxProjA = 1`) therefore span the 1000-attempt
+    // loop and came back as `kPrimaryUnchanged` with no name on it, where the contract header
+    // promises "refused by capacity, with `refused_a` naming the mass number". P12b measured the
+    // cost of that: 0.50 ms per call and FLAT IN Z, which is itself the proof that nothing was
+    // being built - the capacity test at ftf_model.cuh:1554 returns before BOTH `nucleus_init`
+    // calls, so all 1,002 attempts rebuilt nothing at all. docs/RISK.md V192.
+    //
+    // Using `any()` here is safe as well as right: `ftf_model_init` spans ftf_model.cuh:1483-1619
+    // and the only flags it sets are `refused`, `involved_capacity` and `nucleus_failed`. The
+    // retryable ones - `participants_empty`, `put_on_mass_shell_failed`, `excite_failed`,
+    // `string_capacity` - all belong to `ftf_get_strings`, whose own guard below is deliberately
+    // left testing `refused` alone so that Geant4's retries still happen.
+    if (ws->model.report.any()) {
       ws->report.model = ws->model.report;
       ws->report.refused = ws->model.report.refused;
       ws->report.attempts = attempts;

@@ -340,6 +340,92 @@ int main(int argc, char** argv) {
     }
   }
 
+  // ------------------------------------------------------------------------------------------
+  // AN ION TOO BIG FOR THE WORKSPACE, which is the case the contract documents and did not do.
+  //
+  // `entry::HadronWorkspace` has `kMaxProjA = 1`, so ANY ion is over its capacity. The header
+  // promises such a call comes back "refused by capacity, with `refused_a` naming the mass
+  // number", and until docs/RISK.md V192 it came back `kPrimaryUnchanged` with nothing named:
+  // the Scatter loop's guard tested two of `FtfModelReport::any()`'s eight terms and
+  // `involved_capacity` was not one of them, so it retried a refusal no retry can change 1,000
+  // times. P12b measured that: 0.50 ms per call, FLAT IN Z, which is the proof that nothing was
+  // being built - the capacity test returns before both `nucleus_init` calls.
+  //
+  // This block also exercises `HadronWorkspace` end to end for the first time. It is the type
+  // P12 and P13 actually hold, and every earlier row of this test used `Workspace`.
+  // ------------------------------------------------------------------------------------------
+  {
+    static entry::HadronWorkspace hslots[2];
+    static hadronic::ftf::LundTables<double> hlund;
+    const entry::Handle<entry::HadronWorkspace> hh = entry::host_handle(hslots, 2, &hlund);
+    if (!hh.ok()) {
+      std::printf("FAIL: the HadronWorkspace handle is not usable\n");
+      ++fails;
+    }
+    g4gpu::physics::hadronic::HadNucleus nuc;
+    nuc.a = 12;
+    nuc.z = 6;
+    // A proton first, to show the type WORKS before showing what it refuses - a capacity test
+    // that passes because the workspace is broken would prove nothing.
+    {
+      g4gpu::physics::hadronic::HadProjectile<double> hp;
+      hp.pdg = 2212;
+      hp.mass = 938.272013;
+      hp.charge = 1.0;
+      hp.baryon_number = 1;
+      hp.kin_energy = 10000.0;
+      long long ok = 0;
+      for (int ev = 0; ev < 200; ++ev) {
+        out = g4gpu::physics::hadronic::HadFinalState<double, 128>();
+        Philox<double> rng(static_cast<uint32_t>(ev), 91u);
+        entry::Report rep;
+        if (entry::apply(hh, ev % 2, hp, nuc, out, rep, rng) == entry::Status::kRan) { ++ok; }
+      }
+      std::printf("\nHadronWorkspace: proton 10 GeV on C12, %lld of 200 ran\n", ok);
+      if (ok != 200) {
+        std::printf("FAIL: HadronWorkspace ran %lld of 200 for a proton\n", ok);
+        ++fails;
+      }
+    }
+    // Now the four ions QBBC builds, every one of them over `kMaxProjA = 1`.
+    struct IonRow { const char* name; int a, z; double mass; };
+    const IonRow ions[] = {{"deuteron", 2, 1, 1875.612793},
+                           {"triton", 3, 1, 2808.921004},
+                           {"He3", 3, 2, 2808.391586},
+                           {"alpha", 4, 2, 3727.379378}};
+    for (const IonRow& ion : ions) {
+      g4gpu::physics::hadronic::HadProjectile<double> hp;
+      hp.pdg = 1000000000 + ion.z * 10000 + ion.a * 10;
+      hp.mass = ion.mass;
+      hp.charge = ion.z;
+      hp.baryon_number = ion.a;
+      hp.kin_energy = 10000.0;
+      long long named = 0, wrong_a = 0, unchanged_here = 0, worst_attempts = 0;
+      for (int ev = 0; ev < 50; ++ev) {
+        out = g4gpu::physics::hadronic::HadFinalState<double, 128>();
+        Philox<double> rng(static_cast<uint32_t>(ev), 93u);
+        entry::Report rep;
+        const entry::Status st2 = entry::apply(hh, ev % 2, hp, nuc, out, rep, rng);
+        if (st2 == entry::Status::kPrimaryUnchanged) { ++unchanged_here; }
+        if (st2 == entry::Status::kRefused && rep.capacity) { ++named; }
+        if (rep.capacity && rep.capacity_a != ion.a) { ++wrong_a; }
+        if (rep.attempts > worst_attempts) { worst_attempts = rep.attempts; }
+      }
+      std::printf("  %-9s A=%d over kMaxProjA=1: %lld of 50 refused by capacity, "
+                  "mass number wrong in %lld, %lld primary-unchanged, worst attempts %lld\n",
+                  ion.name, ion.a, named, wrong_a, unchanged_here, worst_attempts);
+      // THE THREE THINGS V192 WAS: refused and not unchanged, named by mass number, and ONE
+      // attempt rather than 1,002. The attempt count is the assertion that catches a regression
+      // to the old guard even if the status were fixed some other way.
+      if (named != 50 || wrong_a != 0 || unchanged_here != 0 || worst_attempts != 1) {
+        std::printf("FAIL: %s: %lld named, %lld wrong A, %lld unchanged, %lld attempts "
+                    "(want 50, 0, 0, 1)\n", ion.name, named, wrong_a, unchanged_here,
+                    worst_attempts);
+        ++fails;
+      }
+    }
+  }
+
   std::printf("\n%lld points: %lld ran, %lld primary-unchanged, %lld refused by name, "
               "%lld silent, %lld no-slot\n", points, ran, unchanged, refused, silent, no_slot);
   std::printf("baryon number wrong in %lld, charge in %lld, unknown PDG %lld\n", bad_b, bad_q,

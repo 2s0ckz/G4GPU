@@ -10738,3 +10738,78 @@ Two things this cost, and both are the kind that do not show up as a failure:
 The fix is one word in the guard - `ws->model.report.any()`, which exists, covers all eight terms
 and is what the loop meant. Naming it here rather than changing it: `theo_fs_generator.cuh` is
 P11's and this package wires through `ftf_entry.cuh` and nothing else of the model.
+
+### V191: a sizing table in a comment drifted 24% below `sizeof`, and a caller budgeted from it
+
+`ftf/ftf_entry.cuh` carried the per-slot byte counts as prose - a table a reader had to trust -
+and prose does not recompile. P12b, wiring the at-rest Fritiof arm on main b05d13b, measured the
+two against each other:
+
+    entry::HadronWorkspace   the header's table   266,344 B
+                             sizeof               329,816 B      (and 458,096 after V160)
+
+A caller sizing 1,024 slots from the table budgets **272.8 MB** and needs **337.7 MB**. That is
+not a rounding error, it is a 24% under-allocation of device memory, and the failure mode is a
+launch that either fails to allocate or - worse, if the allocation succeeds from a pool - writes
+past the last slot.
+
+The table is now code. `entry::kWorkspaceBytes`, `kHadronWorkspaceBytes` and `kLundTableBytes`
+are `constexpr` `sizeof` expressions, `static_assert`s pin all three to their current values, and
+one more asserts that `HadronWorkspace` is the smaller of the two so the aliases cannot be
+swapped. A change to any array inside `FtfWorkspace` now **fails the build** with a message that
+names the three places the number lives - the header's table, docs/PORTED.md 2.1.11b and the
+assertion itself - so they are updated together or not at all. `tests/test_ftf_entry.cu` prints
+the whole table from the types.
+
+MEASURED that it bites: changing the asserted `kWorkspaceBytes` by ONE byte fails the compile
+with that message and nothing else. The assertion is on an exact size rather than a bound
+deliberately - a bound would have let the same drift through.
+
+The general lesson is not about this file. Any number that appears both in a comment and in a
+type is a number that will diverge, and the only fix that survives a year of edits is to make the
+comment unable to compile when it is wrong.
+
+### V192: the retry loop tested two of eight failure terms, so an over-capacity ion span 1,000 attempts and came back unnamed
+
+`ftf/ftf_entry.cuh` documents `entry::HadronWorkspace` (`kMaxProjA = 1`) as refusing an ion "by
+capacity (`FtfModelReport::involved_capacity`, with `refused_a` naming the mass number), never
+truncated". P12b found that it does not. It comes back `Status::kPrimaryUnchanged` with nothing
+named on it.
+
+The cause is one guard. `ftf_scatter`'s retry loop tested
+
+    if (ws->model.report.refused != FtfRefusal::kNone || ws->model.report.nucleus_failed)
+
+which is **two of the eight terms** `FtfModelReport::any()` covers. `involved_capacity` is not
+one of them - and it is the one flag `ftf_model_init` can set that no retry can possibly clear,
+because it is a comparison of a mass number against a template argument. So the loop ran all
+1,000 attempts against an unchangeable refusal and fell out of the bottom into the
+attempts-exhausted path, which is Geant4's own "return the primary unchanged".
+
+P12b's timing is what makes the diagnosis certain rather than plausible: **0.50 ms per call and
+FLAT IN Z**. Every other path through this loop scales steeply with the target's mass number,
+because each attempt rebuilds both nuclei. A cost independent of Z means no nucleus was ever
+built - and indeed the capacity test at `ftf_model.cuh:1554` returns **before both
+`nucleus_init` calls**. All 1,002 attempts did nothing but re-enter and re-fail.
+
+The guard is now `ws->model.report.any()`. That is safe as well as correct, and the reason is a
+boundary rather than a hope: `ftf_model_init` spans ftf_model.cuh:1483-1619 and the only flags it
+can set are `refused`, `involved_capacity` and `nucleus_failed`. The retryable ones -
+`participants_empty`, `put_on_mass_shell_failed`, `excite_failed`, `string_capacity`,
+`additional_capacity` - all belong to `ftf_get_strings` (1620 onwards), whose own guard is
+deliberately left testing `refused` alone so that Geant4's retries still happen.
+
+`entry::Report` gained `capacity_a`, because the mass number had nowhere to go: `capacity` is a
+bool and `refused` is `kNone` for a capacity, so the contract's promise that the mass number is
+named could not be kept through the contract header even once the status was right.
+
+MEASURED, before and after, over the four ions QBBC builds (deuteron, triton, He3, alpha) at
+10 GeV on carbon through a `HadronWorkspace`, 50 events each:
+
+    before   0 of 50 refused by capacity, 50 of 50 kPrimaryUnchanged, 1002 attempts
+    after   50 of 50 refused by capacity with the right mass number, 0 unchanged, 1 attempt
+
+The attempt count is asserted as well as the status, because a regression that fixed the status
+some other way and left the loop spinning would cost 1,000 rebuilds a call and pass a test that
+only looked at the answer. A proton through the same `HadronWorkspace` runs 200 of 200, which is
+what makes this a statement about the ion and not about the workspace.
