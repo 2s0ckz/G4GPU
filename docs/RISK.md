@@ -10711,8 +10711,15 @@ Two things this cost, and both are the kind that do not show up as a failure:
     that treats that status as "nothing happened" - which is what it means everywhere else -
     silently drops them. This port counts it under its own name (`kFtfPrimaryUnchanged`) because
     of this measurement, not because the contract suggested it.
-  * **1,002 nucleus builds per call, to reach a conclusion available in the first one.** That is
-    the expensive path the same header warns about at 185-242 ms on lead.
+  * **1,002 iterations to reach a conclusion available in the first one - and they are cheap,
+    which is the part worth checking rather than assuming.** The obvious reading of the loop is
+    that each retry rebuilds both nuclei, which is the 185-242 ms path the same header warns
+    about. It does not: the capacity test returns from `ftf_model_init` BEFORE either
+    `bic::nucleus_init` call, so a retry costs about half a microsecond. Measured end to end
+    through `entry::apply`, one anti-deuteron at rest is **0.50 ms** on O, C, Fe and Pb and 0.40
+    on Al - flat in Z, because none of the work that depends on Z is reached. An estimate from
+    reading the loop would have said 7 ms on carbon and 200 ms on lead, and would have been
+    wrong by two orders of magnitude on the second one.
 
 The fix is one word in the guard - `ws->model.report.any()`, which exists, covers all eight terms
 and is what the loop meant. Naming it here rather than changing it: `theo_fs_generator.cuh` is
