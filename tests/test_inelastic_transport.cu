@@ -898,6 +898,130 @@ int main() {
     }
   }
 
+  // ============================================================================================
+  // 6. `ion_inelastic` switches the five ion names and NOTHING ELSE
+  // ============================================================================================
+  //
+  // WHY THIS SECTION EXISTS. `HadronicWiring::ion_inelastic` is a study switch, not physics: it
+  // is there so a like-for-like column can inactivate on the port side exactly the set the
+  // Geant4 side inactivated. The first full P15 sweep had the five ion processes off in Geant4
+  // and ON in the port, and alpha_840 read -39.27% (-201.8 sigma) because the port drew an
+  // interaction length, refused 91.5% of the interactions by name, and killed each refused ion
+  // with its energy deposited at the refusal point - upstream of the range it would have
+  // travelled. docs/RISK.md V192.
+  //
+  // So the switch has to do two things and this section asserts both, because getting either
+  // half wrong reproduces a different version of that defect:
+  //
+  //   * off, an alpha draws NO interaction length at all - not "draws one and refuses it"
+  //   * off, a PROTON is untouched - `protonInelastic` is wired and is not one of the five
+  //
+  // A gate written as `had.hadron_inelastic && had.ion_inelastic` passes the first and fails the
+  // second; a gate that forgets the species predicate passes the second and fails the first.
+  std::printf("== 6. ion_inelastic switches d/t/He3/alpha/ion and not the proton ==\n");
+  {
+    const int mat = data::kWater;
+    geom::Volume<real_t> vols[1] = {
+        {{geom::SolidType::kBox, {400, 400, 400}}, geom::make_translation<real_t>({0, 0, 0}),
+         0, mat, 0}};
+    Scene<real_t> scene{};
+    scene.geometry = geom::Geometry<real_t>{vols, 1, 0};
+    scene.materials = mats;
+    scene.hadron_range = hrt;
+    scene.range_cut = real_t(0.7);
+    scene.scoring_volume = 0;
+
+    struct S { ParticleType t; real_t e; int z; int a; const char* name; bool is_ion; };
+    const S sp[] = {
+        {ParticleType::kAlpha,      840,  0, 0, "alpha 840 MeV",    true},
+        {ParticleType::kDeuteron,   400,  0, 0, "deuteron 400 MeV", true},
+        {ParticleType::kHe3,        400,  0, 0, "He3 400 MeV",      true},
+        {ParticleType::kTriton,     400,  0, 0, "triton 400 MeV",   true},
+        {ParticleType::kGenericIon, 2000, 6, 12, "C12 2 GeV",       true},
+        {ParticleType::kProton,     210,  0, 0, "proton 210 MeV",   false},
+        {ParticleType::kPionPlus,   500,  0, 0, "pi+ 500 MeV",      false},
+    };
+
+    for (const S& s : sp) {
+      long long queued[2] = {0, 0};  // [0] = ion_inelastic off, [1] = on
+      for (int on = 0; on < 2; ++on) {
+        had::HadronicWiring<real_t> had{};
+        had.stage = had::HadronicStage::kFinal;
+        had.decay = true;
+        had.hadron_elastic = false;
+        had.neutron_capture = false;
+        had.hadron_inelastic = true;
+        had.ion_inelastic = (on != 0);
+        had.hadron_at_rest = false;
+        had.inelastic = xs;
+        had.neutron.inelastic = &ds_n;
+        had.level_data = lt;
+        had.books.count = ref_n.data();
+        had.books.energy = ref_e.data();
+        had.queue.items = qbuf.data();
+        had.queue.cursor = &qcursor;
+        had.queue.capacity = static_cast<int>(qbuf.size());
+
+        for (long long k = 0; k < 400; ++k) {
+          TrackState<real_t> p{};
+          p.species = s.t;
+          p.pos = Vec3<real_t>{0, 0, -390};
+          p.dir = Vec3<real_t>{0, 0, 1};
+          p.ekin = s.e;
+          p.ion_za = ion_za_of(s.z, s.a);
+          p.volume = 0;
+          p.event = 0;
+          p.rng_key = 90001u + static_cast<unsigned int>(k) * 2246822519u;
+          p.step = 0u;
+          p.begin(p.pos, p.dir, p.ekin, 0, 0u, ProcessId::fNotDefined, real_t(0), real_t(1));
+
+          bool alive = true;
+          for (int st = 0; alive && st < kMaxSteps; ++st) {
+            CountingEmitter em;
+            em.books = had.books;
+            StepReport<real_t> rep;
+            Philox<real_t> rng(p.rng_key, p.step, 0xB19Du);
+            real_t edep = 0;
+            bool q = false;
+            qcursor = 0;
+            alive = step_hadron(scene, p, s.t, had, rng, em, edep, rep, vis::no_capture(), &q);
+            ++p.step;
+            if (q && qcursor > 0) { queued[on] += 1; break; }
+          }
+        }
+      }
+
+      if (s.is_ion) {
+        if (queued[0] != 0) {
+          fail(std::string(s.name) + ": ion_inelastic off still queued "
+               + std::to_string(queued[0]) + " interactions - the ion drew an interaction "
+                 "length it must not draw, which is the one-sided inactivation of V192");
+        }
+        // AND THE SWITCH MUST HAVE SOMETHING TO SWITCH. A species that queues nothing with the
+        // flag ON makes the assertion above vacuous - it would pass against a gate that never
+        // lets any ion interact, which is a different bug with the same symptom.
+        if (queued[1] == 0) {
+          fail(std::string(s.name) + ": ion_inelastic ON queued nothing either, so the "
+                 "assertion above is vacuous - this species has no inelastic process to switch");
+        }
+      } else {
+        if (queued[0] != queued[1]) {
+          fail(std::string(s.name) + ": ion_inelastic changed a NON-ion species - "
+               + std::to_string(queued[0]) + " queued off against " + std::to_string(queued[1])
+               + " on. protonInelastic and pi+Inelastic are wired and are not among the five "
+                 "names G4IonPhysics registers");
+        }
+        if (queued[1] == 0) {
+          fail(std::string(s.name) + ": queued nothing at all, so the equality above is "
+                 "vacuous");
+        }
+      }
+      std::printf("   %-18s off %4lld   on %4lld   %s\n", s.name, queued[0], queued[1],
+                  s.is_ion ? "(ion: must be 0 / >0)" : "(not an ion: must be equal)");
+    }
+    qcursor = 0;
+  }
+
   std::printf("\n%s (%d failures)\n", g_fails == 0 ? "PASSED" : "FAILED", g_fails);
   return (g_fails == 0) ? 0 : 1;
 }

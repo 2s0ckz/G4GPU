@@ -103,6 +103,12 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 #                     secondaries by a proton beam, their inelastic processes were active on
 #                     the Geant4 side and the port had none, which nobody had noticed because
 #                     the port had no inelastic process at all to compare against.
+#                     THE PORT HOLDS THE SAME FIVE OFF, via `G4GPU_ION_INELASTIC=0` below. A
+#                     process inactivated on one side only is not a like-for-like column in
+#                     either direction, and the first run of this sweep with the five off on the
+#                     Geant4 side and ON in the port read alpha_840 at -39.27% (-201.8 sigma)
+#                     purely because the port's refusal kills the ion and deposits its energy
+#                     where the refusal happened. docs/RISK.md V192.
 #   hBrems, hPairProd    the radiative processes of a charged hadron: both models' dE/dx is
 #                     exact and neither has a SampleSecondaries (docs/PORTED.md 1.3).
 #   ionElastic        G4NuclNuclDiffuseElastic, both halves ported and the channel not wired.
@@ -199,8 +205,20 @@ foreach ($b in $beams) {
   # is set per beam here so that what each row was measured with is in this file.
   $isHadron = ($b.Particle -eq "proton" -or $b.Particle -eq "alpha")
   if ($isHadron) { $env:G4GPU_LIVE_PER_EVENT = "32" } else { Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue }
+  # THE PORT SIDE HOLDS OFF EXACTLY WHAT THE GEANT4 SIDE HOLDS OFF. `$emOnly` inactivates
+  # dInelastic/tInelastic/He3Inelastic/alphaInelastic/ionInelastic on EVERY beam because the
+  # port refuses P9e's `G4BinaryLightIonReaction::Interact`; until this line existed, the port
+  # kept its own copy of those five processes ON, drew an interaction length, refused 91.5% of
+  # the interactions (measured: 10,266 of 11,223 queued in 20,000 alpha_840 events) and disposed
+  # of each refused ion by killing it with its kinetic energy deposited AT THE REFUSAL POINT -
+  # 6.03e6 MeV, 36% of that beam's energy, in the water upstream of the scoring trapezoid, where
+  # the Geant4 column carries every alpha to full range. That is not a physics disagreement, it
+  # is a one-sided inactivation, and it read as -39.27% / -201.8 sigma on alpha_840.
+  # `G4GPU_ION_INELASTIC=0` is the port's half of the same switch (docs/RISK.md V192).
+  $env:G4GPU_ION_INELASTIC = "0"
   $mac = New-Macro $b "port" $n
   $r = Invoke-Run { & $portExe $mac 2>&1 | ForEach-Object { "$_" } }
+  Remove-Item Env:\G4GPU_ION_INELASTIC -ErrorAction SilentlyContinue
   Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue
   $d = Get-Dose $r.Out
   if ($null -eq $d) { Write-Output "  port produced no dose line; last lines:"; $r.Out | Select-Object -Last 15; exit 1 }

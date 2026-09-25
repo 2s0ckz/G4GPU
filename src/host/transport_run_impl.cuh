@@ -2258,6 +2258,14 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // whose G4PARTICLEXSDATA could not be resolved, which is the same "no process" state a
         // species with no inelastic channel is in.
         had_wiring.hadron_inelastic = had_inelastic_;
+        // `G4GPU_ION_INELASTIC=0` switches the five ion names off without rebuilding B1, the
+        // way `G4GPU_LIVE_PER_EVENT` sets the live-track pool. Read here rather than cached at
+        // construction, so a sweep that sets it per beam gets it per beam.
+        bool ion_inel = had_ion_inelastic_;
+        if (const char* env = std::getenv("G4GPU_ION_INELASTIC")) {
+          ion_inel = !(env[0] == '0' && env[1] == '\0');
+        }
+        had_wiring.ion_inelastic = ion_inel;
         had_wiring.hadron_at_rest = had_at_rest_;
         had_wiring.inelastic = inelastic_tables_.view;
         had_wiring.queue.items = d_queue_;

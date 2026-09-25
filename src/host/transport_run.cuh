@@ -407,6 +407,14 @@ class TransportEngine {
     had_inelastic_ = inelastic;
     had_at_rest_ = at_rest;
   }
+  /// The five ion names on their own - see `had::HadronicWiring::ion_inelastic` for why the
+  /// sweep needs them separable from `protonInelastic`.
+  ///
+  /// `G4GPU_ION_INELASTIC=0` in the environment overrides this at Upload, for the same reason
+  /// `G4GPU_LIVE_PER_EVENT` overrides the pool size: `tools/b1_sweep.ps1` drives a stock
+  /// exampleB1.exe through macros, and there is no UI command that reaches a setter.
+  void SetIonInelastic(bool on) { had_ion_inelastic_ = on; }
+  bool GetIonInelastic() const { return had_ion_inelastic_; }
 
   /// How many interactions may run AT ONCE, which is the number of workspace slots the run
   /// allocates. Set before Upload; 0 asks for the default.
@@ -615,6 +623,7 @@ class TransportEngine {
   /// `host/hadronic_upload.cuh`; the view inside it travels in `had::HadronicWiring`.
   InelasticTableOwner<real_t> inelastic_tables_{};
   bool had_inelastic_ = true;
+  bool had_ion_inelastic_ = true;
   bool had_at_rest_ = true;
   /// The interaction queue: `queue_capacity_` entries of `had::PendingInteraction`, its cursor,
   /// and the view the steppers push through.

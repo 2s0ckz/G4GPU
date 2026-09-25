@@ -528,6 +528,20 @@ struct HadronicWiring {
   /// captures - `hadron_at_rest` is that - because Geant4 has separate UI names for them and
   /// the like-for-like columns need the same separation.
   bool hadron_inelastic = true;
+  /// The five ion UI names alone - `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic`
+  /// and `ionInelastic`, which `had::is_ion_inelastic_species` selects. AND-ed with
+  /// `hadron_inelastic`, so off here leaves p, n, pi and K untouched.
+  ///
+  /// IT EXISTS BECAUSE THE LIKE-FOR-LIKE COLUMN CANNOT BE BUILT WITHOUT IT. P9e's
+  /// `G4BinaryLightIonReaction::Interact` is not wired, so 91.5% of an 840 MeV alpha's
+  /// interactions are refused - measured, 10,266 of 11,223 queued in 20,000 events - and the
+  /// refusal disposes of the ion by killing it with its kinetic energy deposited AT THE POINT
+  /// OF THE REFUSAL: 6.03e6 MeV, 36% of that beam's energy, dumped in the water upstream of
+  /// B1's scoring trapezoid. A Geant4 run with `alphaInelastic` inactivated carries every alpha
+  /// to full range instead, and the two columns then differ by -39.27% (-201.8 sigma) for a
+  /// reason that is the refusal's disposal and not the physics. Off on both sides is the only
+  /// honest comparison until P9e lands. docs/RISK.md V192.
+  bool ion_inelastic = true;
   /// `G4HadronStoppingProcess` for a stopped mu-, pi-, K-, Sigma-, Xi-, Omega-, pbar or nbar:
   /// `hBertiniCaptureAtRest`, `hFritiofCaptureAtRest` and `muMinusCaptureAtRest`, which are
   /// three UI names on the Geant4 side and one switch here because they are one process class.

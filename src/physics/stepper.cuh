@@ -1420,9 +1420,17 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // `inelastic_projectile` wants: only the `kGenericIon` row reads them, and the
     // Glauber-Gribov nucl-nucl component needs the projectile's OWN (Z, A) rather than
     // G4GenericIon's placeholder.
+    //
+    // TWO FLAGS, ONE GATE. `ion_inelastic` switches the five species Geant4 names separately -
+    // `had::is_ion_inelastic_species` - and off, a d/t/He3/alpha/ion draws NO uniform here,
+    // which is exactly what `/process/inactivate alphaInelastic` does on the Geant4 side and
+    // what the sweep's ion column needs held on BOTH sides at once. The proton is deliberately
+    // not in that set: `protonInelastic` stays on and its hole is reported instead.
     real_t inel_xs = real_t(0);
+    const bool inelastic_on =
+        had.hadron_inelastic && (had.ion_inelastic || !had::is_ion_inelastic_species(type));
     const real_t d_inelastic =
-        had.hadron_inelastic
+        inelastic_on
             ? had::inelastic_length<real_t>(had.inelastic, mm, type, p.ekin, h.z, h.a, rng,
                                             inel_xs)
             : geom::kInfinity<real_t>();

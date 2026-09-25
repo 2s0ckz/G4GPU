@@ -12353,3 +12353,117 @@ instruction scheduling is not visible from either. The proton is the species thi
 headline numbers are measured on, so if a proton beam's throughput moves in the sweep, this is
 the first thing to hold it against - and the way to separate them is to build the unit both
 ways, which is one flag.
+
+### V192: a process inactivated on one side only, and a refusal that deposits where it refuses
+
+The first full P15 sweep read **alpha_840 at -39.27% (-201.8 sigma)**, alpha_1600 at **+81.50%**
+and alpha_4000 at **+535.83%**. None of that is physics. It is one switch held on one side.
+
+`tools/b1_sweep.ps1` inactivates `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and
+`ionInelastic` on the **Geant4** side, because P9e's `G4BinaryLightIonReaction::Interact` is not
+wired and the port refuses every ion interaction at or above 50 MeV per nucleon. That much was
+deliberate and is written up in the script. What was missed is that the **port** kept its own copy
+of those five processes switched ON. So on the port side an alpha drew an inelastic interaction
+length, reached the interaction, and was refused; on the Geant4 side it had no such process at all
+and travelled its full range.
+
+THE MEASUREMENT, 20,000 alpha events at 840 MeV in B1:
+
+    11,223   interactions queued
+    10,266   refused: G4BinaryLightIonReaction::Interact - an ion at or above 50 MeV/n (P9e)
+      91.5%  of every queued interaction
+    6.03e6   MeV carried by those refusals
+      36%    of the beam's entire kinetic energy (20,000 x 840 MeV = 1.68e7 MeV)
+
+**The refusal's disposal is what makes it a dose error rather than a missing process.** A refused
+interaction kills the track and deposits its kinetic energy *at the point of the refusal*. That is
+the conservative choice - the energy is conserved and the ledger counts it - but for a heavy
+charged particle it moves the deposit **upstream**, out of the residual range the particle would
+have travelled. In B1 that range is what carries the alpha from the water into the bone trapezoid
+the dose is scored in, so the port lost 39% of the scored dose at 840 MeV while the Geant4 column
+carried every alpha to the end of its range. At 1600 and 4000 MeV the geometry inverts the sign -
+the refusals land inside the trapezoid instead of upstream of it - which is why the same defect
+reads -39% on one beam and +536% on another. **A refusal whose sign depends on the geometry is
+not a tolerance and cannot be one.**
+
+THE FIX IS THE SWITCH, NOT THE DISPOSAL. `had::HadronicWiring::ion_inelastic` -
+`had::is_ion_inelastic_species`, `TransportEngine::SetIonInelastic`, `G4GPU_ION_INELASTIC=0` -
+switches exactly the five species Geant4 gives their own UI names, and the sweep now holds it off
+on the port side for every beam. The proton is deliberately **not** in that set: `protonInelastic`
+is wired and stays on, and its own hole is reported with its rate instead of being hidden.
+
+WHAT THIS LEAVES OPEN, and it should not be forgotten when P9e lands: the disposal itself is still
+"kill and deposit locally", and it is still wrong in the same way for **every** refused inelastic
+interaction, including the proton's. Measured at 1 GeV, 5,000 events:
+
+    2,094   interactions queued
+      208   refused: G4BinaryCascade::Propagate1H1 - a nucleon or pion on hydrogen (P9)
+      9.9%  of every queued interaction
+    196,164 MeV, 3.9% of the beam's energy, deposited where the refusal happened
+
+proton_1000 read **+11.94% (14.8 sigma)** in that same sweep and this is the first thing to hold
+it against. There is no Geant4 switch for "the Binary cascade on hydrogen only", so the proton
+rows cannot be made like-for-like by inactivation the way the ion rows can - the hole has to be
+closed by wiring `Propagate1H1`, and until then the number stands in the report as the measured
+cost of that hole.
+
+### V193: the interaction kernel runs 2 to 82 threads, and a proton beam got 93x slower
+
+P15's inelastic wiring costs the proton beams about two orders of magnitude of throughput. This
+entry is the **diagnosis**; the fix belongs to the performance phase after Phase 3, and the
+numbers below are where it should start. All timings on the **shared** RTX 3070 this project's
+gates run on, so they are upper bounds on the wall clock and not clean benchmarks.
+
+THE COST, port loop time, from `out/b1_sweep_p15.csv`:
+
+    beam          events    before P15      after P15     events/s after    factor
+    proton_210   500,000      2,345 ms     217,699 ms          2,297         92.8x
+    proton_400   300,000      1,142 ms     166,996 ms          1,796        146.2x
+    proton_1000  200,000        822 ms     180,773 ms          1,106        219.9x
+    alpha_840    300,000      2,218 ms      25,476 ms         11,776         11.5x
+    alpha_1600   200,000      1,994 ms      13,899 ms         14,389          7.0x
+    alpha_4000   100,000      1,230 ms       7,803 ms         12,815          6.3x
+
+    gamma_1..100, e-_20..1000                unchanged - the drain loop is gated on `any_hadron`
+
+THREE MECHANISMS, MEASURED SEPARATELY.
+
+**1. The interaction kernel is launched with far fewer threads than the GPU has cores.** One
+workspace slot is 1,604,928 bytes, the pool is 128 slots (205 MB), and the queue is drained in
+chunks of one slot per thread. The fill per launch is the whole story and it varies by three
+orders of magnitude with how many hadrons are alive at once:
+
+    ref/proton/proton_depth.exe   566 queued, 269 launches   =  2.1 threads per launch  (1.6%)
+    B1 proton 1 GeV, live=32    2,094 queued,  36 launches   = 58.2 threads per launch (45%)
+    B1 alpha 840 MeV, live=32  11,223 queued, 137 launches   = 81.9 threads per launch (64%)
+
+Even the best of those is 82 threads on a device with 5,888 cores. The depth-dose case is the
+pathological one: at 4 live tracks per event the queue never fills, and 269 launches carry 566
+interactions between them.
+
+**2. The models are enormous and run one per thread.** Each of the five per-model kernels carries
+a 16,384-byte device stack (V190) and 255 registers, so a launch of 128 threads is 128 warplanes
+each executing a full Binary cascade, Bertini cascade or FTF string fragmentation serially. This
+is why the **protons are 8x slower than the alphas despite far fewer refusals**: an alpha's
+interaction is refused *before* the model runs and costs nothing, while a proton's actually
+propagates a cascade. The refusal rate and the cost run in opposite directions, which is worth
+remembering before anyone reads the alpha rows as the cheap case.
+
+**3. The drain is serialized against the stepping loop.** Every iteration steps, counts buckets,
+sorts, then launches up to five kernels and waits, before the next stepping launch. The launches
+themselves are not free at this fill: 269 launches for 566 interactions is roughly one launch per
+two interactions.
+
+WHAT IS NOT THE CAUSE, and was checked so it does not get re-checked: the queue is nowhere near
+full (busiest iteration 0.0-0.2% of capacity), so `SetInteractionQueueCapacity` is not it; and
+`-Xptxas -O1` on the proton and antiproton units (V191) is not it either, because the alpha units
+compiled at `-O2` and lost 12x by the same mechanism.
+
+THE ONE-LINE CAPACITY THAT DOES NOT WORK. Raising `SetInteractionSlots` is one call and the
+obvious first thing to try, but it is bounded hard: at 1,604,928 bytes a slot, 1,024 slots is
+1.64 GB and 4,096 is 6.6 GB of an 8 GB card, against a pool and a device stack that already take
+their share (V190: 86,016 bytes of stack reservation per thread leaves 0.95 GB). More slots also
+do nothing for the depth-dose case, which is launch-bound at 2 threads and not slot-bound. The
+real fix is a different shape - accumulate interactions across iterations and drain in fewer,
+fuller launches, or split the models so a warp cooperates on one cascade instead of a thread
+owning it - and that is a design change, not a constant.

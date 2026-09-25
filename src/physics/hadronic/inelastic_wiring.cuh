@@ -206,6 +206,29 @@ __host__ __device__ inline InelasticChannel inelastic_channel(ParticleType t) {
   }
 }
 
+/// The five species whose inelastic process Geant4 gives a UI name of its own, separate from
+/// the nucleons' and the mesons': `G4IonPhysics::ConstructProcess` builds `dInelastic`,
+/// `tInelastic`, `He3Inelastic`, `alphaInelastic` and `ionInelastic`, and nothing else in QBBC
+/// registers an inelastic process on d, t, He3, alpha or GenericIon.
+/// `HadronicWiring::ion_inelastic` is the one switch that matches all five at once, so a
+/// like-for-like column can inactivate on the port side exactly the set it inactivated on the
+/// Geant4 side.
+///
+/// IT IS KEYED ON THE SPECIES AND NOT ON `InelasticChannel` BECAUSE THE CHANNELS DO NOT SPLIT
+/// THERE: the proton shares `kParticleInelastic` with d/t/He3/alpha - one
+/// `G4ParticleInelasticXS` data set each - and `protonInelastic` is a name the sweep's ion
+/// column must NOT switch.
+__host__ __device__ inline bool is_ion_inelastic_species(ParticleType t) {
+  switch (t) {
+    case ParticleType::kDeuteron:
+    case ParticleType::kTriton:
+    case ParticleType::kHe3:
+    case ParticleType::kAlpha:
+    case ParticleType::kGenericIon: return true;
+    default:                        return false;
+  }
+}
+
 __host__ __device__ inline const char* inelastic_channel_name(InelasticChannel c) {
   switch (c) {
     case InelasticChannel::kNone:              return "no inelastic process";

@@ -336,6 +336,19 @@ int main(int argc, char** argv) {
     const double live = showers ? std::max(32.0, energy / 10.0) : 32.0;
     rm->GetEngine().SetLiveTracksPerEvent(live);
   }
+
+  // AND THE PORT HOLDS OFF EXACTLY WHAT `inactivate()` HOLDS OFF ON THE GEANT4 SIDE.
+  //
+  // `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and `ionInelastic` are on that
+  // list because P9e's `G4BinaryLightIonReaction::Interact` is not wired. Until this line, the
+  // port kept its own copies of those five ON: it drew an interaction length, reached the
+  // interaction, refused it by name, and disposed of the ion by killing it with its kinetic
+  // energy deposited AT THE REFUSAL POINT - which for a heavy charged particle moves the deposit
+  // upstream, out of the residual range it would have travelled. A one-sided inactivation, and
+  // the one that read -39.27% (-201.8 sigma) on the sweep's 840 MeV alpha beam before it was
+  // found. It is small here - a 100 MeV proton makes few energetic ions - but "small" is not a
+  // reason to compare two different physics lists. docs/RISK.md V192.
+  rm->GetEngine().SetIonInelastic(false);
 #endif
 
   rm->Initialize();
