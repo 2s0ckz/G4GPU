@@ -1177,6 +1177,47 @@ extern template G4GPU_INTERACTION(had::InteractionBucket::kAtRest, StepTap<doubl
 
 // ---------------------------------------------------------------- method bodies
 
+/// Raises the per-thread device stack to what the interaction kernels need, once, the first
+/// time an iteration has a hadron in it.
+///
+/// WHY IT IS DEFERRED AT ALL is in `Upload`'s own comment and in docs/RISK.md V190: 86,016
+/// bytes a thread reserves five of an 8 GB card's gigabytes and costs B1's 6 MeV gamma gate
+/// 28% of its throughput, on a run that can never reach a hadronic model.
+///
+/// WHY IT IS FATAL WHEN IT FAILS. The reservation is made after the pools are allocated, so it
+/// can fail for want of memory where the same call at `Upload` would have succeeded. There is
+/// no safe fall-back: a kernel whose frame is larger than the limit does not warn, it takes an
+/// illegal memory access, and the run after it reports a plausible number. Lowering the slot
+/// count or the batch is what a caller does about it, and the message says so.
+template <typename real_t, typename StepHook>
+void TransportEngine<real_t, StepHook>::RaiseStackForInteractions() {
+  if (stack_raised_) { return; }
+  stack_raised_ = true;
+  const std::size_t want = interaction_stack_bytes(true);
+  std::size_t have = 0;
+  cudaDeviceGetLimit(&have, cudaLimitStackSize);
+  if (have >= want) { return; }
+  const cudaError_t e = cudaDeviceSetLimit(cudaLimitStackSize, want);
+  size_t f = 0, t = 0;
+  cudaMemGetInfo(&f, &t);
+  if (e != cudaSuccess) {
+    std::printf("\nFATAL: the first hadron of this run needs %zu bytes of device stack a\n"
+                "       thread - `run_interaction<kBinary>`'s frame is 81,584 - and the\n"
+                "       driver refused: %s. %.2f GB of %.2f GB is free.\n"
+                "       A kernel whose frame is larger than the limit does not warn, it takes\n"
+                "       an illegal memory access, so this cannot be carried on from. Lower the\n"
+                "       batch, lower SetInteractionSlots (now %d, %.1f MB), or set\n"
+                "       G4GPU_STACK_BYTES before the run. docs/RISK.md V190.\n",
+                want, cudaGetErrorString(e), double(f) / 1073741824.0,
+                double(t) / 1073741824.0, n_interaction_slots_,
+                double(interaction_bytes_) / 1048576.0);
+    std::exit(2);
+  }
+  std::printf("device stack raised to %zu B a thread for the interaction kernels - %.2f GB of "
+              "%.2f GB left (docs/RISK.md V190)\n",
+              want, double(f) / 1073741824.0, double(t) / 1073741824.0);
+}
+
 template <typename real_t, typename StepHook>
 void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int batch_size,
                                      int threads) {
@@ -1215,14 +1256,30 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // number chosen for comfort, because every 4 kB past it is another 270 MB. What is left is
     // what `SetInteractionSlots` and the batch have to fit in, which is why the pool's default
     // dropped to 128 slots and why `Upload` prints the free memory after both.
-    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 86016));
-    {
-      size_t f = 0, t = 0;
-      cudaMemGetInfo(&f, &t);
-      std::printf("device stack: 86,016 B a thread for the interaction kernels (the Binary "
-                  "cascade's frame is 81,600) - %.2f GB of %.2f GB left\n",
-                  double(f) / 1073741824.0, double(t) / 1073741824.0);
-    }
+    // `G4GPU_STACK_BYTES` overrides it, for the same reason `G4GPU_LIVE_PER_EVENT` overrides
+    // the pool: the only way to answer "what did this cost" is to run the same binary both
+    // ways, and a program that has no such option cannot be asked. It is a RESOURCE knob and
+    // not a physics one - but setting it below a kernel's frame is an illegal memory access in
+    // that kernel, not a warning, so anything under 86,016 is only for a run that cannot make a
+    // hadron.
+    // **RAISED LAZILY, ON THE FIRST ITERATION THAT HAS A HADRON IN IT.** `Upload` sets the
+    // stepping kernels' 16,384 and `RaiseStackForInteractions` sets the interaction kernels'
+    // 86,016 the first time one could run, because the difference is 28% of a photon run's
+    // throughput and a photon run can never reach a hadronic model.
+    //
+    // MEASURED, on B1's own 2,000,000-event 6 MeV gamma gate, same binary, one environment
+    // variable apart:
+    //
+    //     16,384 B/thread   1,160 ms of event loop   1.72e6 events/s   5.94 GB free
+    //     86,016 B/thread   1,616 ms                 1.24e6 events/s   1.17 GB free
+    //
+    // and the dose is 425.86 pGy either way, to every digit it prints. So this is not physics
+    // and it is not memory pressure - halving the track pool moved it by 1.4% - it is what a
+    // device-wide stack reservation does to occupancy and local-memory addressing.
+    //
+    // `G4GPU_STACK_BYTES` overrides both, for the same reason `G4GPU_LIVE_PER_EVENT` overrides
+    // the pool: the only way to answer "what did this cost" is to run the same binary both ways.
+    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, interaction_stack_bytes(false)));
 
     n_volumes_ = static_cast<int>(scene.volumes.size());
     h_mats_.assign(scene.materials.m, scene.materials.m + scene.materials.count);
@@ -1694,8 +1751,23 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // `SetInteractionSlots` can be raised against a measurement rather than a hope - and a
     // shortage costs launches, not interactions.
     n_interaction_slots_ = (interaction_slots_request_ > 0) ? interaction_slots_request_ : 128;
-    queue_capacity_ = (queue_capacity_request_ > 0) ? queue_capacity_request_
-                                                    : static_cast<int>(pool_);
+    // THE QUEUE'S BOUND IS THE THROTTLE'S, NOT THE POOL'S, and that is a factor of forty-eight.
+    //
+    // A track queues at most one interaction per launch, so "one entry per pool slot" is a
+    // bound - but a loose one, because a launch cannot STEP every live track. `BeamOn`'s
+    // throttle lets it step at most `(capacity - live) / max_secondaries_per_step(species)`
+    // tracks of a species, and that reservation is 48 for every species that can enqueue. So
+    // the number of interactions one launch can produce is at most `pool_ / 48`, and the
+    // slack below is for the case where a future species enqueues at a smaller reservation.
+    //
+    // It is worth having as memory rather than as elegance: `pool_` entries was 368 MB on B1's
+    // own batch, out of the 1.17 GB the device stack leaves free (docs/RISK.md V190). This is
+    // 8 MB. `kInelasticQueueFull` is still the refusal if the bound is ever wrong, and the
+    // stepper's disposal for it is the conservative one.
+    const long long q_bound = pool_ / max_secondaries_per_step(kSpeciesProton) + 1024;
+    queue_capacity_ = (queue_capacity_request_ > 0)
+                          ? queue_capacity_request_
+                          : static_cast<int>((q_bound < pool_) ? q_bound : pool_);
     {
       const std::size_t q_bytes =
           sizeof(had::PendingInteraction<real_t>) * static_cast<std::size_t>(queue_capacity_);
@@ -2119,10 +2191,31 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         if (sec_.cursor != nullptr) {
           G4GPU_CUDA_CHECK(cudaMemsetAsync(sec_.cursor, 0, sizeof(int)));
         }
-        // The interaction queue holds ONE iteration's interactions and is drained at the end of
-        // it, so its cursor is rewound here beside the arena's and for the same reason: the
-        // bound that says it cannot overflow is "one launch's tracks", not "one run's".
-        if (d_queue_cursor_ != nullptr) {
+        // ---- can anything be queued this iteration at all?
+        //
+        // A TRACK THAT IS NOT A HADRON CANNOT ENQUEUE, so an iteration with no hadronic species
+        // live needs no cursor rewind, no read-back and no drain - and the read-back is the
+        // expensive half, because `cudaMemcpy` D2H is a full device synchronisation and this
+        // loop only had one of those (the species histogram) before P15.
+        //
+        // MEASURED, AND IT IS WHY THIS TEST IS HERE: B1's 2,000,000-event 6 MeV gamma gate went
+        // from 1,172 ms of event loop to 1,947 ms with the drain running unconditionally - 1.7
+        // times slower on a run that cannot produce one interaction. It is not memory: halving
+        // the pool with `G4GPU_LIVE_PER_EVENT=2` moved it by 1.4%, which rules out the 368 MB
+        // the queue was taking. It is the second synchronisation per iteration, 88 of them in
+        // that run.
+        //
+        // `nsp[]` is the species histogram the counting sort already read back, so this costs
+        // nothing: it is a sum over the hadronic rows of a `kNumTrackSpecies` array on the host.
+        bool any_hadron = false;
+        for (int sp = 0; sp < kNumTrackSpecies && !any_hadron; ++sp) {
+          if (nsp[sp] > 0 && max_secondaries_per_step(sp) > 4) { any_hadron = true; }
+        }
+        if (any_hadron) { RaiseStackForInteractions(); }
+        if (any_hadron && d_queue_cursor_ != nullptr) {
+          // The interaction queue holds ONE iteration's interactions and is drained at the end
+          // of it, so its cursor is rewound here beside the arena's and for the same reason:
+          // the bound that says it cannot overflow is "one launch's tracks", not "one run's".
           G4GPU_CUDA_CHECK(cudaMemsetAsync(d_queue_cursor_, 0, sizeof(int)));
         }
         // One launch per species, each over its own range of the one index list, each into the
@@ -2257,7 +2350,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // be stepped in the NEXT iteration, not this one. The read-back of the cursor is a
         // synchronising copy, which is the one place per iteration this loop waits for the
         // device - the counting sort above already reads `idx_n_` back for the same reason.
-        if (d_queue_cursor_ != nullptr && d_slots_ != nullptr) {
+        if (any_hadron && d_queue_cursor_ != nullptr && d_slots_ != nullptr) {
           int n_queued = 0;
           G4GPU_CUDA_CHECK(cudaMemcpy(&n_queued, d_queue_cursor_, sizeof(int),
                                       cudaMemcpyDeviceToHost));

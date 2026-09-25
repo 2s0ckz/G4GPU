@@ -656,6 +656,31 @@ class TransportEngine {
   g4gpu::hadronic::ftf::entry::Owner<g4gpu::hadronic::ftf::entry::Workspace> ftf_pool_{};
   /// P3's Fermi break-up pool on the device, which every arm's de-excitation tail walks.
   FermiPoolOwner fermi_pool_{};
+  /// Has the device stack been raised to what the interaction kernels need?
+  ///
+  /// FALSE UNTIL A HADRON IS LIVE. `Upload` sets 16,384 - what the stepping kernels and the
+  /// solid engine need - and `RaiseStackForInteractions` sets 86,016 on the first iteration
+  /// that could queue anything. A photon or electron run never calls it and keeps 28% of its
+  /// throughput: measured on B1's 2,000,000-event gamma gate, 1.72e6 events/s at 16,384
+  /// against 1.24e6 at 86,016, with the dose identical to every printed digit. docs/RISK.md
+  /// V190 has the whole table.
+  bool stack_raised_ = false;
+  /// The per-thread device stack, in bytes, for the two states. `G4GPU_STACK_BYTES` overrides
+  /// both - a resource knob, and setting it below a kernel's frame is an illegal memory access
+  /// in that kernel rather than a warning.
+  static std::size_t interaction_stack_bytes(bool for_interactions) {
+    if (const char* env = std::getenv("G4GPU_STACK_BYTES")) {
+      const long v = std::atol(env);
+      if (v >= 1024) { return static_cast<std::size_t>(v); }
+    }
+    // 81,584 is `run_interaction<kBinary>`'s frame; 86,016 is that rounded to a 4 kB boundary
+    // with one page of margin. 16,384 is what the solid engine's recursion has needed since
+    // long before P15.
+    return for_interactions ? 86016u : 16384u;
+  }
+  /// Raises it once, and refuses loudly if the device cannot. Called from `BeamOn`.
+  void RaiseStackForInteractions();
+
   /// How many interactions the run queued, and the largest number any one launch produced.
   /// The second is what a slot count is chosen against; see the report.
   long long interactions_queued_ = 0;
