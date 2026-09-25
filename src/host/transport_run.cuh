@@ -604,6 +604,9 @@ class TransportEngine {
   int* d_had_refused_n_ = nullptr;
   double* d_had_refused_e_ = nullptr;
   had::HadronicStage had_stage_ = had::HadronicStage::kStage1;
+  /// The stage the last BeamOn actually ran - `had_stage_` unless `G4GPU_HADRONIC_STAGE` said
+  /// otherwise. It is what the report prints.
+  had::HadronicStage had_stage_used_ = had::HadronicStage::kStage1;
   bool had_decay_ = true;
   bool had_elastic_ = true;
   bool had_capture_ = true;

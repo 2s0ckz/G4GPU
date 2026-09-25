@@ -12809,3 +12809,67 @@ old stream had never sampled a conversion electron in that grid.
 WHAT IT COSTS, measured: `transport_run_int_lightion` alone now takes 437 s of ptxas at a
 15.7 GB peak (40 s and 6.1 GB before), and `run_interaction<kLightIon>`'s frame is 88,240 bytes -
 the largest of the five, and so the one the device stack is now reserved against (V196).
+
+### V199: every at-rest capture was snapped against another interaction's masses
+
+The P15 sweep with P9e wired read **proton_1000 at +29.2% (9.8 sigma)**, and the shape said more
+than the size: the port's rms was 2.3% of its dose against Geant4's 0.34%. A few events were
+putting a great deal of energy into the trapezoid. The ledger of a 20,000-event run named what:
+`kLightIonCascade` refusals at **12 GeV each** and ion delta-ray bookings summing to 1.22e6 MeV -
+ions with kinetic energies near their own REST MASS, from a 1 GeV proton beam.
+
+THE MECHANISM. `fill_result` (G4HadronicProcess::FillResult) snaps every secondary onto its
+definition mass and keeps the total energy: `T += m_dynamic - m_definition`. The definition masses
+come from `slot.pdg_mass[]`, and the slot is reused by all five interaction kernels. `run_inelastic`
+refills it inside its re-entry loop because `check_result` needs it; **`run_at_rest` never did**,
+and the kernel hands `slot->pdg_mass` to `fill_result` for an at-rest capture exactly as for an
+in-flight interaction. So every capture was snapped against the masses of whatever interaction
+last ran in that slot, or against the zeros of a fresh one - and a proton from a pi- capture left
+with 938 MeV it never had, an alpha with 3.7 GeV, a C12 with 11 GeV.
+
+WHY THIS BEAM AND NOT THE OTHERS, and why nothing had seen it:
+
+  * proton_210 is below the pion threshold, so no pi- stops and nothing is captured: -0.21%.
+  * the capture was unreachable until the final stage was selectable (V194, 0159735), so the
+    09-19 sweep, in stage 1, could not show it.
+  * `tests/test_inelastic_transport.cu` section 5 called `run_at_rest` and counted what came
+    back, and never ran `fill_result` after it - the one step the defect lived in.
+  * a TOTAL-energy balance priced with `definition_mass_of` is blind to it by construction: the
+    wrong snap preserves `T + m_dynamic`, and the balance priced the fragment at the same
+    definition mass. Seventy thousand interactions of the test grid balanced perfectly while this
+    was live. What found it was measuring the snap itself - `m_dynamic - pdg_mass[i]` - and then
+    reading which paths write `pdg_mass`.
+
+THE FIX is two lines in `run_at_rest` and a sentence on the member: every entry point that fills
+`slot.fs` refills `slot.pdg_mass` for it. The test poisons `pdg_mass` with zeros before each
+capture - a fresh slot, and the worst case of stale - runs `fill_result` exactly as the kernel
+does, and asserts every secondary moved by its own `m_dyn - m_def` and nothing more. With the fix
+removed, by name: "pi-: 1761 at-rest secondaries were snapped by fill_result against masses that
+are not theirs"; "mu-: 1249".
+
+AND ONE REAL SNAP THE SAME MEASUREMENT FOUND, which is not this defect and is recorded so it is
+not rediscovered: FTFP's final states carry nuclear fragments whose dynamic mass is far above
+their ground state - a "C12" at 11,712 MeV against 11,175 - and the snap turns that "excitation"
+into kinetic energy (11 -> 549 MeV). Total energy is conserved and Geant4's FillResult snaps the
+same way; the question is why FTFP's generator hands back a fragment 537 MeV above any bound
+state, which is P11's and P6's. 3,376 such secondaries in the grid's two 4 GeV proton cells and
+none in the 1 GeV ones, so it does not reach the sweep's beams.
+
+### V200: the ion delta-ray threshold was out by a factor of a thousand, and its branch fires
+
+`step_hadron` refuses a GenericIon's delta rays by name - `kIonDeltaRay`, counted per step -
+because the delta-ray code derives its projectile from the species, and for `kGenericIon` that
+is G4GenericIon's placeholder. The comment justified leaving it refused: the window `tmax > cut`
+needs `beta^2 gamma^2 > 342` for water's 350 keV cut, "above about 17 GeV per nucleon", and "the
+ions this transport makes are elastic recoils of tens of MeV at most".
+
+**It is 0.342, not 342** - `tmax ~ 2 m_e c^2 beta^2 gamma^2` is 1.022 MeV times beta^2 gamma^2,
+and the comparison was made in keV on one side and MeV on the other - so the window opens at
+about **147 MeV per nucleon**. And since P9e's `Interact`, the premise about the ions is false
+too: a 1 GeV/u alpha beam's projectile fragments are GenericIons far above 147 MeV/u. So the
+branch is reachable and the refusal is a real, named hole for those fragments, which is what the
+comments in `stepper.cuh` and `wiring.cuh` and the ledger's printed name now say. Its rate per
+beam is in the sweep's `.refusals.txt`.
+
+It was found on the way to V199: the ion delta-ray bookings in the 1 GeV proton ledger were the
+bogus V199 ions, and reading why the branch could fire at all turned up the arithmetic.

@@ -235,11 +235,14 @@ enum class HadronicRefusal : int {
   /// mass NUMBER as well (`G4NistManager::GetA27`), so the channel is refused rather than
   /// sampled with the wrong particle.
   ///
-  /// AT ZERO FOR EVERYTHING THIS PORT CAN PRODUCE, and the threshold is arithmetic rather than
-  /// a hope: an ion's window is `tmax > cut` with `tmax = 2 m_e b2g2/(1 + 2 gamma m_e/M +
-  /// (m_e/M)^2)`, so water's 350 keV electron cut needs `beta^2 gamma^2 > 342`, i.e. an ion
-  /// above about 17 GeV per nucleon. `step_hadron` tests it with the ion's OWN definition,
-  /// which is exact.
+  /// THE THRESHOLD IS ARITHMETIC, AND IT WAS WRONG BY A FACTOR OF A THOUSAND UNTIL V200. An ion's
+  /// window is `tmax > cut` with `tmax = 2 m_e b2g2/(1 + 2 gamma m_e/M + (m_e/M)^2)`, so water's
+  /// 350 keV electron cut needs `beta^2 gamma^2 > 0.342` - an ion above about **147 MeV per
+  /// nucleon**. This said `> 342` and 17 GeV per nucleon, and on that reading claimed the counter
+  /// sat at zero for everything this port could produce. It does not: since P9e's `Interact`, a
+  /// 1 GeV/u alpha beam's projectile fragments are GenericIons well above the window, so this is a
+  /// reachable, named hole - their delta rays are counted, per step, not sampled. `step_hadron`
+  /// tests it with the ion's OWN definition, which is exact.
   kIonDeltaRay,
 
   // -------------------------------------------------------------------------------------------
@@ -376,7 +379,7 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "a GenericIon track with no (Z, A), or one outside AME2012 - killed with its "
              "energy deposited";
     case HadronicRefusal::kIonDeltaRay:
-      return "an ion's delta-ray channel (G4ionIonisation above ~17 GeV/u) - counted PER STEP, "
+      return "an ion's delta-ray channel (G4ionIonisation above ~147 MeV/u) - counted PER STEP, "
              "not per interaction";
     case HadronicRefusal::kLightIonCascade:
       return "WHY: G4BinaryLightIonReaction's cascade arm - G4BinaryCascade::Propagate "

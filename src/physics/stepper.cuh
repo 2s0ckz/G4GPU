@@ -1285,15 +1285,21 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // definition from its SPECIES, and for `kGenericIon` that is G4GenericIon's placeholder - so
     // handing either of them an oxygen recoil would compute the delta-ray rate of a singly
     // charged 938 MeV particle. Threading `h.def` and `h.a` through them is a change in three
-    // shared EM headers for a branch that cannot fire: an ion's transfer window opens only when
-    // `tmax > cut`, and `tmax = 2 m_e b2g2 / (1 + 2 gamma m_e/M + (m_e/M)^2)`, so water's
-    // 350 keV cut needs `beta^2 gamma^2 > 342` - above about 17 GeV per nucleon. The ions this
-    // transport makes are elastic recoils of tens of MeV at most.
+    // shared EM headers. An ion's transfer window opens only when `tmax > cut`, and
+    // `tmax = 2 m_e b2g2 / (1 + 2 gamma m_e/M + (m_e/M)^2)`, so water's 350 keV cut needs
+    // `beta^2 gamma^2 > 0.342` - ABOUT 147 MeV PER NUCLEON.
+    //
+    // THIS COMMENT SAID `> 342` AND "ABOVE ABOUT 17 GeV PER NUCLEON" UNTIL P15'S SECOND PASS, a
+    // factor of a thousand (keV against MeV), and concluded the branch "cannot fire" because the
+    // ions this transport made were elastic recoils of tens of MeV. Both halves are gone: the
+    // threshold is 147 MeV/u, and since P9e's `Interact` a 1 GeV/u alpha beam's projectile
+    // fragments are GenericIons well above it. So this refusal is REACHABLE and is a named hole:
+    // those fragments' delta rays are counted here, per step, not sampled. docs/RISK.md V200.
     //
     // So the window is tested with the ion's OWN definition, which is exact, and an ion that
     // opens it is counted rather than sampled. The count is per STEP and not per interaction,
     // which is the opposite of every other entry in that ledger: what is missing here is the
-    // whole delta-ray channel of an ion above 17 GeV/u, on every step of it, rather than one
+    // whole delta-ray channel of an ion above ~147 MeV/u, on every step of it, rather than one
     // final state that could not be applied. `hadronic_refusal_name` says so.
     real_t delta_xs = real_t(0);
     if (h.is_real_ion()) {

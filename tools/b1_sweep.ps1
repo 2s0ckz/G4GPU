@@ -187,19 +187,20 @@ function Get-ProcessDump([string[]]$out) {
 # says they must not be summed. This captures the block verbatim rather than parsing it, so the
 # file beside the table says what ran.
 function Get-PortRefusals([string[]]$out) {
-  $keep = @(); $on = $false
+  # The banner, then every LEDGER LINE - a count, an energy in MeV and a name - and the
+  # `interactions:` line. Not "everything up to the first blank line": the ledger prints a blank
+  # line and a paragraph of explanation straight after its banner, and the first version of this
+  # function stopped there and recorded the banner alone for every beam of a full sweep.
+  $keep = @()
   foreach ($l in $out) {
-    if ($l -match 'HADRONIC INTERACTIONS WITH NO FINAL STATE') { $on = $true }
+    if ($l -match 'HADRONIC INTERACTIONS WITH NO FINAL STATE') { $keep += $l; continue }
+    if ($l -match '^\s+\d+\s+[0-9.eE+-]+\s+MeV\s+\S') { $keep += $l; continue }
     if ($l -match '^interactions:') { $keep += $l; continue }
-    if ($on) {
-      if ($l -match '^\s*$') { $on = $false; continue }
-      $keep += $l
-    }
+    if ($l -match '^stack:|^STACK:') { $keep += $l; continue }
   }
   if ($keep.Count -eq 0) { $keep = @("(no refusal ledger printed - no hadronic interaction in this beam)") }
   return $keep
-}
-function Invoke-Run([scriptblock]$launch) {
+}function Invoke-Run([scriptblock]$launch) {
   $sw = [Diagnostics.Stopwatch]::StartNew(); $out = & $launch; $sw.Stop()
   return @{ Ms = $sw.Elapsed.TotalMilliseconds; Out = $out }
 }

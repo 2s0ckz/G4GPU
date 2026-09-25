@@ -816,6 +816,7 @@ int main() {
     for (const S& s : sp) {
       long long stopped = 0, captured = 0, refused = 0, decayed_in_orbit = 0;
       long long em_gammas = 0, nuclear_sec = 0, decayed_in_flight = 0;
+      long long snapped_wrong = 0;  // secondaries fill_result moved by more than their own dm
       const std::vector<int> ref0 = ref_n;
       for (long long k = 0; k < 200; ++k) {
         TrackState<real_t> p{};
@@ -859,10 +860,41 @@ int main() {
             proj.charge = particle_def<real_t>(q.species).charge;
             proj.mass = particle_def<real_t>(q.species).mass;
             proj.kin_energy = 0;
+            // A FRESH SLOT'S `pdg_mass` - zeros - which is what the kernel's first capture in a
+            // slot saw, and the worst case of the stale masses every later one saw. docs/RISK.md
+            // V199: `run_at_rest` must refill it, and the check below is what says it does.
+            for (int j = 0; j < had::kInteractionSecondaryCap; ++j) { slot.pdg_mass[j] = 0; }
             stop::AtRestResult ar;
             const had::InteractionOutcome oc = had::run_at_rest<real_t>(
                 proj, mc, slot, pool.view, 0, lt, pool.view.fermi, had::NuclearMassMeV(), irng,
                 ar);
+            // AND WHAT THE KERNEL DOES NEXT, which this section did not do until V199 and which
+            // is where the defect lived: `fill_result` snaps each secondary onto
+            // `slot.pdg_mass[j]` and adds the difference to its kinetic energy. So every
+            // secondary must come out with its own model energy plus its own `m_dyn - m_def`
+            // off-shell correction and NOTHING ELSE - a proton that gained 938 MeV is a proton
+            // snapped against a zero.
+            if (oc.ran) {
+              slot.filled = hp::fill_result<real_t, had::kInteractionSecondaryCap,
+                                            had::kInteractionSecondaryCap>(
+                  slot.fs, Vec3<real_t>{0, 0, 1}, real_t(0), real_t(1),
+                  had::has_at_rest_arm(q.species), slot.pdg_mass);
+              for (int j = 0; j < slot.fs.n_secondaries && j < slot.filled.n_secondaries; ++j) {
+                const auto& m = slot.fs.secondaries[j];
+                const double dm = double(m.mass) - double(had::definition_mass_of<real_t>(m));
+                double expect = double(m.kin_energy) + ((dm > 1e-3 || dm < -1e-3) ? dm : 0.0);
+                if (expect < 1e-9) { expect = 1e-9; }
+                if (std::fabs(double(slot.filled.secondaries[j].kin_energy) - expect) > 1e-6) {
+                  ++snapped_wrong;
+                  if (snapped_wrong == 1) {
+                    std::printf("   first wrong snap: pdg %d z %d a %d  model T %.4f  handed on "
+                                "%.4f  expected %.4f MeV\n", m.pdg, m.z, m.a,
+                                double(m.kin_energy),
+                                double(slot.filled.secondaries[j].kin_energy), expect);
+                  }
+                }
+              }
+            }
             em_gammas += ar.n_em_cascade;
             if (ar.decayed_in_orbit) { ++decayed_in_orbit; }
             if (oc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
@@ -908,6 +940,16 @@ int main() {
         fail(std::string(s.name)
              + ": the atomic cascade emitted nothing - G4EmCaptureCascade always emits");
       }
+      // THE SNAP MUST USE THESE SECONDARIES' OWN MASSES (V199). A zero or a stale entry in
+      // `slot.pdg_mass` adds a secondary's whole rest mass to its kinetic energy, and the B1
+      // sweep's proton_1000 read +29% (9.8 sigma) on exactly that before it was found.
+      if (snapped_wrong != 0) {
+        fail(std::string(s.name) + ": " + std::to_string(snapped_wrong)
+             + " at-rest secondaries were snapped by fill_result against masses that are not "
+               "theirs - run_at_rest left slot.pdg_mass stale");
+      }
+      std::printf("  %-4s fill_result snapped every at-rest secondary against its own mass: %s\n",
+                  s.name, snapped_wrong == 0 ? "yes" : "NO");
       (void)ref0;
     }
   }

@@ -2319,6 +2319,10 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           else if (env[0] == 's') { stage = had::HadronicStage::kStage1; }
         }
         had_wiring.stage = stage;
+        // What the report prints: the stage this run USED, which `G4GPU_HADRONIC_STAGE` may have
+        // changed from `had_stage_`. The ledger header printed `had_stage_` until V200 and said
+        // "stage1" over runs whose neutrons were visibly reacting inelastically.
+        had_stage_used_ = stage;
         had_wiring.decay = had_decay_;
         had_wiring.hadron_elastic = had_elastic_;
         had_wiring.neutron_capture = had_capture_;
@@ -2720,7 +2724,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                     "    with the projectile's kinetic energy on it. The second says WHY, and\n"
                     "    every one of its entries is a second booking on an event that is\n"
                     "    already in the first. Sum the first group, read the second.\n\n",
-                    st.had_refused_total, had::hadronic_stage_name(had_stage_));
+                    st.had_refused_total, had::hadronic_stage_name(had_stage_used_));
         for (int r = 0; r < kNR; ++r) {
           if (hn[r] > 0) {
             std::printf("      %10lld   %12.6g MeV   %s\n", st.had_refused_count[r],

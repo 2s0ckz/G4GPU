@@ -141,6 +141,11 @@ struct InteractionSlot {
   physics::hadronic::HadronicStepResult<real_t, kInteractionSecondaryCap> filled;
   /// The DEFINITION mass of each secondary, which `fill_result` and `check_result` compare the
   /// model's dynamic mass against. Computed per secondary by `definition_mass_of`.
+  ///
+  /// EVERY ENTRY POINT THAT FILLS `fs` MUST REFILL THIS FOR IT, because the slot is reused by all
+  /// five kernels and `fill_result` adds `mass - pdg_mass[i]` to each secondary's kinetic energy:
+  /// a stale entry - or the zero of a fresh slot - hands a secondary its whole rest mass as
+  /// motion. `run_inelastic` and `run_at_rest` both do; the second did not until V199.
   real_t pdg_mass[kInteractionSecondaryCap];
   /// The two models with final-state types of their own.
   bic::BicFinalState bic_fs;
@@ -787,6 +792,23 @@ __host__ __device__ __noinline__ InteractionOutcome run_at_rest(
   r = stop::at_rest<real_t, kInteractionSecondaryCap>(
       proj, mat, s.fs, &s.nuclear_fs, par, lim, bs, lt, fpool, pws, nuclear_mass, ftf_invoke,
       /*emc_model_id=*/0, /*nc_model_id=*/0, /*dio_model_id=*/0, rng);
+
+  // THE DEFINITION MASSES OF THESE SECONDARIES, WHICH `fill_result` SNAPS EVERY ONE AGAINST.
+  //
+  // `run_inelastic` fills `s.pdg_mass` inside its re-entry loop, because `check_result` needs it;
+  // this function did not, and the kernel hands `slot->pdg_mass` to `fill_result` for an at-rest
+  // capture exactly as for an in-flight interaction. So every capture was snapped against the
+  // masses of whatever interaction had last run in that slot - or against the zeros of a fresh
+  // one - and `fill_result`'s `T += m_dynamic - m_definition` then handed a proton from a pi-
+  // capture 938 MeV it never had, an alpha 3.7 GeV and a C12 11 GeV. That is the B1 sweep's
+  // proton_1000 at +29% (9.8 sigma) with a port rms seven times Geant4's: a 1 GeV proton beam
+  // stops pi- in the phantom, and each capture could put a mass's worth of kinetic energy into
+  // the scoring volume. The 09-19 sweep never saw it because the capture was unreachable until
+  // the final stage was (V194), and `tests/test_inelastic_transport.cu` section 5 ran
+  // `run_at_rest` without `fill_result` after it. docs/RISK.md V199.
+  for (int i = 0; i < s.fs.n_secondaries; ++i) {
+    s.pdg_mass[i] = definition_mass_of<real_t>(s.fs.secondaries[i]);
+  }
 
   out.target_z = r.z;
   out.target_a = r.a;
