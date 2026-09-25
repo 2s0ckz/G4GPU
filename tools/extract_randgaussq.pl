@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# Generates src/physics/hadronic/bic/nucleus/randgaussq_table.hh from CLHEP's own table.
+# Generates src/core/randgaussq_table.hh from CLHEP's own table.
 #
 # WHY THIS EXISTS. `G4RandGauss` is `#define`d to `CLHEP::RandGaussQ` (Randomize.hh:47), not to
 # `CLHEP::RandGauss` - docs/RISK.md V180 - and `RandGaussQ::transformQuick` is a lookup in a
@@ -7,6 +7,12 @@
 # lives in `CLHEP/Random/gaussQTables.cdat`, 1,250 float literals with the argument of each in a
 # trailing comment, and it is 5 kilobytes of numbers: exactly the kind of thing that must be
 # extracted and never retyped.
+#
+# WHY UNDER core/. It was written into bic/nucleus/ for the one caller P9e had, the C12 branch of
+# G4Fancy3DNucleus. The fluctuation, multiple-scattering and fission models call the same
+# `G4RandGauss::shoot` and had each implemented a different Gaussian in its place, so P17 made
+# the transcription shared - src/core/rand_gauss_q.cuh includes this table - and moved the file
+# with `git mv`; its numbers did not change. docs/RISK.md V185.
 #
 # The five geometry constants come from RandGaussQ.cc and are read out of it here rather than
 # written down, for the same reason: a release that changes `Table1step` changes which bin every
@@ -19,7 +25,7 @@ use warnings;
 my $g4src = $ARGV[0] || 'D:/Documents/Geant4/Windows/geant4-v11.1.1';
 my $cdat  = "$g4src/source/externals/clhep/include/CLHEP/Random/gaussQTables.cdat";
 my $src   = "$g4src/source/externals/clhep/src/RandGaussQ.cc";
-my $out   = 'src/physics/hadronic/bic/nucleus/randgaussq_table.hh';
+my $out   = 'src/core/randgaussq_table.hh';
 
 # ---------------------------------------------------------------------------- the constants
 open(my $sh, '<', $src) or die "cannot read $src: $!\n";
@@ -101,11 +107,13 @@ print $o <<"HDR";
 // and then casts the result back to float on the way out, so the answer carries float precision
 // however it is stored, and storing the table as double would only hide where that happens.
 //
-// See docs/RISK.md V180 for why this table is in the port at all.
-#ifndef G4GPU_BIC_NUCLEUS_RANDGAUSSQ_TABLE_HH
-#define G4GPU_BIC_NUCLEUS_RANDGAUSSQ_TABLE_HH
+// See docs/RISK.md V180 for why this table is in the port at all, and V185 for why it is under
+// core/: every `G4RandGauss::shoot` Geant4 makes is `transformQuick` on this table, and
+// core/rand_gauss_q.cuh is the one function all of the port's call sites share.
+#ifndef G4GPU_CORE_RANDGAUSSQ_TABLE_HH
+#define G4GPU_CORE_RANDGAUSSQ_TABLE_HH
 
-namespace g4gpu::bic {
+namespace g4gpu {
 
 inline constexpr int kGaussQTable0Size = $c{Table0size};
 inline constexpr int kGaussQTable1Size = $c{Table1size};
@@ -131,7 +139,7 @@ print $o <<'FTR';
   return t;
 }
 
-}  // namespace g4gpu::bic
+}  // namespace g4gpu
 
 #endif
 FTR
