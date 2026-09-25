@@ -56,11 +56,33 @@ rem 2.8 GB of working set, so six is about 18 GB of the 64 this machine has - an
 rem cores and memory for whatever else is building, which on this project is usually three or
 rem four other worktrees. Unbounded is not free: the first version of this script started all
 rem of them and the machine held eight ptxas processes at once, one of which wanted 8.7 GB.
+rem
+rem P15'S FIVE INTERACTION UNITS ARE NOT IN THAT CAP, AND THAT IS MEASURED TOO. They are the
+rem only objects in the build that carry a hadronic model, and one ptxas of them peaks at:
+rem
+rem     transport_run_int_lightion   6,126 MB    40 s
+rem     transport_run_int_ftfp       8,377 MB   130 s
+rem     transport_run_int_bertini    9,319 MB   210 s
+rem     transport_run_int_binary     9,838 MB   365 s
+rem     transport_run_int_atrest    19,770 MB   660 s   (Bertini AND FTFP - see below)
+rem
+rem Six of those at once is 60+ GB on a 64 GB machine that usually has three or four other
+rem worktrees building, so they are compiled ONE AT A TIME and BEFORE the stepping units, which
+rem puts the 19.8 GB peak on an otherwise idle machine. The at-rest one is two models because
+rem `stopping::at_rest` is one function that calls Bertini unconditionally and FTFP through an
+rem invoke - splitting it by arm would put Bertini in both halves and cost twice. docs/RISK.md
+rem V189 has the whole table, and the reason nobody had found this before: every model test in
+rem this project is host-only, so no model had ever been compiled as device code at all.
 set CAP=6
-echo compiling the transport engine, %CAP% units at a time
 for %%U in ("%~dp0src\host\transport_run*.cu") do (
   if exist "%~dp0out\%%~nU.rc" del /q "%~dp0out\%%~nU.rc"
 )
+echo compiling P15's five interaction units, one at a time ^(they carry the hadronic models^)
+for %%U in ("%~dp0src\host\transport_run_int_*.cu") do (
+  echo   %%~nU
+  call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
+)
+echo compiling the transport engine, %CAP% units at a time
 call :launch_units
 
 rem Waiting on the sentinel files, because cmd cannot wait on a process it started with
@@ -118,8 +140,13 @@ rem object and the program still runs; with them deleted it carries the kernels 
 rem does NOT do is fail - two objects holding the same specialisation link cleanly on CUDA
 rem 11.6, the stubs being COMDAT-folded - so a launch added without a declaration would cost
 rem 24 minutes of nvcc and say nothing at all. Hence a check on the artefact, not on the link.
-for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run.obj" ^| findstr /c:"run_step_"`) do (
-  echo FATAL: out\transport_run.obj carries a stepping kernel:
+rem `run_interaction` is in the pattern since P15 and matters MORE than `run_step_`, not less:
+rem the five interaction kernels are the only ones carrying a hadronic model, so one of them
+rem implicitly instantiated into the engine's own unit would put Bertini or FTFP in an object
+rem that is meant to hold host code and three utility kernels - and would cost the ptxas peak
+rem that unit's `.log` records rather than failing.
+for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run.obj" ^| findstr /c:"run_step_" /c:"run_interaction"`) do (
+  echo FATAL: out\transport_run.obj carries a stepping or interaction kernel:
   echo        %%N
   echo        A launch was added without a matching `extern template` in
   echo        src\host\transport_run_impl.cuh, so that kernel is compiled into the engine's
@@ -160,13 +187,22 @@ rem volume label syntax is incorrect" from inside a process this script never se
 rem the line with `call` means it does not begin with a quote and nothing is stripped. Every
 rem unit failed that way at once and the wait loop above then waited for ever, which is how
 rem this was found; `start`'s own quoted-argument handling has the same fault without `cmd /c`.
+rem A unit whose .rc already exists was compiled by the serial pass above - the five interaction
+rem units - and is skipped here rather than compiled twice. `BASE` is how many of those there
+rem were, so that `await_slot`'s "done" count means THIS pass's units and not all of them; without
+rem it `INFLIGHT` goes negative and every remaining unit starts at once, which is the 60 GB the
+rem serial pass exists to avoid.
 :launch_units
 setlocal EnableDelayedExpansion
+set BASE=0
+for %%R in ("%~dp0out\transport_run*.rc") do set /a BASE+=1
 set LAUNCHED=0
 for %%U in ("%~dp0src\host\transport_run*.cu") do (
-  call :await_slot
-  start "" /b cmd /c call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
-  set /a LAUNCHED+=1
+  if not exist "%~dp0out\%%~nU.rc" (
+    call :await_slot
+    start "" /b cmd /c call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
+    set /a LAUNCHED+=1
+  )
 )
 endlocal
 exit /b 0
@@ -178,7 +214,7 @@ rem that count mean this build rather than the last one.
 :await_slot
 set DONE=0
 for %%R in ("%~dp0out\transport_run*.rc") do set /a DONE+=1
-set /a INFLIGHT=!LAUNCHED!-!DONE!
+set /a INFLIGHT=!LAUNCHED!-!DONE!+!BASE!
 if !INFLIGHT! LSS %CAP% exit /b 0
 ping -n 3 127.0.0.1 >nul
 goto await_slot

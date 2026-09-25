@@ -1863,11 +1863,44 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // call, with the right count on it - which is what makes the queue entry carry eleven
     // pre-step scalars it would otherwise not need.
     if (interacts_inelastic && p.ekin > real_t(0)) {
-      const bool ok = had::enqueue_interaction<real_t>(
-          had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre_step,
-          pos_before, dir_pre_step, volume_pre_step,
-          (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
-          static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status, inel_xs);
+      // ---- `G4EnergyRangeManager::GetHadronicInteraction`, HERE AND NOT IN THE INTERACTION
+      // KERNEL, and that is a deliberate reordering of two independent draws.
+      //
+      // Geant4's order inside `PostStepDoIt` is: the integral-approach rejection, then
+      // `SampleZandA`, then the model choice. The port's is: the model choice (here, at the end
+      // of the step), then the rejection and the target draw (in the interaction kernel, on its
+      // own RNG purpose). The reason is that the model decides WHICH KERNEL runs the entry -
+      // ptxas cannot compile four of them into one (`InteractionBucket`'s own comment) - so the
+      // bucket has to be known at enqueue.
+      //
+      // WHAT IT COSTS IS NOTHING, and the reason is Philox's shape rather than an argument
+      // about small effects. Each step opens a fresh counter-based stream on
+      // `(rng_key, step, purpose)`, so a uniform drawn at the END of a step cannot move any
+      // draw earlier in it and cannot reach the next step at all. The one observable difference
+      // is that a model uniform is now drawn even when the integral rejection will later
+      // discard the interaction, where Geant4 would not have drawn one - a wasted draw on a
+      // stream nothing else reads, not a bias.
+      //
+      // The model choice itself is `choose_inelastic_model`, which needs the energy, the baryon
+      // number and one uniform - no cross-section table and no model code, which is what lets
+      // it live in a stepping kernel at all.
+      physics::hadronic::ModelChoice mstat = physics::hadronic::ModelChoice::kOk;
+      const had::InelasticModel model = had::choose_inelastic_model<real_t>(
+          type, p.ekin, had::baryon_number_of(type, h.a), rng, mstat);
+      const bool ok =
+          (model != had::InelasticModel::kNone)
+          && had::enqueue_interaction<real_t>(
+                 had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre_step,
+                 pos_before, dir_pre_step, volume_pre_step,
+                 (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
+                 static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
+                 inel_xs, had::bucket_of_model(model), model);
+      if (model == had::InelasticModel::kNone) {
+        // `G4EnergyRangeManager` found no model in range, or more than two competing, or two
+        // nested - Geant4's `had005` FatalException. A tripwire on the transcribed windows; see
+        // `kNoInelasticModel`.
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
+      }
       if (!ok) {
         // The proof in `interaction_queue.cuh`'s header says this cannot happen at the default
         // capacity. If it does, the interaction is lost and the track is killed with its
@@ -1994,12 +2027,15 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
       // carries that `edep` and the capture's own local deposit is added to it, not in place
       // of it - so the track's last few tens of keV are scored once, here, and the capture
       // scores only what `AtRestResult::local_deposit_MeV` says.
+      // The at-rest bucket needs no uniform at all: `G4StoppingPhysics::ConstructProcess` gives
+      // a species one nuclear model by NAME, and `at_rest_bucket` is that table.
       const bool ok = had::enqueue_interaction<real_t>(
           had.queue, p, had::InteractionKind::kAtRest, type, rep, edep, ekin_pre_step,
           pos_before, dir_pre_step, volume_pre_step,
           (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
           static_cast<unsigned int>(em.child_count), em.last_secondary,
-          StepStatus::fStopAndKill, real_t(0));
+          StepStatus::fStopAndKill, real_t(0), had::at_rest_bucket(type),
+          had::InelasticModel::kNone);
       if (!ok) {
         had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
         if (r != had::HadronicRefusal::kNumHadronicRefusals) {

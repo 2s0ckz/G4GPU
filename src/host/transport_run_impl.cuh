@@ -45,6 +45,7 @@
 #pragma once
 #include <cstdio>
 #include <cstdlib>
+#include <new>  // placement new; see `run_interaction`'s note on fill_result's 18 kB return
 
 #include "host/transport_run.cuh"
 
@@ -230,6 +231,39 @@ __global__ void scatter_species(TrackBuffer<real_t> pool, int n, int* list,
   const int sp = species_index(static_cast<ParticleType>(pool.species[i]));
   if (sp < 0) { return; }  // already counted by count_species
   list[off.base[sp] + atomicAdd(&cursors[sp], 1)] = i;
+}
+
+// ---------------------------------------------------------------- P15: binning the queue
+//
+// `count_species` and `scatter_species` again, over the interaction queue instead of the track
+// pool, and for the same two reasons: a kernel can only be launched over a contiguous range,
+// and a warp whose threads take different physics paths serialises through all of them. The
+// second reason is stronger here than it is for the steppers - "different physics paths" is
+// Bertini against FTFP rather than two multiple-scattering models - and so is the first, because
+// the kernels are in different translation units and a thread cannot choose between them at all.
+//
+// Both carry no physics and are templated on `real_t` alone, so they stay in the engine's own
+// object like the three utility kernels above.
+template <typename real_t>
+__global__ void count_interactions(const had::PendingInteraction<real_t>* items, int n,
+                                   int* counts) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  atomicAdd(&counts[static_cast<int>(items[i].bucket)], 1);
+}
+
+/// Start of each bucket's contiguous range in the one index list.
+struct InteractionOffsets {
+  int base[static_cast<int>(had::InteractionBucket::kNumInteractionBuckets)];
+};
+
+template <typename real_t>
+__global__ void scatter_interactions(const had::PendingInteraction<real_t>* items, int n,
+                                     int* list, InteractionOffsets off, int* cursors) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  const int b = static_cast<int>(items[i].bucket);
+  list[off.base[b] + atomicAdd(&cursors[b], 1)] = i;
 }
 
 template <typename real_t, typename StepHook>
@@ -541,7 +575,13 @@ __global__ void run_step_hadron(Scene<real_t> scene, TrackBuffer<real_t> in, con
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  const bool alive = step_hadron(scene, p, kType, had, rng, em, edep, srep, traj);
+  // `queued` is P15's one new exit from a step: the track ended in an interaction this kernel
+  // does not run. It goes to `had::InteractionQueue` instead of to `out`, and `run_interaction`
+  // finishes the step - including the deposit, the clocks and the ONE hook call this step gets.
+  // Returning here rather than appending is what keeps a queued track from being stepped twice.
+  bool queued = false;
+  const bool alive = step_hadron(scene, p, kType, had, rng, em, edep, srep, traj, &queued);
+  if (queued) { return; }
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
   // G4Transportation::AlongStepDoIt. Done before the hook so a stepping action reads the
@@ -670,7 +710,12 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  const bool alive = step_neutral(scene, p, kType, neutron_xs, had, rng, em, edep, srep, traj);
+  // See `run_step_hadron`'s note: a neutron whose general process named `inelastic` leaves this
+  // kernel through the queue rather than through `out`.
+  bool queued = false;
+  const bool alive =
+      step_neutral(scene, p, kType, neutron_xs, had, rng, em, edep, srep, traj, &queued);
+  if (queued) { return; }
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance. This is the one that decides
   // whether the neutron time cut ever fires, so it is load-bearing here in a way it is not for
@@ -718,6 +763,248 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   ds.sec_last = em.last_secondary;
   ds.status = (escaped && srep.status == StepStatus::fGeomBoundary) ? StepStatus::fWorldBoundary
                                                                    : srep.status;
+  ds.process = srep.process;
+  hook(ds);
+  const bool requeue = resolve_track_status<real_t>(alive, p.status);
+  if (status_warn != nullptr && is_unsupported_track_status(p.status)) {
+    atomicAdd(status_warn, 1);
+  }
+  if (requeue) { out.append(p); }
+}
+
+// ---------------------------------------------------------------- P15: the interaction kernel
+//
+/// One queued inelastic interaction or at-rest capture, per thread.
+///
+/// THE FIFTH KERNEL, and the one that carries the models. Every other kernel in this file steps
+/// a track; this one finishes a step another kernel started. The split is docs/RISK.md V188: the
+/// four entry points are 255 registers and ten to thirteen kilobytes of frame apiece and need
+/// 1.6 MB of workspace per thread in flight, so a stepping kernel that called them would need
+/// 92 GB for a 65,536-track batch - and would not compile, which was measured before it was
+/// argued.
+///
+/// @tparam kBucket  WHICH MODEL this kernel carries, and therefore which translation unit it is
+///                  in. One per bucket, because ptxas cannot compile four models into one
+///                  module - `had::InteractionBucket`'s own comment and docs/RISK.md V189 have
+///                  the measurement. The host bins the queue and launches only the buckets that
+///                  have entries, so a proton run never launches the FTFP kernel at all.
+/// @param idx     the queue indices of THIS bucket's entries, `n` of them from `base`. Built by
+///                `count_interactions` and `scatter_interactions`, which are the same counting
+///                sort the species dispatch already uses and for the same reason: a warp whose
+///                threads take different physics paths serialises through all of them.
+/// @param out     the same output pool the stepping kernels wrote into. The primary goes back
+///                into it if `FillResult` says it survives, and the secondaries go into it
+///                through the same `BufferEmitter` every other kernel uses.
+///
+/// THE STEP HOOK IS CALLED HERE, ONCE, for the step that queued this entry. `run_step_hadron`
+/// deliberately did not call it - see `step_hadron`'s `queued` parameter - because a stepping
+/// action reads `GetNumberOfSecondariesInCurrentStep()` and that count does not exist until the
+/// model has run.
+template <typename real_t, had::InteractionBucket kBucket, typename StepHook>
+__global__ void run_interaction(Scene<real_t> scene, const had::PendingInteraction<real_t>* items,
+                                const int* idx, int n, int base, TrackBuffer<real_t> out,
+                                int batch, double* score, double* voxel_score,
+                                had::HadronicWiring<real_t> had,
+                                had::InteractionPool<real_t> pool,
+                                vis::TrajectoryBuffer traj, int* status_warn, SecondaryArena sec,
+                                EmitterBooks books, StepHook hook) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  const had::PendingInteraction<real_t> q = items[idx[base + i]];
+  TrackState<real_t> p = q.track;
+
+  // The voxel cell the step STARTED in, recomputed rather than carried: it is three integer
+  // divisions off `(volume_pre, pos_pre)` and the queue entry is already 384 bytes. The same
+  // block `run_step_gamma` has, and the same reason - a per-voxel scorer wants the cell the
+  // step began in, not the one it ended in.
+  int vcell = -1;
+  if (q.score_slot >= 0 && q.volume_pre >= 0 && voxel_score != nullptr) {
+    const auto& vv = scene.geometry.volumes[q.volume_pre];
+    if (vv.score_per_voxel) {
+      const auto grid = geom::voxel_grid_of(vv.solid);
+      const auto qp = geom::to_local(vv.xform, q.pos_pre);
+      int ijk[3];
+      geom::voxel_cell_of(grid, qp, ijk);
+      vcell = grid.index(ijk[0], ijk[1], ijk[2]);
+    }
+  }
+
+  // A fourth RNG purpose, keyed by the same `(rng_key, step)` the stepper used. See
+  // `had::kInteractionRngPurpose`: Philox cannot resume a partly consumed stream, so the
+  // interaction opens its own rather than pretending to continue one.
+  Philox<real_t> rng(p.rng_key, p.step, had::kInteractionRngPurpose);
+
+  StepReport<real_t> srep{};
+  srep.true_length = q.true_length;
+  srep.safety = q.safety;
+  srep.non_ionizing = q.non_ionizing;
+  srep.material = q.material;
+  srep.status = q.status;
+  srep.process = ProcessId::fHadronInelastic;
+
+  const real_t track_mass =
+      (q.species == ParticleType::kGenericIon)
+          ? em::ion_particle_def<real_t>(ion_z_of(p.ion_za), ion_a_of(p.ion_za)).mass
+          : particle_def<real_t>(q.species).mass;
+  // `child_count` CONTINUES the step's own count rather than restarting at zero, so a delta ray
+  // the stepper already emitted and a cascade proton emitted here get different
+  // `child_rng_key`s. Restarting would give two secondaries of one step the same stream.
+  BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step, q.child_count,
+                           q.track.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(q.ekin_pre, track_mass),
+                           sec, q.sec_last, &srep, books};
+
+  real_t edep = q.edep;
+  had::InteractionOutcome outc;
+  had::InteractionSlot<real_t>* slot = pool.slot(i);
+  if (slot == nullptr) {
+    // Cannot happen under the chunked drain - the launch is `min(n_queued, n_slots)` wide - and
+    // it is kept because the alternative to refusing is two threads in one 1.6 MB workspace.
+    had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInteractionNoSlot, p.ekin);
+    outc.refusal = had::HadronicRefusal::kInteractionNoSlot;
+  } else if constexpr (kBucket == had::InteractionBucket::kAtRest) {
+    had::CompositionScratch<real_t> sc{};
+    const physics::hadronic::MaterialComposition<real_t> mc =
+        had::material_composition_of<real_t>(scene.materials[q.material], sc);
+    physics::hadronic::HadProjectile<real_t> proj;
+    proj.pdg = pdg_code(q.species);
+    // -1 for the antiproton, 0 for mu-, pi- and K-. Read only by the Fritiof arm, which tests
+    // `< -1` for an anti-nucleus; `stopping_arm` does the rest off the PDG code.
+    proj.baryon_number = had::baryon_number_of(q.species, ion_a_of(p.ion_za));
+    proj.charge = particle_def<real_t>(q.species).charge;
+    proj.mass = track_mass;
+    proj.kin_energy = real_t(0);  // at rest, by definition
+    physics::hadronic::stopping::AtRestResult ar;
+    outc = had::run_at_rest<real_t>(proj, mc, *slot, pool, i, had.level_data, pool.fermi,
+                                    had::NuclearMassMeV(), rng, ar);
+    edep += static_cast<real_t>(ar.local_deposit_MeV);
+  } else {
+    physics::hadronic::HadProjectile<real_t> proj;
+    proj.pdg = pdg_code(q.species);
+    proj.charge = particle_def<real_t>(q.species).charge;
+    proj.mass = track_mass;
+    proj.kin_energy = p.ekin;
+    // THE BARYON NUMBER IS THE TRACK'S, and for a `kGenericIon` that is not the definition's.
+    // `choose_hadronic_interaction` divides the energy by it, so a carbon ion whose baryon
+    // number arrived as G4GenericIon's placeholder 1 would be offered FTFP at 4 GeV where
+    // Geant4 offers the light-ion reaction at 0.33 GeV per nucleon.
+    proj.baryon_number = had::baryon_number_of(q.species, ion_a_of(p.ion_za));
+    const int pz = (q.species == ParticleType::kGenericIon) ? ion_z_of(p.ion_za) : 0;
+    const int pa = (q.species == ParticleType::kGenericIon) ? ion_a_of(p.ion_za) : 0;
+    // The neutron reads its own data set, which is `NeutronSubTables::inelastic` and not one of
+    // the five `G4ParticleInelasticXS` ones - see `had::InelasticTables`'s own note.
+    had::InelasticTables<real_t> xs = had.inelastic;
+    xs.neutron = had.neutron.inelastic;
+    // `kModelOfBucket` makes the arm a compile-time constant, so this unit contains one model.
+    constexpr had::InelasticModel kModelOfBucket =
+        (kBucket == had::InteractionBucket::kFtfp)     ? had::InelasticModel::kFtfp
+        : (kBucket == had::InteractionBucket::kBertini) ? had::InelasticModel::kBertini
+        : (kBucket == had::InteractionBucket::kBinary)  ? had::InelasticModel::kBinary
+                                                        : had::InelasticModel::kLightIon;
+    outc = had::run_inelastic<real_t, kModelOfBucket>(
+        proj, q.species, scene.materials[q.material], xs, q.xs_at_step_start, *slot, pool, i,
+        had.level_data, pool.fermi, pz, pa, rng);
+  }
+
+  bool alive = false;
+  if (outc.rejected_by_integral_xs) {
+    // `G4HadronicProcess::PostStepDoIt` returns the track unchanged: no interaction happened.
+    // The step still ended here and still reports `fHadronInelastic` as what defined it, which
+    // is what Geant4's own step reports after a rejection.
+    alive = (p.ekin > em::kHadronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld);
+  } else if (outc.ran && slot != nullptr) {
+    // FillResult, then the primary and the secondaries.
+    //
+    // PLACEMENT NEW AND NOT AN ASSIGNMENT. `fill_result` returns a
+    // `HadronicStepResult<real_t, 256>` BY VALUE, which is about 18 kB; assigning it to
+    // `slot->filled` would materialise that temporary on the kernel's own stack, where 18 kB a
+    // thread over the resident set is hundreds of megabytes of local memory for a struct that
+    // has a home in the pool already. C++17's guaranteed copy elision initialises the prvalue
+    // directly into the storage a placement new names, so nothing is copied and nothing is on
+    // the stack.
+    //
+    // The direction it rotates into is `q.dir_pre`, THE STEP'S PRE-STEP DIRECTION, which is
+    // what `G4HadronicProcess::FillResult` uses - `aT.GetMomentumDirection()` on a track whose
+    // direction the along-step scattering has already changed... and that is exactly why the
+    // queue carries it: the model built its final state about +z relative to the projectile,
+    // and the projectile's direction at the interaction point is `p.dir`, not `q.dir_pre`.
+    // `p.dir` is the one passed. `q.dir_pre` is for the step hook.
+    ::new (&slot->filled)
+        physics::hadronic::HadronicStepResult<real_t, had::kInteractionSecondaryCap>(
+            physics::hadronic::fill_result<real_t, had::kInteractionSecondaryCap,
+                                           had::kInteractionSecondaryCap>(
+                slot->fs, p.dir, p.global_time, p.weight,
+                /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), slot->pdg_mass));
+    edep += slot->filled.local_energy_deposit;
+    srep.non_ionizing += slot->filled.non_ionizing_energy_deposit;
+    em.pos = p.pos;
+    em.volume = p.volume;
+    em.event = p.event;
+    had::emit_interaction_result<real_t>(slot->filled, em, had.books);
+    if (slot->filled.status == physics::hadronic::TrackStatusChange::kAlive) {
+      p.ekin = slot->filled.energy;
+      p.dir = slot->filled.momentum_direction;
+      alive = (p.ekin > em::kHadronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld);
+    } else {
+      p.ekin = real_t(0);
+    }
+  }
+  if (!outc.ran && !outc.rejected_by_integral_xs) {
+    // The interaction happened and no final state came back. TWO bookings, in the two groups
+    // `had::HadronicRefusal` keeps apart: the SIZE, one per lost interaction with the
+    // projectile's kinetic energy on it, and the WHY.
+    had::book_refusal<real_t>(
+        had.books,
+        (q.species == ParticleType::kNeutron) ? had::HadronicRefusal::kNeutronInelastic
+                                              : had::HadronicRefusal::kChargedHadronInelastic,
+        q.track.ekin);
+    if (outc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
+      had::book_refusal<real_t>(had.books, outc.refusal, q.track.ekin);
+    }
+    // The conservative disposal, as `kNeutronInelastic` has used since P8d and NOT what Geant4
+    // does: the energy goes to the volume rather than into secondaries that leave it.
+    if (q.score_slot >= 0) { edep += p.ekin; }
+    p.ekin = real_t(0);
+    srep.status = StepStatus::fStopAndKill;
+  }
+
+  ++p.step;
+  p.advance(srep.true_length, q.ekin_pre, track_mass);
+  if (edep != real_t(0) && q.score_slot >= 0) {
+    atomicAdd(&score[static_cast<size_t>(q.score_slot) * batch + p.event],
+              static_cast<double>(edep));
+    if (vcell >= 0 && voxel_score != nullptr) {
+      atomicAdd(&voxel_score[vcell], static_cast<double>(edep));
+    }
+  }
+  traj.add(q.pos_pre, p.pos, q.species, p.event, p.rng_key);
+
+  DeviceStep<real_t> ds{};
+  ds.species = q.species;
+  p.species = q.species;
+  ds.ekin_pre = q.ekin_pre;
+  ds.ekin_post = alive ? p.ekin : real_t(0);
+  ds.edep = edep;
+  ds.length = srep.true_length;
+  ds.pos_pre = q.pos_pre;
+  ds.pos_post = p.pos;
+  ds.dir_pre = q.dir_pre;
+  ds.dir_post = p.dir;
+  ds.volume_pre = q.volume_pre;
+  ds.volume_post = p.volume;
+  ds.score_slot = q.score_slot;
+  ds.event = p.event;
+  ds.alive = alive;
+  ds.track_ptr = &p;
+  ds.first_in_volume = q.first_in_volume;
+  ds.material = srep.material;
+  ds.safety = srep.safety;
+  ds.non_ionizing = srep.non_ionizing;
+  ds.n_secondaries = static_cast<int>(em.child_count);
+  ds.sec_arena = sec;
+  ds.sec_pool = &out;
+  ds.sec_last = em.last_secondary;
+  ds.status = srep.status;
   ds.process = srep.process;
   hook(ds);
   const bool requeue = resolve_track_status<real_t>(alive, p.status);
@@ -804,6 +1091,16 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
       Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
       double*, int, const had::NeutronGeneralXs<double>*, had::HadronicWiring<double>,       \
       double*, int*, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+// P15's interaction kernels: FIVE of them, one per model, one translation unit each
+// (`host/transport_run_int_*.cu`). Those five are the only objects in the build that carry any
+// hadronic model at all, and the split is not a preference - ptxas cannot compile four models
+// into one module (docs/RISK.md V189; the measurement is in `had::InteractionBucket`).
+#define G4GPU_INTERACTION(BUCKET, HOOK)                                                      \
+  __global__ void run_interaction<double, BUCKET, HOOK>(                                     \
+      Scene<double>, const had::PendingInteraction<double>*, const int*, int, int,           \
+      TrackBuffer<double>, int, double*, double*, had::HadronicWiring<double>,               \
+      had::InteractionPool<double>, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks,\
+      HOOK)
 
 extern template G4GPU_STEP_GAMMA(StepTap<double>);
 extern template G4GPU_STEP_LEPTON(false, StepTap<double>);
@@ -823,6 +1120,11 @@ extern template G4GPU_STEP_HADRON(ParticleType::kHe3, StepTap<double>);
 extern template G4GPU_STEP_HADRON(ParticleType::kGenericIon, StepTap<double>);
 extern template G4GPU_STEP_NEUTRAL(ParticleType::kNeutron, StepTap<double>);
 extern template G4GPU_STEP_NEUTRAL(ParticleType::kPiZero, StepTap<double>);
+extern template G4GPU_INTERACTION(had::InteractionBucket::kFtfp, StepTap<double>);
+extern template G4GPU_INTERACTION(had::InteractionBucket::kBertini, StepTap<double>);
+extern template G4GPU_INTERACTION(had::InteractionBucket::kBinary, StepTap<double>);
+extern template G4GPU_INTERACTION(had::InteractionBucket::kLightIon, StepTap<double>);
+extern template G4GPU_INTERACTION(had::InteractionBucket::kAtRest, StepTap<double>);
 
 
 // ---------------------------------------------------------------- method bodies
@@ -837,7 +1139,23 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // The solid engine is mutually recursive, so the kernels need a real call stack; the 1 KB
     // default is not enough for one frame of the distance routine. Overflow surfaces as an
     // illegal memory access from an unrelated API call, with nothing pointing at the cause.
-    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 16384));
+    //
+    // **49,152 SINCE P15, AND THE NUMBER IS A MEASUREMENT.** 16,384 was the stepping kernels'
+    // ceiling and they are still under it (`run_step_hadron<kProton>` is 3,936 B). The
+    // interaction kernels are not: `-Xptxas -v` puts `run_interaction<kLightIon>` at a
+    // **31,968-byte** frame and the others alongside it, because a kernel's frame is the
+    // maximum over its call tree and that tree now contains `bic::apply_yourself` (about 10 kB
+    // on its own), P6's PreCompound and P3's whole evaporation cascade behind it. A limit below
+    // the frame is not a warning - it is an illegal memory access from an unrelated API call,
+    // which is exactly the failure this line was written for in the first place.
+    //
+    // WHAT IT COSTS IS LOCAL MEMORY AND THE COST IS BOUNDED BY THE LAUNCH, not by the batch:
+    // CUDA reserves the stack for the maximum RESIDENT threads, and the interaction kernels run
+    // at 255 registers - about 256 threads an SM - so on a 46-SM card that is 46 * 256 * 48 kB
+    // = 565 MB, reserved once and reused by every launch. The stepping kernels pay the same
+    // reservation and use 4 kB of it. `SetInteractionSlots` is what bounds the number of
+    // threads that can be inside a model at once; this bounds what one of them may use.
+    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 49152));
 
     n_volumes_ = static_cast<int>(scene.volumes.size());
     h_mats_.assign(scene.materials.m, scene.materials.m + scene.materials.count);
@@ -989,6 +1307,12 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // `BuildPhysicsTable` sums MACROSCOPIC cross sections and so needs the atom densities.
     neutron_tables_ = upload_neutron_tables<real_t>(h_mats_.data(), n_materials_);
     d_neutron_xs_ = neutron_tables_.d_general;
+
+    // P15: the five G4ParticleInelasticXS data sets and G4BGGPionInelasticXS. Beside the
+    // elastic tables and for the same reason - a run that will carry a charged hadron needs
+    // them before the first primary is seeded, and the engine cannot know what the generator
+    // will produce until it has produced one.
+    inelastic_tables_ = upload_inelastic_tables<real_t>();
 
     // P3's nuclear level data, which the capture sub-process walks. Unconditional by default
     // since P8d - `SetNuclearLevelData` has the reason, and it is Geant4's own answer
@@ -1285,6 +1609,91 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     G4GPU_CUDA_CHECK(cudaMalloc(&sec_.overflow, sizeof(int)));
     G4GPU_CUDA_CHECK(cudaMemset(sec_.cursor, 0, sizeof(int)));
     G4GPU_CUDA_CHECK(cudaMemset(sec_.overflow, 0, sizeof(int)));
+
+    // ---- P15: the interaction queue and the workspace pool it is drained into.
+    //
+    // THE QUEUE IS A BOUND AND THE POOL IS A CHOICE, and the difference is the whole of
+    // docs/RISK.md V188. A launch steps at most `pool_` tracks and one track queues at most one
+    // interaction, so a queue of `pool_` entries cannot overflow - the same argument the arena
+    // above makes for itself. The POOL is how many of those run at once; a shortage costs
+    // launches and not interactions, because the drain loop in BeamOn chunks.
+    //
+    // THE DEFAULT SLOT COUNT IS 256 AND IT IS A MEASUREMENT, not a round number: docs/RISK.md
+    // V189 has the throughput against 64, 128, 256, 512 and 1024 on the sweep's own beams. At
+    // 1,604,928 bytes a slot that is 391.8 MB, against 24.0 MB for a full-size queue on a
+    // 65,536-track pool.
+    n_interaction_slots_ = (interaction_slots_request_ > 0) ? interaction_slots_request_ : 256;
+    queue_capacity_ = (queue_capacity_request_ > 0) ? queue_capacity_request_
+                                                    : static_cast<int>(pool_);
+    {
+      const std::size_t q_bytes =
+          sizeof(had::PendingInteraction<real_t>) * static_cast<std::size_t>(queue_capacity_);
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_queue_, q_bytes));
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_queue_cursor_, sizeof(int)));
+      G4GPU_CUDA_CHECK(cudaMemset(d_queue_cursor_, 0, sizeof(int)));
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_qidx_, sizeof(int) * queue_capacity_));
+      G4GPU_CUDA_CHECK(cudaMalloc(
+          &d_qcount_,
+          sizeof(int) * static_cast<int>(had::InteractionBucket::kNumInteractionBuckets)));
+      interaction_bytes_ = q_bytes + sizeof(int) + sizeof(int) * queue_capacity_;
+
+      // The slots. ONE CONSTRUCTED HOST IMAGE, uploaded into every slot, and not a memset:
+      // docs/RISK.md V104 is a member that only a constructor sets and that decides physics
+      // when it is zero, and `bert::NucleiModel` and `bic::CascadeBuffers` are the same shape
+      // of risk. `ftf::entry::build` does exactly this for its own pool and says so.
+      const std::size_t s_bytes = sizeof(had::InteractionSlot<real_t>)
+                                  * static_cast<std::size_t>(n_interaction_slots_);
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_slots_, s_bytes));
+      {
+        auto* image = new had::InteractionSlot<real_t>();
+        for (int i = 0; i < n_interaction_slots_; ++i) {
+          G4GPU_CUDA_CHECK(cudaMemcpy(static_cast<had::InteractionSlot<real_t>*>(d_slots_) + i,
+                                      image, sizeof(*image), cudaMemcpyHostToDevice));
+        }
+        delete image;
+      }
+      interaction_bytes_ += s_bytes;
+
+      // The Binary cascade's 306 concrete channels: read-only, identical for every thread, one
+      // copy for the whole run - the same relationship `LundTables` has to FTFP's pool.
+      {
+        auto* ch = new bic::imr::ConcreteChannel[bic::imr::kConcreteChannelCount];
+        const int n_ch = bic::imr::build_concrete_channels(ch,
+                                                           bic::imr::kConcreteChannelCount);
+        const std::size_t c_bytes = sizeof(bic::imr::ConcreteChannel)
+                                    * static_cast<std::size_t>(n_ch);
+        G4GPU_CUDA_CHECK(cudaMalloc(&d_bic_channels_, c_bytes));
+        G4GPU_CUDA_CHECK(cudaMemcpy(d_bic_channels_, ch, c_bytes, cudaMemcpyHostToDevice));
+        n_bic_channels_ = n_ch;
+        interaction_bytes_ += c_bytes;
+        delete[] ch;
+      }
+
+      // FTFP's pool, through its own contract. Same slot count, same thread index - and
+      // `entry::Workspace` rather than `entry::HadronWorkspace` because a GenericIon above
+      // 3 GeV per nucleon goes to FTFP and the hadron-only type refuses an ion by capacity.
+      ftf_pool_ = g4gpu::hadronic::ftf::entry::build<g4gpu::hadronic::ftf::entry::Workspace>(
+          n_interaction_slots_, /*enable_bc_particles=*/true, /*verbose=*/false);
+      if (!ftf_pool_.view.ok()) {
+        std::printf("\nFATAL: FTFP's workspace pool (%d slots) could not be built. The "
+                    "inelastic\n       process cannot run without it; see "
+                    "ftf/ftf_entry.cuh.\n", n_interaction_slots_);
+        std::exit(1);
+      }
+      interaction_bytes_ += ftf_pool_.bytes;
+
+      // P3's Fermi break-up table, which every arm's de-excitation tail walks. Built on the
+      // host from the level scheme that is already there, and uploaded once.
+      fermi_pool_ = upload_fermi_pool(level_storage_.view(), /*verbose=*/false);
+      interaction_bytes_ += fermi_pool_.bytes;
+
+      std::printf("interaction pool: %d slots of %zu B + FTFP's %zu B = %.1f MB; queue %d "
+                  "entries of %zu B = %.1f MB\n",
+                  n_interaction_slots_, sizeof(had::InteractionSlot<real_t>),
+                  g4gpu::hadronic::ftf::entry::kWorkspaceBytes,
+                  double(s_bytes + ftf_pool_.bytes) / 1048576.0, queue_capacity_,
+                  sizeof(had::PendingInteraction<real_t>), double(q_bytes) / 1048576.0);
+    }
 
     // Per-cell scoring, allocated only when a volume actually asks for it. One double per
     // cell in the whole pool - the cell index is already global across voxel volumes, so no
@@ -1639,6 +2048,12 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         if (sec_.cursor != nullptr) {
           G4GPU_CUDA_CHECK(cudaMemsetAsync(sec_.cursor, 0, sizeof(int)));
         }
+        // The interaction queue holds ONE iteration's interactions and is drained at the end of
+        // it, so its cursor is rewound here beside the arena's and for the same reason: the
+        // bound that says it cannot overflow is "one launch's tracks", not "one run's".
+        if (d_queue_cursor_ != nullptr) {
+          G4GPU_CUDA_CHECK(cudaMemsetAsync(d_queue_cursor_, 0, sizeof(int)));
+        }
         // One launch per species, each over its own range of the one index list, each into the
         // one output pool.
         //
@@ -1675,8 +2090,29 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // `Upload`'s refusal above is what keeps it from arriving separately from the cross
         // sections.
         had_wiring.level_data = level_tables_.view;
+        // P15's two processes and the queue they go through. The tables are null in a run
+        // whose G4PARTICLEXSDATA could not be resolved, which is the same "no process" state a
+        // species with no inelastic channel is in.
+        had_wiring.hadron_inelastic = had_inelastic_;
+        had_wiring.hadron_at_rest = had_at_rest_;
+        had_wiring.inelastic = inelastic_tables_.view;
+        had_wiring.queue.items = d_queue_;
+        had_wiring.queue.cursor = d_queue_cursor_;
+        had_wiring.queue.capacity = queue_capacity_;
         had_wiring.books.count = d_had_refused_n_;
         had_wiring.books.energy = d_had_refused_e_;
+
+        // The pool the interaction kernel runs in, built once per launch out of what Upload
+        // allocated - the same relationship `had_wiring` has to the tables, and for the same
+        // reason: a by-value struct the launch takes rather than a field on Scene.
+        had::InteractionPool<real_t> pool_view;
+        pool_view.slots = static_cast<had::InteractionSlot<real_t>*>(d_slots_);
+        pool_view.n_slots = n_interaction_slots_;
+        pool_view.bic_channels =
+            static_cast<const bic::imr::ConcreteChannel*>(d_bic_channels_);
+        pool_view.n_bic_channels = n_bic_channels_;
+        pool_view.ftf = ftf_pool_.view;
+        pool_view.fermi = fermi_pool_.view;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
           const int n_sp = nsp[sp];
           if (n_sp <= 0) { continue; }
@@ -1737,6 +2173,78 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 #undef G4GPU_LAUNCH_NEUTRAL
         }
         G4GPU_CUDA_CHECK(cudaGetLastError());
+
+        // ---- P15: drain the interaction queue, in chunks of `n_interaction_slots_`.
+        //
+        // THE CHUNKING IS THE WHOLE DESIGN, and it is what makes the slot count a capacity
+        // whose shortage costs TIME rather than one whose shortage costs INTERACTIONS
+        // (docs/RISK.md V188). Thread `i` of a chunk takes slot `i`, so `pool.slot(i)` is never
+        // null and `kInteractionNoSlot` is a tripwire rather than a rate.
+        //
+        // AFTER every stepping launch and BEFORE the buffers swap, because the secondaries this
+        // makes belong in `tracks_[nxt]` with the ones the steppers made: a cascade proton must
+        // be stepped in the NEXT iteration, not this one. The read-back of the cursor is a
+        // synchronising copy, which is the one place per iteration this loop waits for the
+        // device - the counting sort above already reads `idx_n_` back for the same reason.
+        if (d_queue_cursor_ != nullptr && d_slots_ != nullptr) {
+          int n_queued = 0;
+          G4GPU_CUDA_CHECK(cudaMemcpy(&n_queued, d_queue_cursor_, sizeof(int),
+                                      cudaMemcpyDeviceToHost));
+          if (n_queued > queue_capacity_) { n_queued = queue_capacity_; }
+          if (n_queued > 0) {
+            interactions_queued_ += n_queued;
+            if (n_queued > max_queued_per_launch_) { max_queued_per_launch_ = n_queued; }
+
+            // Bin by model, exactly as the species dispatch bins the track pool: histogram,
+            // host-side prefix sum, scatter. `d_qcount_` is the histogram and then the bump
+            // cursors, one allocation used twice - the same arrangement `idx_n_` has.
+            constexpr int kNB = static_cast<int>(had::InteractionBucket::kNumInteractionBuckets);
+            const int qblocks = (n_queued + threads_ - 1) / threads_;
+            G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
+            count_interactions<real_t><<<qblocks, threads_>>>(d_queue_, n_queued, d_qcount_);
+            int nb[kNB] = {};
+            G4GPU_CUDA_CHECK(cudaMemcpy(nb, d_qcount_, sizeof(int) * kNB,
+                                        cudaMemcpyDeviceToHost));
+            InteractionOffsets qoff{};
+            int acc = 0;
+            for (int b = 0; b < kNB; ++b) { qoff.base[b] = acc; acc += nb[b]; }
+            G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
+            scatter_interactions<real_t><<<qblocks, threads_>>>(d_queue_, n_queued, d_qidx_,
+                                                                qoff, d_qcount_);
+
+            // A block of 32 and not `threads_`: an interaction kernel is 255 registers with a
+            // large frame, so a 256-thread block would not be resident anyway, and a small one
+            // lets a chunk of 40 interactions use two SMs instead of one.
+            constexpr int kIth = 32;
+#define G4GPU_DRAIN(BUCKET)                                                                  \
+  do {                                                                                       \
+    const int b_ = static_cast<int>(BUCKET);                                                 \
+    for (int base = 0; base < nb[b_]; base += n_interaction_slots_) {                        \
+      const int n_this = (nb[b_] - base < n_interaction_slots_) ? (nb[b_] - base)            \
+                                                                : n_interaction_slots_;      \
+      run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
+          scene_, d_queue_, d_qidx_, n_this, qoff.base[b_] + base, tracks_[nxt].view, batch_, \
+          d_score_, d_voxel_score_, had_wiring, pool_view, traj, d_status_warn_, sec_, books, \
+          hook_);                                                                            \
+      ++interaction_chunks_;                                                                 \
+    }                                                                                        \
+  } while (0)
+            G4GPU_DRAIN(had::InteractionBucket::kFtfp);
+            G4GPU_DRAIN(had::InteractionBucket::kBertini);
+            G4GPU_DRAIN(had::InteractionBucket::kBinary);
+            G4GPU_DRAIN(had::InteractionBucket::kLightIon);
+            G4GPU_DRAIN(had::InteractionBucket::kAtRest);
+#undef G4GPU_DRAIN
+            // `kNone` is not drained and is not silent: the stepper booked
+            // `kNoInelasticModel` for every entry in it before it enqueued, and an entry with
+            // no model has no kernel to run. It is counted here so the report can say how many
+            // interactions never reached a launch.
+            interactions_no_model_ +=
+                nb[static_cast<int>(had::InteractionBucket::kNone)];
+            G4GPU_CUDA_CHECK(cudaGetLastError());
+          }
+        }
+
         cur ^= 1;
         nxt ^= 1;
       }
@@ -1952,7 +2460,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                     "    Stage: %s\n"
                     "    The cross section decided each of these happened; the model that\n"
                     "    would have said what came out is not written. The dose is low by the\n"
-                    "    energy column, which is what the missing model would have moved.\n\n",
+                    "    energy column, which is what the missing model would have moved.\n"
+                    "\n"
+                    "    SINCE P15 THE LEDGER HAS TWO GROUPS AND THEY MUST NOT BE ADDED.\n"
+                    "    The first says HOW MUCH is missing - one entry per lost interaction,\n"
+                    "    with the projectile's kinetic energy on it. The second says WHY, and\n"
+                    "    every one of its entries is a second booking on an event that is\n"
+                    "    already in the first. Sum the first group, read the second.\n\n",
                     st.had_refused_total, had::hadronic_stage_name(had_stage_));
         for (int r = 0; r < kNR; ++r) {
           if (hn[r] > 0) {
@@ -1962,6 +2476,30 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           }
         }
         std::printf("\n");
+      }
+    }
+    // ---- P15: the interaction queue and the pool, whether or not anything was refused.
+    //
+    // PRINTED EVEN WHEN NOTHING WENT WRONG, because the whole argument for the slot count is
+    // that it is a measured capacity rather than an implicit one: a run that does not say how
+    // many interactions it produced and how many launches it took to run them has not made the
+    // capacity visible, it has only made it invisible in a different place.
+    st.interactions = interactions_queued_;
+    st.interaction_chunks = interaction_chunks_;
+    st.max_queued_per_launch = max_queued_per_launch_;
+    st.interaction_slots = n_interaction_slots_;
+    st.interaction_bytes = interaction_bytes_;
+    if (interactions_queued_ > 0) {
+      std::printf("interactions: %lld queued in %lld chunk launches over %d slots (%.1f MB); "
+                  "the busiest iteration queued %d (%.1f%% of the %d-entry queue)\n",
+                  interactions_queued_, interaction_chunks_, n_interaction_slots_,
+                  double(interaction_bytes_) / 1048576.0, max_queued_per_launch_,
+                  100.0 * double(max_queued_per_launch_)
+                      / double(queue_capacity_ ? queue_capacity_ : 1),
+                  queue_capacity_);
+      if (interactions_no_model_ > 0) {
+        std::printf("             %lld of them had no model in range and never reached a "
+                    "kernel (kNoInelasticModel above)\n", interactions_no_model_);
       }
     }
     if (sec_.overflow != nullptr) {
@@ -2062,7 +2600,24 @@ void TransportEngine<real_t, StepHook>::Free() {
     d_neutron_xs_ = nullptr;
     free_neutron_tables<real_t>(neutron_tables_);
     free_elastic_tables<real_t>(elastic_tables_);
+    free_inelastic_tables<real_t>(inelastic_tables_);
     free_level_data(level_tables_);
+    // P15's pool and queue. `ftf::entry::free` is FTFP's own, for the allocations its contract
+    // made; the rest is this file's.
+    g4gpu::hadronic::ftf::entry::free<g4gpu::hadronic::ftf::entry::Workspace>(ftf_pool_);
+    free_fermi_pool(fermi_pool_);
+    cudaFree(d_slots_);
+    cudaFree(d_bic_channels_);
+    cudaFree(d_queue_);
+    cudaFree(d_queue_cursor_);
+    cudaFree(d_qidx_);
+    cudaFree(d_qcount_);
+    d_slots_ = nullptr;
+    d_bic_channels_ = nullptr;
+    d_queue_ = nullptr;
+    d_queue_cursor_ = nullptr;
+    d_qidx_ = nullptr;
+    d_qcount_ = nullptr;
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);

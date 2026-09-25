@@ -89,6 +89,73 @@ enum class InteractionKind : int {
   kAtRest = 1,
 };
 
+/// WHICH KERNEL a queue entry is run by, and therefore which translation unit carries the model
+/// it needs.
+///
+/// ONE KERNEL PER MODEL, AND IT IS FORCED. `transport_run_interaction.cu` began as ONE kernel
+/// with all four in-flight arms behind a switch, and ptxas went past **22 GB of working set in
+/// 200 seconds and was still climbing** when it was stopped. Compiled one arm at a time into a
+/// kernel of its own, the same code takes:
+///
+///     FTFP             8,377 MB, 130 s        Binary cascade   9,838 MB, 365 s
+///     Bertini          9,319 MB, 210 s        light ion        (see docs/RISK.md V189)
+///
+/// so the models ARE compilable as device code - which nothing in this project had ever tried,
+/// because every one of their tests is host-only - and what is not compilable is four of them
+/// in one module. That is docs/RISK.md V65's rule ("one translation unit per kernel") arriving
+/// one level down, and it buys the thing V65 bought as well: a warp whose threads take
+/// different physics paths serialises through all of them, so binning the queue by model is
+/// better for throughput than branching inside one kernel would have been.
+///
+/// The bucket is decided by the STEPPER, at enqueue, which is why `PendingInteraction` carries
+/// it: for an in-flight interaction it is `choose_inelastic_model`, which needs one uniform and
+/// no cross-section table; for an at-rest capture it is a pure function of the PDG code.
+enum class InteractionBucket : int {
+  kFtfp = 0,
+  kBertini,
+  kBinary,
+  kLightIon,
+  /// `G4HadronStoppingProcess::AtRestDoIt`, all three arms.
+  ///
+  /// ONE BUCKET AND NOT TWO, AND THE REASON IS MEASURED. Splitting the at-rest entries into a
+  /// Bertini arm and a Fritiof arm would put Bertini in one kernel and FTFP in the other, which
+  /// is what the in-flight split buys - except that `stopping::at_rest` is ONE function that
+  /// calls Bertini unconditionally and FTFP through an invoke, so instantiating it instantiates
+  /// Bertini whichever arm a kernel is built for. Two kernels would each be Bertini + FTFP and
+  /// cost twice what one does. Measured: the at-rest kernel is **19,770 MB of ptxas and 660
+  /// seconds**, against 9,319 MB for Bertini alone and 8,377 MB for FTFP alone. docs/RISK.md
+  /// V189.
+  kAtRest,
+  /// The species has a process and no model this port can run. Booked by name without a
+  /// kernel launch, which is what keeps a refusal from costing a 1.6 MB slot.
+  kNone,
+  kNumInteractionBuckets,
+};
+
+__host__ __device__ inline const char* interaction_bucket_name(InteractionBucket b) {
+  switch (b) {
+    case InteractionBucket::kFtfp:           return "FTFP";
+    case InteractionBucket::kBertini:        return "Bertini";
+    case InteractionBucket::kBinary:         return "BinaryCascade";
+    case InteractionBucket::kLightIon:       return "BinaryLightIonReaction";
+    case InteractionBucket::kAtRest:         return "at rest (G4HadronStoppingProcess)";
+    case InteractionBucket::kNone:           return "(no model)";
+    case InteractionBucket::kNumInteractionBuckets: break;
+  }
+  return "unknown";
+}
+
+__host__ __device__ inline InteractionBucket bucket_of_model(InelasticModel m) {
+  switch (m) {
+    case InelasticModel::kFtfp:     return InteractionBucket::kFtfp;
+    case InelasticModel::kBertini:  return InteractionBucket::kBertini;
+    case InelasticModel::kBinary:   return InteractionBucket::kBinary;
+    case InelasticModel::kLightIon: return InteractionBucket::kLightIon;
+    case InelasticModel::kNone:     break;
+  }
+  return InteractionBucket::kNone;
+}
+
 /// One pending interaction: the track, the step that produced it, and the choice already made.
 ///
 /// IT CARRIES THE TRACK BY VALUE AND THE STEPPER DOES NOT APPEND IT. The alternative - append
@@ -99,10 +166,12 @@ enum class InteractionKind : int {
 ///
 /// THE PRE-STEP SNAPSHOT IS HERE BECAUSE THE HOOK IS. `run_interaction` calls the step hook for
 /// this step, so it needs what `run_step_hadron` would have put in `DeviceStep`: the pre-step
-/// energy, position, direction and volume, the true length, the safety, the material, the score
-/// slot and the voxel cell. Eleven scalars against one hook call per step, which is the property
-/// a stepping action depends on - `GetNumberOfSecondariesInCurrentStep()` on a step whose
-/// secondaries are made in a later kernel is otherwise zero.
+/// energy, position, direction and volume, the true length, the safety, the material and the
+/// score slot. The VOXEL cell is not among them and is recomputed in `run_interaction` instead -
+/// three integer divisions off `(volume_pre, pos_pre)`, against four more bytes on every entry.
+/// Eleven scalars against one hook call per step, which is the property a stepping action
+/// depends on - `GetNumberOfSecondariesInCurrentStep()` on a step whose secondaries are made in
+/// a later kernel is otherwise zero.
 template <typename real_t>
 struct PendingInteraction {
   TrackState<real_t> track{};   ///< at the interaction point, after the continuous loss
@@ -118,7 +187,6 @@ struct PendingInteraction {
   int volume_pre = 0;
   int material = -1;
   int score_slot = -1;
-  int voxel_cell = -1;
   /// Secondaries this step has already emitted (a delta ray), so the interaction kernel's
   /// emitter continues the child index rather than restarting it. Restarting would give two
   /// secondaries of one step the same `child_rng_key` and therefore the same random stream.
@@ -130,6 +198,11 @@ struct PendingInteraction {
   // ---- the interaction itself
   ParticleType species = ParticleType::kNumTypes;
   InteractionKind kind = InteractionKind::kInelastic;
+  /// Which kernel runs this entry, and therefore which model's code it needs. Decided by the
+  /// STEPPER, because the decision costs one uniform and no table.
+  InteractionBucket bucket = InteractionBucket::kNone;
+  /// The model that bucket corresponds to, so the interaction kernel does not re-derive it.
+  InelasticModel model = InelasticModel::kNone;
   /// The macroscopic cross section the interaction length was drawn with, for
   /// `G4HadronicProcess`'s integral-approach rejection. Not used on the at-rest arm.
   real_t xs_at_step_start = 0;
@@ -187,8 +260,10 @@ __host__ __device__ __noinline__ bool enqueue_interaction(
     InteractionKind kind, ParticleType species, const StepReport<real_t>& rep, real_t edep,
     real_t ekin_pre, const Vec3<real_t>& pos_pre, const Vec3<real_t>& dir_pre, int volume_pre,
     int score_slot, unsigned int child_count, int sec_last, StepStatus status,
-    real_t xs_at_step_start) {
+    real_t xs_at_step_start, InteractionBucket bucket, InelasticModel model) {
   PendingInteraction<real_t> q;
+  q.bucket = bucket;
+  q.model = model;
   q.track = track;
   q.ekin_pre = ekin_pre;
   q.pos_pre = pos_pre;
@@ -206,7 +281,45 @@ __host__ __device__ __noinline__ bool enqueue_interaction(
   q.species = species;
   q.kind = kind;
   q.xs_at_step_start = xs_at_step_start;
+  // What the step should REPORT, which is the flag as the track arrived with it. The stepping
+  // kernel recomputes `p.flags` from the step's own status AFTER the step; a queued step ended
+  // on the interaction rather than on a boundary, so the track still carries the pre-step
+  // value here and `run_interaction` does that recompute instead.
+  q.first_in_volume = (track.flags & kFirstStepInVolume) != 0u;
   return queue.push(q) >= 0;
+}
+
+/// WHICH at-rest nuclear arm QBBC gives this species, or `kNone`.
+///
+/// `stopping::stopping_arm` collapsed onto the two BUCKETS a kernel can be built for, which is
+/// the distinction that matters here and not the one that matters there:
+/// `G4MuonMinusCapture` and `G4HadronicAbsorptionBertini` are different processes with different
+/// de-excitation choices, and `stopping::at_rest` tells them apart itself off the PDG code -
+/// but both end in BERTINI, so both go in the kernel that carries Bertini. The anti-baryons end
+/// in FTFP and go in the other one. A kernel that carried both would be the 22 GB ptxas run
+/// `InteractionBucket`'s own comment records.
+__host__ __device__ inline InteractionBucket at_rest_bucket(ParticleType t) {
+  const int pdg = pdg_code(t);
+  if (pdg == 13) { return InteractionBucket::kAtRest; }  // mu-, G4MuonMinusCapture
+  switch (pdg) {
+    case -211:    // pi-            G4HadronicAbsorptionBertini
+    case -321:    // K-
+    case 3112:    // Sigma-
+    case 3312:    // Xi-
+    case 3334:    // Omega-
+      return InteractionBucket::kAtRest;
+    case -2212:   // anti-proton    G4HadronicAbsorptionFritiof
+    case -2112:   // anti-neutron   (neutral, and in the list)
+    case -3122:   // anti-Lambda    (neutral)
+    case -3212:   // anti-Sigma0    (neutral)
+    case -3222:   // anti-Sigma+    (charge -1)
+    case -3322:   // anti-Xi0       (neutral)
+      return InteractionBucket::kAtRest;
+    default:
+      break;
+  }
+  // Anti-nuclei: `particle->GetBaryonNumber() < -1`, which is the Fritiof arm.
+  return (pdg <= -1000000000) ? InteractionBucket::kAtRest : InteractionBucket::kNone;
 }
 
 /// Does QBBC give this species an at-rest nuclear process?
@@ -227,26 +340,38 @@ __host__ __device__ __noinline__ bool enqueue_interaction(
 /// It answers about the SPECIES and not about the stage: whether the capture actually runs is
 /// `HadronicWiring::hadron_at_rest` and `HadronicStage`, which the caller tests.
 __host__ __device__ inline bool has_at_rest_arm(ParticleType t) {
-  switch (pdg_code(t)) {
-    case 13:      // mu-            G4MuonMinusCapture
-    case -211:    // pi-            G4HadronicAbsorptionBertini
-    case -321:    // K-
-    case 3112:    // Sigma-
-    case 3312:    // Xi-
-    case 3334:    // Omega-
-    case -2212:   // anti-proton    G4HadronicAbsorptionFritiof
-    case -2112:   // anti-neutron   (neutral, and in the list)
-    case -3122:   // anti-Lambda    (neutral)
-    case -3212:   // anti-Sigma0    (neutral)
-    case -3222:   // anti-Sigma+    (charge -1)
-    case -3322:   // anti-Xi0       (neutral)
-      return true;
-    default:
-      break;
+  return at_rest_bucket(t) != InteractionBucket::kNone;
+}
+
+/// `G4ParticleDefinition::GetBaryonNumber()` for a transported track.
+///
+/// `ParticleDef` does not carry one - it is an EM struct, built for dE/dx and delta rays - and
+/// two things here need it: `G4EnergyRangeManager` divides the energy by |B| for any |B| > 1,
+/// which is what makes an alpha's model choice per nucleon, and `G4StoppingPhysics`'s
+/// anti-nucleus arm tests `B < -1`.
+///
+/// Off the PDG code, as Geant4 does. A nuclear code is 10LZZZAAAI, so A is `(|pdg|/10) % 1000`
+/// and the sign is the code's; for `kGenericIon` the code is G4GenericIon's placeholder and the
+/// mass number travels on the track instead, which is what `ion_a` is for.
+__host__ __device__ inline int baryon_number_of(ParticleType t, int ion_a) {
+  if (t == ParticleType::kGenericIon) { return (ion_a > 0) ? ion_a : 1; }
+  const int pdg = pdg_code(t);
+  const int a = (pdg < 0) ? -pdg : pdg;
+  if (a >= 1000000000) {
+    const int mass_number = (a / 10) % 1000;
+    return (pdg < 0) ? -mass_number : mass_number;
   }
-  // Anti-nuclei: `particle->GetBaryonNumber() < -1`. A PDG ion code is 10LZZZAAAI and an
-  // anti-ion is its negative, so an anti-deuteron is -1000010020.
-  return pdg_code(t) <= -1000000000;
+  switch (pdg) {
+    case 2212: case 2112: return 1;     // p, n
+    case -2212: case -2112: return -1;  // pbar, nbar
+    // The hyperons and anti-hyperons, which this port refuses at emission but which a queue
+    // entry could carry if that ever changes. Listed rather than defaulted, so adding one to
+    // the transported set does not silently give it baryon number 0.
+    case 3122: case 3222: case 3212: case 3112: case 3322: case 3312: case 3334: return 1;
+    case -3122: case -3222: case -3212: case -3112: case -3322: case -3312: case -3334:
+      return -1;
+    default: return 0;                  // the mesons and the leptons
+  }
 }
 
 /// The RNG purpose the interaction kernel draws on.

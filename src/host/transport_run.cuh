@@ -22,6 +22,11 @@
 #include "host/level_upload.cuh"
 #include "host/neutron_upload.cuh"
 #include "host/pe_upload.cuh"
+// P15's interaction kernel body. The ONE header in this engine that pulls in Bertini, the
+// Binary cascade, FTFP and the at-rest chain - see docs/RISK.md V188 for why it is here and
+// not in `physics/stepper.cuh`, and `host/transport_run_interaction.cu` for the one translation
+// unit that instantiates the kernel it defines.
+#include "physics/hadronic/interaction_apply.cuh"
 #include "physics/source.cuh"
 #include "physics/stepper.cuh"
 #include "render/trajectory.cuh"
@@ -191,6 +196,18 @@ struct RunStats {
       {};
   double had_refused_energy[static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals)] = {};
   long long had_refused_total = 0;
+  /// P15: how many inelastic interactions and at-rest captures the run queued, how many chunk
+  /// launches it took to run them, and the busiest single iteration.
+  ///
+  /// `max_queued_per_launch` IS THE NUMBER A SLOT COUNT IS CHOSEN AGAINST, and it is here so
+  /// that choosing one is a measurement rather than a guess: a run whose busiest iteration
+  /// queued 40 interactions gains nothing from 1,024 slots at 1.6 MB each, and one whose
+  /// busiest queued 8,000 pays 200 chunk launches for 40.
+  long long interactions = 0;
+  long long interaction_chunks = 0;
+  int max_queued_per_launch = 0;
+  int interaction_slots = 0;
+  std::size_t interaction_bytes = 0;
   /// Energy discarded by the neutron time cut, MeV, and how many neutrons it killed.
   ///
   /// Separate from `carried_away` because it is a different kind of loss and conflating them
@@ -364,6 +381,33 @@ class TransportEngine {
     had_elastic_ = elastic;
     had_capture_ = capture;
   }
+  /// The two P15 adds, and they are two switches rather than one because Geant4 has two sets of
+  /// UI names: `/process/inactivate protonInelastic` and its eight siblings, against
+  /// `/process/inactivate hBertiniCaptureAtRest` and its two. A like-for-like column that
+  /// switched both off with one flag could not be built against a Geant4 that switched one.
+  ///
+  /// `inelastic` off is the configuration every dose in this project was measured in before
+  /// P15; `at_rest` off is `HadronicStage::kStage1`'s, where a stopped negative hadron decays
+  /// on both sides instead.
+  void SetHadronicInelastic(bool inelastic, bool at_rest) {
+    had_inelastic_ = inelastic;
+    had_at_rest_ = at_rest;
+  }
+
+  /// How many interactions may run AT ONCE, which is the number of workspace slots the run
+  /// allocates. Set before Upload; 0 asks for the default.
+  ///
+  /// ONE SLOT IS 1,604,928 BYTES - `had::InteractionSlot` plus one `ftf::entry::Workspace` -
+  /// and the engine prints the total. A shortage costs launches and not interactions: the queue
+  /// is drained in chunks of this many, so every queued interaction runs whatever this is set
+  /// to. docs/RISK.md V188 is why the capacity works that way round, and V189 is the
+  /// measurement the default came from.
+  void SetInteractionSlots(int n) { interaction_slots_request_ = n; }
+  int GetInteractionSlots() const { return n_interaction_slots_; }
+  /// How many pending interactions the queue holds in one launch. Set before Upload; 0 asks for
+  /// the default, which is the track pool and is a BOUND (see the member's own comment). A
+  /// smaller one is legal and its overflow is `kInelasticQueueFull`, counted and printed.
+  void SetInteractionQueueCapacity(int n) { queue_capacity_request_ = n; }
 
   /// Read PhotonEvaporation5.7 and upload it, so a capture cascade on the device has a level
   /// scheme to walk. Set before Upload. **ON by default since P8d**, which is what
@@ -551,6 +595,58 @@ class TransportEngine {
   /// that the final states arrived, so the refusal now checks that the two per-process data
   /// sets and the level scheme came with the table instead of refusing the table outright.
   had::NeutronGeneralXs<real_t>* d_neutron_xs_ = nullptr;
+
+  // ---- P15: the inelastic processes, the at-rest captures, and where they run.
+  /// The five `G4ParticleInelasticXS` data sets and `G4BGGPionInelasticXS`. See
+  /// `host/hadronic_upload.cuh`; the view inside it travels in `had::HadronicWiring`.
+  InelasticTableOwner<real_t> inelastic_tables_{};
+  bool had_inelastic_ = true;
+  bool had_at_rest_ = true;
+  /// The interaction queue: `queue_capacity_` entries of `had::PendingInteraction`, its cursor,
+  /// and the view the steppers push through.
+  ///
+  /// SIZED AT THE POOL BY DEFAULT, and that is a bound rather than an estimate - one track
+  /// queues at most one interaction per launch and a launch steps at most `pool_` tracks. The
+  /// same argument `sec_.capacity` uses, and it costs 384 bytes an entry against a track slot's
+  /// 248, so a full-size queue is 1.5 times the track arena. `SetInteractionQueueCapacity`
+  /// exists for a caller who wants it smaller and accepts `kInelasticQueueFull` refusals.
+  had::PendingInteraction<real_t>* d_queue_ = nullptr;
+  int* d_queue_cursor_ = nullptr;
+  int queue_capacity_ = 0;
+  int queue_capacity_request_ = 0;
+  /// The counting sort that bins the queue by model, so each interaction kernel is launched
+  /// over a contiguous range of its own entries. One index per queue slot and one counter per
+  /// bucket - the same shape `idx_` and `idx_n_` have for the species dispatch, and used twice
+  /// the same way: as the histogram, then as the bump cursors.
+  int* d_qidx_ = nullptr;
+  int* d_qcount_ = nullptr;
+  /// Interactions whose species had a process and no model in range. Booked by name in the
+  /// stepper (`kNoInelasticModel`); counted here so the report can say how many never reached
+  /// a kernel at all.
+  long long interactions_no_model_ = 0;
+  /// The workspace pool the interaction kernel runs in: `n_interaction_slots_` slots of
+  /// `had::InteractionSlot` plus FTFP's own pool of the same count, through its own contract.
+  ///
+  /// A STATED, PRINTED, MEASURED CAPACITY. One slot is 1,604,928 bytes and the queue is drained
+  /// in chunks of this many, so a shortage costs launches and not interactions - docs/RISK.md
+  /// V188 has the argument and V189 the throughput measurement behind the default.
+  void* d_slots_ = nullptr;
+  int n_interaction_slots_ = 0;
+  int interaction_slots_request_ = 0;
+  std::size_t interaction_bytes_ = 0;
+  /// `bic::imr::build_concrete_channels`' 306 channels: read-only, identical for every thread,
+  /// one device copy for the whole run.
+  void* d_bic_channels_ = nullptr;
+  int n_bic_channels_ = 0;
+  /// FTFP's pool, from `ftf::entry::build`.
+  g4gpu::hadronic::ftf::entry::Owner<g4gpu::hadronic::ftf::entry::Workspace> ftf_pool_{};
+  /// P3's Fermi break-up pool on the device, which every arm's de-excitation tail walks.
+  FermiPoolOwner fermi_pool_{};
+  /// How many interactions the run queued, and the largest number any one launch produced.
+  /// The second is what a slot count is chosen against; see the report.
+  long long interactions_queued_ = 0;
+  long long interaction_chunks_ = 0;
+  int max_queued_per_launch_ = 0;
 };
 
 

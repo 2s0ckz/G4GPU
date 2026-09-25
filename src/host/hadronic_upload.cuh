@@ -44,6 +44,10 @@
 #include "data/nuclei_mass_ame12.hh"
 #include "host/g4data.cuh"
 #include "host/neutron_upload.cuh"
+// P3's Fermi break-up pool: a HOST builder and nine flat arrays, which is all `upload_fermi_pool`
+// below needs. It carries no kernel and instantiates none, so including it here costs parse time
+// and no device code - the property docs/RISK.md V188 is about.
+#include "physics/hadronic/deexcitation/fermi_breakup.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
 #include "physics/hadronic/inelastic_wiring.cuh"
 
@@ -311,6 +315,83 @@ template <typename real_t>
 inline void free_inelastic_tables(InelasticTableOwner<real_t>& own) {
   for (void* p : own.allocs) { cudaFree(p); }
   own = InelasticTableOwner<real_t>{};
+}
+
+// =============================================================================================
+// P3's Fermi break-up pool, on the device
+// =============================================================================================
+//
+// `G4FermiFragmentsPoolVI::Initialise`'s output: the fragment list, the per-A index, the
+// channel sets and their cumulative probabilities. `deex::build_fermi_pool` builds it on the
+// host from the level scheme, and every arm of the inelastic chain walks it - the Binary
+// cascade's de-excitation, Bertini's, FTFP's and the at-rest captures' all end in P3's
+// `G4ExcitationHandler`, whose Fermi break-up branch reads this.
+//
+// Nine arrays and no pointers inside them, so uploading it is nine memcpys and a view whose
+// pointers are repointed - the same shape `detail::upload_pxs` has for a cross-section table.
+//
+// BUILT FROM THE HOST LEVEL SCHEME, which means a run with `SetNuclearLevelData(false)` gets an
+// EMPTY pool. That is not silent: `deex::fermi_break_up` with no fragments reports its own
+// refusal, and `Upload` already refuses the combination of a neutron cross section with no
+// level scheme (docs/RISK.md V60). A run that can make no hadron pays nothing for this either
+// way, because nothing reads it.
+
+struct FermiPoolOwner {
+  deex::FermiPool view{};
+  std::vector<void*> allocs;
+  std::size_t bytes = 0;
+};
+
+inline FermiPoolOwner upload_fermi_pool(const data::LevelTable& host_levels,
+                                        bool verbose = true) {
+  FermiPoolOwner own;
+  auto* st = new deex::FermiPoolStorage();
+  deex::build_fermi_pool(*st, host_levels);
+
+  auto up = [&own](const void* src, std::size_t n) -> void* {
+    if (n == 0) { return nullptr; }
+    void* p = nullptr;
+    if (cudaMalloc(&p, n) != cudaSuccess
+        || cudaMemcpy(p, src, n, cudaMemcpyHostToDevice) != cudaSuccess) {
+      std::printf("\nFATAL: could not upload %zu bytes of the Fermi break-up pool\n", n);
+      std::exit(1);
+    }
+    own.allocs.push_back(p);
+    own.bytes += n;
+    return p;
+  };
+
+  deex::FermiPool v = st->view();
+  v.frag = static_cast<const deex::FermiFragment*>(
+      up(st->frag.data(), st->frag.size() * sizeof(deex::FermiFragment)));
+  v.by_a = static_cast<const int*>(up(st->by_a.data(), st->by_a.size() * sizeof(int)));
+  v.by_a_offset =
+      static_cast<const int*>(up(st->by_a_offset.data(), st->by_a_offset.size() * sizeof(int)));
+  v.by_a_count =
+      static_cast<const int*>(up(st->by_a_count.data(), st->by_a_count.size() * sizeof(int)));
+  v.ch_offset =
+      static_cast<const int*>(up(st->ch_offset.data(), st->ch_offset.size() * sizeof(int)));
+  v.ch_count =
+      static_cast<const int*>(up(st->ch_count.data(), st->ch_count.size() * sizeof(int)));
+  v.pairs = static_cast<const deex::FermiPair*>(
+      up(st->pairs.data(), st->pairs.size() * sizeof(deex::FermiPair)));
+  v.pair_of_channel = static_cast<const int*>(
+      up(st->pair_of_channel.data(), st->pair_of_channel.size() * sizeof(int)));
+  v.cum_prob = static_cast<const double*>(
+      up(st->cum_prob.data(), st->cum_prob.size() * sizeof(double)));
+  own.view = v;
+
+  if (verbose) {
+    std::printf("Fermi break-up pool: %d fragments, %d channels, %d pairs, %.2f MB\n",
+                v.n_frag, v.n_channels, v.n_pairs, double(own.bytes) / 1048576.0);
+  }
+  delete st;
+  return own;
+}
+
+inline void free_fermi_pool(FermiPoolOwner& own) {
+  for (void* p : own.allocs) { cudaFree(p); }
+  own = FermiPoolOwner{};
 }
 
 }  // namespace g4gpu::host
