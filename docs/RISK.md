@@ -12414,18 +12414,29 @@ entry is the **diagnosis**; the fix belongs to the performance phase after Phase
 numbers below are where it should start. All timings on the **shared** RTX 3070 this project's
 gates run on, so they are upper bounds on the wall clock and not clean benchmarks.
 
-THE COST, port loop time, from `out/b1_sweep_p15.csv`:
+THE COST, port event-loop time per beam, all on the SHARED RTX 3070 - the same binary run twice
+today took 249 s and 351 s for proton_210, so read these to a factor of 1.4:
 
-    beam          events    before P15      after P15     events/s after    factor
-    proton_210   500,000      2,345 ms     217,699 ms          2,297         92.8x
-    proton_400   300,000      1,142 ms     166,996 ms          1,796        146.2x
-    proton_1000  200,000        822 ms     180,773 ms          1,106        219.9x
-    alpha_840    300,000      2,218 ms      25,476 ms         11,776         11.5x
-    alpha_1600   200,000      1,994 ms      13,899 ms         14,389          7.0x
-    alpha_4000   100,000      1,230 ms       7,803 ms         12,815          6.3x
+    beam          events     before P15   P15 1st pass   after P9e+V199   events/s   vs before   Geant4 EM-only
+                                          (09-19)        (09-25)          after                  (events/s)
+    proton_210    500,000      2,345 ms     217,699 ms     350,793 ms        1,425     150x       7,336
+    proton_400    300,000      1,142 ms     166,996 ms     360,722 ms          832     316x       5,945
+    proton_1000   200,000        822 ms     180,773 ms     251,376 ms          796     306x       4,411
+    alpha_840      30,000*       222 ms       2,548 ms      86,774 ms          346     391x       2,135
+    alpha_1600     20,000*       199 ms       1,390 ms     102,401 ms          195     514x       1,677
+    alpha_4000     10,000*       123 ms         780 ms      63,443 ms          158     516x       1,200
+    neutron_100   500,000            -              -      284,921 ms        1,755       -        9,203
+    gamma_6     2,000,000      1,211 ms       1,260 ms       1,283 ms    1,558,000    1.06x       56,610
 
-    gamma_1..100, e-_20..1000                unchanged - the drain loop is gated on `any_hadron`
+    * the alpha rows were taken at a tenth of the sweep's counts after P9e; the "before" and
+      "1st pass" columns are scaled to the same counts from their own runs
 
+**The port is now SLOWER THAN GEANT4 on every hadron beam** - five times for the protons and the
+neutron, six to eight for the alphas - where before P15 it was eleven to nineteen times faster.
+The photon and electron beams are untouched: `gamma_6` is within the card's own spread of where
+it was, because the drain loop is gated on `any_hadron` and the stack reservation is lazy (V190).
+P9e made the alpha rows the proton rows' shape: in the first pass an alpha's interaction was
+REFUSED before any model ran, which cost nothing; now it runs a two-nucleus cascade.
 THE MECHANISM, MEASURED WITH A PROFILER RATHER THAN INFERRED FROM THE REPORT. The first version of
 this entry listed three candidates from the engine's own report lines; P15's second pass put the
 210 MeV proton beam under Nsight Systems 2021.5.2 (`nsys profile --trace=cuda --sample=none`),

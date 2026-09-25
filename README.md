@@ -37,11 +37,19 @@ below say exactly what is there and what is not.
 | | Geant4 11.1.1 | G4GPU | |
 |---|---|---|---|
 | **Example B1**, 2M gammas of 6 MeV, dose in the scoring volume | 427.385 ± 0.87 pGy | 425.860 ± 0.87 pGy | **1.24 σ** |
-| **Bragg peak**, 100 MeV protons in water, R80 | 77.730 mm | 77.742 mm | **+0.012 mm** |
-| plateau dose, 0–59.8 mm | — | +0.158% | per proton |
-| distal 80–20 width | 1.152 mm | 1.166 mm | +0.014 mm |
+| **Bragg peak**, 100 MeV protons in water, QBBC with inelastic scattering on both sides, R80 | 77.720 mm | 77.657 mm | **−0.063 mm** |
+| plateau dose, 0–59.8 mm | — | +0.096% | per proton |
+| distal 80–20 width | 1.169 mm | 1.205 mm | +0.036 mm |
+| energy contained (the neutrons leave on both sides) | 97.6119% | 97.4244% | −0.19% |
 | **Electron shower**, 100k e− of 1 GeV in 4 m of water, R80 | 1,079.26 mm | 1,081.70 mm | **+2.44 mm** |
 | energy contained in the phantom | 97.6448% | 97.8498% | +0.21% |
+
+**The Bragg-peak rows changed with P15 and are like for like again.** They used to compare two
+transports with no inelastic process at all; with P15 and P9e both sides run QBBC's inelastic
+scattering - the Binary cascade, Bertini, FTFP and the light-ion reaction - and a 100 MeV proton
+makes neutrons that leave the phantom, so containment is compared side against side rather than
+each against 100% (`tools/compare_depth.ps1`). Before P15: R80 77.730 against 77.742, plateau
++0.158%, width +0.014 mm. docs/PORTED.md 2.1.15 has every column between.
 
 The B1 figure is **one sample**, and reading it as a constant is the mistake it invites. Four
 other seeds give 426.191, 426.908, 427.485 and 427.287 pGy — 0.97, 0.39, 0.08 and 0.08 σ, a
@@ -123,6 +131,18 @@ labelled, for that reason. `src/host/transport_run.cuh` documents which is which
 
 Bit-reproducible across batch sizes and thread counts: the RNG is counter-based and keyed on
 `(rng_key, step)` carried by the track, never on its buffer slot.
+
+**Hadron beams are the opposite story since P15, and it is measured, not estimated.** With the
+inelastic interaction wired, the port is SLOWER than Geant4 on every hadron beam of the B1
+sweep - about five times for the 210-1000 MeV protons and the 100 MeV neutron, six to eight for
+the alphas - where before P15 it was eleven to nineteen times faster. A profile of the 210 MeV
+proton beam (docs/RISK.md V193) puts **95% of the event loop in one kernel**, the Binary
+cascade's, launched with 32 to 128 threads on a card that holds 70,656 and lasting as long as its
+slowest cascade: median 136 ms a launch, the longest 2.4 s. The stepping loop waits for every
+drain. So the fix is a change of shape - take the drain off the stepping loop's critical path,
+then the tail - and not a constant; V193 says what was measured and excluded on the way. The
+photon and electron beams did not move: the drain is gated on a hadron being alive and the
+extra device stack is reserved lazily (V190).
 
 *(RTX 3070, FP64, best of three runs. `G4GPU_FP32` compiles the whole transport in single
 precision.)*

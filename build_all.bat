@@ -768,13 +768,20 @@ rem budget and is one of the things an inelastic wiring can get wrong - and the 
 rem one-part-in-a-million total check survives only as a floor. Measured, 100,000 reference
 rem events against 6,000 port events:
 rem
-rem                       before P15 (no inelastic)      after P15 (inelastic both sides)
-rem     contained         100% both sides                G4 97.5749%, port 97.3203%, -0.261%
-rem     plateau           +0.158%                        +0.048%
-rem     R80               77.730 G4 / 77.742 port        77.714 G4 / 77.656 port, -0.057 mm
-rem     80-20 width       1.152 / 1.166, +0.014 mm       1.166 / 1.208, +0.043 mm
+rem                   before P15            P15 first pass           P15 second pass
+rem                   (no inelastic)        (ions off both sides,     (P9e's Interact: ions ON both
+rem                                         port in stage 1)          sides; port in the final stage)
+rem     contained     100% both sides       G4 97.5749%               G4 97.6119%
+rem                                         port 97.3203%, -0.261%    port 97.4244%, -0.192%
+rem     plateau       +0.158%               +0.048%                   +0.096%
+rem     R80           77.730 / 77.742       77.714 / 77.656           77.720 / 77.657, -0.063 mm
+rem     80-20 width   1.152 / 1.166         1.166 / 1.208             1.169 / 1.205, +0.036 mm
 rem
-rem All four are inside their limits and the plateau got BETTER. docs/PORTED.md 2.1.15.
+rem All four are inside their limits in every column. The second pass is the like-for-like one:
+rem the five ion inelastic processes are active on BOTH sides (the first pass had them off on
+rem both, because the port refused Interact), and the port runs the final stage, whose neutron
+rem reacts inelastically and whose stopped negatives are captured - the first pass had the port
+rem in stage 1 while Geant4 ran both (docs/RISK.md V192, V194, V198). docs/PORTED.md 2.1.15.
 rem
 rem The phantom is also 150 mm wide rather than 50, because the conservation check's premise
 rem ("the phantom is deeper than the range") is about depth and an elastic scatter sends a

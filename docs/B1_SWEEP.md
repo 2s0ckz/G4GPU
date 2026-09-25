@@ -277,3 +277,70 @@ as QBBC actually builds it, and the sweep sets it for every beam.
 Neither switch can move a photon or an electron row: no gamma or electron shower in this
 configuration makes an ion or a neutron, and both gates are inside `step_hadron` and
 `step_neutral`. **`gamma_6` is carried through the re-run as the control that says so.**
+
+### P9e's Interact, and a third defect the sweep found (2026-09-25)
+
+P9e's `G4BinaryLightIonReaction::Interact` reached main at 3ea5035 and this branch at f8fef09, so
+the five ion inelastic processes came OFF both sides of every column - the Geant4 list no longer
+inactivates `dInelastic`/`tInelastic`/`He3Inelastic`/`alphaInelastic`/`ionInelastic`, and the
+port no longer holds them off. The alpha rows compare the ion cascade now, not its absence.
+
+**The first sweep after it found one more defect, and it was the port's.** proton_1000 read
+**+29.2% (9.8 sigma)** with the port's rms at 2.3% of its dose against Geant4's 0.34% - a few
+events depositing a great deal. The ledger said what: ions with kinetic energies near their own
+rest mass. Every at-rest capture - a stopped pi- or mu- - was being snapped by `fill_result`
+against the definition masses of whatever interaction last ran in its workspace slot, or against
+a fresh slot's zeros, so a proton from a pi- capture left with 938 MeV it never had and a C12
+with 11 GeV. `run_at_rest` never refilled `slot.pdg_mass`; `run_inelastic` always had. proton_210
+is below the pion threshold and could not see it; the 09-19 sweep ran in stage 1, where nothing
+is captured; and the test that called `run_at_rest` never called `fill_result` after it
+(docs/RISK.md V199). The table below is after the fix.
+
+**The gamma and electron rows are the 12:49 run and did not move.** Every port dose is
+bit-identical to the 09-19 sweep's - 8.51719E-08 for the 6 MeV gamma gate, 3.31323E-07 and
+2.37133E-07 for the 100 MeV and 1 GeV electrons - so nothing P15, P9e or the fixes did reached
+them. The Geant4 column did move, within statistics, on gamma_100 and the electron beams, and
+that is Geant4's own random stream and not physics: a 20 MeV electron run with and without the
+five ion processes inactivated - which no electron shower in this configuration can reach -
+reads 4.52294 against 4.52836 nGy. That is why e-_1000 reads -3.1 sigma against the new
+reference where it read -1.7 against the old one; the row's 100,000-event Geant4 reference moves
+by more than its own rms between seeds (README open question 5), and the port's dose is the
+same to every digit.
+
+#### The table, after P9e and the V199 fix
+
+EM rows from the 12:49 run (their port doses are bit-identical before and after every fix
+since); proton rows re-taken after V199; alpha rows at a TENTH of the counts above, because with
+`Interact` wired every alpha interaction is a two-nucleus Binary cascade on one GPU thread and
+the full counts would hold the shared card for ninety minutes (docs/RISK.md V193). "sigma" is the
+difference over the quadrature sum of the two printed errors; "refused" is the SIZE group of the
+port's ledger over its queued interactions, by name in `out/b1_sweep_p15d_*.refusals.txt`.
+
+| beam | events | port (Gy) | G4 EM-only (Gy) | diff | sigma | refused, by name |
+|---|--:|--:|--:|--:|--:|---|
+| gamma 1 MeV | 2,000,000 | 1.27257E-08 | 1.27449E-08 | -0.15% | -0.5 | - |
+| gamma 6 MeV | 2,000,000 | 8.51719E-08 | 8.56154E-08 | -0.52% | -1.8 | - |
+| gamma 100 MeV | 1,000,000 | 5.46487E-07 | 5.47863E-07 | -0.25% | -0.9 | - |
+| e- 20 MeV | 500,000 | 4.62726E-09 | 4.52836E-09 | +2.18% | +1.7 | - |
+| e- 100 MeV | 300,000 | 3.31323E-07 | 3.32673E-07 | -0.41% | -1.6 | - |
+| e- 1000 MeV | 100,000 | 2.37133E-07 | 2.40499E-07 | -1.40% | -3.1 | - (see above) |
+| proton 210 MeV | 500,000 | 2.49555E-06 | 2.50078E-06 | -0.21% | -1.1 | 0 of 146,843 |
+| proton 400 MeV | 300,000 | 6.59014E-07 | 6.58269E-07 | +0.11% | +0.4 | 0.37%: `Propagate1H1` 384 of 103,463 |
+| **proton 1000 MeV** | 200,000 | 4.44892E-07 | 3.90403E-07 | **+13.96%** | **+17.2** | **8.5%: `Propagate1H1` 8,196 of 95,955, 7.75e6 MeV** |
+| alpha 840 MeV | 30,000 | 4.80958E-07 | 4.91874E-07 | -2.22% | -2.7 | 1.07%: `kLightIonCascade` 306 of 28,866 |
+| alpha 1600 MeV | 20,000 | 1.51532E-07 | 1.51496E-07 | +0.02% | +0.0 | 1.50%: `kLightIonCascade` 285, `Propagate1H1` 20 |
+| **alpha 4000 MeV** | 10,000 | 7.70771E-08 | 6.69757E-08 | **+15.08%** | **+4.6** | **3.88%: `kLightIonCascade` 344 (1.14e6 MeV), `Propagate1H1` 218** |
+| neutron 100 MeV | 500,000 | 133.107 nGy | 132.135 nGy | +0.74% | +0.9 | 0.009%: `Propagate1H1` 15 of 174,596 |
+
+The neutron row is the `ref/b1neutron/` pair, `p15_neutron.mac` against `p15_neutron_port.mac`,
+with the general process off on the Geant4 side so the ion processes can be named (V53) and the
+port in the final stage.
+
+**Eleven of thirteen rows are inside three sigma**, and the two that are not are the two with
+the largest refused energy per interaction: proton_1000, where one interaction in twelve is a
+nucleon on HYDROGEN and `Propagate1H1` is refused with ~950 MeV on it, and alpha_4000, where
+`Interact`'s own `Propagate` refuses at 3.3 GeV each. Both carry the same signature V199 had - a
+port rms larger than Geant4's (proton_1000 0.64% against 0.34%; alpha_4000 2.7% against 1.1%) -
+which is what a few very large local deposits look like. The refusal's disposal deposits the
+projectile's whole kinetic energy where the refusal happened (V192), and where that is inside the
+trapezoid it is dose Geant4 would have carried onward with the leading nucleon.

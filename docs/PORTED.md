@@ -1743,6 +1743,17 @@ were booked as refusals - whose disposal kills the track and deposits its energy
 Sections 7 and 8 of `tests/test_inelastic_transport.cu` assert all three with cases whose answer
 is known in advance, and check WHAT was applied rather than only that something was.
 
+**And one that the sweep found and no test could have** (docs/RISK.md V199). `fill_result`
+snaps every secondary onto its definition mass, adding `m_dynamic - m_definition` to its kinetic
+energy, and takes the definition masses from `slot.pdg_mass` - which `run_inelastic` refills and
+`run_at_rest` never did. So every at-rest capture was snapped against the previous interaction's
+masses or a fresh slot's zeros, and a proton from a pi- capture left with 938 MeV it never had.
+The B1 sweep's proton_1000 read +29.2% (9.8 sigma) on it; section 5 of the transport test now
+poisons the array with zeros, runs `fill_result` as the kernel does and asserts each secondary
+moved by its own mass difference and nothing more (1,761 and 1,249 wrong snaps with the fix
+removed). A total-energy balance priced with the same definition masses was blind to it by
+construction, which is why seventy thousand balanced interactions did not find it.
+
 **Two engine findings the same pass turned up, neither of them physics.** The GenericIon stepping
 unit - one kernel on its own, the shape V65 had found always compiles - died in ptxas at -O3, -O2
 and -O1 from 2bad77b on. Isolated commit by commit with that one kernel (docs/RISK.md V195): one

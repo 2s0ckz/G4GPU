@@ -175,8 +175,29 @@ measure that absence rather than the stepper.
 paragraph above it says which: `G4EmStandardPhysics` and nothing else, taken when the premise
 "this port has no hadronic physics" was true. It is QBBC on both sides since P8c, with only what
 the port lacks inactivated on Geant4's, and the reference CSV was regenerated for it - which
-moved Geant4's own R80 by 0.068 mm. The current numbers are in docs/PORTED.md 2.1.7 and in the
-README's table: G4 77.730, port 77.742, +0.012 mm; plateau +0.158%; width 1.152 against 1.166.
+moved Geant4's own R80 by 0.068 mm. Those were the numbers until P15: G4 77.730, port 77.742,
++0.012 mm; plateau +0.158%; width 1.152 against 1.166.
+
+**P15 changed the experiment again, and it is like for like on both counts now.** The inelastic
+processes came off the Geant4 side's inactivation list as the port wired them - `protonInelastic`
+and the neutron general process in P15's first pass, the five ion processes when P9e's
+`Interact` landed - and the port runs the final hadronic stage, whose neutron reacts
+inelastically and whose stopped negatives are captured. A 100 MeV proton now makes neutrons, and
+neutrons leave a 150 mm phantom on BOTH sides, so the energy-conservation check compares the two
+contained fractions against each other rather than each against 100% - that difference is a
+statement about the escaping-neutron budget, which is one of the things an inelastic wiring can
+get wrong. Measured, 100,000 reference events against 6,000 port events:
+
+| | Geant4 | this port | |
+|---|---|---|---|
+| energy contained | 97.6119% | 97.4244% | -0.192%, limit 1% |
+| plateau, 0-59.8 mm | - | +0.096% | per proton |
+| R80 | 77.720 mm | 77.657 mm | -0.063 mm |
+| distal 80-20 width | 1.169 mm | 1.205 mm | +0.036 mm |
+
+P15's first pass had the ions off on both sides and the port in stage 1 - contained -0.261%,
+plateau +0.048%, R80 -0.057 mm, width +0.043 mm - and that column compared a port whose neutrons
+could not react against a Geant4 whose could (docs/RISK.md V194). docs/PORTED.md 2.1.15.
 P14d re-took them before and after putting the lepton's continuous loss into
 `G4VEnergyLossProcess::AlongStepDoIt`'s shape and they are identical in every printed column,
 which is the check that the change reached no hadron (docs/RISK.md V96).
