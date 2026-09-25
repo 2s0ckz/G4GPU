@@ -232,3 +232,48 @@ the gamma gate's five seeds (-0.0710 ± 0.0045 pGy, RISK V96). The row ships at 
 -2.75 σ**, and the direction is the same one the gate sees: the linear form takes slightly less
 per short step than the inversion it replaces. What this row says about that is only that it is
 small.
+
+## The hadron rows, after P15 (2026-09-19)
+
+P15 wires the inelastic interaction and the at-rest capture, so for the first time the sweep's
+hadron rows compare two Geant4s rather than a Geant4 against a port with the whole of hadronic
+inelastic scattering missing. `protonInelastic`, the two pion processes, the two kaon processes
+and `G4NeutronGeneralProcess`'s inelastic sub-process all came OFF the Geant4 side's inactivation
+list, and the three at-rest captures came off it too.
+
+**The sweep found two defects before it found any physics, and both were in the comparison rather
+than in the models.** They are worth reading before the table, because each of them produced a
+row tens or hundreds of sigma out for a reason that is not a disagreement about physics.
+
+### A process inactivated on one side only (docs/RISK.md V192)
+
+The first full run read **alpha_840 at -39.27% (-201.8 sigma)**, alpha_1600 at **+81.50%** and
+alpha_4000 at **+535.83%**, with every gamma and electron row bit-identical to its pre-P15 value.
+
+`dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and `ionInelastic` are inactivated on
+the Geant4 side because P9e's `G4BinaryLightIonReaction::Interact` is not wired - and the **port
+kept its own copies ON**. So an ion drew an interaction length, reached the interaction, was
+refused by name, and was disposed of by being killed with its kinetic energy deposited *at the
+point of the refusal*, while the Geant4 column carried the same ion to the end of its range.
+Measured on 20,000 alpha events at 840 MeV: **10,266 of 11,223 queued interactions refused
+(91.5%), carrying 6.03e6 MeV - 36% of the beam's entire kinetic energy** - dumped in the water
+upstream of the trapezoid the dose is scored in. At 1600 and 4000 MeV the refusals land *inside*
+the trapezoid instead, which is why the same defect reads -39% on one beam and +536% on another.
+
+A refusal whose sign depends on the geometry is not a tolerance. `G4GPU_ION_INELASTIC=0` holds the
+same five processes off on the port side now, and both columns run the same physics list.
+
+### A stage no run selected (docs/RISK.md V194)
+
+The second is the mirror image. `TransportEngine`'s default is `HadronicStage::kStage1`, in which
+a neutron carries `hadElastic` and `nCapture` as two separate processes **with no inelastic
+sibling at all**, and a stopped negative hadron decays instead of being captured. A grep of the
+repository for `SetHadronicStage` found the setter, two comments and no caller: every row of every
+previous sweep was taken in it. So P15's two headline deliverables - the neutron's inelastic
+sub-process and the at-rest capture - were wired to a configuration no production run reached,
+while the Geant4 column had both. `G4GPU_HADRONIC_STAGE=final` selects `G4NeutronGeneralProcess`
+as QBBC actually builds it, and the sweep sets it for every beam.
+
+Neither switch can move a photon or an electron row: no gamma or electron shower in this
+configuration makes an ion or a neutron, and both gates are inside `step_hadron` and
+`step_neutral`. **`gamma_6` is carried through the re-run as the control that says so.**

@@ -12467,3 +12467,49 @@ do nothing for the depth-dose case, which is launch-bound at 2 threads and not s
 real fix is a different shape - accumulate interactions across iterations and drain in fewer,
 fuller launches, or split the models so a warp cooperates on one cascade instead of a thread
 owning it - and that is a design change, not a constant.
+
+### V194: the neutron's inelastic sub-process was wired to a stage no run selects
+
+P15's brief lists "the neutron general process's inelastic sub-process replacing its refusal" as
+a deliverable, and `step_neutral` does it: `HadronicRefusal::kNeutronInelastic` is gone and the
+sub-process is applied from `G4NeutronGeneralProcess`'s cumulative partials. **It was reachable
+from one test and from nothing else.**
+
+`TransportEngine`'s default is `HadronicStage::kStage1`, and a grep of the whole repository for
+`SetHadronicStage` finds the setter, two comments, and no caller. In `kStage1`,
+`step_neutral`'s gates are `has_stage1_elastic` and `has_stage1_capture` - there is no
+`has_stage1_inelastic`, and correctly so, because stage 1 is a configuration Geant4 can only
+produce with `EnableNeutronGeneralProcess` false and `neutronInelastic` inactivated by name
+(`ref/b1hadron/stage1_neutron.mac`). So every B1 run, every sweep row and the proton depth-dose
+gate ran with a neutron that scatters and captures and cannot react.
+
+AND IT GATES THE OTHER P15 DELIVERABLE TOO. `step_hadron`'s dying branch reaches
+`stopping::at_rest` only under `had.stage == HadronicStage::kFinal`; in `kStage1` a stopped pi-,
+K- or mu- takes `decay_at_rest_allowed` and DECAYS, which is right for stage 1 because the three
+at-rest captures are inactivated on the Geant4 side there. The sweep's Geant4 column does not
+inactivate `hBertiniCaptureAtRest`, `hFritiofCaptureAtRest` or `muMinusCaptureAtRest`, so both
+halves of P15 - the neutron's inelastic sub-process and the at-rest capture - were being
+compared against a Geant4 that had them while the port did not.
+
+THAT IS ALSO A ONE-SIDED CONFIGURATION, in the opposite direction from V192. The sweep's Geant4
+column does not inactivate `NeutronGeneralProc`, and `ref/proton/proton_depth.cc` took it off its
+list in P15 because "the port now does both" - which was true of the code and false of the
+configuration the code ran in. A proton beam was being compared as a port whose secondary
+neutrons cannot react against a Geant4 whose can.
+
+WHAT WAS DONE. `G4GPU_HADRONIC_STAGE=final|stage1` selects the stage at Upload, the same shape as
+`G4GPU_LIVE_PER_EVENT` and `G4GPU_ION_INELASTIC` and for the same reason - `examples/B1` is
+Geant4's own B1 and has no UI command that reaches a setter. `tools/b1_sweep.ps1` sets it for
+every beam and `ref/proton/proton_depth.cc` calls `SetHadronicStage(kFinal)` directly.
+`ref/b1hadron/p15_neutron.mac` and `p15_neutron_port.mac` are the like-for-like pair for a
+neutron beam with the sub-process active; the stage-1 pair is kept unedited because the numbers
+published against it were taken with it.
+
+WHAT WAS NOT DONE, DELIBERATELY. **The default is still `kStage1`.** Every gate in this project
+was measured in it, and which stage ships is a decision about all of them rather than about P15 -
+flipping it in this package would move numbers nobody in this package is measuring. What P15 owes
+is that the final stage can be selected and has been measured, and the open question belongs to
+whoever owns the next campaign: QBBC's own answer is `EnableNeutronGeneralProcess = true`
+(`G4HadronInelasticQBBC`'s constructor sets it), so `kFinal` is the configuration that matches
+the physics list this port is a port OF, and `kStage1` is scaffolding that has outlived its
+purpose now that the third sub-process exists.

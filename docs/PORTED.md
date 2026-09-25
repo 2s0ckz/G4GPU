@@ -1707,12 +1707,37 @@ gamma gate schedules byte for byte as it did. A hadron run wants 32 live tracks 
 than 4 to pay for it; `ref/proton/proton_depth.cc` sets it and `tools/b1_sweep.ps1` sets
 `G4GPU_LIVE_PER_EVENT` for the proton and alpha beams only.
 
+**And the one the sweep found, which was in neither the code under test nor the tests.** The
+Geant4 side of every like-for-like column inactivates `dInelastic`, `tInelastic`, `He3Inelastic`,
+`alphaInelastic` and `ionInelastic` - written down three paragraphs above as the right thing to
+do while `Interact` is refused - and the **port kept its own copies ON**. So an ion drew an
+interaction length, reached the interaction, was refused by name, and was disposed of by being
+killed with its kinetic energy deposited *at the point of the refusal*, while the Geant4 column
+carried the same ion to the end of its range. Measured on 20,000 alpha events at 840 MeV:
+**10,266 of 11,223 queued interactions refused (91.5%), carrying 6.03e6 MeV - 36% of the beam's
+entire kinetic energy - deposited upstream of the volume the dose is scored in.** The first full
+sweep read that beam at **-39.27% (-201.8 sigma)**, and the 1600 and 4000 MeV beams at +81.50%
+and +535.83% because there the refusals land *inside* the trapezoid instead of upstream of it.
+
+`HadronicWiring::ion_inelastic` (`had::is_ion_inelastic_species`,
+`TransportEngine::SetIonInelastic`, `G4GPU_ION_INELASTIC=0`) switches exactly the five species
+`G4IonPhysics::ConstructProcess` gives their own UI names, so both columns can hold the same set
+off. It is keyed on the species rather than on `InelasticChannel` because the channels do not
+split there: the proton shares `kParticleInelastic` with d/t/He3/alpha, and `protonInelastic` is
+a name the ion column must not switch. docs/RISK.md V192 has the measurement; the disposal itself
+is unchanged and is still wrong in the same way for every refused interaction, the proton's
+`Propagate1H1` included, which is why proton_1000 is reported with its rate rather than tuned.
+
 **The numbers.** `tests/test_inelastic_models.cu`: 24 (model, window) triples exact against
 `ftf_windows.csv`, 440 (species, energy) cells, 30 overlaps at 200,000 draws each, worst 1.46
 sigma, 0 draw-count mismatches. `tests/test_inelastic_transport.cu`: 1,152 cross-section points
 at worst relative 0; 24 rate cells at worst 2.58 sigma; baryon number and charge exact on every
-interaction with no refused secondary; the at-rest hook on 400 stopped tracks. Eight
-perturbations on the first test and four on the second, all twelve detected.
+interaction with no refused secondary; the at-rest hook on 400 stopped tracks; and section 6,
+which holds `ion_inelastic` off and on across seven species and asserts that the five ions queue
+nothing off and something on while the proton and the pion queue the same 93 and 221 either way.
+Eight perturbations on the first test and six on the second, all fourteen detected - the two new
+ones being the gate written without the species predicate (5 failures, every ion row) and the
+predicate widened to every species (2 failures, the two non-ion rows).
 
 
 ### 2.2 What QBBC needs and is not there

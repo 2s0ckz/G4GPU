@@ -179,12 +179,38 @@ function Get-ProcessDump([string[]]$out) {
   }
   return $keep
 }
+# The port's refusal ledger and its interaction line, per beam.
+#
+# THE BRIEF ASKS FOR THE REFUSED FRACTION PER BEAM BY NAME and until P15 there was nothing to
+# ask it of - the port had no inelastic process, so a hadron beam's only holes were whole
+# processes that were simply absent. Now a beam can run an interaction and refuse ONE ARM of it
+# (`G4BinaryCascade::Propagate1H1` on hydrogen, `G4BinaryLightIonReaction::Interact` at or above
+# 50 MeV/n), and the rate of that is a number the row is not interpretable without: a dose that
+# agrees while a third of the interactions were refused is not agreement.
+#
+# The engine prints the ledger in two groups - SIZE (one booking per lost interaction) and WHY
+# (a second booking on the same event, naming the arm) - and `had::HadronicRefusal`'s own comment
+# says they must not be summed. This captures the block verbatim rather than parsing it, so the
+# file beside the table says what ran.
+function Get-PortRefusals([string[]]$out) {
+  $keep = @(); $on = $false
+  foreach ($l in $out) {
+    if ($l -match 'HADRONIC INTERACTIONS WITH NO FINAL STATE') { $on = $true }
+    if ($l -match '^interactions:') { $keep += $l; continue }
+    if ($on) {
+      if ($l -match '^\s*$') { $on = $false; continue }
+      $keep += $l
+    }
+  }
+  if ($keep.Count -eq 0) { $keep = @("(no refusal ledger printed - no hadronic interaction in this beam)") }
+  return $keep
+}
 function Invoke-Run([scriptblock]$launch) {
   $sw = [Diagnostics.Stopwatch]::StartNew(); $out = & $launch; $sw.Stop()
   return @{ Ms = $sw.Elapsed.TotalMilliseconds; Out = $out }
 }
 
-$rows = @(); $dumps = @()
+$rows = @(); $dumps = @(); $refusals = @()
 foreach ($b in $beams) {
   $n = [int][math]::Round($b.Events * $Scale)
   Write-Output ("=== {0}: {1} events per run" -f $b.Name, $n)
@@ -216,14 +242,25 @@ foreach ($b in $beams) {
   # is a one-sided inactivation, and it read as -39.27% / -201.8 sigma on alpha_840.
   # `G4GPU_ION_INELASTIC=0` is the port's half of the same switch (docs/RISK.md V192).
   $env:G4GPU_ION_INELASTIC = "0"
+  # AND THE NEUTRON'S SIDE OF THE SAME RULE. The Geant4 column above does NOT inactivate
+  # `NeutronGeneralProc`, so its secondary neutrons scatter, capture AND react inelastically.
+  # The port's default hadronic stage is `kStage1`, where a neutron has `hadElastic` and
+  # `nCapture` as separate processes and no inelastic sibling at all - so a proton beam compared
+  # in the default configuration is a port whose secondary neutrons cannot react against a
+  # Geant4 whose can. `kFinal` is `G4NeutronGeneralProcess` as QBBC actually builds it, and P15
+  # is what made it reachable: nothing in this repository selected it before. docs/RISK.md V194.
+  $env:G4GPU_HADRONIC_STAGE = "final"
   $mac = New-Macro $b "port" $n
   $r = Invoke-Run { & $portExe $mac 2>&1 | ForEach-Object { "$_" } }
+  Remove-Item Env:\G4GPU_HADRONIC_STAGE -ErrorAction SilentlyContinue
   Remove-Item Env:\G4GPU_ION_INELASTIC -ErrorAction SilentlyContinue
   Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue
   $d = Get-Dose $r.Out
   if ($null -eq $d) { Write-Output "  port produced no dose line; last lines:"; $r.Out | Select-Object -Last 15; exit 1 }
   $rows += [pscustomobject]@{ Beam = $b.Name; Particle = $b.Particle; EnergyMeV = $b.Energy; Events = $n; Code = "port"
                               Dose = $d.Dose; Rms = $d.Rms; WallMs = $r.Ms; LoopMs = (Get-PortLoopMs $r.Out); GpuMs = (Get-PortGpuMs $r.Out) }
+  $refusals += ("=== {0}: {1:N0} events of {2} MeV {3}" -f $b.Name, $n, $b.Energy, $b.Particle)
+  $refusals += (Get-PortRefusals $r.Out); $refusals += ""
   Write-Output ("  port        {0,12:E5} Gy +/- {1,9:E2}   loop {2,9:N0} ms   wall {3,9:N0} ms" -f $d.Dose, $d.Rms, (Get-PortLoopMs $r.Out), $r.Ms)
   # Geant4, like-for-like then as shipped
   $sides = @("em"); if (-not $SkipQBBC) { $sides += "qbbc" }
@@ -259,5 +296,6 @@ foreach ($b in $beams) {
 }
 $md | Set-Content -Path "$Out.md" -Encoding UTF8
 $dumps | Set-Content -Path "$Out.dumps.txt" -Encoding UTF8
+$refusals | Set-Content -Path "$Out.refusals.txt" -Encoding UTF8
 Write-Output ""; $md | ForEach-Object { Write-Output $_ }
-Write-Output ""; Write-Output "written: $Out.csv, $Out.md, $Out.dumps.txt"
+Write-Output ""; Write-Output "written: $Out.csv, $Out.md, $Out.dumps.txt, $Out.refusals.txt"

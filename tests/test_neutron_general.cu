@@ -145,6 +145,13 @@ struct RecordingEmitter {
   int volume = 0;
   int event = 0;
   unsigned int child_count = 0u;
+  /// The head of this step's secondary chain in a `SecondaryArena`, which `BufferEmitter` keeps
+  /// so a queued interaction can walk back over the secondaries the STEP emitted before the
+  /// interaction ran (`had::enqueue_interaction`'s `sec_last`). This emitter writes into
+  /// `Outcome` and not into an arena, so there is no chain and -1 is the right value rather
+  /// than a placeholder: `core/track_buffer.cuh` documents -1 as exactly the "not recording"
+  /// state. Added in P15, when `step_neutral` grew the enqueue that reads it.
+  int last_secondary = -1;
 
   __host__ __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin, int,
                                unsigned short za = 0) {

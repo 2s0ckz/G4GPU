@@ -743,12 +743,21 @@ rem at-rest captures - and the reference run prints `/particle/process/dump` for
 rem and for GenericIon so the configuration is recorded by what ran rather than by what was
 rem intended. docs/RISK.md V58, docs/PORTED.md 2.1.7.
 rem
-rem AND IT CHANGED AGAIN IN P15, in the other direction: `protonInelastic` and
-rem `NeutronGeneralProc` came OFF that list, because the port now does both. What is still
-rem inactivated is `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and
+rem AND IT CHANGED AGAIN IN P15, in the other direction: `protonInelastic`, `NeutronGeneralProc`
+rem and the THREE AT-REST CAPTURES came OFF that list, because the port does all of them now.
+rem What is still inactivated is `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and
 rem `ionInelastic` - `G4BinaryLightIonReaction::Interact`, every ion at or above 50 MeV per
 rem nucleon, is P9e's and is refused by name - plus `hBrems`/`hPairProd`, `ionElastic` and the
 rem lepto-nuclear processes. Both references were regenerated.
+rem
+rem AND THE PORT SIDE HOLDS THE SAME TWO SWITCHES, which is the half that was missing and is
+rem what docs/RISK.md V192 and V194 are. `proton_depth.cc` calls `SetIonInelastic(false)` so the
+rem five ion names are off on BOTH sides rather than on Geant4's alone - the port refuses nine
+rem in ten of an ion's interactions and disposes of each by killing the ion where the refusal
+rem happened, which moves the deposit upstream of its range - and `SetHadronicStage(kFinal)` so
+rem the neutron actually HAS an inelastic sub-process and a stopped negative hadron is actually
+rem captured. The engine default is `kStage1`, in which neither is true, and nothing in this
+rem repository selected anything else before P15.
 rem
 rem THE FOUR NUMBERS MOVED AND THE CONSERVATION CHECK CHANGED SHAPE. With inelastic processes
 rem active on both sides a 100 MeV proton makes NEUTRONS, and a neutron leaves a 150 mm

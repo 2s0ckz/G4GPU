@@ -1,0 +1,35 @@
+# The port's half of the P15 neutron like-for-like. Its partner is `p15_neutron.mac`, which runs
+# through `ref/b1neutron/run.bat`; this one runs through `examples/B1/exampleB1.exe`.
+#
+# TWO ENVIRONMENT VARIABLES HAVE TO BE SET AROUND THIS MACRO, and they are not in the file
+# because this port's G4UImanager rejects an unknown command rather than ignoring it - the
+# convention P1 set, and the reason the two sides of every comparison are two files:
+#
+#   G4GPU_HADRONIC_STAGE=final    `G4NeutronGeneralProcess` as QBBC builds it: one interaction
+#                                 length from the combined table, then elastic, inelastic or
+#                                 capture from its cumulative partials. The engine's DEFAULT is
+#                                 `kStage1`, where a neutron has `hadElastic` and `nCapture` as
+#                                 separate processes and NO INELASTIC AT ALL - so without this
+#                                 variable the run measures the hole P15 closed rather than the
+#                                 physics it wired. docs/RISK.md V194.
+#   G4GPU_ION_INELASTIC=0         the five ion names `p15_neutron.mac` inactivates on the Geant4
+#                                 side, held off here too: P9e's
+#                                 `G4BinaryLightIonReaction::Interact` is refused, and a process
+#                                 inactivated on one side only is not a like-for-like column in
+#                                 either direction. docs/RISK.md V192.
+#
+# A 100 MeV NEUTRON IS THE BEAM THIS PACKAGE IS MOST EXPOSED ON. It has no charge, so there is
+# no continuous loss to dominate the answer and no Bragg peak to hide behind: essentially all of
+# the dose in B1's trapezoid comes from what the hadronic processes do, and the elastic and
+# capture halves of that were already measured at stage 1. What this pair adds is the inelastic
+# sub-process on top of them.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

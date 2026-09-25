@@ -358,7 +358,7 @@ A class-by-class inventory of all three Geant4 process trees — 568 electromagn
 
 ### Open questions
 
-Three things are measured, documented and unresolved rather than unknown. Two more were on this
+Four things are measured, documented and unresolved rather than unknown. Two more were on this
 list until P8e and are closed; **they keep their numbers**, because RISK entries, PORTED rows and
 source comments cite "open question 2" and "open question 3" by number and a renumbering would
 send every one of them somewhere else.
@@ -433,6 +433,17 @@ send every one of them somewhere else.
    What is left in its place is smaller and named: a nucleon on a HYDROGEN target is
    `G4BinaryCascade::Propagate1H1`, which P9 refused, and in water hydrogen is two atoms in
    three. `had::HadronicRefusal::kBinaryHydrogenTarget`, counted with the energy it costs.
+
+   **AND IT ACTS ONLY IN THE FINAL STAGE, WHICH NOTHING IN THIS REPOSITORY SELECTED.** The
+   engine's default is `HadronicStage::kStage1`, where a neutron carries `hadElastic` and
+   `nCapture` as two separate processes with no inelastic sibling at all, and a grep for
+   `SetHadronicStage` found the setter, two comments and no caller: every B1 run, every sweep row
+   and the proton depth-dose gate had been taken in it. The same flag gates the at-rest capture,
+   so both halves of P15 were behind it. `G4GPU_HADRONIC_STAGE=final` selects the stage now and
+   `tools/b1_sweep.ps1`, `ref/proton/proton_depth.cc` and `ref/b1hadron/p15_neutron_port.mac`
+   set it; the DEFAULT is deliberately still `kStage1`, because every gate in this project was
+   measured in it and which stage ships is question 6 below rather than P15's to decide.
+   docs/RISK.md V194.
  5. **Electrons and positrons above 100 MeV: the clamp is gone, the msc model is Geant4's, and
    the row is still 2.8 sigma low.** The B1
    sweep of 2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first
@@ -467,6 +478,24 @@ send every one of them somewhere else.
    gate −0.071 ± 0.0045 pGy, 0.0166% (RISK V96). What that opened instead is RISK V97, small
    and pinned: a positron that LEAVES the world is annihilated on the way out, emitting
    1.022 MeV of photons outside it that nothing scores.
+
+ 6. **Which hadronic stage ships.** `HadronicStage::kStage1` is scaffolding from P8: a neutron
+   carries `hadElastic` and `nCapture` as two separate processes, and a stopped negative hadron
+   decays. It exists because Geant4 can be made to match it - `ref/b1neutron/b1neutron.cc` is
+   example B1 with `SetEnableNeutronGeneralProcess(false)` added, and the three at-rest captures
+   inactivated by name - and because for most of this port's life the third sub-process and the
+   capture did not exist to select. They both exist now (P12, P15), so the configuration that
+   matches the physics list this is a port OF is `kFinal`: QBBC's own constructor sets
+   `SetEnableBCParticles(true); SetEnableNeutronGeneralProcess(true);`.
+
+   **The default is still `kStage1` and this package deliberately did not change it.** Every
+   gate, every sweep row and both depth-dose references were measured in it, so flipping it is a
+   decision about all of them at once and not about the package that made the alternative
+   reachable. What P15 leaves is the switch (`G4GPU_HADRONIC_STAGE`,
+   `TransportEngine::SetHadronicStage`), the like-for-like macro pair
+   (`ref/b1hadron/p15_neutron.mac` and `p15_neutron_port.mac`) and the measurement below;
+   what is open is whether the next campaign re-takes the gates in `kFinal` and makes it the
+   default. docs/RISK.md V194.
 
 
 ---

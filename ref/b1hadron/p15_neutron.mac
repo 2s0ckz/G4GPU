@@ -1,0 +1,56 @@
+# P15: example B1 with a neutron beam, the like-for-like Geant4 column now that the inelastic
+# sub-process is wired. The partner is `p15_neutron_port.mac`; both run through
+# `ref/b1neutron/run.bat`, which is B1 with `EnableNeutronGeneralProcess` forced false.
+#
+# WHY A NEW FILE RATHER THAN AN EDIT OF `stage1_neutron.mac`. That macro carries
+# `/process/inactivate neutronInelastic`, and it is right for the stage it names: from P8d to
+# P15 the port refused the neutron's inelastic final state by name
+# (`HadronicRefusal::kNeutronInelastic`) and a column that left it active on the Geant4 side
+# would have been comparing two different physics lists. P15 wires it, so the line comes off -
+# and the old pair is kept unedited because the numbers already published against it were taken
+# with it.
+#
+# WHY THE GENERAL PROCESS IS STILL OFF ON BOTH SIDES. It is not a physics choice and it is not
+# the port's doing: with `EnableNeutronGeneralProcess = 1` a neutron's manager holds exactly
+# `Transportation`, `Decay` and `NeutronGeneralProc`, so `/process/inactivate neutronInelastic`
+# answers `illegal process (or type) name` and NOTHING inside the general process can be reached
+# by name at all (docs/RISK.md V53). Turning it off is what makes the five ion inactivations
+# below expressible; the sub-processes it splits into are the same code.
+#
+# WHAT IS STILL INACTIVATED, and it is the same list the sweep uses:
+#
+#   dInelastic, tInelastic, He3Inelastic, alphaInelastic, ionInelastic
+#                   P9e's `G4BinaryLightIonReaction::Interact` is not wired, so the port refuses
+#                   every ion interaction at or above 50 MeV per nucleon. The PORT holds the
+#                   same five off through `G4GPU_ION_INELASTIC=0` - a process inactivated on one
+#                   side only is not a like-for-like column in either direction, and that is
+#                   exactly the defect docs/RISK.md V192 records.
+#   ionElastic      `G4NuclNuclDiffuseElastic`, both halves ported and the channel not wired.
+#
+# A 100 MeV neutron beam is the case the two groups of the refusal ledger were built for: the
+# neutron itself has a full inelastic process now, and what it MAKES - deuterons, tritons,
+# alphas and recoil nuclides - is what the five names above cover.
+
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate dInelastic
+/process/inactivate tInelastic
+/process/inactivate He3Inelastic
+/process/inactivate alphaInelastic
+/process/inactivate ionInelastic
+/process/inactivate ionElastic
+
+# The stage, recorded by what RAN and not by what was intended: Active/InActive for every
+# process on the neutron's manager, after the inactivations above. `/process/inactivate` ignores
+# a name the species does not have (docs/RISK.md V43), so this dump is the only thing that makes
+# the list above a claim rather than a hope.
+/particle/select neutron
+/particle/process/dump
+
+/gun/particle neutron
+/gun/energy 100 MeV
+
+/run/printProgress 100000
+/run/beamOn 500000

@@ -349,6 +349,16 @@ int main(int argc, char** argv) {
   // found. It is small here - a 100 MeV proton makes few energetic ions - but "small" is not a
   // reason to compare two different physics lists. docs/RISK.md V192.
   rm->GetEngine().SetIonInelastic(false);
+
+  // AND THE NEUTRON'S SIDE OF THE SAME RULE, which is the other half of what P15 changed here.
+  // `NeutronGeneralProc` came OFF `inactivate()`'s list because the port wires the inelastic
+  // sub-process now - but the engine's DEFAULT stage is `kStage1`, where a neutron carries
+  // `hadElastic` and `nCapture` as separate processes and has no inelastic sibling at all.
+  // Leaving the default in place would compare a port whose secondary neutrons cannot react
+  // against a Geant4 whose can, which is the same one-sided-configuration defect as the ions
+  // and in the opposite direction. `kFinal` is `G4NeutronGeneralProcess` as QBBC builds it.
+  // docs/RISK.md V194.
+  rm->GetEngine().SetHadronicStage(g4gpu::had::HadronicStage::kFinal);
 #endif
 
   rm->Initialize();
@@ -435,9 +445,24 @@ int main(int argc, char** argv) {
         // for, so that omission is no longer inert and is stated in the report rather than
         // assumed away.
         "electronNuclear", "positronNuclear", "muonNuclear",
-        // The at-rest captures: P12. Unreachable here (nothing negative is made) and listed so
-        // that this list is the stage-1 one.
-        "hBertiniCaptureAtRest", "hFritiofCaptureAtRest", "muMinusCaptureAtRest",
+        // THE THREE AT-REST CAPTURES CAME OFF THIS LIST IN P15, with the same reasoning that
+        // took `protonInelastic` off it. They were here because P12's chain had no caller and
+        // the comment said so: "unreachable here (nothing negative is made) and listed so that
+        // this list is the stage-1 one". P15 supplies the caller - a stopped mu-, pi-, K-,
+        // Sigma-, Xi-, Omega-, pbar or nbar is queued and `stopping::at_rest` runs on it, in
+        // competition with P4's decay exactly as `G4HadronStoppingProcess` and `G4Decay`
+        // compete - so leaving them inactivated would switch off physics the port HAS.
+        //
+        // AND IT IS THE STAGE THAT MADE THEM REACHABLE, not the wiring alone: `step_hadron`'s
+        // dying branch tests `had.stage == HadronicStage::kFinal`, and the engine's default is
+        // `kStage1`, where a stopped negative hadron decays on both sides instead. This harness
+        // calls `SetHadronicStage(kFinal)` above; without that line these three names would have
+        // to stay, because the port would be decaying where Geant4 captures. docs/RISK.md V194.
+        //
+        // A 100 MeV PROTON MAKES NONE OF THOSE PARTICLES - the pion threshold is near 290 MeV -
+        // so this change moves no number in the gate as it is run. It is made because the list
+        // is supposed to say what the port lacks, and a list that is right only by being
+        // unreachable stops being right the moment someone raises the energy.
     };
     for (const char* p : off) {
       ui->ApplyCommand(G4String("/process/inactivate ") + p);

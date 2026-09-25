@@ -2237,7 +2237,28 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // stage can change between two BeamOn calls in one process - which is what
         // ref/b1hadron/stage1_compare.ps1 needs of it.
         had::HadronicWiring<real_t> had_wiring{};
-        had_wiring.stage = had_stage_;
+        // `G4GPU_HADRONIC_STAGE=final` (or `stage1`) overrides the engine's default, for the
+        // same reason `G4GPU_LIVE_PER_EVENT` and `G4GPU_ION_INELASTIC` exist: `examples/B1` is
+        // Geant4's own B1 and has no UI command that reaches a setter.
+        //
+        // AND UNTIL P15 THERE WAS NOTHING IN THIS REPOSITORY THAT SELECTED `kFinal` AT ALL.
+        // The default is `kStage1`, which for a neutron means `hadElastic` and `nCapture` as two
+        // separate processes and NO inelastic - see `step_neutral`'s `has_stage1_elastic` /
+        // `has_stage1_capture`, which have no inelastic sibling. So P15's neutron inelastic
+        // sub-process, the port's largest named hole from P8d, was wired and then reachable only
+        // from `tests/test_inelastic_transport.cu`, which sets the stage itself. A deliverable
+        // no production run can reach is not a deliverable. docs/RISK.md V194.
+        //
+        // The DEFAULT is deliberately left at `kStage1` here rather than flipped: every gate in
+        // this project was measured in it, and which stage ships is a decision about all of them
+        // and not about P15. What P15 owes is that the final stage can be selected and has been
+        // measured, which is what this variable and the sweep's use of it are.
+        had::HadronicStage stage = had_stage_;
+        if (const char* env = std::getenv("G4GPU_HADRONIC_STAGE")) {
+          if (env[0] == 'f') { stage = had::HadronicStage::kFinal; }
+          else if (env[0] == 's') { stage = had::HadronicStage::kStage1; }
+        }
+        had_wiring.stage = stage;
         had_wiring.decay = had_decay_;
         had_wiring.hadron_elastic = had_elastic_;
         had_wiring.neutron_capture = had_capture_;
