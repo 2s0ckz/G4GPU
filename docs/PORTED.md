@@ -1621,6 +1621,99 @@ is the >= 10 GeV FTF arm, by name, which is a different statement. The cross sec
 and `G4PhysicsVector::Value` clamps above the top node, so a 10 PeV muon's mean free path is a
 1 PeV muon's. Neither of those is a P15 decision; both are recorded so that P15 does not add a
 window Geant4 does not have.
+#### 2.1.15 The inelastic process and the at-rest capture, wired (P15)
+
+Everything in 2.1.10 to 2.1.13 is reached by a particle now. A proton, a neutron, a pion, a
+kaon, a deuteron, a triton, a He3, an alpha and a real nuclide each draw an inelastic
+interaction length from P2's cross sections, pick a model as `G4EnergyRangeManager` picks one,
+and get a final state; a stopped mu-, pi-, K- or negative hyperon is captured.
+
+| Geant4 class / function | QBBC | | Where |
+|---|:--:|:--:|---|
+| `G4HadronInelasticQBBC::ConstructProcess`'s model table - FTFP 3 GeV-100 TeV, Bertini 1-6 GeV (1-12 for pions), the Binary cascade 0-1.5 GeV, in that REGISTRATION order | y | **V** | `hadronic/inelastic_wiring.cuh`. Asserted against `ref/oracle/ftf_windows.csv`, which is the CONSTRUCTED process's own `GetModelName`/`GetMinEnergy`/`GetMaxEnergy`: 24 (model, emin, emax) triples over 11 species, exact |
+| `G4HadronicBuilder::BuildFTFP_BERT`'s `if(bert)` - kaons and hyperons get FTFP from 3 GeV and Bertini from ZERO; anti-nucleons and anti-hyperons get FTFP at EVERY energy, because nothing calls `SetMinEnergy` on that instance | y | **V** | same. The anti-nucleon row is a line that is NOT there, and the oracle is what proves it: perturbing the floor from 0 to 3 GeV fails the test |
+| `G4IonPhysics::ConstructProcess` - the light-ion reaction 0-6 GeV/n FIRST, then FTFP from 3 GeV/n, and the energy compared PER NUCLEON | y | **V** | same. `choose_hadronic_interaction`'s `Ekin/|A|` is P5's; what P15 supplies is the track's own baryon number, which for a `kGenericIon` is its A and not G4GenericIon's placeholder 1 |
+| `G4EnergyRangeManager::GetHadronicInteraction` across an overlap | y | **V** | P5's, called from `step_hadron`. 30 overlap cells x 200,000 draws against `overlap_probability_upper` computed from the CSV's own emin/emax: worst **1.46 sigma** against a 5 sigma gate, and **0 mismatches** on the number of uniforms consumed |
+| `G4ParticleInelasticXS` (p, d, t, He3, alpha - five data sets, five directories, two different high-energy Glauber-Gribov components), `G4NeutronInelasticXS`, `G4BGGPionInelasticXS`, `G4CrossSectionInelastic(GG hadron-nucleus)` for the kaons, `(GG nucl-nucl)` for GenericIon | y | **V** | `inelastic_wiring.cuh` + `host/hadronic_upload.cuh`. The MACROSCOPIC cross section - `sum_i n_i sigma_i` over a material's elements - against `ref/oracle/had_particlexs.csv` at the oracle's own node energies: **1,152 points, worst relative 0** |
+| `G4HadronicProcess::PostStepDoIt` - the integral rejection first, then `SampleZandA` from the RECOMPUTED partial sums, then the model, then `do { ApplyYourself } while(!CheckResult)` bounded at 100, then the K0/anti-K0 mixing, then `FillResult` | y | **V** | `hadronic/interaction_apply.cuh`. The interaction RATE against the cross section: 24 (beam, material) cells, 400 tracks each, Poisson mean `sum(L_i/lambda_i)` over the realised path - worst **2.58 sigma** against a 5 sigma gate |
+| `G4HadronStoppingProcess::AtRestDoIt` in the transport | y | **T** | `physics/stepper.cuh`'s dying branch through `had::at_rest_bucket`. 200 stopped pi- and 200 mu- in water: 197 and 200 reach `stopping::at_rest` (the other three pions decay in flight - see below), all capture, 1,639 and 1,772 atomic-cascade secondaries and 916 and 677 nuclear ones, with 173 of the 200 muons decaying in orbit |
+| `G4NeutronGeneralProcess`'s inelastic sub-process | y | **T** | `step_neutral`. It was `HadronicRefusal::kNeutronInelastic` from P8d to P15 - the port's largest named hole, 18% of the interactions in water at 10 MeV and 51% in lead - and it is applied now. `NeutronSubTables::inelastic` is the data set `upload_neutron_tables` had always built and thrown away |
+| `G4BinaryLightIonReaction::Interact` | y | **-** | **REFUSED BY NAME**, `kLightIonCascade`, and it is the largest hole P15 leaves. See below |
+| `G4BinaryCascade::Propagate1H1` | y | **-** | **REFUSED BY NAME**, `kBinaryHydrogenTarget`. 107 of 1,021 refused interactions over the test grid; in water hydrogen is two atoms in three |
+
+**The design, and the measurement that forced it.** The models are not in the stepping kernels
+and cannot be: docs/RISK.md **V188** and **V189** have the two halves. A stepper decides that an
+interaction happens, chooses the model, and puts the track and the step into an
+`had::InteractionQueue`; the engine bins the queue by model with the same counting sort the
+species dispatch uses, and launches one of FIVE interaction kernels per non-empty bucket, in
+chunks of the slot count. One slot is **1,604,928 bytes** (`InteractionSlot` 1,065,824 +
+`ftf::entry::Workspace` 539,104) and a queue entry is **392**; the default pool is 256 slots,
+391.8 MB, and the queue is sized at the track pool, which is a BOUND rather than an estimate -
+one track queues at most one interaction per launch.
+
+**V189 is the finding worth reading twice**: every test of P9's, P10's, P11's and P12's models
+is host-only, so no hadronic model in this port had ever been compiled as device code at all.
+Four of them in one kernel is past ptxas - 22.6 GB of working set at 200 seconds, still climbing
+- and one each compiles at 6.1 to 19.8 GB. Five translation units, `if constexpr` on the bucket
+and the model, and `cudaLimitStackSize` from 16,384 to 49,152 because the frames are 31,968 to
+35,360 bytes.
+
+**What is refused, by name, with its rate.** Over the validation grid - 8 beams x 3 materials x
+400 tracks - 1,021 charged-hadron interactions produced no final state, and the ledger says why:
+
+| refusal | count | energy | whose |
+|---|--:|--:|---|
+| `kLightIonCascade` - an ion at or above **50 MeV per nucleon** | 914 | 387,270 MeV | P9e |
+| `kBinaryHydrogenTarget` - `Propagate1H1` | 107 | 57,824 MeV | P9 |
+| `kInelasticSecondarySpecies` - a hyperon, a K0S/K0L, an anti-nucleus | 3 | 1,395 MeV | P1's species set |
+
+The first is not a corner and it decides a column of the B1 sweep.
+`G4BinaryLightIonReaction::ApplyYourself` fuses below 50 MeV/n and calls `Interact` at or above
+it; QBBC gives an ion the light-ion reaction to 6 GeV/n and FTFP from 3 GeV/n, so between
+50 MeV/n and 3 GeV/n there is no model this port can run - and all three alpha beams of the
+sweep sit there, at 210, 400 and 1000 MeV per nucleon. Measured: **195 of 215** alpha
+interactions in water are refused. So `alphaInelastic`, `dInelastic`, `tInelastic`,
+`He3Inelastic` and `ionInelastic` stay inactivated on the Geant4 side of every like-for-like
+column until `Interact` lands, and `protonInelastic` and `NeutronGeneralProc` come off.
+
+**The refusal ledger has two groups now and they must not be added.**
+`kNeutronInelastic` and `kChargedHadronInelastic` say how MUCH is missing, one booking per lost
+interaction with the projectile's kinetic energy; the eleven `kLightIonCascade`-and-neighbours
+entries say WHY, and every one of them is a second booking on an event already in the first.
+The run's report prints them under separate headings and `had::HadronicRefusal`'s own comment
+says so where a reader will hit it.
+
+**Two things the anti-vacuity pass found that were not in the code under test.**
+
+- **A rate check built from the port's own cross section agrees with itself when the cross
+  section is doubled.** The Poisson comparison above was written against
+  `inelastic_xs_per_volume` - the same function the stepper draws from - so perturbing it to
+  `return 2 * v.value` moved the expectation and the observation together and the test passed at
+  the same 2.58 sigma. docs/RISK.md V52 for the second time in this project. The fix is the
+  1,152-point comparison against `had_particlexs.csv` above: 3a asks whether SIGMA is Geant4's
+  and 3 asks whether the LENGTH is drawn from that sigma, and only together do they mean
+  anything.
+- **`tests/test_step_hadron.cu`'s refusal comparison could not fail.** It launches its kernel
+  twice to prove block-size determinism and both launches book into one ledger, so the device's
+  counters were twice the host's for any refusal that fired - and none ever had. The first
+  refusal to fire read `host 3, device 6`. The ledger is snapshotted and rewound around the
+  second launch now, and the two launches' own contributions are compared against each other as
+  well, which is strictly stronger than what was there.
+
+**And one that was.** `max_secondaries_per_step` reserved four output slots for every species.
+One 4 GeV proton interaction in compact bone emits **29** secondaries. The hadronic rows are 48
+now - measured, with a tripwire in the test - and the EM rows are untouched at four, so B1's
+gamma gate schedules byte for byte as it did. A hadron run wants 32 live tracks an event rather
+than 4 to pay for it; `ref/proton/proton_depth.cc` sets it and `tools/b1_sweep.ps1` sets
+`G4GPU_LIVE_PER_EVENT` for the proton and alpha beams only.
+
+**The numbers.** `tests/test_inelastic_models.cu`: 24 (model, window) triples exact against
+`ftf_windows.csv`, 440 (species, energy) cells, 30 overlaps at 200,000 draws each, worst 1.46
+sigma, 0 draw-count mismatches. `tests/test_inelastic_transport.cu`: 1,152 cross-section points
+at worst relative 0; 24 rate cells at worst 2.58 sigma; baryon number and charge exact on every
+interaction with no refused secondary; the at-rest hook on 400 stopped tracks. Eight
+perturbations on the first test and four on the second, all twelve detected.
+
 
 ### 2.2 What QBBC needs and is not there
 
