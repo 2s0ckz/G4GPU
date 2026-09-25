@@ -12407,7 +12407,7 @@ rows cannot be made like-for-like by inactivation the way the ion rows can - the
 closed by wiring `Propagate1H1`, and until then the number stands in the report as the measured
 cost of that hole.
 
-### V193: the interaction kernel runs 2 to 82 threads, and a proton beam got 93x slower
+### V193: 95% of a proton beam's loop is one kernel of 52 threads waiting for its slowest cascade
 
 P15's inelastic wiring costs the proton beams about two orders of magnitude of throughput. This
 entry is the **diagnosis**; the fix belongs to the performance phase after Phase 3, and the
@@ -12426,48 +12426,71 @@ THE COST, port loop time, from `out/b1_sweep_p15.csv`:
 
     gamma_1..100, e-_20..1000                unchanged - the drain loop is gated on `any_hadron`
 
-THREE MECHANISMS, MEASURED SEPARATELY.
+THE MECHANISM, MEASURED WITH A PROFILER RATHER THAN INFERRED FROM THE REPORT. The first version of
+this entry listed three candidates from the engine's own report lines; P15's second pass put the
+210 MeV proton beam under Nsight Systems 2021.5.2 (`nsys profile --trace=cuda --sample=none`),
+10,000 events, batch 10,000, `G4GPU_LIVE_PER_EVENT=32`, final stage, on the shared card:
 
-**1. The interaction kernel is launched with far fewer threads than the GPU has cores.** One
-workspace slot is 1,604,928 bytes, the pool is 128 slots (205 MB), and the queue is drained in
-chunks of one slot per thread. The fill per launch is the whole story and it varies by three
-orders of magnitude with how many hadrons are alive at once:
+    kernel                             GPU time    launches   average per launch
+    run_interaction<kBinary>          10,982 ms        56        196 ms
+    run_step_hadron<proton>              123 ms       129       0.96 ms
+    run_step_lepton (both), gamma,        ~70 ms       ...
+    neutral, the other hadrons,
+    the counting sorts
+    event loop, host clock            11,525 ms
 
-    ref/proton/proton_depth.exe   566 queued, 269 launches   =  2.1 threads per launch  (1.6%)
-    B1 proton 1 GeV, live=32    2,094 queued,  36 launches   = 58.2 threads per launch (45%)
-    B1 alpha 840 MeV, live=32  11,223 queued, 137 launches   = 81.9 threads per launch (64%)
+**95% of the event loop is one kernel, and it is not busy.** 2,910 interactions in 56 launches is
+52 threads a launch - 32 to 128 by the trace's own grid sizes - on a card that holds 70,656
+resident. And a launch lasts as long as its SLOWEST thread, so the per-launch time is a tail
+statistic, not an average cost:
 
-Even the best of those is 82 threads on a device with 5,888 cores. The depth-dose case is the
-pathological one: at 4 live tracks per event the queue never fills, and 269 launches carry 566
-interactions between them.
+    run_interaction<kBinary>, 56 launches:  min 1.8 ms   median 136 ms   p90 358 ms   max 2,448 ms
 
-**2. The models are enormous and run one per thread.** Each of the five per-model kernels carries
-a 16,384-byte device stack (V190) and 255 registers, so a launch of 128 threads is 128 warplanes
-each executing a full Binary cascade, Bertini cascade or FTF string fragmentation serially. This
-is why the **protons are 8x slower than the alphas despite far fewer refusals**: an alpha's
-interaction is refused *before* the model runs and costs nothing, while a proton's actually
-propagates a cascade. The refusal rate and the cost run in opposite directions, which is worth
-remembering before anyone reads the alpha rows as the cheap case.
+The single longest launch is 22% of all the kernel's time. The shortest - 1.8 ms for 32 threads -
+is the floor on what one Binary cascade costs one GPU thread; the median is what the slowest of
+~50 costs. The stepping loop waits for each drain before its next launch, so the transport's
+throughput is set by the worst cascade in each iteration.
 
-**3. The drain is serialized against the stepping loop.** Every iteration steps, counts buckets,
-sorts, then launches up to five kernels and waits, before the next stepping launch. The launches
-themselves are not free at this fill: 269 launches for 566 interactions is roughly one launch per
-two interactions.
+That separates the three candidates the first version named:
 
-WHAT IS NOT THE CAUSE, and was checked so it does not get re-checked: the queue is nowhere near
-full (busiest iteration 0.0-0.2% of capacity), so `SetInteractionQueueCapacity` is not it; and
-`-Xptxas -O1` on the proton and antiproton units (V191) is not it either, because the alpha units
-compiled at `-O2` and lost 12x by the same mechanism.
+  * **occupancy** - real, and the reason the GPU is idle during the 95%: at most 128 threads, the
+    slot count, at 2,020,152 bytes a slot since P9e (1,604,928 before);
+  * **serialization** - real, and the multiplier: the stepping kernels are 1% of the time and
+    spend the rest waiting for a drain that waits for its slowest thread;
+  * **the queue's fill** - NOT a cause: the busiest iteration queued 158 of a 7,690-entry queue
+    here (2.1%), and 1,243 of 1,186,357 in the automatic batch.
+
+AND ONE THAT WAS TESTED BECAUSE IT LOOKED LIKE A CAUSE AND IS NOT: oversubscription. The automatic
+batch sizes the track buffers to 55% of the memory free at `Upload`, BEFORE the lazy stack raise,
+so a hadron run then asks for ~4.6 GB of stack reservation the card does not have - and on this
+Windows (WDDM) setup `cudaDeviceSetLimit` succeeds anyway and reports 0.00 GB free (V196's probe:
+3.8 GB allocated, then a 94,208-byte limit, and an 88 kB-frame kernel still runs correctly). The
+same 50,000-event 210 MeV proton run with `/run/setBatchSize 50000`, which fits with 0.20 GB to
+spare: 28,963 ms against 30,895 ms, **6.6% faster, dose identical to every digit**. So paging is
+worth a few percent, not the factor of a hundred.
+
+WHAT THE PERFORMANCE PHASE SHOULD START FROM, in order:
+
+  1. **Stop the stepping loop waiting for the drain.** The interaction kernels and the stepping
+     kernels touch disjoint tracks by construction - a queued track is out of the stepping
+     buffer until its interaction writes it back - so they can run on different streams, with
+     the drain's results merged the iteration after. That attacks the multiplier directly and is
+     a change of shape, not a constant.
+  2. **Look at the tail.** A 2.45-second launch is one or a few cascades taking seconds on one
+     thread: a retry loop at its bound, or a de-excitation chain of unusual length. Which events
+     those are is measurable with the same trace plus the queue's own record of each entry.
+  3. **Only then, concurrency.** More slots raise the threads per launch and do nothing for the
+     tail; at 2 MB a slot they are also the most expensive lever there is.
+
+WHAT IS NOT THE CAUSE, and was checked so it does not get re-checked: the queue's capacity, above;
+oversubscription, above; and `-Xptxas -O1` on the proton and antiproton units (V191, V195), which
+cannot explain an alpha beam that compiled at ptxas's default -O3 and lost 12x by the same shape.
 
 THE ONE-LINE CAPACITY THAT DOES NOT WORK. Raising `SetInteractionSlots` is one call and the
-obvious first thing to try, but it is bounded hard: at 1,604,928 bytes a slot, 1,024 slots is
-1.64 GB and 4,096 is 6.6 GB of an 8 GB card, against a pool and a device stack that already take
-their share (V190: 86,016 bytes of stack reservation per thread leaves 0.95 GB). More slots also
-do nothing for the depth-dose case, which is launch-bound at 2 threads and not slot-bound. The
-real fix is a different shape - accumulate interactions across iterations and drain in fewer,
-fuller launches, or split the models so a warp cooperates on one cascade instead of a thread
-owning it - and that is a design change, not a constant.
-
+obvious first thing to try, and the profile says why it would not do much: it raises the threads
+per launch, and the launch is as long as its slowest thread either way. It is also bounded hard -
+1,024 slots is 2.1 GB at P9e's slot size, of a card whose stack reservation already takes most of
+it (V196's table: 94,208 bytes a thread leaves 0.82 GB free before anything is allocated).
 ### V194: the neutron's inelastic sub-process was wired to a stage no run selects
 
 P15's brief lists "the neutron general process's inelastic sub-process replacing its refusal" as
