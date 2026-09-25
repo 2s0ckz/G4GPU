@@ -999,7 +999,13 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     // tracking-cut convention and it is also `G4Decay::DecayIt`'s own `energyDeposit` on the
     // at-rest branch - and `q.edep` carries it. Adding it again here would score the last few
     // tens of keV of every refused capture twice.
-    if (q.kind != had::InteractionKind::kAtRest && q.score_slot >= 0) { edep += p.ekin; }
+    if (q.kind != had::InteractionKind::kAtRest && q.score_slot >= 0) {
+      edep += p.ekin;
+      // AND WHERE IT WENT, booked a second time: how much of the scored dose this disposal put
+      // in the scorer. `kRefusedEnergyScored` is what separates "a hole the dose cannot see"
+      // from "a hole that IS the discrepancy" (docs/RISK.md V201).
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kRefusedEnergyScored, p.ekin);
+    }
     p.ekin = real_t(0);
     srep.status = StepStatus::fStopAndKill;
   }

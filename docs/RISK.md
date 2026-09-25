@@ -12622,6 +12622,15 @@ table of -O3 against -O1. The ladder is -O3, -O2, -O1 now, each rung tried only 
 it died with an access violation; the `.o1` marker records the rung that compiled, and the -O3 log
 is kept as `<unit>.O3.log` because the retry overwrites the unit's own.
 
+**AND THE NEW RUNG EARNED ITS KEEP ON THE THIRD BUILD AFTER IT WENT IN.** The build that added
+`HadronicRefusal::kRefusedEnergyScored` (V201) - one enum value appended, which moves the
+sentinel constant `kNumHadronicRefusals` by one in every kernel that compares against it - put
+the GenericIon unit back over the cliff at -O3, and it compiled at -O2: "transport_run_generic_ion:
+ptxas -O2". Without the rung this ladder added, that build would have jumped to -O1 or, as the
+09-19 evening build did, died there too. That is the cliff V63 and V65 describe, facing both ways
+on a change no reader would call a code change, and it is the case for keeping the rung rather than
+the case for any one source shape.
+
 ### V196: the driver sizes the stack for a kernel ptxas can size, and faults the one it cannot
 
 **THIS ENTRY SCOPES V183.** V183 (P9e's, "the cascade's kernel frame is 63 kilobytes and the
@@ -12884,3 +12893,42 @@ beam is in the sweep's `.refusals.txt`.
 
 It was found on the way to V199: the ion delta-ray bookings in the 1 GeV proton ledger were the
 bogus V199 ions, and reading why the branch could fire at all turned up the arithmetic.
+
+### V201: the two rows outside three sigma are the refusals' disposal, measured in the scorer
+
+After V199 the B1 sweep has eleven of thirteen rows inside three sigma, and the two outside are
+proton_1000 (+13.96%, +17.2 sigma) and alpha_4000 (+15.08%, +4.6 sigma, a tenth of the counts).
+Both have large refusals: `Propagate1H1` - a nucleon on HYDROGEN, P9's missing arm - for 8.5% of
+proton_1000's interactions at ~950 MeV each, and `Propagate` refusing inside `Interact` for
+alpha_4000 at 3.3 GeV each. And V192 says what the port does with a refused interaction: it
+kills the track and deposits its kinetic energy WHERE THE REFUSAL HAPPENED. The hypothesis is
+that the excess is that energy landing in the trapezoid. A dose cannot say so on its own; a
+ledger entry can.
+
+THE INSTRUMENT. `HadronicRefusal::kRefusedEnergyScored` books, a second time, the kinetic energy
+the disposal deposits inside a scoring volume - a WHERE annotation on the SIZE group, not a new
+hole. It changes no behaviour; the dose is bit-identical with it (alpha_4000's 77.0771 nGy to
+every digit).
+
+THE MEASUREMENT, with B1's scoring mass (Shape2, 936 cm^3 of G4_BONE_COMPACT_ICRU at
+1.85 g/cm^3, 1.7316 kg):
+
+    beam          events   port dose    refused energy        share of the    port without     Geant4
+                                        in the trapezoid      scored energy   those deposits
+    proton_1000   50,000   110.62 nGy   208,945 MeV (229)        17.5%          91.29 nGy       97.60 nGy
+    alpha_4000    10,000    77.08 nGy   157,092 MeV (78)         18.9%          62.53 nGy       66.98 nGy
+
+In both, **Geant4 lies inside the bracket** the refusals define: with the missing arm wired,
+those interactions would deposit something between nothing and everything in the trapezoid,
+and Geant4's number corresponds to about a third (proton_1000) and a third (alpha_4000) of
+what the disposal put there - which is what a leading nucleon and its pions ionising onward
+through the bone, or a fragmenting 1 GeV/u alpha's forward products, would plausibly leave.
+So the refusals' disposal is sufficient to explain both excesses, and nothing else is needed to.
+
+WHAT THAT DOES AND DOES NOT CLOSE. It closes the question "is there another defect under these
+two rows" - there is no residual the bracket cannot hold. It does not close the holes: both are
+P9's (`Propagate1H1`, and whatever `Propagate` refuses inside `Interact`, which `cascade_ref`
+names), and V192's point stands - a refused interaction is not "no process", and a disposal that
+deposits a GeV where it stands will always be visible in a scorer the refusal happens inside. The
+counter is on every run's ledger now, so the next package can read the share directly instead of
+bracketing it.

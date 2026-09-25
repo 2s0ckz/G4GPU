@@ -344,3 +344,11 @@ port rms larger than Geant4's (proton_1000 0.64% against 0.34%; alpha_4000 2.7% 
 which is what a few very large local deposits look like. The refusal's disposal deposits the
 projectile's whole kinetic energy where the refusal happened (V192), and where that is inside the
 trapezoid it is dose Geant4 would have carried onward with the leading nucleon.
+
+**And the two rows outside three sigma are measured, not argued** (docs/RISK.md V201). A ledger
+entry now books the energy a refused interaction's disposal deposits INSIDE the scorer: 208,945
+MeV of proton_1000's scored energy in 50,000 events (17.5%) and 157,092 MeV of alpha_4000's in
+10,000 (18.9%). Without it the port would read 91.29 and 62.53 nGy against Geant4's 97.60 and
+66.98 - so Geant4 sits inside the bracket those refusals define in both, and the disposal of
+P9's two refused arms (a nucleon on hydrogen; `Propagate` refusing inside `Interact`) is
+sufficient to explain both excesses.

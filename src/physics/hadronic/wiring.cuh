@@ -91,7 +91,9 @@ __host__ __device__ inline const char* hadronic_stage_name(HadronicStage s) {
              ? "stage1 (QBBC with *Inelastic and the three at-rest captures inactivated; the "
                "neutron with EnableNeutronGeneralProcess false and neutronInelastic off, i.e. "
                "hadElastic and nCapture as separate processes)"
-             : "final (QBBC as it ships; stopping and neutronInelastic are refused by name)";
+             : "final (QBBC as it ships: G4NeutronGeneralProcess with its inelastic sub-process, "
+               "and the at-rest captures - both wired since P15; what each still refuses is in "
+               "the ledger below)";
 }
 
 // =============================================================================================
@@ -342,6 +344,20 @@ enum class HadronicRefusal : int {
   /// did not change, which is a stage whose at-rest processes are inactivated on both sides.
   kAtRestRefused,
 
+  /// WHERE, not why and not how much: the kinetic energy a refused in-flight interaction
+  /// deposited INSIDE a scoring volume, which the conservative disposal puts there - the track is
+  /// killed and its energy deposited on the spot. A SUBSET of the SIZE group's energy, booked a
+  /// second time so the report can say how much of a scored dose the refusals' disposal put in
+  /// the scorer; not to be added to anything.
+  ///
+  /// It exists because a dose cannot say it on its own. The B1 sweep's proton_1000 reads about
+  /// +14% against Geant4 with `Propagate1H1` - a nucleon on hydrogen, which is two atoms in three
+  /// in water and still present in bone - refused for one interaction in twelve, each carrying
+  /// ~950 MeV, and Geant4 would have sent most of that energy onward with the leading nucleon and
+  /// its pions. Whether the refusals' disposal is the whole of that excess is a question of how
+  /// much of their energy landed in the trapezoid, and this is that number. docs/RISK.md V201.
+  kRefusedEnergyScored,
+
   kNumHadronicRefusals,
 };
 
@@ -415,6 +431,9 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kAtRestRefused:
       return "a stopped negative hadron's at-rest capture with no final state "
              "(stopping::at_rest; P12's own refusals)";
+    case HadronicRefusal::kRefusedEnergyScored:
+      return "WHERE: of the refused in-flight interactions above, the kinetic energy deposited "
+             "INSIDE a scoring volume by the disposal - part of the scored dose; do not add";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";
