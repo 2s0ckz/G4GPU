@@ -11635,6 +11635,14 @@ STOPS - `transformSmall` is entered below r = 2e-6 and the table's own last argu
 |z| never exceeds about 7.5 where an exact normal is unbounded. At 20,000 samples neither shows.
 The comments are wrong either way and should be corrected by whoever owns those files.
 
+Integration note (lead, integ/bic4): the removal shrank FTFP's two workspaces by 8 B each -
+`entry::Workspace` 539,104 -> 539,096 B and `entry::HadronWorkspace` 458,096 -> 458,088 B -
+because `FtfWorkspace` embeds one `Nucleus3DScratch`. V167's `static_assert`s refused every unit
+that includes `ftf/ftf_entry.cuh` until the pins, the header's table and docs/PORTED.md 2.1.11b
+moved with the types; P15 found it first, from a scratch tree of its sources over this branch's
+bic files. `ftf_model.cuh`'s comment that the cache had to survive between `nucleus_init` calls
+went with it.
+
 ### V181: which argument of a call gets the first random number, and the compiler decides
 
 `G4FermiMomentum.hh` line 59, the Fermi momentum of every nucleon of every nucleus the Binary

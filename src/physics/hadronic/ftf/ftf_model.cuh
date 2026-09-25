@@ -1484,11 +1484,10 @@ __host__ __device__ inline void ftf_model_init(FtfModelWorkspace<kA, kP, kI, kS>
                                                const xs::Projectile<double>& proj,
                                                const Vec4& proj_p4, int target_a, int target_z,
                                                const LundTables<double>* lund, Rng& rng) {
-  // Wire P9's scratch to the workspace's own storage. POINTERS AND CAPACITY ONLY: the two
-  // Gaussian fields in `Nucleus3DScratch` mirror CLHEP's `RandGauss` thread-local cache and
-  // MUST survive from one `nucleus_init` to the next, which is what
-  // bic/nucleus/nucleus_model.cuh's note 5 asks for. Re-seeding them here would restart the
-  // polar-method pair cache on every Scatter attempt and give a different stream from Geant4's.
+  // Wire P9's scratch to the workspace's own storage: pointers and capacity, which is all the
+  // scratch holds. It carried a Gaussian pair cache once, mirroring `CLHEP::RandGauss`'s static,
+  // and this comment said it had to survive from one `nucleus_init` to the next; `G4RandGauss`
+  // is `RandGaussQ`, which has no state, so since docs/RISK.md V180 there is nothing to keep.
   w->scratch.momentum = w->scratch_momentum;
   w->scratch.fermi_p = w->scratch_fermi_p;
   w->scratch.test_sums = w->scratch_sums;

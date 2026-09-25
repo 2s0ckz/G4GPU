@@ -22,8 +22,8 @@
 // distinction is the whole of the sizing problem, because the two numbers differ by four orders
 // of magnitude:
 //
-//   entry::kWorkspaceBytes       539,104   ion beams included (kMaxProjA = 64)
-//   entry::kHadronWorkspaceBytes 458,096   projectile is a single hadron (kMaxProjA = 1)
+//   entry::kWorkspaceBytes       539,096   ion beams included (kMaxProjA = 64)
+//   entry::kHadronWorkspaceBytes 458,088   projectile is a single hadron (kMaxProjA = 1)
 //
 //   slots      Workspace      HadronWorkspace
 //       64       32.9 MB           28.0 MB
@@ -35,6 +35,11 @@
 // V167): this table was prose once, it drifted by 24%, and a caller budgeted from it and came up
 // short. `bytes_for<WS>(n)` computes any row of it, `slots_for_bytes<WS>(budget)` inverts it, and
 // `tests/test_ftf_entry.cu` prints the whole table from the types themselves.
+//
+// Both shrank by 8 B when P9e landed (docs/RISK.md V180): the Gaussian cache left
+// `bic::Nucleus3DScratch`, which `FtfWorkspace` embeds once, so 539,104 became 539,096 and
+// 458,096 became 458,088. The two assertions below refused the build until this table, the pins
+// and docs/PORTED.md 2.1.11b moved together - the first time they fired for real.
 //
 // Both grew twice in P11d part 2, and both for the decay pass. 22,552 bytes for
 // `G4DecayKineticTracks`' own list, because P9d's `bic::DecayTrack` and P6's
@@ -114,10 +119,10 @@ inline constexpr std::size_t kHadronWorkspaceBytes = sizeof(HadronWorkspace);
 /// The one table shared by every slot, whatever the type.
 inline constexpr std::size_t kLundTableBytes = sizeof(LundTables<double>);
 
-static_assert(kWorkspaceBytes == 539104,
+static_assert(kWorkspaceBytes == 539096,
               "entry::Workspace changed size. The header's sizing table, docs/PORTED.md 2.1.11b "
               "and this assertion all carry the number - update all three. docs/RISK.md V167.");
-static_assert(kHadronWorkspaceBytes == 458096,
+static_assert(kHadronWorkspaceBytes == 458088,
               "entry::HadronWorkspace changed size. The header's sizing table, docs/PORTED.md "
               "2.1.11b and this assertion all carry the number - update all three. "
               "docs/RISK.md V167.");
