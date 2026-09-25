@@ -322,9 +322,18 @@ int main(int argc, char** argv) {
   // truncating a shower, which is how both of those failures were found. Nothing had reached it
   // because until docs/RISK.md V84 was closed every lepton fired into this harness died on its
   // first step in the vacuum world and no shower was ever built.
+  //
+  // AND A HADRON IS NOT ON 4.0 ANY MORE EITHER, since P15. The line above used to end "a proton
+  // or an ion keeps the engine's own 4.0, so no run that existed before this line is changed by
+  // it", and that was right while a proton made at most a delta ray per step. It now makes an
+  // inelastic reaction: `max_secondaries_per_step` reserves 48 output slots for every hadronic
+  // species (29 measured from one 4 GeV proton interaction in compact bone), and the engine
+  // steps at most `(capacity - live) / reservation` tracks of a species per launch - so at 4.0
+  // a proton run would step about one hadron per 24 events per iteration. Correct, and two
+  // dozen times the iterations. 32 is the same number the showers get and for the same reason.
   {
     const bool showers = (particle == "e-" || particle == "e+" || particle == "gamma");
-    const double live = showers ? std::max(32.0, energy / 10.0) : 4.0;
+    const double live = showers ? std::max(32.0, energy / 10.0) : 32.0;
     rm->GetEngine().SetLiveTracksPerEvent(live);
   }
 #endif

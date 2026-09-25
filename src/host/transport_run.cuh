@@ -303,6 +303,20 @@ class TransportEngine {
   /// a dose that is too low rather than a slow run.
   ///
   /// Set before Upload.
+  /// **A HADRON RUN WITH P15'S INELASTIC PROCESSES ON WANTS THIS RAISED, AND THE ARITHMETIC IS
+  /// NOT ABOUT MEMORY.** The pool holds `batch * n` slots; a launch may step only as many
+  /// tracks as `(capacity - live) / max_secondaries_per_step(species)`, and that reservation
+  /// went from 4 to 48 for every hadronic species when the inelastic final states were wired,
+  /// because one 4 GeV proton interaction in compact bone emits 29 secondaries (measured,
+  /// `tests/test_inelastic_transport.cu`). At the default of 4 live tracks an event the spare
+  /// budget is about 2 slots an event, which is one stepped hadron per 24 events - correct, and
+  /// two dozen times the iterations.
+  ///
+  /// It is NOT raised automatically, and that is deliberate: the engine cannot know from the
+  /// geometry whether the generator will produce a hadron, and raising it for a gamma run would
+  /// cost that run pool memory it has no use for. `G4GPU_LIVE_PER_EVENT` overrides it for any
+  /// program; `tools/b1_sweep.ps1` sets it for the proton and alpha beams and leaves the photon
+  /// and electron ones alone.
   void SetLiveTracksPerEvent(double n) { live_per_event_ = (n < 1.0) ? 1.0 : n; }
   double GetLiveTracksPerEvent() const { return live_per_event_; }
 

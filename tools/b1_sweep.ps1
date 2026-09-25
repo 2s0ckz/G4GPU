@@ -183,8 +183,25 @@ foreach ($b in $beams) {
   $n = [int][math]::Round($b.Events * $Scale)
   Write-Output ("=== {0}: {1} events per run" -f $b.Name, $n)
   # port
+  #
+  # THE HADRON BEAMS NEED A BIGGER TRACK POOL SINCE P15, and the photon and electron ones must
+  # NOT get one or their rows would move for a reason that is not physics.
+  #
+  # The engine steps at most `(pool capacity - live) / max_secondaries_per_step(species)` tracks
+  # of a species per launch, and that reservation is 48 for every hadronic species now (one
+  # 4 GeV proton interaction in compact bone emits 29 secondaries - measured) against 4 for the
+  # EM ones. At the default of 4 live tracks an event a proton run would step about one hadron
+  # per 24 events per iteration: correct, and two dozen times the iterations. 32 is what
+  # `ref/proton/proton_depth.cc` already gives an electron shower for the same reason.
+  #
+  # `G4GPU_LIVE_PER_EVENT` rather than a flag, because `examples/B1` is Geant4's own B1 and
+  # takes no such option - the environment variable is the engine's documented override and it
+  # is set per beam here so that what each row was measured with is in this file.
+  $isHadron = ($b.Particle -eq "proton" -or $b.Particle -eq "alpha")
+  if ($isHadron) { $env:G4GPU_LIVE_PER_EVENT = "32" } else { Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue }
   $mac = New-Macro $b "port" $n
   $r = Invoke-Run { & $portExe $mac 2>&1 | ForEach-Object { "$_" } }
+  Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue
   $d = Get-Dose $r.Out
   if ($null -eq $d) { Write-Output "  port produced no dose line; last lines:"; $r.Out | Select-Object -Last 15; exit 1 }
   $rows += [pscustomobject]@{ Beam = $b.Name; Particle = $b.Particle; EnergyMeV = $b.Energy; Events = $n; Code = "port"

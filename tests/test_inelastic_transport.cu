@@ -64,6 +64,7 @@ namespace stop = g4gpu::physics::hadronic::stopping;
 namespace ftfe = g4gpu::hadronic::ftf::entry;
 
 static int g_fails = 0;
+static int g_max_secondaries = 0;
 static void fail(const std::string& what) {
   std::printf("  FAIL: %s\n", what.c_str());
   ++g_fails;
@@ -242,6 +243,15 @@ struct Cell {
   double worst_energy = 0;
   long long n_balance = 0;
   long long secondaries = 0;
+  /// The most secondaries any ONE interaction of this cell emitted into the pool.
+  ///
+  /// THIS IS THE NUMBER `max_secondaries_per_step` IS SET FROM, and it is measured here rather
+  /// than guessed because the engine's output-pool budget is `(capacity - live) / reservation`:
+  /// too low and a launch overruns the pool and the batch halves, too high and a hadron run
+  /// steps a fraction of its tracks per iteration. `core/track_buffer.cuh`'s own comment says
+  /// the hadronic rows are the wiring package's to raise and does the arithmetic for what
+  /// raising the SHARED constant would cost a gamma; this is the other half of it.
+  int max_secondaries = 0;
 };
 
 }  // namespace
@@ -477,8 +487,8 @@ int main() {
   }
 
   std::printf("== 3. the interaction rate against the cross section, and 4. the balance ==\n");
-  std::printf("  %-18s %-6s %9s %9s %8s %8s %7s %9s\n", "beam", "mat", "expected", "queued",
-              "sigma", "ran", "reject", "worst dE");
+  std::printf("  %-18s %-6s %9s %9s %8s %8s %7s %9s %7s\n", "beam", "mat", "expected",
+              "queued", "sigma", "ran", "reject", "worst dE", "max sec");
 
   double worst_sigma = 0;
   std::string worst_where;
@@ -620,6 +630,9 @@ int main() {
               ie.books = had.books;
               had::emit_interaction_result<real_t>(slot.filled, ie, had.books);
               cell.secondaries += ie.n_secondaries;
+              if (ie.n_secondaries > cell.max_secondaries) {
+                cell.max_secondaries = ie.n_secondaries;
+              }
 
               // ---- 4. baryon number and charge, projectile + target against the products.
               //
@@ -691,13 +704,39 @@ int main() {
              + std::to_string(cell.bad_charge) + " of " + std::to_string(cell.n_balance)
              + " interactions do not balance charge");
       }
-      std::printf("  %-18s %-6s %9.1f %9lld %8.2f %8lld %7lld %9.3g\n", b.name, kMatNames[mi],
-                  cell.expected, cell.queued, sig, cell.ran, cell.rejected,
-                  cell.worst_energy);
+      std::printf("  %-18s %-6s %9.1f %9lld %8.2f %8lld %7lld %9.3g %7d\n", b.name,
+                  kMatNames[mi], cell.expected, cell.queued, sig, cell.ran, cell.rejected,
+                  cell.worst_energy, cell.max_secondaries);
+      if (cell.max_secondaries > g_max_secondaries) {
+        g_max_secondaries = cell.max_secondaries;
+      }
     }
   }
-  std::printf("  worst %.2f sigma against a %.1f gate  [%s]\n\n", worst_sigma, kSigmaGate,
+  std::printf("  worst %.2f sigma against a %.1f gate  [%s]\n", worst_sigma, kSigmaGate,
               worst_where.c_str());
+  // THE NUMBER `core/track_buffer.cuh`'s `max_secondaries_per_step` IS SET FROM.
+  //
+  // That function's own header says the hadronic rows are the wiring package's to raise and
+  // does the arithmetic for why raising the shared constant would not do: the engine's
+  // output-pool budget is `(capacity - live) / reservation`, so 64 for everything would let a
+  // gamma run step 1.6% as many tracks per iteration as 4 does. Here is the other half - what
+  // a hadronic reservation actually has to cover, measured over 24 cells and 3,200 tracks.
+  //
+  // Being UNDER it is not silent: the launch overruns the output pool, `TrackBuffer::append`
+  // counts the overflow and `BeamOn` halves the batch and retries. Being over it costs every
+  // hadron run iterations it did not need.
+  std::printf("  most secondaries from ONE interaction, over every cell: %d "
+              "(max_secondaries_per_step's hadronic rows are set from this)\n\n",
+              g_max_secondaries);
+  if (g_max_secondaries > max_secondaries_per_step(kSpeciesProton)) {
+    char b[256];
+    std::snprintf(b, sizeof(b),
+                  "one interaction emitted %d secondaries and "
+                  "max_secondaries_per_step(kSpeciesProton) reserves %d - the output pool's "
+                  "budget is too small and BeamOn will halve the batch to cope",
+                  g_max_secondaries, max_secondaries_per_step(kSpeciesProton));
+    fail(b);
+  }
 
   // ---- A TEST THAT PASSED BECAUSE NOTHING HAPPENED IS THE FAILURE MODE THIS GUARDS.
   {

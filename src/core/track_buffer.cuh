@@ -211,14 +211,40 @@ __host__ __device__ inline SpeciesDisposition species_disposition(ParticleType t
 /// So: P8 raises the hadronic rows here and leaves the EM rows alone. The neutral row is four
 /// today because step_neutral emits nothing at all - its cross section is zero until P8 - and
 /// four rather than one only so that the row that has to change is obvious rather than special.
+///
+/// **P15 RAISED THEM, AND THE NUMBER IS MEASURED.** `tests/test_inelastic_transport.cu` prints
+/// the most secondaries any ONE interaction emitted into the pool, over 24 cells of
+/// (beam, material) and 3,200 tracks:
+///
+///     proton 210 MeV    8 in water, 12 in compact bone
+///     proton 1 GeV     14 in water, 18 in bone
+///     proton 4 GeV     18 in water, **29** in bone        <- the worst over the whole grid
+///     neutron 100 MeV   8 in water, 10 in bone
+///     pi+/pi- 300 MeV  11-12
+///     alpha, deuteron   6-8      (most of their interactions are refused - the cascade arm)
+///
+/// **48**, then: above the measured 29 with room for the 6 GeV Bertini and the FTFP events this
+/// grid does not reach, and below the 64 this header's own arithmetic uses as its cautionary
+/// example. The test FAILS if a cell ever beats the reservation, so the number is a measured
+/// bound with a tripwire on it rather than a guess with a comment.
+///
+/// BEING UNDER IT IS NOT SILENT AND NOT WRONG, which is what makes 48 safe rather than merely
+/// generous: a launch that overruns the output pool is caught by `TrackBuffer::append`'s
+/// overflow counter and `BeamOn` halves the batch and retries the same events. The cost of
+/// being under is time; the cost of being over is also time, on every hadron run, which is why
+/// it is not simply set to `kInteractionSecondaryCap`.
+///
+/// AND IT IS PER SPECIES, which is what this function was made a function for: the gamma,
+/// electron and positron rows are untouched at four, so B1's 6 MeV gamma gate schedules byte
+/// for byte as it did and its throughput does not move.
 __host__ __device__ inline int max_secondaries_per_step(int sp) {
   switch (sp) {
     case kSpeciesGamma:      return 4;  // e- + e+ from a conversion, or a photoelectron
     case kSpeciesElectron:   return 4;  // a delta ray or a brems photon
     case kSpeciesPositron:   return 4;  // two annihilation photons plus a delta ray
-    case kSpeciesProton:     return 4;  // one delta ray
-    case kSpeciesAlpha:      return 4;
-    default:                 return 4;  // every charged and neutral hadron: one delta ray
+    // Every species with an inelastic process, and the neutron's general process with it.
+    // Measured worst over the grid above: 29.
+    default:                 return 48;
   }
 }
 
