@@ -684,7 +684,7 @@ __host__ __device__ inline void blir_deexcite_spectator(
     double statistical_ex_energy, const imr::LorentzVector& p_spectators,
     const imr::LorentzVector& p_initial_state, imr::LorentzVector& p_final_state,
     const data::LevelTable& lt, const deex::FermiPool& pool, const deex::DeexWorkspace& dws,
-    Rng& rng, deex::DeexStatus& dstatus, BlirRefusal& ref) {
+    Rng& rng, deex::DeexStatus& dstatus, BlirRefusal& ref, BlirCorrectorReport& last) {
   int n_frag = 0;
   imr::LorentzVector p_fragments;
   const int first_frag = n_cascaders;   // where the de-excitation products will go
@@ -745,9 +745,10 @@ __host__ __device__ inline void blir_deexcite_spectator(
   const imr::LorentzVector p_cas = p_initial_state - p_fragments;
   const BlirCorrectorReport r1 = blir_energy_and_momentum_corrector(cascaders, n_cascaders,
                                                                     p_cas);
+  last = r1;
   n_cascaders += n_frag;
   if (!r1.ok) {
-    blir_energy_and_momentum_corrector(cascaders, n_cascaders, p_initial_state);
+    last = blir_energy_and_momentum_corrector(cascaders, n_cascaders, p_initial_state);
   }
 }
 
@@ -787,6 +788,48 @@ struct BlirReport {
   double projectile_excitation = 0.0;
   int correction_loops = 0;    ///< `loopcount` in the E/p loop, at most 11
   bool correction_gave_up = false;
+  /// The LAST `EnergyAndMomentumCorrector` call of the event - the one that decides what the
+  /// final state adds up to - and it is here because the ion arm does NOT conserve energy
+  /// exactly and cannot be asserted as if it did.
+  ///
+  /// `EnergyAndMomentumCorrector` is a FIXED-POINT iteration with `ErrLimit = 1.E-6` - see
+  /// docs/RISK.md V184 for the whole of it - and
+  /// `Scale = TotalCollisionMass/Sum - 1` at exit is the relative error still left in the
+  /// products' centre-of-mass energy. It has two exits: `|Scale| <= ErrLimit`, and
+  /// `OldScale == Scale` - an exact double comparison that stops a frozen iteration wherever it
+  /// froze, with no bound on the error at all. It returns TRUE either way and Geant4 only
+  /// prints the difference under a debug flag. So the energy the event is short by is
+  /// `|Scale|` times the invariant mass the products were corrected to, and that is a quantity
+  /// a test can ASSERT - which is the difference between reproducing Geant4 and losing energy.
+  ///
+  /// MEASURED on the campaign: an alpha at 50 MeV/nucleon on Fe56 leaves 0.0529 MeV on a
+  /// converged event, against `1e-6 * 55,800 MeV = 0.0558`; the worst event of that case is
+  /// 2.11 MeV, which is a frozen exit.
+  /// Whether that last corrector call happened AT ALL. It does not when `spectatorA == 0`:
+  /// Geant4 guards `DeExciteSpectatorNucleus` with `if (spectatorA > 0)`, so an event whose
+  /// projectile cascaded entirely away is left wherever the while loop above put it - and that
+  /// loop exits on `|momentum.e() - pspectators.e()| <= 10*MeV`, so TEN MEV is the bound on
+  /// those events and there is nothing sharper to say about them.
+  /// `gamma` of `boost_fragments`, the boost `DeExciteSpectatorNucleus` applies to the
+  /// spectator fragment's de-excitation products - `G4LorentzRotation(pSpectators.boostVector())`.
+  ///
+  /// It is reported because a test comparing this arm's energy balance has to know what the
+  /// spectator's products were boosted by. It is NOT the explanation of V76's conversion
+  /// electron here, which is what it was added for: on the nucleon path
+  /// `G4PhotonEvaporation::GenerateGamma` CREATES one electron rest mass per internal
+  /// conversion and a test subtracts it flat, and the first guess was that this arm sees
+  /// `gamma * m_e` instead. It does not. MEASURED on ic_a50_Fe56 ev 10628: the surplus is not
+  /// scaled by gamma (1.05 there), it is ABSORBED - every de-excitation product of this arm
+  /// goes through `EnergyAndMomentumCorrector`, which rescales the cascaders until the total
+  /// matches `pInitialState - pFragments`. So the ion event balances against its initial energy
+  /// with no electron term at all, and subtracting one is what creates a discrepancy of exactly
+  /// `m_e`. The wrong guess is written down because the right answer is only interesting
+  /// against it.
+  double spectator_gamma = 1.0;
+  bool last_correction_ran = false;
+  bool last_correction_converged = false;
+  double last_correction_scale = 0.0;
+  int last_correction_attempts = 0;
   PropagateResult propagate;
 };
 
@@ -924,6 +967,10 @@ __host__ __device__ inline preco::PrecoStatus blir_cascade_arm(
       store.cascaders, store.cascader_capacity, n_spectators, n_cascaders, spectator_a,
       spectator_z, p_final_state, ref);
   rep.spectator_a = spectator_a;
+  {
+    const double m_spec = p_spectators.mag();
+    rep.spectator_gamma = (m_spec > 0.0) ? (p_spectators.e / m_spec) : 1.0;
+  }
   rep.spectator_z = spectator_z;
   rep.n_spectators = n_spectators;
   if (ref.any()) { return status; }
@@ -956,10 +1003,15 @@ __host__ __device__ inline preco::PrecoStatus blir_cascade_arm(
   if (spectator_a > 0) {
     if (std::sqrt(g4gpu::mag2(momentum.v)) - momentum.e < 10.0 * u::keV<double>()) {
       deex::DeexStatus dstatus;
+      BlirCorrectorReport last;
       blir_deexcite_spectator(store.spectators, n_spectators, store.cascaders, n_cascaders,
                               store.cascader_capacity, spectator_a, spectator_z, f.pa,
                               ir.projectile_excitation, p_spectators, p_initial_state,
-                              p_final_state, lt, pool, ws.deex, rng, dstatus, ref);
+                              p_final_state, lt, pool, ws.deex, rng, dstatus, ref, last);
+      rep.last_correction_ran = true;
+      rep.last_correction_converged = last.converged;
+      rep.last_correction_scale = last.final_scale;
+      rep.last_correction_attempts = last.attempts;
       status.deex = dstatus;
       if (ref.any()) { return status; }
     } else {

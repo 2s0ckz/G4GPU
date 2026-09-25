@@ -4078,6 +4078,14 @@ void write_blir_apply() {
           ez += (pdg / 10000) % 1000;
         } else if (pdg == 2112) { ea += 1; }
         else if (pdg == 2212) { ea += 1; ez += 1; }
+        // A CHARGED PION carries charge out of the event and no nucleons, exactly as
+        // write_bic_apply counts it - so `ez` is the event's total CHARGE and `ea` the baryon
+        // number of its nuclei and nucleons, and both are conserved. Without these two lines
+        // the cascade arm reported (Z, A) VARYING on every case that makes pions, which is
+        // every case above the pion threshold: ic_d1000_C12 alone makes 5,463 pi+ and 5,659
+        // pi- in 20,000 events.
+        else if (pdg == 211) { ez += 1; }
+        else if (pdg == -211) { ez -= 1; }
       }
       for (const auto& kv : per_event) { sum_k2[kv.first] += double(kv.second) * kv.second; }
       if (sum_z < 0) { sum_z = ez; sum_a = ea; }

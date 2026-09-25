@@ -11707,3 +11707,151 @@ are safe, because multiplication of the two draws is commutative; `G4Nucleus.cc:
 `-` are also unordered and they are not interchangeable - but it is inside
 `G4Nucleus::EvaporationEffects`, which `process.cuh` records as unreachable in QBBC's elastic
 scattering and which this port does not transcribe.
+
+### V182: a cascade that leaves ONE nucleon behind loses its excitation energy, and Geant4 knows
+
+`G4BinaryCascade::DeExcite`, the branch for a residual of a single nucleon:
+
+```
+} else
+{        // fragment->GetA_asInt() <= 1, so a single proton, as a fragment must have Z>0
+   ...
+   G4ReactionProduct * aNew = new G4ReactionProduct((*i)->GetDefinition());
+   aNew->SetTotalEnergy((*i)->GetDefinition()->GetPDGMass());
+   ...
+   aNew->SetMomentum(G4ThreeVector(0));// see boost for preCompoundProducts below..
+   precompoundProducts = new G4ReactionProductVector();
+   precompoundProducts->push_back(aNew);
+}
+```
+
+The residual carried an invariant mass of `m + E*`; the product leaves with `m`, at rest, and is
+then boosted by `precompoundLorentzboost` like every other precompound product. So the event
+ends short by exactly `gamma*E*`. There is nothing to de-excite a single nucleon into, so the
+energy has nowhere to go and is dropped, and the source is not hiding it: the
+`debug_BIC_DeexcitationProducts` block a few lines below prints
+`fragment_momentum.e() - Preco_momentum.e()` and calls it "delta E".
+
+MEASURED, in the port, on the 1.96-million-event campaign: **one event**, in the 20,000 of
+`camp_n1400_C12` - a 1.4 GeV neutron on carbon that knocked out twelve of the thirteen nucleons
+and a pi-, leaving one proton. Energy short by 25.0939158 MeV, against an excitation of
+20.8324988 MeV and a boost gamma of 1.20455621: `gamma*E*` is 25.0939158, and the two agree to
+2.7e-12 MeV.
+
+**What this cost, and the lesson.** `tests/test_bic_apply.cu` asserts per event that the
+secondaries add up to `T + m_projectile + M_target`, against the port's own answer and no
+oracle at all - the sharpest statement in that file, because it needs nothing to compare
+against. It had a tolerance of 2e-2 MeV and it had been green over 1.96 million events. It went
+red when V181 was fixed, because fixing V181 changes which events happen, and the new event
+sequence contained one of these. **A rare exception to a conservation law does not announce
+itself; it waits for an unrelated change to reshuffle the events.**
+
+The fix is not to widen the tolerance and not to skip the event. `BicReport` now carries
+`precompound_boost`, and the test asserts that the deficit EQUALS `gamma*E*` - which says the
+port discards what Geant4 discards and nothing else, and would still fail if the port lost
+energy anywhere else in the same event. The count is printed with the rest of the rates.
+
+### V183: the cascade's kernel frame is 63 kilobytes and the transport sets a 16 kilobyte limit
+
+`tests/test_bic_apply.cu` instantiates both entry points as `__global__` probes that are never
+launched, for the reason V52 gives - a `__host__ __device__` template that is only ever called
+from the host is never compiled for the device at all, so "it works on the GPU" is otherwise an
+untested claim. MEASURED with `nvcc -arch=sm_86 -Xptxas -v` on that translation unit:
+
+| probe | registers | stack frame | spill st/ld | cmem[0] |
+|---|--:|--:|---|--:|
+| `bic_apply_probe` (`G4BinaryCascade::ApplyYourself`) | 255 | **56,816 B** | 184 / 200 | 696 |
+| `bic_blir_probe` (`G4BinaryLightIonReaction::ApplyYourself`) | 255 | **63,088 B** | 80 / 88 | 744 |
+
+`TransportEngine::Upload` (src/host/transport_run_impl.cuh) and `b1_gpu_sched.cu` both call
+`cudaDeviceSetLimit(cudaLimitStackSize, 16384)`. **63,088 is not 16,384.** A kernel that calls
+either entry point under the current limit overflows its stack, and CUDA reports that as an
+illegal memory access from whatever API call happens next - which is the failure mode the
+comment on that very line already warns about for the solid engine.
+
+This is not a bug in the cascade and it is not fixed by making the cascade smaller: the frame is
+what `Propagate` costs. It is a WIRING constraint and it belongs to whoever attaches the
+inelastic process to transport. The three ways out, in the order they should be considered:
+
+  * raise the limit. 64 kB per thread against a 1024-thread block is 64 MB of local memory for
+    the block, which the driver will allocate out of global memory and which caps occupancy
+    hard. It is the only option that needs no code change, and it should be measured, not
+    assumed to be acceptable.
+  * give the cascade its own kernel with its own launch geometry and its own limit, fed by a
+    queue, rather than calling it inline from the per-track transport kernel. The cascade runs
+    once per inelastic interaction, not once per step.
+  * move what is on the frame into caller storage. `BicStorage` and `BlirStorage` already exist
+    for exactly this and already hold every array the cascade needs; what is left on the frame
+    is the call chain itself - `apply_yourself` -> `propagate` -> `do_time_step` ->
+    `apply_collision` -> the channel final states - plus P6's `deexcite` behind its
+    `__noinline__` (V55). The `__noinline__` is why the de-excitation's frame is not live for
+    the whole cascade loop; without it these numbers would be worse.
+
+For comparison, the numbers this project already carries: `run_step_hadron` is 4,592 B and
+`run_step_neutral<kNeutron>` is 7,264 B. The cascade is an order of magnitude above both, and
+that ratio is the honest summary of what it costs to put a Binary cascade in a thread.
+
+### V184: the ion arm conserves energy to one part in a million, and sometimes not even that
+
+`G4BinaryLightIonReaction::EnergyAndMomentumCorrector` is the only thing in that model that
+enforces energy conservation, and it does not solve for the answer - it iterates towards it:
+
+```
+G4double Scale = 0, OldScale = 0;
+...
+Scale = TotalCollisionMass/Sum - 1;
+if (std::abs(Scale) <= ErrLimit
+        || OldScale == Scale)   // protect 'frozen' situation and divide by 0 ...
+{ success = true; break; }
+```
+
+with `ErrLimit = 1.E-6` and `nAttemptScale = 2500`. Three things follow, and all three are
+Geant4's, not the port's:
+
+  * **the accepted answer is wrong by `Scale`, relatively.** `Sum` is the corrected products'
+    centre-of-mass energy and `TotalCollisionMass` is what it should be, so the event leaves
+    short by `|Scale|` times the energy that was corrected. On an alpha at 50 MeV/nucleon on
+    Fe56 that is `1e-6 * 55,800 MeV = 0.056 MeV` per event, every event.
+  * **`OldScale == Scale` is an exact double comparison and it is a second exit with NO bound.**
+    A fixed point that stops moving stops the loop wherever it froze. MEASURED: the worst event
+    of that same case is short by 2.0066 MeV, thirty-six times `ErrLimit`.
+  * **the function returns TRUE either way.** `success` is set only for a `G4cout` under a debug
+    flag; the products are boosted and returned whether the iteration converged or not.
+
+And when `spectatorA == 0` - the projectile cascaded entirely away - `DeExciteSpectatorNucleus`
+is not called at all, so nothing corrects the event at the end. What bounds it then is the loop
+in `ApplyYourself` itself, whose condition is `std::abs(momentum.e() - pspectators.e()) > 10*MeV`:
+**ten MeV**, and that is the whole guarantee.
+
+So "the ion cascade conserves energy" is false, and a test that asserted it would be asserting
+something Geant4 does not do. `tests/test_bic_apply.cu` asserts the SHARP form instead: the
+deficit must EQUAL `|Scale|` times the energy the event started with, per event, against the
+port's own numbers and no oracle. MEASURED over 3,000 alpha-on-Fe56 events, the ratio
+`de / (|Scale| * want_e)` has a maximum of 1.0000002 - the deficit does not merely fit inside
+the bound, it IS the bound: 0.0560158 MeV against 0.0560157, and 2.00655 against the same
+product on the frozen-exit event. A port that lost energy anywhere else in the same event would
+exceed it, which is what makes this an assertion rather than an excuse.
+
+**AND THE CONVERSION ELECTRON BEHAVES DIFFERENTLY HERE, which took two wrong guesses to pin
+down.** V76: `G4PhotonEvaporation::GenerateGamma` CREATES one electron rest mass per internal
+conversion, and on the nucleon path a test subtracts `n_e * m_e` flat and the books balance -
+residue 0.0012 MeV per electron over 1.96 million events. Doing the same here left an ion event
+short by about half an MeV.
+
+The first guess was the boost: `DeExciteSpectatorNucleus` boosts the spectator's de-excitation
+products by `G4LorentzRotation(pSpectators.boostVector())`, so the surplus should arrive as
+`gamma * m_e` and leave `(gamma - 1) * m_e`. Wrong by more than an order of magnitude - gamma is
+1.05 at 50 MeV/nucleon, worth 0.027 MeV against a discrepancy of 0.45.
+
+The answer is that there is no surplus at all. MEASURED on ic_a50_Fe56 ev 10628, one conversion
+electron: deficit 0.565051 MeV against a corrector bound of 0.055983, and the difference is
+0.509068 - `m_e` to three parts in a thousand. **The rest mass is ABSORBED**, by the same
+`EnergyAndMomentumCorrector` this entry is about: every de-excitation product of this arm passes
+through it, and it rescales the cascaders until the total matches `pInitialState - pFragments`.
+So an ion event balances against the energy it started with and NOTHING is subtracted for its
+electrons; putting the nucleon path's term in is what creates the discrepancy.
+
+`tests/test_bic_apply.cu` therefore asserts the same equality for every ion event, with or
+without a conversion electron, and keeps `IonBalanceIC(MeV/electron)` as a separate bucket
+bounded at 1e-3 rather than at a rest mass - so that if the surplus ever stops being absorbed,
+the number that comes back is 0.511 and says so.
