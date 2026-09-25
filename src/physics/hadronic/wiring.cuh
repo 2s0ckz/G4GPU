@@ -32,6 +32,7 @@
 #include "data/level_data.cuh"
 #include "physics/decay/decay.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
+#include "physics/hadronic/interaction_queue.cuh"
 #include "physics/hadronic/neutron_wiring.cuh"
 
 namespace g4gpu::had {
@@ -517,6 +518,34 @@ struct HadronicWiring {
   /// with no levels to walk sees, and `neutron_capture_apply` then reports the model's own
   /// refusal rather than inventing a gamma.
   data::LevelTable level_data{};
+  /// `*Inelastic` for every species QBBC gives one: `protonInelastic`, `pi+-Inelastic`,
+  /// `kaon+-Inelastic`, `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic`,
+  /// `ionInelastic`, and the inelastic sub-process of `G4NeutronGeneralProcess`.
+  ///
+  /// Off means those species draw no inelastic interaction length at all, which is the state
+  /// every one of them was in before P15 and is what the `/process/inactivate <x>Inelastic`
+  /// column of `tools/b1_sweep.ps1` compares against. It does NOT switch off the at-rest
+  /// captures - `hadron_at_rest` is that - because Geant4 has separate UI names for them and
+  /// the like-for-like columns need the same separation.
+  bool hadron_inelastic = true;
+  /// `G4HadronStoppingProcess` for a stopped mu-, pi-, K-, Sigma-, Xi-, Omega-, pbar or nbar:
+  /// `hBertiniCaptureAtRest`, `hFritiofCaptureAtRest` and `muMinusCaptureAtRest`, which are
+  /// three UI names on the Geant4 side and one switch here because they are one process class.
+  ///
+  /// Off is `HadronicStage::kStage1`'s configuration, where all three are inactivated and a
+  /// stopped negative hadron decays on both sides instead.
+  bool hadron_at_rest = true;
+  /// The five `G4ParticleInelasticXS` data sets and `G4BGGPionInelasticXS`, on the device.
+  /// Null in a run whose `G4PARTICLEXSDATA` could not be resolved, which behaves exactly as a
+  /// species with no inelastic process does. `host/hadronic_upload.cuh` fills them; the
+  /// neutron's own `G4NeutronInelasticXS` travels in `neutron.inelastic` instead, because all
+  /// three of its data sets have to come from the one load that built the combined table.
+  InelasticTables<real_t> inelastic{};
+  /// Where a stepper records an interaction it is not going to run itself. See
+  /// `interaction_queue.cuh`: the models are too large for a stepping kernel (docs/RISK.md
+  /// V188), so the stepper does the whole step except the model call and the interaction
+  /// kernel does the rest.
+  InteractionQueue<real_t> queue{};
   HadronicRefusalBooks books{};
 };
 

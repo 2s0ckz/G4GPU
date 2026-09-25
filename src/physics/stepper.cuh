@@ -1184,15 +1184,32 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///     An elastic recoil heavier than an alpha maps to `kGenericIon`, which has no kernel, so
 ///     it is counted by name with its kinetic energy rather than transported. For a 200 MeV
 ///     proton in water that is the oxygen recoils above the 70 keV threshold.
+///
+/// @param queued set true when this step ended in an interaction the stepper did NOT run - a
+///        `*Inelastic` or an at-rest capture, both of which go to `had::InteractionQueue` and
+///        are applied by `run_interaction`. The caller must then neither append the track to
+///        the output pool nor call the step hook: the queue entry IS the track, and the
+///        interaction kernel does both. Defaulted to null so that every caller written before
+///        P15 - `tests/test_step_hadron.cu`, `src/host/b1_gpu_sched.cu` - is unchanged and
+///        simply never enqueues, because `HadronicWiring::queue` is empty in those runs.
 template <typename real_t, typename Rng, typename Emitter>
 __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
                                    ParticleType type, const had::HadronicWiring<real_t>& had,
                                    Rng& rng, Emitter& em, real_t& edep,
                                    StepReport<real_t>& rep,
-                                   vis::TrajectoryBuffer traj = vis::no_capture()) {
+                                   vis::TrajectoryBuffer traj = vis::no_capture(),
+                                   bool* queued = nullptr) {
   edep = real_t(0);
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
+  // The pre-step state, for the queue entry a `*Inelastic` or an at-rest capture writes. The
+  // kernel captures the same three for the step hook and cannot pass them here, because a
+  // stepper that took them as arguments would be taking them from the only caller that has
+  // them - and `tests/test_step_hadron.cu` runs this function on the host without one.
+  const real_t ekin_pre_step = p.ekin;
+  const Vec3<real_t> dir_pre_step = p.dir;
+  const int volume_pre_step = p.volume;
+  if (queued != nullptr) { *queued = false; }
   if (p.volume == geom::kOutsideWorld || s.hadron_range == nullptr) { return false; }
 
   // ---- WHICH PARTICLE THIS IS, and for `kGenericIon` that is two answers.
@@ -1373,6 +1390,36 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     const real_t d_elastic = (el_xs > real_t(0)) ? -log(rng.uniform()) / el_xs
                                                  : geom::kInfinity<real_t>();
 
+    // ---- `<species>Inelastic`, a FIFTH discrete competitor and the one P15 adds.
+    //
+    // THE PARTIAL SUMS ARE DELIBERATELY NOT KEPT HERE, which is the opposite of what the
+    // elastic branch above does, and the reason is `G4HadronicProcess::PostStepDoIt`: for a
+    // charged projectile it RECOMPUTES the cross section at the END of the step (the integral
+    // approach) and `SampleZandA` then draws the element from THAT array. Keeping this one and
+    // handing it to the interaction kernel would select a target by the pre-step energy's
+    // cross sections for every species whose `fXSType` is not `fHadNoIntegral` - which is every
+    // charged hadron here. `had::run_inelastic` builds its own, at the energy the step ended
+    // with, and `xs_at_step_start` below is the only number that travels.
+    //
+    // Conditional on the flag and on the species, so a run with inelastic switched off and
+    // every species QBBC gives no inelastic process - the muons, pi0 and the antiproton, whose
+    // data set P2 refuses - consume exactly the uniforms they consumed before P15. That
+    // matters twice over here: the proton's and the alpha's B1 doses are the numbers this
+    // project is judged on, and the antiproton is the one charged hadron with neither an
+    // elastic nor an inelastic process, so its stream must be untouched by both.
+    real_t inel_xs = real_t(0);
+    if (had.hadron_inelastic) {
+      hadronic::xs::MaterialXs<real_t> tmp{};
+      // `h.z`/`h.a` are zero for everything but a real nuclide, which is exactly what
+      // `inelastic_projectile` wants: only the `kGenericIon` row reads them, and the
+      // Glauber-Gribov nucl-nucl component needs the projectile's OWN (Z, A) rather than
+      // G4GenericIon's placeholder.
+      inel_xs = had::inelastic_xs_per_volume<real_t>(had.inelastic, mm, type, p.ekin, h.z, h.a,
+                                                     tmp);
+    }
+    const real_t d_inelastic = (inel_xs > real_t(0)) ? -log(rng.uniform()) / inel_xs
+                                                     : geom::kInfinity<real_t>();
+
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
     const real_t finR = em::kHadronFinalRange<real_t>();
@@ -1461,7 +1508,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
 
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc), fmin(d_delta, d_decay));
-    t_step = fmin(fmin(t_step, fmin(d_coul, d_elastic)), range);
+    t_step = fmin(fmin(t_step, fmin(d_coul, d_elastic)), fmin(d_inelastic, range));
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
     // are inputs to WentzelVI's true/geometric conversion, so both are computed from the
@@ -1551,6 +1598,17 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // the constructed QBBC actually holds.
     const bool scatters_elastic = !hits_boundary && !decays && !emits_delta
                                   && !coulomb_scatters && (d_elastic <= t_step);
+    // And `<species>Inelastic` LAST of all, because it is last on the process manager.
+    // `ref/oracle/species_processes.csv` has the order a constructed QBBC holds and the
+    // inelastic process is the final row of every species that has one - proton:
+    // `Transportation, msc, hIoni, hBrems, hPairProd, CoulombScat, hadElastic,
+    // protonInelastic`; alpha: `Transportation, msc, ionIoni, hadElastic, alphaInelastic`. So
+    // it loses every tie, which is the same rule the four above follow and for the same
+    // reason: `G4SteppingManager::DefinePhysicalStepLength` keeps the smallest with a strict
+    // `<`, so a tie goes to whichever process the manager holds first.
+    const bool interacts_inelastic = !hits_boundary && !decays && !emits_delta
+                                     && !coulomb_scatters && !scatters_elastic
+                                     && (d_inelastic <= t_step);
 
     // Read back out as G4StepPoint::GetProcessDefinedStep would report it. See the same block
     // in step_lepton.
@@ -1569,6 +1627,9 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     } else if (scatters_elastic) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fHadronElastic;
+    } else if (interacts_inelastic) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fHadronInelastic;
     } else {
       rep.status = StepStatus::fAlongStepDoItProc;
       rep.process = ProcessId::fIonisation;
@@ -1787,6 +1848,49 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
       }
     }
 
+    // ---- `<species>Inelastic`: the step ENDS HERE and the final state is somebody else's.
+    //
+    // The stepper has done the whole step - the continuous loss, the multiple scattering, the
+    // move to the interaction point, whatever the along-step part emitted - and what is left is
+    // the model call, which cannot live in this kernel (docs/RISK.md V188). So the track and
+    // the step it just took go into the queue and this function returns without the track: the
+    // queue entry IS the track, `run_step_hadron` neither appends it nor calls the hook, and
+    // `run_interaction` does both.
+    //
+    // THE HOOK IS NOT CALLED HERE, and that is deliberate rather than an omission. A stepping
+    // action reads `GetNumberOfSecondariesInCurrentStep()`, and calling the hook before the
+    // model has run would report zero for every inelastic step in the run. One step, one hook
+    // call, with the right count on it - which is what makes the queue entry carry eleven
+    // pre-step scalars it would otherwise not need.
+    if (interacts_inelastic && p.ekin > real_t(0)) {
+      const bool ok = had::enqueue_interaction<real_t>(
+          had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre_step,
+          pos_before, dir_pre_step, volume_pre_step,
+          (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
+          static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status, inel_xs);
+      if (!ok) {
+        // The proof in `interaction_queue.cuh`'s header says this cannot happen at the default
+        // capacity. If it does, the interaction is lost and the track is killed with its
+        // kinetic energy deposited locally - the conservative disposal, and NOT what Geant4
+        // does with it.
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kChargedHadronInelastic,
+                                  p.ekin);
+        rep.status = StepStatus::fStopAndKill;
+        if (p.volume >= 0 && s.geometry.volumes[p.volume].score_index >= 0) { edep += p.ekin; }
+        // AND THE TRACK'S ENERGY IS ZEROED, which the dying branch below does not have to do
+        // and this branch does. A track that runs out of range dies with a few tens of keV
+        // left, so leaving `p.ekin` standing is below every tolerance; a 400 MeV kaon killed
+        // here leaves 400 MeV standing, and `tests/test_step_hadron.cu`'s per-track energy
+        // balance reads it as 397.6 MeV unaccounted for - which is exactly what it did the
+        // first time this branch fired. The energy went to the volume; the track has none.
+        p.ekin = real_t(0);
+        return false;
+      }
+      if (queued != nullptr) { *queued = true; }
+      return false;
+    }
+
     // ---- the decay itself, G4Decay::DecayIt on the POST-step state.
     //
     // After the continuous loss and after the scattering, because that is the order Geant4
@@ -1863,18 +1967,51 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
       had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, p.ekin);
     }
   } else if (stopped_in_world && had.stage == had::HadronicStage::kFinal) {
-    // No decay at rest, in the FINAL stage: a stopping process pre-empted it and this port does
-    // not have it. A hole worth the whole rest mass, so it is booked by name.
+    // No decay at rest, in the FINAL stage: a stopping process pre-empted it.
+    // `G4HadronStoppingProcess::AtRestGetPhysicalInteractionLength` returns 0.0
+    // (G4HadronStoppingProcess.cc:115), which is a pre-emption and not a race - no sample of
+    // `-log(rand)*tau` beats zero - so a stopped negative hadron is CAPTURED, always.
     //
     // THE STAGE CONDITION IS NOT DECORATION. In stage 1 the three at-rest captures are
     // inactivated on the Geant4 side, so a stopped pi-, K- or mu- decays there and here -
     // `decay_at_rest_allowed` took that branch - and a stopped ANTIPROTON does nothing on
     // either side, because it is stable (so `G4Decay::IsApplicable` is false for it) and its
-    // only at-rest process is the one that was switched off. Booking a refusal for it in
-    // stage 1 would count agreement as a gap and put a number in the report that says the
-    // answer is missing energy it is not missing.
+    // only at-rest process is the one that was switched off.
+    //
+    // WIRED SINCE P15, and this is where the three counters stopped being the answer. It used
+    // to book `kStoppedNegativeHadron`, `kStoppedMuonMinus` or `kStoppedAntiProton` with the
+    // whole rest mass - 139.6 MeV for a pi-, 1876 for a pbar - because P12's chain had no
+    // caller. It has one now: the capture is queued exactly as an in-flight interaction is, and
+    // the same interaction kernel runs `stopping::at_rest`. The three counters remain for the
+    // run that has `hadron_at_rest` switched off, which is the only configuration that can
+    // still reach them.
     const had::HadronicRefusal r = had::stopped_refusal(type);
-    if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+    const bool has_arm = had::has_at_rest_arm(type);
+    if (had.hadron_at_rest && has_arm && had.queue.items != nullptr) {
+      // THE RESIDUAL KINETIC ENERGY IS NOT DEPOSITED TWICE. The dying branch above has already
+      // added `p.ekin` to `edep`, which is the port's own stop-at-the-tracking-cut convention
+      // and is also `G4Decay::DecayIt`'s `energyDeposit` on the at-rest branch. The queue entry
+      // carries that `edep` and the capture's own local deposit is added to it, not in place
+      // of it - so the track's last few tens of keV are scored once, here, and the capture
+      // scores only what `AtRestResult::local_deposit_MeV` says.
+      const bool ok = had::enqueue_interaction<real_t>(
+          had.queue, p, had::InteractionKind::kAtRest, type, rep, edep, ekin_pre_step,
+          pos_before, dir_pre_step, volume_pre_step,
+          (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
+          static_cast<unsigned int>(em.child_count), em.last_secondary,
+          StepStatus::fStopAndKill, real_t(0));
+      if (!ok) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+        if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+          had::book_refusal<real_t>(had.books, r,
+                                    had::stopped_refusal_energy<real_t>(type, p.ekin));
+        }
+      } else if (queued != nullptr) {
+        *queued = true;
+      }
+    } else if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+      // `hadron_at_rest` off, or a species `has_at_rest_arm` does not cover. A hole worth the
+      // whole rest mass, booked by name as it has been since P8.
       had::book_refusal<real_t>(had.books, r,
                                 had::stopped_refusal_energy<real_t>(type, p.ekin));
     }
@@ -1959,10 +2096,18 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
                                     const had::NeutronGeneralXs<real_t>* xs,
                                     const had::HadronicWiring<real_t>& had, Rng& rng,
                                     Emitter& em, real_t& edep, StepReport<real_t>& rep,
-                                    vis::TrajectoryBuffer traj = vis::no_capture()) {
+                                    vis::TrajectoryBuffer traj = vis::no_capture(),
+                                    bool* queued = nullptr) {
   edep = real_t(0);
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
+  // The pre-step state the queue entry carries for the step hook. See `step_hadron`'s, and the
+  // note on `queued` there: a neutron whose general process names `inelastic` ends its step in
+  // the queue and `run_interaction` calls the hook for it.
+  const real_t ekin_pre = p.ekin;
+  const Vec3<real_t> dir_pre = p.dir;
+  const int volume_pre = p.volume;
+  if (queued != nullptr) { *queued = false; }
   if (p.volume == geom::kOutsideWorld) { return false; }
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
@@ -2150,20 +2295,42 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
   if (sub_from_general) { sub = xs->select(mat, p.ekin, loge, rng.uniform()); }
 
   if (sub == had::NeutronSubProcess::kInelastic) {
-    // REFUSED BY NAME, with the energy it costs the answer. P9-P11 own
-    // `G4BinaryCascade`/Bertini/FTFP; until one of them lands there is no final state to apply,
-    // and Geant4 would have replaced this neutron with a shower of nucleons and fragments.
+    // QUEUED SINCE P15. This branch used to be the port's largest named hole: the neutron was
+    // killed with its kinetic energy deposited locally - the conservative disposal, and NOT
+    // what Geant4 does with it - and README's "Not implemented" table put the size at 18% of
+    // the interactions in water at 10 MeV, 39% in air, 25% in bone and 51% in lead.
     //
-    // The neutron is killed with its kinetic energy deposited locally. That is the conservative
-    // disposal this file uses for every refusal (`kIonWithoutNuclide`, `kDecayChannel`) and it
-    // is NOT what Geant4 does: an inelastic reaction spreads the energy over secondaries that
-    // leave the volume. So a `kFinal` dose is wrong by this counter's energy, and the counter
-    // exists so the size of that is read off a run rather than inferred from a disagreement.
-    // Unreachable in `kStage1`, where the reference has `neutronInelastic` inactivated.
+    // The final state comes from the same three models a proton's does and through the same
+    // queue; what is different for the neutron is only where the interaction length came from
+    // (`G4NeutronGeneralProcess`'s combined table) and that the sub-process was NAMED rather
+    // than competed for. `HadFinalState`'s own partial sums are rebuilt in the interaction
+    // kernel from `had.neutron.inelastic`, which is the third data set
+    // `upload_neutron_tables` built and, until P15, threw away.
+    rep.status = StepStatus::fPostStepDoItProc;
+    rep.process = ProcessId::fHadronInelastic;
+    if (had.queue.items != nullptr) {
+      // The `xs_at_step_start` of ZERO IS NOT A PLACEHOLDER. `hadronic_xs_type` gives a neutral
+      // projectile `fHadNoIntegral`, so `G4HadronicProcess::PostStepDoIt` takes no rejection
+      // and never reads `theLastCrossSection` - which is also why the neutron's interaction
+      // length can come from a COMBINED table while its target draw comes from a
+      // per-sub-process one without the two having to agree.
+      if (had::enqueue_interaction<real_t>(
+              had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
+              pos_before, dir_pre, volume_pre,
+              scores ? s.geometry.volumes[p.volume].score_index : -1,
+              static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
+              real_t(0))) {
+        if (queued != nullptr) { *queued = true; }
+        return false;
+      }
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+    }
+    // No queue (a run built without the interaction pool), or the queue was full: the disposal
+    // this branch has used since P8d, with its counter.
     had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNeutronInelastic, p.ekin);
     rep.status = StepStatus::fStopAndKill;
-    rep.process = ProcessId::fHadronInelastic;
     if (scores) { edep = p.ekin; }
+    p.ekin = real_t(0);  // deposited; see the same line in step_hadron's queue-full branch
     return false;
   }
 

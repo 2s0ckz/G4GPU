@@ -524,6 +524,14 @@ int main() {
     cudaMalloc(&d_out, sizeof(Outcome) * kPer);
     cudaMemset(d_out, 0, sizeof(Outcome) * kPer);
 
+    // The ledger as this beam found it, so the two launches below can be compared on their
+    // OWN contributions rather than on a total that already carries the earlier beams.
+    std::vector<int> ref_n_0(h_ref_n.size(), 0);
+    std::vector<double> ref_e_0(h_ref_n.size(), 0.0);
+    cudaMemcpy(ref_n_0.data(), d_ref_n, sizeof(int) * ref_n_0.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ref_e_0.data(), d_ref_e, sizeof(double) * ref_e_0.size(),
+               cudaMemcpyDeviceToHost);
+
     RunHadron<<<(kPer + 63) / 64, 64>>>(dscene, d_in, kPer, b.type, dhad, d_out);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -537,11 +545,56 @@ int main() {
     cudaMemcpy(dev.data(), d_out, sizeof(Outcome) * kPer, cudaMemcpyDeviceToHost);
 
     // A second launch with a different block size, for determinism.
+    //
+    // THE REFUSAL LEDGER IS SNAPSHOTTED AND REWOUND AROUND IT, and until P15 nothing needed
+    // that. Both launches book into the same `dhad.books`, so the device's counters were twice
+    // the host's for every refusal that fired - and none ever fired here, so `got_n[r] !=
+    // h_ref_n[r]` compared 0 against 2*0 and could not fail. The moment `step_hadron` gained a
+    // process that refuses (P15's `*Inelastic` with no queue attached in this test), the
+    // comparison read `host 3, device 6`. A check that can only pass while nothing happens is
+    // the failure mode this file's own closing section is named for.
+    //
+    // Rewinding is strictly stronger than resetting once: the two launches' ledgers are
+    // compared against EACH OTHER as well, so book_refusal's atomic arm is asserted to be
+    // block-size independent the way every other field already is.
+    std::vector<int> ref_n_1(h_ref_n.size(), 0);
+    std::vector<double> ref_e_1(h_ref_n.size(), 0.0);
+    cudaMemcpy(ref_n_1.data(), d_ref_n, sizeof(int) * ref_n_1.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ref_e_1.data(), d_ref_e, sizeof(double) * ref_e_1.size(),
+               cudaMemcpyDeviceToHost);
+    // Rewound to what this beam found, so the second launch books only its own.
+    cudaMemcpy(d_ref_n, ref_n_0.data(), sizeof(int) * ref_n_0.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ref_e, ref_e_0.data(), sizeof(double) * ref_e_0.size(),
+               cudaMemcpyHostToDevice);
+
     cudaMemset(d_out, 0, sizeof(Outcome) * kPer);
     RunHadron<<<kPer, 1>>>(dscene, d_in, kPer, b.type, dhad, d_out);
     cudaDeviceSynchronize();
     std::vector<Outcome> dev2(kPer);
     cudaMemcpy(dev2.data(), d_out, sizeof(Outcome) * kPer, cudaMemcpyDeviceToHost);
+
+    // The two launches' OWN contributions against each other, then the first launch's total
+    // put back so the host/device comparison at the end of the run sees one launch's worth.
+    {
+      std::vector<int> ref_n_2(h_ref_n.size(), 0);
+      std::vector<double> ref_e_2(h_ref_n.size(), 0.0);
+      cudaMemcpy(ref_n_2.data(), d_ref_n, sizeof(int) * ref_n_2.size(), cudaMemcpyDeviceToHost);
+      cudaMemcpy(ref_e_2.data(), d_ref_e, sizeof(double) * ref_e_2.size(),
+                 cudaMemcpyDeviceToHost);
+      for (std::size_t r = 0; r < ref_n_2.size(); ++r) {
+        const int d1 = ref_n_1[r] - ref_n_0[r], d2 = ref_n_2[r] - ref_n_0[r];
+        const double e1 = ref_e_1[r] - ref_e_0[r], e2 = ref_e_2[r] - ref_e_0[r];
+        if (d1 != d2 || e1 != e2) {
+          std::printf("  FAIL: %s refusal %zu differs across block size: 64 -> %d/%.17g, "
+                      "1 -> %d/%.17g\n", b.name, r, d1, e1, d2, e2);
+          ++g_fails;
+        }
+      }
+      cudaMemcpy(d_ref_n, ref_n_1.data(), sizeof(int) * ref_n_1.size(),
+                 cudaMemcpyHostToDevice);
+      cudaMemcpy(d_ref_e, ref_e_1.data(), sizeof(double) * ref_e_1.size(),
+                 cudaMemcpyHostToDevice);
+    }
 
     double worst = 0.0;
     // A budget on the FAIL lines: 900 steps that all disagree would otherwise print 900 of

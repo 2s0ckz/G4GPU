@@ -148,14 +148,106 @@ struct InteractionQueue {
 
   /// @return the slot taken, or -1 when the queue is full (or absent). The caller must then
   ///         refuse by name; see the file header for the disposal.
-  __device__ int push(const PendingInteraction<real_t>& q) const {
+  ///
+  /// `__host__ __device__` for the reason `book_refusal` gives: `step_hadron` and `step_neutral`
+  /// are run on the HOST and compared against the device bit for bit
+  /// (`tests/test_step_hadron.cu`, `tests/test_neutron_general.cu`), and a device-only push
+  /// would have made the enqueue the one branch those comparisons could not reach. A host
+  /// caller is single-threaded, so the host arm is a plain increment and not a serialised
+  /// atomic.
+  __host__ __device__ int push(const PendingInteraction<real_t>& q) const {
     if (items == nullptr || cursor == nullptr || capacity <= 0) { return -1; }
+#ifdef __CUDA_ARCH__
     const int i = atomicAdd(cursor, 1);
+#else
+    const int i = (*cursor)++;
+#endif
     if (i >= capacity) { return -1; }
     items[i] = q;
     return i;
   }
 };
+
+/// Builds a queue entry out of a step and pushes it.
+///
+/// `__noinline__`, AND THAT IS NOT AN OPTIMISATION. Written inline in `step_hadron`, the two
+/// enqueue blocks put a 384-byte `PendingInteraction` and its eighteen assignments into the
+/// kernel body twice, and `nvcc error : 'ptxas' died with status 0xC0000005
+/// (ACCESS_VIOLATION)` on `tests/test_step_hadron.cu` - measured, at a 3.7 GB working set after
+/// 120 seconds. That is docs/RISK.md **V55** exactly (inlining the elastic package into
+/// `run_step_hadron` killed ptxas the same way, and four functions are `__noinline__` there
+/// because of it), **V63** and **V65** for a fifth time, and the fix is the same one: give the
+/// compiler a call boundary to put the frame behind.
+///
+/// @return true when the entry was queued. False means the queue was full or absent, and the
+///         caller must refuse by name - `has_at_rest_arm`'s file header says what with.
+template <typename real_t>
+__host__ __device__ __noinline__ bool enqueue_interaction(
+    const InteractionQueue<real_t>& queue, const TrackState<real_t>& track,
+    InteractionKind kind, ParticleType species, const StepReport<real_t>& rep, real_t edep,
+    real_t ekin_pre, const Vec3<real_t>& pos_pre, const Vec3<real_t>& dir_pre, int volume_pre,
+    int score_slot, unsigned int child_count, int sec_last, StepStatus status,
+    real_t xs_at_step_start) {
+  PendingInteraction<real_t> q;
+  q.track = track;
+  q.ekin_pre = ekin_pre;
+  q.pos_pre = pos_pre;
+  q.dir_pre = dir_pre;
+  q.edep = edep;
+  q.true_length = rep.true_length;
+  q.safety = rep.safety;
+  q.non_ionizing = rep.non_ionizing;
+  q.volume_pre = volume_pre;
+  q.material = rep.material;
+  q.score_slot = score_slot;
+  q.child_count = child_count;
+  q.sec_last = sec_last;
+  q.status = status;
+  q.species = species;
+  q.kind = kind;
+  q.xs_at_step_start = xs_at_step_start;
+  return queue.push(q) >= 0;
+}
+
+/// Does QBBC give this species an at-rest nuclear process?
+///
+/// `G4StoppingPhysics::ConstructProcess`'s two explicit lists plus the muon, as a function of
+/// the PDG code - which is exactly what `stopping::stopping_arm` is, and this is a SECOND COPY
+/// of it. The duplication is deliberate and is bounded by a test rather than by care:
+/// `physics/stepper.cuh` cannot include `stopping/stopping_process.cuh`, because that header
+/// pulls in Bertini and FTFP and would put both inside every stepping kernel (docs/RISK.md
+/// V188) - and the stepper has to know, before it enqueues, whether there is anything to
+/// enqueue.
+///
+/// `tests/test_inelastic_transport.cu` asserts this function against `stopping::stopping_arm`
+/// for every `ParticleType` in the enum, so a species added to one and not the other is a test
+/// failure and not a silent divergence. That assertion is the reason this is a copy and not a
+/// guess.
+///
+/// It answers about the SPECIES and not about the stage: whether the capture actually runs is
+/// `HadronicWiring::hadron_at_rest` and `HadronicStage`, which the caller tests.
+__host__ __device__ inline bool has_at_rest_arm(ParticleType t) {
+  switch (pdg_code(t)) {
+    case 13:      // mu-            G4MuonMinusCapture
+    case -211:    // pi-            G4HadronicAbsorptionBertini
+    case -321:    // K-
+    case 3112:    // Sigma-
+    case 3312:    // Xi-
+    case 3334:    // Omega-
+    case -2212:   // anti-proton    G4HadronicAbsorptionFritiof
+    case -2112:   // anti-neutron   (neutral, and in the list)
+    case -3122:   // anti-Lambda    (neutral)
+    case -3212:   // anti-Sigma0    (neutral)
+    case -3222:   // anti-Sigma+    (charge -1)
+    case -3322:   // anti-Xi0       (neutral)
+      return true;
+    default:
+      break;
+  }
+  // Anti-nuclei: `particle->GetBaryonNumber() < -1`. A PDG ion code is 10LZZZAAAI and an
+  // anti-ion is its negative, so an anti-deuteron is -1000010020.
+  return pdg_code(t) <= -1000000000;
+}
 
 /// The RNG purpose the interaction kernel draws on.
 ///
