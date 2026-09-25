@@ -1140,22 +1140,41 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // default is not enough for one frame of the distance routine. Overflow surfaces as an
     // illegal memory access from an unrelated API call, with nothing pointing at the cause.
     //
-    // **49,152 SINCE P15, AND THE NUMBER IS A MEASUREMENT.** 16,384 was the stepping kernels'
-    // ceiling and they are still under it (`run_step_hadron<kProton>` is 3,936 B). The
-    // interaction kernels are not: `-Xptxas -v` puts `run_interaction<kLightIon>` at a
-    // **31,968-byte** frame and the others alongside it, because a kernel's frame is the
-    // maximum over its call tree and that tree now contains `bic::apply_yourself` (about 10 kB
-    // on its own), P6's PreCompound and P3's whole evaporation cascade behind it. A limit below
-    // the frame is not a warning - it is an illegal memory access from an unrelated API call,
-    // which is exactly the failure this line was written for in the first place.
+    // **86,016 SINCE P15, AND EVERY DIGIT OF IT IS A MEASUREMENT.** 16,384 was the stepping
+    // kernels' ceiling and they are still far under it (`run_step_hadron<kProton>` is 3,936 B).
+    // The interaction kernels are not. `-Xptxas -v` on the engine's own five units:
     //
-    // WHAT IT COSTS IS LOCAL MEMORY AND THE COST IS BOUNDED BY THE LAUNCH, not by the batch:
-    // CUDA reserves the stack for the maximum RESIDENT threads, and the interaction kernels run
-    // at 255 registers - about 256 threads an SM - so on a 46-SM card that is 46 * 256 * 48 kB
-    // = 565 MB, reserved once and reused by every launch. The stepping kernels pay the same
-    // reservation and use 4 kB of it. `SetInteractionSlots` is what bounds the number of
-    // threads that can be inside a model at once; this bounds what one of them may use.
-    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 49152));
+    //     run_interaction<kFtfp>       23,008 B      run_interaction<kAtRest>     35,360 B
+    //     run_interaction<kLightIon>   31,968 B      run_interaction<kBinary>   **81,600 B**
+    //     run_interaction<kBertini>    33,680 B
+    //
+    // A kernel's frame is the maximum over its call tree, and the Binary cascade's tree -
+    // `bic::apply_yourself` through `Propagate`, `ApplyCollision` and `DeExcite` into P6's
+    // PreCompound and P3's evaporation - is 2.4 times the next largest. A limit below the frame
+    // is not a warning: it is an illegal memory access from an unrelated API call, which is
+    // exactly the failure this line was written for in the first place.
+    //
+    // **AND IT IS EXPENSIVE, DEVICE-WIDE, AND NOT BOUNDED BY THE LAUNCH.** CUDA reserves the
+    // stack for the maximum threads the DEVICE can hold resident, not for the threads a kernel
+    // is launched with, so `SetInteractionSlots` does not bound it. Measured on this RTX 3070
+    // (46 SMs, 1536 threads an SM, 8.00 GB) with `cudaMemGetInfo` after the limit is set:
+    //
+    //      16,384 B/thread   5.938 GB free      86,016 B/thread   0.952 GB free
+    //      81,920 B/thread   1.221 GB free      98,304 B/thread   0.099 GB free
+    //
+    // So the Binary cascade's frame costs this port **five of the card's eight gigabytes**, and
+    // 86,016 is 81,600 rounded up to a 4 kB boundary with one page of margin - not a round
+    // number chosen for comfort, because every 4 kB past it is another 270 MB. What is left is
+    // what `SetInteractionSlots` and the batch have to fit in, which is why the pool's default
+    // dropped to 128 slots and why `Upload` prints the free memory after both.
+    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, 86016));
+    {
+      size_t f = 0, t = 0;
+      cudaMemGetInfo(&f, &t);
+      std::printf("device stack: 86,016 B a thread for the interaction kernels (the Binary "
+                  "cascade's frame is 81,600) - %.2f GB of %.2f GB left\n",
+                  double(f) / 1073741824.0, double(t) / 1073741824.0);
+    }
 
     n_volumes_ = static_cast<int>(scene.volumes.size());
     h_mats_.assign(scene.materials.m, scene.materials.m + scene.materials.count);
@@ -1618,11 +1637,15 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // above makes for itself. The POOL is how many of those run at once; a shortage costs
     // launches and not interactions, because the drain loop in BeamOn chunks.
     //
-    // THE DEFAULT SLOT COUNT IS 256 AND IT IS A MEASUREMENT, not a round number: docs/RISK.md
-    // V189 has the throughput against 64, 128, 256, 512 and 1024 on the sweep's own beams. At
-    // 1,604,928 bytes a slot that is 391.8 MB, against 24.0 MB for a full-size queue on a
-    // 65,536-track pool.
-    n_interaction_slots_ = (interaction_slots_request_ > 0) ? interaction_slots_request_ : 256;
+    // THE DEFAULT SLOT COUNT IS 128 AND THE BINDING CONSTRAINT IS NOT THROUGHPUT, IT IS THE
+    // DEVICE STACK. At 1,604,928 bytes a slot, 128 slots is 195.9 MB - and what is left of an
+    // 8 GB card after 86,016 bytes a thread of reserved stack is 0.95 GB, measured (see the
+    // `cudaDeviceSetLimit` above and docs/RISK.md V190). 256 slots would take 392 MB of that
+    // 0.95 GB and leave the track pool, the queue, the 9.52 MB level scheme and the scene to
+    // share what remains. The run prints how deep the queue actually got, so
+    // `SetInteractionSlots` can be raised against a measurement rather than a hope - and a
+    // shortage costs launches, not interactions.
+    n_interaction_slots_ = (interaction_slots_request_ > 0) ? interaction_slots_request_ : 128;
     queue_capacity_ = (queue_capacity_request_ > 0) ? queue_capacity_request_
                                                     : static_cast<int>(pool_);
     {

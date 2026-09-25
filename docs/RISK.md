@@ -12247,3 +12247,62 @@ TWO CONSEQUENCES WORTH HAVING SEPARATELY FROM THE COMPILE:
     limit under the frame is not a warning, it is an illegal memory access from an unrelated API
     call - which is what that line was written for in 2026 and is now true a second time, for a
     reason twice the size.
+
+### V190: the Binary cascade's kernel frame is 81,600 bytes, and a device stack is not bounded by the launch
+
+V189 got the five interaction kernels to compile. This is what `-Xptxas -v` then said about them,
+and what the first of those numbers costs.
+
+| kernel | registers | stack frame |
+|---|--:|--:|
+| `run_interaction<kFtfp>` | 255 | 23,008 B |
+| `run_interaction<kLightIon>` | 255 | 31,968 B |
+| `run_interaction<kBertini>` | 255 | 33,680 B |
+| `run_interaction<kAtRest>` | 255 | 35,360 B |
+| **`run_interaction<kBinary>`** | 255 | **81,600 B** |
+
+against the stepping kernels' 2,352 to 4,592 B, and against `cudaDeviceSetLimit(
+cudaLimitStackSize, 16384)` - the line the engine has carried since the solid engine needed a
+real call stack.
+
+**The Binary cascade's tree is 2.4 times the next largest**, and it is a tree rather than a
+function: `bic::apply_yourself` -> `Propagate` -> `FindCollisions`/`ApplyCollision`/`DoTimeStep`
+-> `bic_deexcite_fragment` -> P6's PreCompound -> P3's evaporation cascade. P9's own probe
+reports "255 registers and about 10 kB" for `apply_yourself`, which is the HOST measurement;
+81,600 is what ptxas makes of the same call tree with its own conservative frame layout, and the
+two are not the same quantity.
+
+**AND THE COST IS DEVICE-WIDE.** This is the part worth writing down, because it is the opposite
+of how every other capacity in this port behaves. `cudaLimitStackSize` reserves for the maximum
+threads the DEVICE can hold resident, not for the threads a kernel is launched with - so
+`SetInteractionSlots`, which bounds how many threads may be inside a model at once, does not
+bound this at all. Measured with `cudaMemGetInfo` immediately after the limit is set, on an
+RTX 3070 (46 SMs, 1536 threads an SM, 8.00 GB):
+
+       1,024 B/thread   6.947 GB free        65,536 B/thread   2.703 GB free
+      16,384 B/thread   5.938 GB free        81,920 B/thread   1.221 GB free
+      32,768 B/thread   4.859 GB free        86,016 B/thread   0.952 GB free
+      49,152 B/thread   3.781 GB free        98,304 B/thread   0.099 GB free
+      65,536 B/thread   2.703 GB free       131,072 B/thread   0.000 GB free
+
+About **270 MB per 4 kB of stack**, and slightly super-linear at the top. So one kernel's frame
+sets a floor under the whole run's memory: going from 16 kB to the 84 kB the Binary cascade
+needs costs **five of the card's eight gigabytes**, before a single track is allocated.
+
+The limit is **86,016** - 81,600 rounded up to a 4 kB boundary with one page of margin, and not
+a round number chosen for comfort, because every 4 kB past it is another 270 MB. What is left is
+0.95 GB, and that is what the interaction pool, the track pool, the queue, PhotonEvaporation's
+9.52 MB and the scene have to fit in, which is why the pool's default slot count is **128**
+(195.9 MB) and not the 256 the throughput would have preferred. `Upload` prints the free memory
+after the reservation so the number is on every run's own report rather than in this entry only.
+
+WHAT WOULD MOVE IT, in the order a future package should try:
+
+  * **A smaller frame in `bic/`.** 81,600 B against Bertini's 33,680 for a comparable tree says
+    something in the Binary cascade's path is holding a large local live across a call. That is
+    P9's file and not a wiring question, and the saving would be direct: every 4 kB is 270 MB.
+  * **Splitting the Binary cascade's own call tree behind more `__noinline__` boundaries**, the
+    way `bic_deexcite_fragment` already is. ptxas's frame is the maximum over the tree, so a
+    boundary in the right place can lower the maximum rather than merely move it.
+  * NOT a smaller launch. That is the thing this entry exists to say: the reservation is a
+    property of the device and the kernel, and no launch configuration touches it.
