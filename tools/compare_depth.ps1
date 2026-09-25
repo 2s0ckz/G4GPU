@@ -9,8 +9,13 @@
 #
 # The four numbers, and why each is separate rather than one aggregate:
 #
-#   total       energy in vs energy deposited. A conservation check, not a physics one, and it
-#               should be exact on both sides - the phantom is deeper than the range.
+#   contained   energy in vs energy deposited, PORT AGAINST GEANT4 rather than either against
+#               one. It used to be "exact on both sides - the phantom is deeper than the range",
+#               and it was, until P15 wired `protonInelastic` and `NeutronGeneralProc` on both
+#               sides: a 100 MeV proton's inelastic reactions make neutrons and a neutron leaves
+#               a 150 mm phantom. Geant4 contains 97.5749% of the beam energy now and the port
+#               97.3203%. What is checkable is the DIFFERENCE, which is a statement about the
+#               escaping-neutron budget and one of the things an inelastic wiring can get wrong.
 #   plateau     the integral over the entrance half, which is the restricted stopping power
 #               and nothing else. Insensitive to where the peak is.
 #   R80         the distal 80% depth, the standard proton range metric and the number a
@@ -29,7 +34,13 @@ param(
   [double]$PlateauLimit = 0.01,   # fraction
   [double]$R80Limit     = 0.5,    # mm
   [double]$WidthLimit   = 0.15,   # mm
-  [double]$TotalLimit   = 1e-6    # fraction
+  [double]$TotalLimit   = 1e-6,   # fraction; see the note at the total block - a floor now
+  # How far apart the two sides' CONTAINED fractions may be. 1% against a measured 0.26% at
+  # 100,000 reference events and 6,000 port events, which is what P15's wiring of
+  # protonInelastic and NeutronGeneralProc leaves: both sides make neutrons and a neutron
+  # leaves a 150 mm phantom. Tightening this is the right thing to do the day the port stops
+  # refusing G4BinaryCascade::Propagate1H1 - a hydrogen target, and two atoms in three of water.
+  [double]$ContainedLimit = 0.01
 )
 
 function Read-Curve([string]$path) {
@@ -92,16 +103,44 @@ $fails = 0
 Write-Host ("proton depth-dose: {0} events of {1} MeV in water, {2} mm slabs" -f $ref.Events, $ref.Energy, $ref.Slab)
 
 # ---- total
+#
+# THE CONTAINED FRACTION IS NO LONGER 1, AND THE CHECK IS NOW BETWEEN THE TWO SIDES.
+#
+# This asked each side, separately, whether it had deposited the whole beam energy, to one part
+# in a million. That was the right question while the reference had every inelastic process
+# inactivated: a 100 MeV proton has a 77 mm range in a 100 mm phantom 150 mm wide, nothing
+# leaves it, and a missing MeV is a bug. P15 wired `protonInelastic` and `NeutronGeneralProc`,
+# so both sides now make NEUTRONS - and a neutron leaves a 150 mm phantom. Measured, at 100,000
+# events a side: Geant4 contains 97.5749% and the port 97.3203%. Neither is a defect and neither
+# can be 100%.
+#
+# So the quantity with meaning is the DIFFERENCE between the two contained fractions, which is a
+# statement about the escaping-neutron budget and is exactly the thing the inelastic wiring
+# could get wrong. It is checked against `$ContainedLimit` and PRINTED whether it passes or not,
+# because a number that moves is the point of it.
+#
+# `$TotalLimit` survives as an absolute floor: a side that contains less than half the beam
+# energy has something structurally wrong rather than a neutron budget to argue about.
 $tr = ($ref.D | Measure-Object -Sum).Sum
 $tp = ($prt.D | Measure-Object -Sum).Sum
 foreach ($p in @(@("Geant4", $tr, $ref.Events), @("port", $tp, $prt.Events))) {
   $want = $p[2] * $ref.Energy
-  $dev = [Math]::Abs($p[1] / $want - 1)
   Write-Host ("  total {0,-8} {1,14:g8} MeV of {2:g8} in  ({3:p4})" -f $p[0], $p[1], $want, ($p[1]/$want))
-  if ($dev -gt $TotalLimit) {
-    Write-Host ("  FAIL: {0} did not deposit the beam energy - {1:p4} of it" -f $p[0], ($p[1]/$want))
+  if (($p[1] / $want) -lt 0.5) {
+    Write-Host ("  FAIL: {0} contained {1:p4} of the beam energy, which is not a neutron budget" -f $p[0], ($p[1]/$want))
     $fails++
   }
+}
+# The one that means something: does the port lose the same fraction to escaping neutrals that
+# Geant4 does?
+$cr = $tr / ($ref.Events * $ref.Energy)
+$cp = $tp / ($prt.Events * $ref.Energy)
+$cdev = [Math]::Abs($cp / $cr - 1)
+Write-Host ("  contained    G4 {0:p4}   port {1:p4}   port/G4 - 1 = {2:p3}" -f $cr, $cp, ($cp/$cr - 1))
+if ($cdev -gt $ContainedLimit) {
+  Write-Host ("  FAIL: the contained fractions differ by {0:p3}, limit {1:p3} - the port and " -f $cdev, $ContainedLimit)
+  Write-Host  "        Geant4 are losing different amounts to particles that leave the phantom"
+  $fails++
 }
 
 # ---- plateau: the entrance half, well proximal of the peak

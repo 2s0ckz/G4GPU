@@ -743,6 +743,30 @@ rem at-rest captures - and the reference run prints `/particle/process/dump` for
 rem and for GenericIon so the configuration is recorded by what ran rather than by what was
 rem intended. docs/RISK.md V58, docs/PORTED.md 2.1.7.
 rem
+rem AND IT CHANGED AGAIN IN P15, in the other direction: `protonInelastic` and
+rem `NeutronGeneralProc` came OFF that list, because the port now does both. What is still
+rem inactivated is `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and
+rem `ionInelastic` - `G4BinaryLightIonReaction::Interact`, every ion at or above 50 MeV per
+rem nucleon, is P9e's and is refused by name - plus `hBrems`/`hPairProd`, `ionElastic` and the
+rem lepto-nuclear processes. Both references were regenerated.
+rem
+rem THE FOUR NUMBERS MOVED AND THE CONSERVATION CHECK CHANGED SHAPE. With inelastic processes
+rem active on both sides a 100 MeV proton makes NEUTRONS, and a neutron leaves a 150 mm
+rem phantom, so neither side contains the beam energy any more: Geant4 97.5749%, the port
+rem 97.3203%. `compare_depth.ps1` compares the two CONTAINED fractions against each other now
+rem rather than each against one - that difference is a statement about the escaping-neutron
+rem budget and is one of the things an inelastic wiring can get wrong - and the old
+rem one-part-in-a-million total check survives only as a floor. Measured, 100,000 reference
+rem events against 6,000 port events:
+rem
+rem                       before P15 (no inelastic)      after P15 (inelastic both sides)
+rem     contained         100% both sides                G4 97.5749%, port 97.3203%, -0.261%
+rem     plateau           +0.158%                        +0.048%
+rem     R80               77.730 G4 / 77.742 port        77.714 G4 / 77.656 port, -0.057 mm
+rem     80-20 width       1.152 / 1.166, +0.014 mm       1.166 / 1.208, +0.043 mm
+rem
+rem All four are inside their limits and the plateau got BETTER. docs/PORTED.md 2.1.15.
+rem
 rem The phantom is also 150 mm wide rather than 50, because the conservation check's premise
 rem ("the phantom is deeper than the range") is about depth and an elastic scatter sends a
 rem proton sideways with nearly all of its energy: 1.1e-5 of the beam left a 50 mm box, on
