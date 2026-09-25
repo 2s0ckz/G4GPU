@@ -12102,3 +12102,8 @@ de  <=  n_ev_electrons * m_e * max over products with A >= 2 of (kin_energy / ma
 the bucket's point - a lost or doubled electron rest mass is 0.511 MeV - and it needs no
 threshold that the next random stream can cross. **Until it is made, build_all.bat is red on
 test_bic_apply for a reason that is not a defect of either stream.**
+
+Integration note (lead, integ/gaussq): made, in `tests/test_bic_apply.cu`. The nucleon-path
+bucket is now `BalanceWithICExcess`: per event, `de - n_e * m_e * max(kin/mass)` over the
+event's products with A >= 2, its limit 1e-5 MeV, and the worst event is printed with its
+residue, its bound and its electron count.

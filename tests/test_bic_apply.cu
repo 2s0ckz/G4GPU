@@ -605,6 +605,7 @@ int main() {
     bool za_varies = false;
     double sum_tot_e = 0.0, sum_tot_pz = 0.0;
     double worst_ev_e = 0.0, worst_ev_e_ic = 0.0, worst_per_electron = 0.0;
+    std::string worst_ev_e_ic_at;
     /// The conversion-electron surplus, per event: `n_e * m_e` in energy and the same rest mass
     /// carried along by the boost in momentum. See the file header.
     const double kMe = units::electron_mass_c2<double>();
@@ -763,6 +764,7 @@ int main() {
       per_event.clear();
       long long ez = 0, ea = 0;
       int n_ev_electrons = 0;
+      double gm1_max = 0.0;  // the largest (gamma - 1) among the event's nuclei, for the IC bound
       double tot_e = 0.0, tot_pz = 0.0;
       n_sec += result.n_secondaries;
       sum_mult2 += static_cast<double>(result.n_secondaries) * result.n_secondaries;
@@ -780,6 +782,9 @@ int main() {
         ++per_event[key];
         tot_e += s.total_energy();
         tot_pz += s.momentum() * s.direction.z;
+        if (s.a >= 2 && s.mass > 0) {
+          gm1_max = std::max(gm1_max, static_cast<double>(s.kin_energy) / s.mass);
+        }
         ea += s.a;
         // A CHARGED PION carries charge out of the event and no nucleons, and
         // `write_bic_apply` counts it that way - `else if (pdg == 211) ez += 1; else if
@@ -815,9 +820,16 @@ int main() {
       // different statements. With none, the balance is EXACT and the bound below is the ulp of
       // a 205 GeV sum. With one or more, the flat `n_e * m_e` is only the first term: the mass
       // is added to the EMITTING residual's invariant mass and the four-vector is then rescaled
-      // and re-clamped by `GenerateGamma`'s two `if`s, so a residue of order 1e-4 MeV per
-      // electron is left. Lumping them into one tolerance would hide the exact half behind the
-      // approximate one - which is what the first version of this test did.
+      // and re-clamped by `GenerateGamma`'s two `if`s, so the mass arrives in the lab as
+      // `gamma * m_e` and `m_e * (gamma - 1)` per electron is left, gamma being the emitter's.
+      // That is not small for a fast light fragment: a Na27 at 166 MeV from a second fission
+      // leaves 3.4e-3 MeV (docs/RISK.md V187), so the bucket bounds each event by
+      // `n_e * m_e * max(gamma - 1)` over its nuclei - the emitter is one of them - and asserts
+      // the EXCESS over that bound, measured at 7.5e-7 MeV over 300,000 conversion-electron
+      // events, below 1e-5. Until V187 the limit was 2e-3 MeV on the residue itself, the worst
+      // value one Philox key had happened to show. Lumping the exact and the bounded events into
+      // one tolerance would hide the exact half behind the approximate one - which is what the
+      // first version of this test did.
       const int res_a = is_ion ? brep.propagate.fragment_a : nrep.fragment_a;
       if (c.model == "bic_blirapply") {
         // EVERY event of the ion cascade arm, conversion electrons and A == 1 residuals
@@ -913,7 +925,14 @@ int main() {
       } else if (n_ev_electrons == 0) {
         if (de > worst_ev_e) { worst_ev_e = de; }
       } else {
-        if (de > worst_ev_e_ic) { worst_ev_e_ic = de; }
+        // The excess over the per-event bound, not the residue: see the comment above `de`.
+        const double ic_bound = n_ev_electrons * kMe * gm1_max;
+        if (de - ic_bound > worst_ev_e_ic) {
+          worst_ev_e_ic = de - ic_bound;
+          worst_ev_e_ic_at = " ev " + std::to_string(ev) + " residue " + std::to_string(de) +
+                             " bound " + std::to_string(ic_bound) + " on " +
+                             std::to_string(n_ev_electrons) + " electrons";
+        }
         if (de / n_ev_electrons > worst_per_electron) {
           worst_per_electron = de / n_ev_electrons;
         }
@@ -1096,7 +1115,10 @@ int main() {
       if (dp > worst_pz) { worst_pz = dp; worst_pz_at = c.name; }
       if (worst_ev_e > worst_ev_exact) { worst_ev_exact = worst_ev_e; worst_ev_exact_at = c.name; }
     }
-    if (worst_ev_e_ic > worst_ev_ic) { worst_ev_ic = worst_ev_e_ic; worst_ev_ic_at = c.name; }
+    if (worst_ev_e_ic > worst_ev_ic) {
+      worst_ev_ic = worst_ev_e_ic;
+      worst_ev_ic_at = c.name + worst_ev_e_ic_at;
+    }
     if (worst_per_electron > worst_pe) { worst_pe = worst_per_electron; }
     // The per-case print and the bucket must agree, or a case can be counted as a failure
     // here while the bucket that owns the number passes. 5e-2 is the bucket's bound and the
@@ -1463,7 +1485,7 @@ int main() {
     // a tolerance with no story behind it.
     {"CascadeBalanceNoIC(MeV/event)", static_cast<long long>(cases.size()), worst_cev, 5e-2,
      worst_cev_at},
-    {"BalanceWithIC(MeV/event)", static_cast<long long>(cases.size()), worst_ev_ic, 2e-3,
+    {"BalanceWithICExcess(MeV/event)", static_cast<long long>(cases.size()), worst_ev_ic, 1e-5,
      worst_ev_ic_at},
     // The A == 1 residual, asserted rather than excused - see `worst_a1`. The bound is the
     // 2.7e-12 MeV measured on the one event the campaign contains, rounded up four decades.
