@@ -16,17 +16,18 @@ de-excitation chain, and transport for eleven more species - is on main, validat
 class against the library, and not yet reached by a particle. Phase 2 has landed single Coulomb scattering, PreCompound and the closure of the negative-hadron
 question; decay, hadron elastic scattering, single Coulomb scattering and the **neutron general
 process** are wired into the transport, so a neutron interacts rather than streaming, its elastic
-and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ. Its inelastic
-sub-process is Phase 3's and is refused by name. Phase 3 has started: the Binary cascade's
-foundations and its whole collision tree, the whole FTFP chain - the tuned parameters, the Glauber
-participants, the diffractive excitation and the annihilation, the Lund string fragmentation, the
-string decay and the generator - and the whole Bertini cascade are on main, validated class by
-class, and not yet reached by a particle. FTFP runs to a final state, resonances decayed, for nucleons, pions, kaons,
-anti-nucleons and ions, Bertini for nucleons, pions, kaons and hyperons, and a stopped μ⁻, π⁻, K⁻
-or negative hyperon is captured as Geant4 captures it, anti-baryons included; the Binary cascade
-runs for nucleons, pions and ions; the photon's, electron's and muon's
-nuclear interactions are on main below the QGS window. The [status tables](#physics) below say
-exactly what is there and what is not.
+and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ. Phase 3 is on main
+and, **since P15, is reached by a particle**: the Binary cascade with its whole collision tree,
+the whole FTFP chain - the tuned parameters, the Glauber participants, the diffractive excitation
+and the annihilation, the Lund string fragmentation, the string decay and the generator - the
+whole Bertini cascade, and the at-rest captures. A proton, a neutron, a pion, a kaon, a deuteron,
+a triton, a He3, an alpha and a real nuclide each draw an inelastic interaction length from the
+cross sections, pick a model as `G4EnergyRangeManager` picks one, and get a final state; a
+stopped μ⁻, π⁻, K⁻ or negative hyperon is captured rather than decayed. What is still refused is
+named and counted with its rate, and the largest of it is
+`G4BinaryLightIonReaction::Interact` - every ion at or above 50 MeV per nucleon, which is where
+a therapeutic alpha beam lives. The [status tables](#physics) below say exactly what is there
+and what is not.
 
 ---
 
@@ -342,10 +343,10 @@ closed - the same question has the mechanism.
 |---|---|---|
 | `G4BinaryLightIonReaction::Interact` | every ion at or above 50 MeV per NUCLEON | Phase 3, P9e - committed on `phys/bic` and not yet on main. THE LARGEST NAMED HOLE P15 LEAVES. QBBC gives an ion the light-ion reaction from 0 to 6 GeV per nucleon and FTFP from 3, so the window with no model here is 50 MeV/n to 3 GeV/n - and that is where a therapeutic alpha beam lives. Measured: 195 of 215 alpha interactions in water refused, 914 of 1,021 refused charged-hadron interactions over the whole validation grid. `had::HadronicRefusal::kLightIonCascade`, counted with the energy it costs, and `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic` stay inactivated on the Geant4 side of every like-for-like column until it lands |
 | `G4BinaryCascade::Propagate1H1` | a nucleon or pion on a HYDROGEN target | Phase 3, P9. Reached now that `protonInelastic` and the pion processes are wired, and not a corner in water, where hydrogen is two atoms in three: 107 of 1,021 refused interactions over P15's validation grid, 0 of 93 for a 210 MeV proton in water and 31 of 256 at 1 GeV. `had::HadronicRefusal::kBinaryHydrogenTarget` |
-| Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in), `generateSCMmuonAbsorption`, the anti-hyperon decay tables, K0S and K0L as Bertini projectiles | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the pieces named | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and nothing calls it from the transport yet |
-| the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); nothing calls it from the transport yet |
-| the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and nothing calls it from the transport yet |
-| `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; the models below those energies are on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.14) and nothing calls them from the transport yet | Phase 3, remaining; QGS is not in this port |
+| Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in), `generateSCMmuonAbsorption`, the anti-hyperon decay tables, K0S and K0L as Bertini projectiles | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the pieces named | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
+| the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it |
+| the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and P15 calls it |
+| gamma-/electro-/muon-nuclear | `G4EmExtraPhysics` | Phase 3, in progress (P13) |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
 | `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | absent. It returns immediately unless a step loses ≥ 5% of the energy, so it is a correction on the long steps of a slowing ion; the recoil ions stop in one step |
 | `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead |
