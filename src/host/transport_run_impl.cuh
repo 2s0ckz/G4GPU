@@ -1193,29 +1193,79 @@ template <typename real_t, typename StepHook>
 void TransportEngine<real_t, StepHook>::RaiseStackForInteractions() {
   if (stack_raised_) { return; }
   stack_raised_ = true;
-  const std::size_t want = interaction_stack_bytes(true);
+  // THE NUMBER IS READ OFF THE FIVE KERNELS, and until P15's second pass it was written down -
+  // 86,016, "81,584 rounded up to a 4 kB boundary with one page of margin". A constant like that
+  // is right for exactly one build: P9e's `G4BinaryLightIonReaction::Interact` puts a whole
+  // Binary cascade behind the light-ion arm, and its own probe measured 63,088 bytes of frame
+  // for that entry point alone (V183 on its branch), against the 31,952 `run_interaction<
+  // kLightIon>` had when the constant was chosen. So the reservation is the largest
+  // `localSizeBytes` of the five, rounded up the same way.
+  //
+  // WHY `localSizeBytes` IS THE RIGHT QUANTITY, measured rather than assumed (docs/RISK.md
+  // V196). For a call graph ptxas can size, it overlays every non-inlined callee's frame INTO
+  // THE ENTRY'S: `-Xptxas -v` on `transport_run_int_binary` reports `propagate`,
+  // `do_time_step`, `apply_collision`, `bic_deexcite_fragment` and P6's `deexcite` at 0 bytes
+  // each and the kernel at 81,584, and `cudaFuncGetAttributes` returns the entry's number. So
+  // the entry's frame IS the tree's requirement, and V190's "maximum over the call tree" was
+  // right.
+  //
+  // AND WHAT A SHORTFALL WOULD COST, which is less than this function's first version claimed.
+  // For a kernel ptxas can size, this driver (610.62, CUDA 11.6) RAISES THE LIMIT ITSELF at the
+  // launch: a probe needing 40,000 B, launched under a 1,024 B limit, ran to the right answer and
+  // left the limit at 40,000. So a reservation that came up short would not fault - it would
+  // spend the memory at an interaction launch nobody chose, after the pools were sized against
+  // the free memory printed below. That is still a defect, because every 4 kB is 270 MB of an
+  // 8 GB card, and the report checks for it: `stack_reserved_` against the limit after the run.
+  struct KernelFrame {
+    const char* name;
+    cudaFuncAttributes attr;
+  };
+  KernelFrame k[5] = {{"run_interaction<kFtfp>", {}},     {"run_interaction<kBertini>", {}},
+                      {"run_interaction<kBinary>", {}},   {"run_interaction<kLightIon>", {}},
+                      {"run_interaction<kAtRest>", {}}};
+  G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+      &k[0].attr, run_interaction<real_t, had::InteractionBucket::kFtfp, StepHook>));
+  G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+      &k[1].attr, run_interaction<real_t, had::InteractionBucket::kBertini, StepHook>));
+  G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+      &k[2].attr, run_interaction<real_t, had::InteractionBucket::kBinary, StepHook>));
+  G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+      &k[3].attr, run_interaction<real_t, had::InteractionBucket::kLightIon, StepHook>));
+  G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+      &k[4].attr, run_interaction<real_t, had::InteractionBucket::kAtRest, StepHook>));
+  std::size_t need = 0;
+  for (const KernelFrame& kf : k) {
+    if (kf.attr.localSizeBytes > need) {
+      need = kf.attr.localSizeBytes;
+      stack_kernel_ = kf.name;
+    }
+  }
+  // V190's rule: up to a 4 kB boundary, and one page of margin on top. Never below the
+  // stepping kernels' floor, because the stepping kernels run under the same limit and theirs
+  // is the one the driver cannot enforce for them.
+  std::size_t want = ((need + 4095u) / 4096u) * 4096u + 4096u;
+  want = std::max(want, stepping_stack_bytes());
   std::size_t have = 0;
   cudaDeviceGetLimit(&have, cudaLimitStackSize);
+  stack_reserved_ = std::max(want, have);
   if (have >= want) { return; }
   const cudaError_t e = cudaDeviceSetLimit(cudaLimitStackSize, want);
   size_t f = 0, t = 0;
   cudaMemGetInfo(&f, &t);
   if (e != cudaSuccess) {
     std::printf("\nFATAL: the first hadron of this run needs %zu bytes of device stack a\n"
-                "       thread - `run_interaction<kBinary>`'s frame is 81,584 - and the\n"
-                "       driver refused: %s. %.2f GB of %.2f GB is free.\n"
-                "       A kernel whose frame is larger than the limit does not warn, it takes\n"
-                "       an illegal memory access, so this cannot be carried on from. Lower the\n"
-                "       batch, lower SetInteractionSlots (now %d, %.1f MB), or set\n"
-                "       G4GPU_STACK_BYTES before the run. docs/RISK.md V190.\n",
-                want, cudaGetErrorString(e), double(f) / 1073741824.0,
+                "       thread - %s's frame is %zu - and the driver refused: %s.\n"
+                "       %.2f GB of %.2f GB is free. Lower the batch, lower\n"
+                "       SetInteractionSlots (now %d, %.1f MB), or run without hadrons.\n"
+                "       docs/RISK.md V190 and V196.\n",
+                want, stack_kernel_, need, cudaGetErrorString(e), double(f) / 1073741824.0,
                 double(t) / 1073741824.0, n_interaction_slots_,
                 double(interaction_bytes_) / 1048576.0);
     std::exit(2);
   }
-  std::printf("device stack raised to %zu B a thread for the interaction kernels - %.2f GB of "
-              "%.2f GB left (docs/RISK.md V190)\n",
-              want, double(f) / 1073741824.0, double(t) / 1073741824.0);
+  std::printf("device stack raised to %zu B a thread for the interaction kernels - %s's frame is "
+              "%zu B - %.2f GB of %.2f GB left (docs/RISK.md V190, V196)\n",
+              want, stack_kernel_, need, double(f) / 1073741824.0, double(t) / 1073741824.0);
 }
 
 template <typename real_t, typename StepHook>
@@ -1279,7 +1329,16 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     //
     // `G4GPU_STACK_BYTES` overrides both, for the same reason `G4GPU_LIVE_PER_EVENT` overrides
     // the pool: the only way to answer "what did this cost" is to run the same binary both ways.
-    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, interaction_stack_bytes(false)));
+    //
+    // **TWO THINGS ABOVE ARE CORRECTED BY V196, AND THE TABLE IS HISTORY.** The frames are the
+    // ones this comment was written against; `RaiseStackForInteractions` now READS the number
+    // off the five kernels, so it cannot go stale when P9e's `Interact` grows the light-ion
+    // arm. And "a limit below the frame is an illegal memory access" is true of THIS limit - the
+    // stepping kernels', whose stack ptxas cannot size because the solid engine recurses - and
+    // not of the interaction kernels', which ptxas sizes exactly and which this driver simply
+    // raises the limit for at launch if nothing else has. Both measured, with two probes of
+    // thirty lines each, in docs/RISK.md V196.
+    G4GPU_CUDA_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, stepping_stack_bytes()));
 
     n_volumes_ = static_cast<int>(scene.volumes.size());
     h_mats_.assign(scene.materials.m, scene.materials.m + scene.materials.count);
@@ -2693,6 +2752,23 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       if (interactions_no_model_ > 0) {
         std::printf("             %lld of them had no model in range and never reached a "
                     "kernel (kNoInelasticModel above)\n", interactions_no_model_);
+      }
+    }
+    // THE TRIPWIRE ON THE STACK RESERVATION. If the driver found the limit short at an
+    // interaction launch it raised it itself (V196) - no fault, no error code, and 270 MB of an
+    // 8 GB card per 4 kB spent after the pools were sized against the free memory printed at
+    // the raise. The only trace it leaves is the limit, so the limit is read here and compared.
+    // A run with no hadron never raised anything and has nothing to compare.
+    if (stack_raised_) {
+      std::size_t lim = 0;
+      G4GPU_CUDA_CHECK(cudaDeviceGetLimit(&lim, cudaLimitStackSize));
+      if (lim > stack_reserved_) {
+        std::printf("STACK: the driver raised the device stack from the %zu B reserved off %s to "
+                    "%zu B at an interaction launch - the reservation read off the kernels was "
+                    "short. docs/RISK.md V196.\n", stack_reserved_, stack_kernel_, lim);
+      } else {
+        std::printf("stack: %zu B a thread reserved off %s, and no launch needed more\n",
+                    stack_reserved_, stack_kernel_);
       }
     }
     if (sec_.overflow != nullptr) {

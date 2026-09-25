@@ -1917,11 +1917,21 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         // transcribed windows. A full queue is a capacity, and `interaction_queue.cuh`'s header
         // has the proof that it cannot happen at the default one. Booking BOTH for either, as
         // this did first, would trip the capacity tripwire on a windows bug.
-        had::book_refusal<real_t>(
-            had.books,
-            (model == had::InelasticModel::kNone) ? had::HadronicRefusal::kNoInelasticModel
-                                                  : had::HadronicRefusal::kInelasticQueueFull,
-            p.ekin);
+        //
+        // TWO CALLS AND NOT ONE CALL WITH A SELECTED ARGUMENT, and that is ptxas's doing rather
+        // than style. Written as `book_refusal(books, kNone ? kNoInelasticModel :
+        // kInelasticQueueFull, ekin)` - the same semantics - the GenericIon kernel's ptxas dies
+        // with 0xC0000005 (ACCESS_VIOLATION) at -O3, -O2 and -O1 alike and compiles only at -O0,
+        // while this `if`/`else` compiles at the default -O3 with a 3,952-byte frame. Isolated
+        // commit by commit with that one kernel on its own: docs/RISK.md V195. `step_neutral`'s
+        // copy of the same booking keeps the ternary because its unit compiles with it, and
+        // making the two agree would move a unit that works for the sake of symmetry.
+        if (model == had::InelasticModel::kNone) {
+          had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
+        } else {
+          had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull,
+                                    p.ekin);
+        }
         // And the SIZE counter either way: the interaction happened and no final state came of
         // it. The track is killed with its kinetic energy deposited locally - the conservative
         // disposal, and NOT what Geant4 does with it.

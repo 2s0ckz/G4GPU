@@ -674,20 +674,32 @@ class TransportEngine {
   /// against 1.24e6 at 86,016, with the dose identical to every printed digit. docs/RISK.md
   /// V190 has the whole table.
   bool stack_raised_ = false;
-  /// The per-thread device stack, in bytes, for the two states. `G4GPU_STACK_BYTES` overrides
-  /// both - a resource knob, and setting it below a kernel's frame is an illegal memory access
-  /// in that kernel rather than a warning.
-  static std::size_t interaction_stack_bytes(bool for_interactions) {
+  /// What `RaiseStackForInteractions` reserved, and the kernel whose frame decided it - kept so
+  /// the report can check the driver never had to raise it further (docs/RISK.md V196).
+  std::size_t stack_reserved_ = 0;
+  const char* stack_kernel_ = "";
+  /// The per-thread device stack for the STEPPING kernels, in bytes: 16,384, or
+  /// `G4GPU_STACK_BYTES`.
+  ///
+  /// THIS ONE IS LOAD-BEARING IN A WAY THE INTERACTION KERNELS' RESERVATION IS NOT, and the
+  /// difference is measured (V196). The solid engine's distance routine recurses, so ptxas
+  /// cannot size a stepping kernel's stack - "Stack size for entry function ... cannot be
+  /// statically determined" - and for such a kernel the driver raises nothing: a recursive probe
+  /// launched under a 1,024-byte limit took an illegal memory access at a recursion depth of
+  /// two. A kernel whose stack ptxas CAN size is different, and is `RaiseStackForInteractions`'s
+  /// business.
+  static std::size_t stepping_stack_bytes() {
     if (const char* env = std::getenv("G4GPU_STACK_BYTES")) {
       const long v = std::atol(env);
       if (v >= 1024) { return static_cast<std::size_t>(v); }
     }
-    // 81,584 is `run_interaction<kBinary>`'s frame; 86,016 is that rounded to a 4 kB boundary
-    // with one page of margin. 16,384 is what the solid engine's recursion has needed since
-    // long before P15.
-    return for_interactions ? 86016u : 16384u;
+    return 16384u;
   }
-  /// Raises it once, and refuses loudly if the device cannot. Called from `BeamOn`.
+  /// Raises the device stack once, to what the five interaction kernels need, and refuses
+  /// loudly if the device cannot. Called from `BeamOn` on the first iteration with a hadron in
+  /// it. The number is READ OFF THE KERNELS - `cudaFuncGetAttributes(...).localSizeBytes` - and
+  /// not written down here; see the function for why that is the right number and the only one
+  /// that cannot go stale when a model's frame grows.
   void RaiseStackForInteractions();
 
   /// How many interactions the run queued, and the largest number any one launch produced.

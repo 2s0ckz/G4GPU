@@ -169,16 +169,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem Which units ptxas could not compile at -O2. An artefact and not a memory: build_engine_unit
-rem writes a .o1 beside the log for each one and deletes it when -O2 succeeds, so this list is
-rem what THIS build did. docs/RISK.md V63 and V191.
+rem Which units ptxas could not compile at its default -O3. An artefact and not a memory:
+rem build_engine_unit writes a .o1 beside the log for each one - holding the rung that DID
+rem compile, -O2 or -O1 - and deletes it when -O3 succeeds, so this list is what THIS build did.
+rem It said "-O2" for a week, and ptxas's default is 3: docs/RISK.md V63, V191 and V195.
 set ANYO1=
 for %%O in ("%~dp0out\transport_run*.o1") do set ANYO1=1
 if defined ANYO1 (
   echo.
-  echo NOTE: these units are compiled at -Xptxas -O1 because ptxas died at -O2 with an
-  echo       access violation. docs/RISK.md V63, V191.
-  for %%O in ("%~dp0out\transport_run*.o1") do echo        %%~nO
+  echo NOTE: ptxas died at its default -O3 with an access violation on these units, and each
+  echo       is compiled at the rung shown instead. docs/RISK.md V63, V191, V195.
+  for %%O in ("%~dp0out\transport_run*.o1") do for /f "usebackq delims=" %%R in ("%%~fO") do echo        %%~nO: %%R
   echo.
 )
 popd

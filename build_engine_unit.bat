@@ -44,21 +44,35 @@ rem retry is here, it is PER UNIT so nothing that compiles at -O2 is degraded, a
 rem because a build that silently drops an optimisation level is a build whose numbers nobody
 rem can explain later. The `.o1` file beside the log records which units needed it, so the list
 rem is an artefact rather than a memory.
+rem
+rem **AND PTXAS'S DEFAULT IS -O3, NOT -O2**, which this block said for its first week. The `-O2`
+rem on nvcc's command line above is the HOST optimisation level; `ptxas --help` says
+rem `--opt-level <N> ... Default value: 3`. So every unit reported as "died at -O2" had died at
+rem -O3, and the retry jumped two levels without ever trying the one between. The ladder is now
+rem -O3, -O2, -O1, each rung tried only when the one above it died with an access violation, the
+rem marker says which rung succeeded, and the -O3 log is kept beside it as `<unit>.O3.log`
+rem because the retry overwrites `<unit>.log`. docs/RISK.md V195 is the measurement that found
+rem it - and the unit that found it, GenericIon's, dies on all three rungs at one source shape
+rem and compiles on the first at another, which is why the source was changed and not the rung.
 if errorlevel 1 (
   findstr /c:"ACCESS_VIOLATION" "%OUTDIR%\%UNIT%.log" >nul
   if not errorlevel 1 (
-    echo   %UNIT%: ptxas died at -O2 with an access violation; retrying at -Xptxas -O1 ^(docs/RISK.md V63^)
-    nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -O1 -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
-      -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
-    if not errorlevel 1 (
-      > "%OUTDIR%\%UNIT%.o1" echo ptxas -O1
-      > "%OUTDIR%\%UNIT%.rc" echo 0
-      exit /b 0
+    copy /y "%OUTDIR%\%UNIT%.log" "%OUTDIR%\%UNIT%.O3.log" >nul
+    for %%L in (2 1) do (
+      echo   %UNIT%: ptxas died with an access violation above -O%%L; retrying at -Xptxas -O%%L ^(docs/RISK.md V63, V195^)
+      nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
+        -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
+      if not errorlevel 1 (
+        > "%OUTDIR%\%UNIT%.o1" echo ptxas -O%%L
+        > "%OUTDIR%\%UNIT%.rc" echo 0
+        exit /b 0
+      )
     )
   )
   > "%OUTDIR%\%UNIT%.rc" echo 1
   exit /b 1
 )
+if exist "%OUTDIR%\%UNIT%.O3.log" del /q "%OUTDIR%\%UNIT%.O3.log"
 rem The redirection comes FIRST on both lines. `echo 0 > file` writes "0 " - echo takes
 rem everything up to the redirect, trailing space included - and build_engine.bat compares the
 rem line against "0", so that one space would have reported every successful unit as a

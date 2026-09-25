@@ -12513,3 +12513,142 @@ whoever owns the next campaign: QBBC's own answer is `EnableNeutronGeneralProces
 (`G4HadronInelasticQBBC`'s constructor sets it), so `kFinal` is the configuration that matches
 the physics list this port is a port OF, and `kStage1` is scaffolding that has outlived its
 purpose now that the third sub-process exists.
+
+### V195: one refusal booked through a selected argument killed ptxas on the GenericIon kernel at every level but -O0
+
+The 09-19 evening engine build ended
+
+    transport_run_generic_ion: ptxas died at -O2 with an access violation; retrying at -Xptxas -O1
+    FATAL: a transport engine unit did not compile.
+    nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+
+and that is new in one precise way. V65 recorded one `run_step_hadron` in a translation unit of
+its own as "the only shape this project has ever measured ptxas to compile for every arrangement
+of the physics", and `transport_run_generic_ion.cu` is exactly that shape - one explicit
+instantiation, `G4GPU_STEP_HADRON(ParticleType::kGenericIon, StepTap<double>)`, and nothing else.
+So V55's one-kernel reproducer is not a tool to reach for here; it is the unit that failed.
+
+#### Isolated commit by commit, the one kernel on its own
+
+Every row below is `transport_run_generic_ion.cu` compiled ALONE - the same command line as
+`build_engine_unit.bat`, `nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -v -c` - from a copy of `src/`
+in a scratch directory, so the worktree was never perturbed. Each failure is the same message and
+arrives within about ninety seconds, on a machine with 32 GB free:
+
+| source | ptxas level | result |
+|---|---|---|
+| e03356f (V191's commit) | default (-O3) | **compiles**, 3,952 B frame, 312/656 spill |
+| 2bad77b | default | ACCESS_VIOLATION |
+| 70b0192, 4161811, 8f1459b | default | ACCESS_VIOLATION |
+| 8f1459b | -O1 | **compiles**, 3,952 B frame, 296/652 spill |
+| 0159735 (HEAD) | default | ACCESS_VIOLATION |
+| 0159735 | -O2 | ACCESS_VIOLATION |
+| 0159735 | -O1 | ACCESS_VIOLATION |
+| 0159735 | -O3 with `-allow-expensive-optimizations=false` | ACCESS_VIOLATION |
+| 0159735 | -O0 | compiles, 4,256 B frame, **700/3,968** spill |
+| 0159735 with b77ffc7's gate reverted | default | ACCESS_VIOLATION |
+| e03356f + ONLY 2bad77b's `stepper.cuh` | default | ACCESS_VIOLATION |
+| **0159735 with the booking as `if`/`else`** | default | **compiles, 3,952 B frame, 300/652 spill** |
+
+WHAT IT SAYS, in order:
+
+  * **The trigger is 2bad77b's `stepper.cuh`, and nothing else in that commit.** Its
+    `transport_run_impl.cuh` half is entirely inside `run_interaction`, which is `extern template`
+    in this unit, and the row that puts ONLY the stepper onto e03356f dies. The change is one
+    statement in `step_hadron`: two `if` blocks that booked `kNoInelasticModel` and
+    `kInelasticQueueFull` became ONE `book_refusal` call whose enum argument is a ternary - the
+    fix for a real bug (both were booked for a model-less step) and semantically neutral
+    otherwise.
+  * **The gate b77ffc7 added is NOT the trigger**, although it is what the evening build was the
+    first to compile. Reverting it alone changes nothing. What it did do is move the cliff for
+    the RETRY: 8f1459b's kernel compiles at -O1, so the sweep engine of 09-19 16:46 carried a
+    GenericIon kernel compiled at -O1 without anyone having asked for one, and b77ffc7's one byte
+    load pushed -O1 over as well.
+  * **No ptxas option short of -O0 gets past it.** -O2, -O1 and turning the expensive
+    optimisations off all die the same way. -O0 compiles, at five and a half times the spill
+    loads. Shipping -O0 would not be dropping the species, but it would be degrading the one
+    kernel every recoil nucleus runs to avoid rewriting one statement.
+  * **Two calls compile where one call with a selected argument does not.** `book_refusal`
+    indexes two device arrays by the enum and adds atomically, so the difference ptxas sees is
+    two constant addresses against one selected address. That is a description of the
+    difference, not an explanation of the crash, and this entry does not claim one: the crash is
+    in ptxas, it is deterministic, and it has no symbol.
+
+THE FIX is the last row, in `step_hadron` with a comment saying why it must not be folded back.
+`step_neutral`'s copy of the same booking keeps the ternary, because the neutral unit compiles
+with it and moving a unit that works for the sake of symmetry is how the next one of these gets
+made.
+
+#### And the retry had been reporting the wrong level for a week
+
+`ptxas --help` says `--opt-level <N> ... Default value: 3`. The `-O2` on nvcc's command line is
+the HOST optimisation level, so every unit `build_engine_unit.bat` reported as "died at -O2" had
+died at -O3, and the retry went straight to -O1 without trying -O2. V191's table is therefore a
+table of -O3 against -O1. The ladder is -O3, -O2, -O1 now, each rung tried only when the one above
+it died with an access violation; the `.o1` marker records the rung that compiled, and the -O3 log
+is kept as `<unit>.O3.log` because the retry overwrites the unit's own.
+
+### V196: the driver sizes the stack for a kernel ptxas can size, and faults the one it cannot
+
+**THIS ENTRY SCOPES V183.** V183 (P9e's, "the cascade's kernel frame is 63 kilobytes and the
+transport sets a 16 kilobyte limit") measured its two cascade probes at 63,088 and 56,816 bytes of
+frame and concluded that "a kernel that calls either entry point under the current limit
+overflows its stack, and CUDA reports that as an illegal memory access". The frames are right and
+the cost it names is right; the failure mode is right for only one kind of kernel. For a kernel
+ptxas can size - every cascade kernel this port launches - **the driver raises
+`cudaLimitStackSize` itself at the launch**: measured, a kernel needing 40,000 B launched under a
+1,024 B limit ran to the right answer, left the limit at 40,000, and spent 2.76 GB doing it. Only a
+kernel ptxas CANNOT size - a recursive one, which is what the stepping kernels are - faults, and it
+faults at a recursion depth of two. This engine's own comment made the same over-general claim
+about its own limit, and V190 built the 86,016-byte reservation on it. The difference decides
+whether a reservation is load-bearing or bookkeeping. Two probes of about thirty lines, CUDA 11.6,
+driver 610.62, RTX 3070:
+
+**A kernel ptxas can size.** A kernel whose callee holds a 40,000-byte local array, launched
+46 x 6 blocks of 256 under `cudaDeviceSetLimit(cudaLimitStackSize, 1024)`:
+
+    k: localSizeBytes 40000
+    after SetLimit(1024)    limit  1024 B/thread   free 7.460 GB
+    launch: no error / sync: no error
+    after the launch        limit 40000 B/thread   free 4.704 GB
+    out[0] = 931307.5       (the right answer: the frame was really used)
+
+The driver raised the limit itself, to exactly `localSizeBytes`, and paid for it - 2.756 GB for
+40 kB a thread, which is V190's 270 MB per 4 kB again.
+
+**A kernel ptxas cannot size.** The same launch with a RECURSIVE callee of 792 bytes a level:
+
+    ptxas warning : Stack size for entry function '_Z1kPdi' cannot be statically determined
+    k: localSizeBytes 0
+    depth 2:   launch: no error / sync: an illegal memory access was encountered
+    depth 80:  launch: no error / sync: an illegal memory access was encountered
+
+Nothing raised, and three levels - 2,376 bytes - were enough to fault under a 1,024-byte limit.
+
+WHAT THAT MEANS FOR THIS ENGINE, kernel by kernel:
+
+  * **The stepping kernels are the second kind.** The solid engine's distance routine recurses,
+    `-Xptxas -v` prints the "cannot be statically determined" warning for them, and their
+    16,384-byte floor is the only thing standing between a deep boolean solid and an illegal
+    memory access. That limit is load-bearing and always was.
+  * **The five interaction kernels are the first kind.** None of their units prints the warning.
+    So a reservation that came up short would not fault; the driver would spend the difference at
+    the launch - after `Upload` had sized the pools against the free memory it printed - and say
+    nothing. That is still worth preventing, because it is 270 MB of an 8 GB card per 4 kB, but it
+    is a bookkeeping failure and not a crash, and the entry that says otherwise overstates it.
+  * **ptxas's number is the whole tree's.** For a call graph it can size, ptxas overlays every
+    non-inlined callee's frame into the entry's: `transport_run_int_binary`'s log reports
+    `propagate`, `do_time_step`, `apply_collision`, `bic_deexcite_fragment` and P6's `deexcite`
+    at 0 bytes each and `run_interaction<kBinary>` at 81,584, and `cudaFuncGetAttributes` returns
+    the entry's number. So V190's "a kernel's frame is the maximum over its call tree" stands,
+    and `localSizeBytes` is exactly the quantity to reserve.
+
+WHAT WAS DONE. `RaiseStackForInteractions` no longer carries 86,016: it takes the largest
+`localSizeBytes` of the five kernels, rounds it up to a 4 kB boundary with one page of margin
+(V190's rule), floors it at the stepping kernels' 16,384, and prints which kernel set it. That is
+the only form of the number that cannot go stale when a model's frame grows - and P9e's
+`Interact` is about to grow the light-ion kernel's from 31,952 bytes towards the 63,088 its own
+probe reports. And the run report now reads the limit back after the run: if it is above what was
+reserved, the driver had to raise it at an interaction launch, and the report says so by name.
+That tripwire is the only way a short reservation could ever be seen, because the probe above is
+the proof that nothing else would complain.
