@@ -66,11 +66,54 @@ if (-not (Test-Path -LiteralPath $portExe)) { Write-Output "FATAL: no $portExe";
 if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; exit 1 }
 
 # Per species: what the port does not transport, by the process names QBBC's managers carry.
+#
+# P15 CHANGED THIS TABLE AND THE CHANGE IS THE MEASUREMENT, so what came off and what stayed on
+# is written out rather than left to a diff.
+#
+# OFF THE LIST (the port does these now):
+#   protonInelastic   wired. The Binary cascade below 1.5 GeV, Bertini 1-6, FTFP from 3, chosen
+#                     as `G4EnergyRangeManager` chooses. What it still refuses is
+#                     `G4BinaryCascade::Propagate1H1` - a nucleon or pion on a HYDROGEN target -
+#                     which in water is not a corner: hydrogen is two atoms in three.
+#                     `tests/test_inelastic_transport.cu` measures it at 0 of 93 interactions
+#                     for a 210 MeV proton and 31 of 256 at 1 GeV, and the sweep's own run
+#                     prints the refused fraction per beam. It is off the list because a
+#                     process that does seven eighths of its work is not "what the port lacks";
+#                     the eighth is reported instead of being hidden by switching the whole
+#                     process off.
+#   NeutronGeneralProc  was never in these lists (the neutron general process has been wired
+#                     since P8d) but its INELASTIC sub-process was refused by name until P15
+#                     and is applied now, which is what makes a proton's secondary neutrons
+#                     comparable at all.
+#   pi+/pi-/kaon+/kaon-Inelastic  never in these lists either, and until P15 that was a hole
+#                     rather than a statement: a 1 GeV proton makes pions and Geant4's were
+#                     interacting where the port's were not. They are wired now.
+#
+# STAYING ON THE LIST (the port still refuses these, with a rate):
+#   alphaInelastic, dInelastic, tInelastic, He3Inelastic, ionInelastic
+#                     `G4BinaryLightIonReaction::Interact` - every ion at or above 50 MeV per
+#                     NUCLEON - is P9e's and is refused by name. The window it leaves open is
+#                     the fusion arm below 50 MeV/n and FTFP above 3 GeV/n, and all three alpha
+#                     beams of this sweep sit between those at 210, 400 and 1000 MeV/n. So the
+#                     port refuses essentially every alpha inelastic interaction: measured, 195
+#                     of 215 in water. A process wired and then refused for 91% of its
+#                     interactions is NOT a like-for-like column, and `alphaInelastic` stays
+#                     off on the Geant4 side until `Interact` lands. The other four are here
+#                     for the same reason and were MISSING before - d, t and He3 are made as
+#                     secondaries by a proton beam, their inelastic processes were active on
+#                     the Geant4 side and the port had none, which nobody had noticed because
+#                     the port had no inelastic process at all to compare against.
+#   hBrems, hPairProd    the radiative processes of a charged hadron: both models' dE/dx is
+#                     exact and neither has a SampleSecondaries (docs/PORTED.md 1.3).
+#   ionElastic        G4NuclNuclDiffuseElastic, both halves ported and the channel not wired.
+#   photonNuclear, electronNuclear, positronNuclear   P13's, and on main since 6c62d94 - but
+#                     the WIRING is not P15's, so they stay off and the gamma and electron rows
+#                     do not move.
 $emOnly = @{
-  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic", "ionInelastic") }
-  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic", "ionInelastic") }
-  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "protonInelastic", "ionElastic", "ionInelastic") }
-  "alpha"  = @{ PreInit = @(); Inactivate = @("alphaInelastic", "ionElastic", "ionInelastic") }
+  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
+  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
+  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
+  "alpha"  = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "alphaInelastic", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic") }
 }
 
 $beams = @(

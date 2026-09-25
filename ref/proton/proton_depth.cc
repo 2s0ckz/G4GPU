@@ -352,18 +352,39 @@ int main(int argc, char** argv) {
         // The radiative processes of a charged hadron. em/muon_radiative.cuh has both models'
         // dE/dx exactly and neither model's SampleSecondaries (docs/PORTED.md 1.3).
         "hBrems", "hPairProd", "muBrems", "muPairProd",
-        // Every inelastic final state that has a name of its own: P9 (binary cascade),
-        // P10 (Bertini), P11 (FTFP).
-        "protonInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic",
-        "ionInelastic",
-        // The neutron's three sub-processes are one process and /process/inactivate can only
-        // take it whole (docs/RISK.md V53). P8c leaves step_neutral's cross section at zero, so
-        // the whole process comes off. `neutronInelastic` is deliberately NOT in this list: the
-        // UI answers `illegal process (or type) name` for it, because it is inside the general
-        // process and is on no manager. No neutron is made in this configuration anyway -
-        // nothing but an inelastic reaction produces one - so this line costs the comparison
-        // nothing and keeps its statement true.
-        "NeutronGeneralProc",
+        // THE ION INELASTIC FINAL STATES, and `protonInelastic` is NOT among them any more.
+        //
+        // P15 wired `protonInelastic` - the Binary cascade below 1.5 GeV, Bertini 1-6 GeV,
+        // FTFP from 3, chosen as `G4EnergyRangeManager` chooses - so inactivating it on the
+        // Geant4 side would be switching off physics the port HAS, which is the opposite of
+        // what this list is for. What the proton's process still refuses is
+        // `G4BinaryCascade::Propagate1H1`, a nucleon or pion on a hydrogen target, measured at
+        // 0 of 93 interactions for a 210 MeV proton in water and 31 of 256 at 1 GeV
+        // (`tests/test_inelastic_transport.cu`); the run reports that fraction rather than
+        // hiding it behind the whole process.
+        //
+        // These five STAY, and the reason is a threshold rather than a gap in the transcription:
+        // `G4BinaryLightIonReaction::ApplyYourself` fuses below **50 MeV per nucleon** and calls
+        // `Interact` at or above it, and `Interact` is P9e's. QBBC gives an ion the light-ion
+        // reaction from 0 to 6 GeV/n and FTFP from 3 GeV/n, so between 50 MeV/n and 3 GeV/n
+        // there is no model this port can run - which is where a 100 MeV proton's alpha and He3
+        // secondaries live. Refused by name, `had::HadronicRefusal::kLightIonCascade`, and
+        // counted; the day `Interact` lands these five come off together.
+        "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic", "ionInelastic",
+        // `NeutronGeneralProc` IS NO LONGER HERE EITHER, and it is the line that mattered most.
+        //
+        // It used to say "no neutron is made in this configuration anyway - nothing but an
+        // inelastic reaction produces one - so this line costs the comparison nothing". That
+        // was true precisely because `protonInelastic` was on the list above it. It is not now:
+        // a 100 MeV proton's inelastic reactions are what MAKE the neutrons, and the port
+        // applies all three sub-processes - elastic since P8d, capture since P8d, and inelastic
+        // since P15. Leaving it inactivated would compare a Geant4 whose neutrons stream
+        // against a port whose neutrons interact.
+        //
+        // `neutronInelastic` is still deliberately absent: the UI answers `illegal process (or
+        // type) name` for it, because it is inside the general process and is on no manager
+        // (docs/RISK.md V53). The general process is now ACTIVE on both sides, which is the
+        // only configuration in which that name's absence costs nothing.
         // The ion's own elastic process. G4IonElasticPhysics gives GenericIon "ionElastic"
         // (G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic); both halves are ported and the
         // channel is not wired - had::ElasticChannel::kIonDiffuseNotWired.

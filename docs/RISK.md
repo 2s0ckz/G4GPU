@@ -12178,3 +12178,72 @@ rather than an implicit consequence of the batch size.
 So: `physics/stepper.cuh` includes `hadronic/interaction_queue.cuh`, which includes no model at
 all, and `hadronic/interaction_apply.cuh` is the only file in the port that includes all four
 entry points. The stepping kernels' frames in the table above are what they must stay.
+
+### V189: no hadronic model had ever been compiled as device code, and four in one module is past ptxas
+
+V188 settled that the models cannot go inside a stepping kernel. This is what happened when
+they went into a kernel of their own, and the first fact is the one nobody had had a reason to
+notice:
+
+**Every test of P9's Binary cascade, P10's Bertini, P11's FTFP and P12's at-rest chain is in
+`TESTS`, not `TESTS_GPU`.** Host-only translation units, compiled with `nvcc -std=c++17 -O2 -I
+src` and no `-arch`, so nvcc never invokes ptxas on them. The models carry `__host__ __device__`
+on every function, 858,362 channel-table values and 1.96 million cascades have been validated
+against the library, and **not one line of any of them had ever been compiled for a GPU.** P15
+is the first caller that instantiates them in a `__global__`, and that is where this was found.
+
+THE FIRST ARRANGEMENT was one `run_interaction` kernel with a four-way switch over FTFP,
+Bertini, the Binary cascade and the light-ion reaction, plus the at-rest chain - which is the
+shape the code wants to have, because the model is a property of the queue entry and not of the
+kernel. Measured:
+
+    ptxas   22,629 MB of working set at 200 seconds, still climbing, killed
+
+Two things were tried first and neither moved it. `__noinline__` on each of the four arms:
+21,435 MB. `-Xptxas -O1`: 21,435 MB, the same number to the megabyte - and the stage was
+identified by watching the processes rather than assuming, because `cicc` peaked at 347 MB and
+`cl` at 222 MB while ptxas held all of it.
+
+ONE MODEL AT A TIME, into a kernel each, the same code compiles:
+
+| unit | ptxas peak | wall | registers | stack frame |
+|---|--:|--:|--:|--:|
+| `transport_run_int_lightion` | 6,126 MB | 40 s | 255 | 31,968 B |
+| `transport_run_int_ftfp` | 8,377 MB | 130 s | 255 | — |
+| `transport_run_int_bertini` | 9,319 MB | 210 s | 255 | 33,680 B |
+| `transport_run_int_binary` | 9,838 MB | 365 s | 255 | — |
+| `transport_run_int_atrest` | 19,770 MB | 660 s | 255 | 35,360 B |
+
+(the probe figures are from a bare kernel calling one arm; the frames are from the engine's own
+units, which wrap the arm in `FillResult`, the emitter and the step hook.)
+
+So the answer is docs/RISK.md **V65**'s rule - one translation unit per kernel - applied one
+level down: `run_interaction` is templated on `had::InteractionBucket`, `run_one_model` on
+`had::InelasticModel`, both resolved with `if constexpr`, and five `.cu` files instantiate one
+each. The binary-cascade object contains no FTFP and the FTFP object no Bertini.
+
+**THE AT-REST BUCKET IS ONE AND NOT TWO, and that is arithmetic rather than laziness.**
+Splitting the at-rest entries into a Bertini arm and a Fritiof arm looks like it would halve the
+19,770 MB. It would not: `stopping::at_rest` is ONE function that calls Bertini unconditionally
+and FTFP through an invoke, so instantiating it instantiates Bertini whichever arm the kernel is
+built for, and two kernels would each be Bertini + FTFP. One at 19.8 GB beats two at 19.8 GB.
+
+WHAT IT COSTS THE BUILD, and it is not small: `build_engine.bat` compiles the five interaction
+units ONE AT A TIME and BEFORE the seventeen stepping units, because six of them at once is 60+
+GB on a 64 GB machine that usually has three or four other worktrees building. That is about
+1,400 seconds of serial ptxas on top of the seven minutes the stepping units take six-up. The
+alternative was not a faster build; it was no build at all.
+
+TWO CONSEQUENCES WORTH HAVING SEPARATELY FROM THE COMPILE:
+
+  * **A warp whose threads take different physics paths serialises through all of them**, which
+    is the argument that made `species_index` exist in the first place. Binning the queue by
+    model - `count_interactions` and `scatter_interactions`, the species counting sort again -
+    means a warp inside the Bertini kernel is 32 Bertini cascades. Branching inside one kernel
+    would have been 32 threads walking four models' worth of code.
+  * **`cudaLimitStackSize` had to go from 16,384 to 49,152.** A kernel's frame is the maximum
+    over its call tree, and these trees contain `bic::apply_yourself` (about 10 kB on its own),
+    P6's PreCompound and P3's whole evaporation cascade: 31,968 to 35,360 bytes measured. A
+    limit under the frame is not a warning, it is an illegal memory access from an unrelated API
+    call - which is what that line was written for in 2026 and is now true a second time, for a
+    reason twice the size.
