@@ -1,0 +1,618 @@
+// P15: the interaction kernel's body - one queued interaction, from the model choice to the
+// secondaries, and the per-thread pool it runs in.
+//
+// This is the ONLY file in the port that includes all four inelastic entry points, and that is
+// the point of it: `physics/stepper.cuh` includes `interaction_queue.cuh`, which includes none
+// of them, so no stepping kernel carries a byte of model code. docs/RISK.md V188 has the
+// measurement that made that a rule rather than a preference.
+//
+// ---------------------------------------------------------------------------------------------
+// WHAT IS TRANSCRIBED HERE
+//
+// `G4HadronicProcess::PostStepDoIt` (management/src/G4HadronicProcess.cc:324-482), in its own
+// order, because every step of it either draws a uniform or decides which array a later step
+// reads:
+//
+//   1. `theNumberOfInteractionLengthLeft = -1`      - not carried; see `decay_in_flight_length`
+//   2. if `fXSType != fHadNoIntegral`: recompute the cross section at the END of the step and
+//      reject with `xs < theLastCrossSection*G4UniformRand()`. ONE uniform, and it comes FIRST.
+//   3. `theCrossSectionDataStore->SampleZandA(...)` - the target, from the partial sums the
+//      RECOMPUTE left behind, not from the ones the interaction length was drawn with.
+//   4. `thePro.Initialise(aTrack)`
+//   5. `ChooseHadronicInteraction(...)` = `G4EnergyRangeManager::GetHadronicInteraction`, which
+//      draws one uniform if and only if two models overlap here.
+//   6. `do { result = ApplyYourself(...); result = CheckResult(...); } while(!result)`, bounded
+//      at 100 re-entries, past which Geant4 raises `had006`.
+//   7. K0 / anti-K0 among the secondaries are mixed to K0S / K0L with ONE uniform each.
+//   8. `FillResult(result, aTrack)`.
+//
+// and `G4HadronStoppingProcess::AtRestDoIt` through `stopping::at_rest`, which P12 ported whole
+// and which this file only has to call and drain.
+//
+// ---------------------------------------------------------------------------------------------
+// THE POOL, AND WHY IT IS ONE STRUCT AND NOT TWENTY ARRAYS
+//
+// `InteractionSlot` holds every per-thread buffer the four arms need BY VALUE, so the pool is
+// one `cudaMalloc` of `n_slots * sizeof(InteractionSlot)` and a thread's slot is
+// `&slots[tid]` - the shape `ftf::entry::Handle` already has, and for the same reasons:
+//
+//   * ONE constructed host image, uploaded into every slot, and NOT a `cudaMemset`.
+//     docs/RISK.md V104 is a member that only a constructor sets and that decides physics when
+//     it is zero, and `bert::NucleiModel` and `bic::CascadeBuffers` are the same shape of risk.
+//   * The capacities are the ones the models' own campaigns were validated at -
+//     `tests/test_bic_apply.cu`'s 256 nucleons / 512 cascade tracks / 2048 collisions and
+//     `tests/test_stopping.cu`'s 4096 / 1024 / 512 de-excitation buffers - so a slot is inside
+//     the envelope those 1.96 million cascades and 1,000,000 captures were run in. Shrinking
+//     them would be choosing a new envelope with no campaign behind it.
+//
+// FTFP keeps its OWN pool, because it has its own contract: `ftf::entry::build` allocates,
+// initialises and uploads `entry::Workspace` slots and hands back a handle, and re-implementing
+// that here would be exactly the duplication `ftf/ftf_entry.cuh` exists to prevent (docs/RISK.md
+// V145). The two pools are allocated with the same `n_slots` and indexed by the same `tid`.
+//
+// `entry::Workspace` and not `entry::HadronWorkspace`: the ion arm is real here - a GenericIon
+// above 3 GeV per nucleon goes to FTFP - and `HadronWorkspace` refuses an ion by capacity
+// (`kMaxProjA = 1`). 81,008 bytes a slot more, stated rather than discovered.
+#pragma once
+
+#include "physics/hadronic/bertini/cascade_interface.cuh"
+#include "physics/hadronic/bic/binary_cascade.cuh"
+#include "physics/hadronic/bic/light_ion_reaction.cuh"
+#include "physics/hadronic/ftf/ftf_entry.cuh"
+#include "physics/hadronic/interaction_queue.cuh"
+#include "physics/hadronic/stopping/stopping_process.cuh"
+#include "physics/hadronic/wiring.cuh"
+
+namespace g4gpu::had {
+
+namespace bert = g4gpu::physics::hadronic::bert;
+namespace stop = g4gpu::physics::hadronic::stopping;
+namespace ftfe = g4gpu::hadronic::ftf::entry;
+
+/// `kMaxSecondaries` of the final states in a slot. 256 is what `tests/test_stopping.cu` ran
+/// 1,000,000 at-rest captures at and comfortably above the 128 `bic::kBlirMaxSecondaries` a
+/// fusion event can fill; an overflow is counted by name (`kInelasticSecondaryOverflow`), never
+/// silent.
+inline constexpr int kInteractionSecondaryCap = 256;
+
+/// Everything ONE thread inside the interaction kernel needs, by value.
+template <typename real_t>
+struct InteractionSlot {
+  // ---- Bertini: `bert::apply_yourself`'s seven caller-owned buffers.
+  bert::NucleiModel bert_model;
+  bert::BertiniWorkspace bert_ws;
+  bert::CollisionOutput co_global;
+  bert::CollisionOutput co_out;
+  bert::CollisionOutput co_dex;
+  bert::CollisionOutput co_tmp;
+  bert::ColliderOutput epo;
+
+  // ---- Binary cascade: what `bic::BicStorage` points at. The capacities are
+  // `tests/test_bic_apply.cu`'s, which is the campaign's envelope.
+  bic::Nucleon nucleons[256];
+  deex::Vec3d nucleus_mom[256];
+  double fermi_p[256];
+  bic::NucleusSortEntry sort_sums[256];
+  double flat_block[bic::kFlatBlock];
+  double proton_field[bic::kMaxFieldTable];
+  double neutron_field[bic::kMaxFieldTable];
+  bic::CascadeTrack cascade_pool[512];
+  bic::imr::CollisionInitialState collisions[2048];
+  bic::CascadeBuffers cascade_buffers;
+  bic::CascadeProduct products[256];
+  bic::CascadeProduct preco_products[64];
+
+  // ---- PreCompound and P3's de-excitation, the tail of all four arms.
+  deex::Fragment evap_list[4096];
+  deex::Fragment evap_results[1024];
+  deex::Fragment evap_step[512];
+  deex::DeexProduct deex_products[1024];
+  deex::DeexProduct preco_out[1024];
+
+  // ---- the final states, which are far too big for a kernel stack: one
+  // HadFinalState<real_t, 256> alone is about 18 kB against `run_step_hadron`'s whole 3,936 B
+  // frame.
+  physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap> fs;
+  physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap> nuclear_fs;
+  physics::hadronic::HadronicStepResult<real_t, kInteractionSecondaryCap> filled;
+  /// The DEFINITION mass of each secondary, which `fill_result` and `check_result` compare the
+  /// model's dynamic mass against. Computed per secondary by `definition_mass_of`.
+  real_t pdg_mass[kInteractionSecondaryCap];
+  /// The two models with final-state types of their own.
+  bic::BicFinalState bic_fs;
+  bic::BlirFinalState blir_fs;
+};
+
+/// What a launch is handed by value.
+template <typename real_t>
+struct InteractionPool {
+  InteractionSlot<real_t>* slots = nullptr;
+  int n_slots = 0;
+  /// `bic::imr::build_concrete_channels`' 306 channels - read-only and identical for every
+  /// thread, so ONE device copy for the whole run (9,792 B), exactly as `LundTables` is one.
+  const bic::imr::ConcreteChannel* bic_channels = nullptr;
+  int n_bic_channels = 0;
+  /// FTFP's own pool, from `ftf::entry::build`. Same `n_slots`, same `tid`.
+  ftfe::Handle<ftfe::Workspace> ftf{};
+
+  __host__ __device__ InteractionSlot<real_t>* slot(int i) const {
+    return (slots != nullptr && i >= 0 && i < n_slots) ? &slots[i] : nullptr;
+  }
+  __host__ __device__ bool ok() const { return slots != nullptr && n_slots > 0; }
+};
+
+/// `bic::BicStorage` pointed at one slot's arrays. A value, built per call: `BicStorage` is
+/// thirteen pointers and two ints, and building it in the kernel keeps the pool a plain array
+/// of PODs with no device-side pointer fix-up.
+template <typename real_t>
+__host__ __device__ inline bic::BicStorage bic_storage_of(InteractionSlot<real_t>& s,
+                                                          const InteractionPool<real_t>& pool,
+                                                          const preco::PrecoWorkspace& pws) {
+  bic::BicStorage st;
+  st.nucleons = s.nucleons;
+  st.scratch.momentum = s.nucleus_mom;
+  st.scratch.fermi_p = s.fermi_p;
+  st.scratch.test_sums = s.sort_sums;
+  st.scratch.flat_block = s.flat_block;
+  st.scratch.capacity = 256;
+  st.proton_field = s.proton_field;
+  st.neutron_field = s.neutron_field;
+  st.field_capacity = bic::kMaxFieldTable;
+  st.cascade.pool = s.cascade_pool;
+  st.cascade.pool_capacity = 512;
+  st.cascade.collisions = s.collisions;
+  st.cascade.collision_capacity = 2048;
+  st.cascade.channels = pool.bic_channels;
+  st.cascade.n_channels = pool.n_bic_channels;
+  st.cascade.buffers = &s.cascade_buffers;
+  st.cascade.products = s.products;
+  st.cascade.product_capacity = 256;
+  st.cascade.preco_products = s.preco_products;
+  st.cascade.preco_capacity = 64;
+  st.preco = &pws;
+  return st;
+}
+
+/// `preco::PrecoWorkspace` pointed at one slot's arrays.
+template <typename real_t>
+__host__ __device__ inline preco::PrecoWorkspace preco_workspace_of(InteractionSlot<real_t>& s) {
+  preco::PrecoWorkspace w;
+  w.deex.evap_list = s.evap_list;
+  w.deex.evap_capacity = 4096;
+  w.deex.results = s.evap_results;
+  w.deex.results_capacity = 1024;
+  w.deex.step = s.evap_step;
+  w.deex.step_capacity = 512;
+  w.deex.products = s.deex_products;
+  w.deex.products_capacity = 1024;
+  w.products = s.preco_out;
+  w.products_capacity = 1024;
+  return w;
+}
+
+/// The DEFINITION mass of a secondary, which is what `FillResult`'s 1 keV shell test and
+/// `CheckResult`'s off-shell test compare the model's dynamic mass against.
+///
+/// Two branches and they are the two kinds of secondary a hadronic model emits. For a NUCLEUS
+/// (`a > 0`) it is `G4NucleiProperties::GetNuclearMass(A, Z)` with no excitation on it - the
+/// model's own `s.mass` carries `M + E*`, which is exactly the difference the shell test is
+/// looking at. For everything else it is `G4ParticleDefinition::GetPDGMass()`, from
+/// `core/particle.cuh`'s table by PDG code; a code with no row there answers with the model's
+/// own mass, which makes the test pass rather than inventing a number, and the secondary is
+/// refused at emission a few lines later anyway.
+template <typename real_t>
+__host__ __device__ inline real_t definition_mass_of(
+    const physics::hadronic::HadSecondary<real_t>& s) {
+  if (s.a > 0) { return static_cast<real_t>(deex::nuclear_mass(s.a, s.z)); }
+  const ParticleType t = particle_type_of_pdg(s.pdg);
+  if (t == ParticleType::kNumTypes) { return s.mass; }
+  return particle_def<real_t>(t).mass;
+}
+
+/// Moves a model's own final state into the slot's common one.
+///
+/// The Binary cascade and the light-ion reaction have final-state types of their OWN -
+/// `HadFinalState<double, 128>` both, through `bic::kBicMaxSecondaries` and
+/// `bic::kBlirMaxSecondaries` - while Bertini and FTFP fill the caller's. Rather than
+/// instantiate those two models at 256 (which would change a capacity two validated campaigns
+/// were run at), their answers are copied across here, and a source that produced more than the
+/// destination holds is counted rather than truncated.
+template <typename real_t, int kSrc, int kDst>
+__host__ __device__ inline void copy_final_state(
+    const physics::hadronic::HadFinalState<double, kSrc>& src,
+    physics::hadronic::HadFinalState<real_t, kDst>& dst) {
+  dst.clear();
+  dst.status = src.status;
+  dst.energy_change = static_cast<real_t>(src.energy_change);
+  dst.momentum_change = Vec3<real_t>{static_cast<real_t>(src.momentum_change.x),
+                                     static_cast<real_t>(src.momentum_change.y),
+                                     static_cast<real_t>(src.momentum_change.z)};
+  dst.local_energy_deposit = static_cast<real_t>(src.local_energy_deposit);
+  dst.secondary_overflow = src.secondary_overflow;
+  for (int i = 0; i < src.n_secondaries; ++i) {
+    const physics::hadronic::HadSecondary<double>& a = src.secondaries[i];
+    physics::hadronic::HadSecondary<real_t> b;
+    b.pdg = a.pdg;
+    b.z = a.z;
+    b.a = a.a;
+    b.mass = static_cast<real_t>(a.mass);
+    b.kin_energy = static_cast<real_t>(a.kin_energy);
+    b.direction = Vec3<real_t>{static_cast<real_t>(a.direction.x),
+                               static_cast<real_t>(a.direction.y),
+                               static_cast<real_t>(a.direction.z)};
+    b.time = static_cast<real_t>(a.time);
+    b.weight = static_cast<real_t>(a.weight);
+    b.creator_model_id = a.creator_model_id;
+    if (!dst.add_secondary(b)) { ++dst.secondary_overflow; }
+  }
+}
+
+/// What one queued interaction did. Every field is a number the run reports.
+struct InteractionOutcome {
+  bool ran = false;             ///< a final state was produced and applied
+  bool rejected_by_integral_xs = false;  ///< step 2 above: no interaction, the primary lives on
+  bool primary_survives = true; ///< FillResult said `fAlive` (or the model did nothing)
+  InelasticModel model = InelasticModel::kNone;
+  HadronicRefusal refusal = HadronicRefusal::kNumHadronicRefusals;  ///< kNum... = none
+  int n_secondaries = 0;
+  int n_emitted = 0;
+  int attempts = 0;             ///< the `do { } while(!result)` re-entry count
+  int target_z = 0, target_a = 0;
+};
+
+// =============================================================================================
+// The four arms
+// =============================================================================================
+
+/// Runs the chosen model once into `slot.fs` (or its own final state, copied across).
+///
+/// `__noinline__` and it is the whole reason this function exists separately: it is where the
+/// four 255-register, ten-to-thirteen-kilobyte frames meet, and keeping it out of the kernel
+/// body means the kernel's own frame is its locals and not their maximum plus its locals. The
+/// same argument `bic_deexcite_fragment` and `elastic_apply` each make in their own headers.
+///
+/// @return false when the model refused; `out.refusal` then names which.
+template <typename real_t, typename Rng>
+__host__ __device__ __noinline__ bool run_one_model(
+    InelasticModel model, const physics::hadronic::HadProjectile<real_t>& proj,
+    const physics::hadronic::HadNucleus& tgt, InteractionSlot<real_t>& s,
+    const InteractionPool<real_t>& pool, int slot_index, const data::LevelTable& lt,
+    const deex::FermiPool& fpool, Rng& rng, InteractionOutcome& out) {
+  const preco::PrecoWorkspace pws = preco_workspace_of<real_t>(s);
+  switch (model) {
+    case InelasticModel::kFtfp: {
+      ftfe::Report rep;
+      const ftfe::Status st =
+          ftfe::apply<real_t, kInteractionSecondaryCap>(pool.ftf, slot_index, proj, tgt, s.fs,
+                                                        rep, rng);
+      if (st == ftfe::Status::kRan) { return true; }
+      // `kPrimaryUnchanged` IS a final state - G4VPartonStringModel::Scatter's 1,000-attempt
+      // fallback returns the primary, and Geant4 calls that the answer with a JustWarning. It
+      // is booked under its own name rather than as a refusal, because treating it as "nothing
+      // happened" would be right and treating it as a hole would not.
+      out.refusal = (st == ftfe::Status::kNoWorkspaceSlot)
+                        ? HadronicRefusal::kInteractionNoSlot
+                        : HadronicRefusal::kFtfpRefused;
+      return false;
+    }
+    case InelasticModel::kBertini: {
+      const bert::CascadeParams par = bert::default_cascade_params();
+      const bert::InterfaceLimits lim = bert::default_interface_limits();
+      // `usePreCompoundDeexcitation()` on both instances QBBC's inelastic constructor builds
+      // (`theBERT` and `theBERT1`) and on the kaon/hyperon one from
+      // `G4HadronicBuilder::BuildFTFP_BERT`. The at-rest muon arm is the only kCascade one and
+      // it is `stopping::at_rest`'s, not this function's.
+      const bert::ApplyResult r = bert::apply_yourself<real_t, kInteractionSecondaryCap>(
+          proj, tgt, s.fs, bert::DeexciteChoice::kPreCompound, par, lim, s.bert_model,
+          s.co_global, s.co_out, s.co_dex, s.co_tmp, s.epo, s.bert_ws, lt, fpool, pws,
+          /*secondary_model_id=*/0, rng);
+      if (r.refusal == bert::InterfaceRefusal::kNone && !r.no_interaction) { return true; }
+      out.refusal = HadronicRefusal::kBertiniRefused;
+      return false;
+    }
+    case InelasticModel::kBinary: {
+      bic::BicRefusal ref;
+      bic::BicReport rep;
+      bic::apply_yourself(proj, tgt, lt, fpool, pws, bic_storage_of<real_t>(s, pool, pws), rng,
+                          s.bic_fs, ref, rep);
+      if (ref.species || ref.hydrogen || ref.preco_projectile || ref.capacity) {
+        // `hydrogen` is `Propagate1H1`, which P9 refused by name and P9e is writing; the other
+        // three are tripwires on a projectile this wiring should never send here.
+        out.refusal = ref.hydrogen ? HadronicRefusal::kBinaryHydrogenTarget
+                                   : HadronicRefusal::kBinaryRefused;
+        return false;
+      }
+      copy_final_state<real_t>(s.bic_fs, s.fs);
+      return true;
+    }
+    case InelasticModel::kLightIon: {
+      bic::BlirRefusal ref;
+      bic::blir_apply_yourself(proj, tgt, lt, fpool, pws, rng, s.blir_fs, ref);
+      if (ref.cascade) {
+        // `(mom.t()-mom.mag())/pA >= 50 MeV`: G4BinaryLightIonReaction::Interact, which P9e is
+        // writing. THE LARGEST NAMED HOLE P15 LEAVES - every ion above 50 MeV per nucleon - and
+        // the reason `alphaInelastic` and `ionInelastic` stay inactivated on the Geant4 side of
+        // the sweep. docs/B1_SWEEP.md has the measured rate per beam.
+        out.refusal = HadronicRefusal::kLightIonCascade;
+        return false;
+      }
+      if (ref.anti_or_hyper || ref.capacity) {
+        out.refusal = HadronicRefusal::kBinaryRefused;
+        return false;
+      }
+      // `no_fusion` is NOT a refusal: it is Geant4's own "too low energy for nuclei to fuse",
+      // and the final state is the primary unchanged and alive. The model said so and the
+      // model is right.
+      copy_final_state<real_t>(s.blir_fs, s.fs);
+      return true;
+    }
+    case InelasticModel::kNone:
+      out.refusal = HadronicRefusal::kNoInelasticModel;
+      return false;
+  }
+  out.refusal = HadronicRefusal::kNoInelasticModel;
+  return false;
+}
+
+// =============================================================================================
+// G4HadronicProcess::PostStepDoIt
+// =============================================================================================
+
+/// The in-flight arm: everything between "the interaction length won" and "the final state is
+/// in `slot.filled`".
+///
+/// Step by step against G4HadronicProcess.cc:324-482, and the ORDER of the three uniforms is
+/// the part that cannot be rearranged: the integral rejection first, then `SampleZandA`, then
+/// `ChooseHadronicInteraction`.
+///
+/// @param mxs  filled by this function, not by the caller: `PostStepDoIt` recomputes the cross
+///             section at the END of the step for a charged projectile and `SampleZandA` then
+///             draws the element from THOSE partial sums. Handing it the stepper's pre-step
+///             array would select an element by an energy the track no longer has, and nothing
+///             would complain - the same trap `elastic_apply`'s own note records.
+template <typename real_t, typename Rng>
+__host__ __device__ inline InteractionOutcome run_inelastic(
+    const physics::hadronic::HadProjectile<real_t>& proj, ParticleType species,
+    const data::Material<real_t>& mat, const InelasticTables<real_t>& xs_tables,
+    real_t xs_at_step_start, InteractionSlot<real_t>& s, const InteractionPool<real_t>& pool,
+    int slot_index, const data::LevelTable& lt, const deex::FermiPool& fpool, int proj_z,
+    int proj_a, Rng& rng) {
+  InteractionOutcome out;
+
+  // ---- 2. the integral-approach rejection, and it draws BEFORE anything else.
+  hxs::MaterialXs<real_t> mxs{};
+  const hxs::Projectile<real_t> pj = inelastic_projectile<real_t>(species, proj_z, proj_a);
+  const hp::HadXsType xt = inelastic_xs_type<real_t>(pj);
+  real_t xs_now = xs_at_step_start;
+  if (xt != hp::HadXsType::kNoIntegral) {
+    xs_now = inelastic_xs_per_volume<real_t>(xs_tables, mat, species, proj.kin_energy, proj_z,
+                                             proj_a, mxs);
+    if (hp::integral_xs_rejects<real_t>(xt, xs_now, xs_at_step_start, rng)) {
+      out.rejected_by_integral_xs = true;
+      return out;
+    }
+  } else {
+    // A NEUTRAL projectile takes no rejection and no recompute, which is `fHadNoIntegral`'s
+    // whole meaning - and it still needs the partial sums, because `SampleZandA` reads them.
+    // `PostStepDoIt` gets them from the data store's own cache; here the array is rebuilt at
+    // the same energy, which is the same number.
+    xs_now = inelastic_xs_per_volume<real_t>(xs_tables, mat, species, proj.kin_energy, proj_z,
+                                             proj_a, mxs);
+  }
+  if (!(xs_now > real_t(0)) || mxs.n_elements <= 0) {
+    // No cross section here: the species has no process, or P2 refuses its data set. The
+    // caller should never have drawn an interaction length, so this is a tripwire.
+    out.refusal = HadronicRefusal::kNoInelasticModel;
+    return out;
+  }
+
+  // ---- 3. the target.
+  const hxs::TargetZA tgt = inelastic_sample_target<real_t>(xs_tables, mat, species,
+                                                            proj.kin_energy, proj_z, proj_a,
+                                                            mxs, rng);
+  out.target_z = tgt.z;
+  out.target_a = tgt.a;
+  physics::hadronic::HadNucleus nucleus{tgt.z, tgt.a, 0};
+
+  // ---- 5. the model. One uniform if and only if two windows overlap here; see
+  // `inelastic_choice_draws`, which answers the same question without running the choice.
+  hp::ModelChoice status = hp::ModelChoice::kOk;
+  out.model = choose_inelastic_model<real_t>(species, proj.kin_energy, proj.baryon_number, rng,
+                                             status);
+  if (out.model == InelasticModel::kNone) {
+    out.refusal = HadronicRefusal::kNoInelasticModel;
+    return out;
+  }
+
+  // ---- 6. `do { ApplyYourself } while(!CheckResult)`, bounded at 100.
+  //
+  // The bound is Geant4's own `reentryCount > 100` and the disposal past it is not: Geant4
+  // raises the `had006` FatalException and a kernel cannot throw, so it is carried out by name.
+  constexpr int kMaxReentry = 100;
+  const physics::hadronic::FatalEnergyCheckLevels<real_t> levels{};
+  const real_t target_mass = static_cast<real_t>(deex::nuclear_mass(tgt.a, tgt.z));
+  bool accepted = false;
+  for (out.attempts = 0; out.attempts < kMaxReentry; ++out.attempts) {
+    if (!run_one_model<real_t>(out.model, proj, nucleus, s, pool, slot_index, lt, fpool, rng,
+                               out)) {
+      return out;  // the model refused by name; `out.refusal` says which
+    }
+    for (int i = 0; i < s.fs.n_secondaries; ++i) {
+      s.pdg_mass[i] = definition_mass_of<real_t>(s.fs.secondaries[i]);
+    }
+    real_t delta_e = real_t(0);
+    const physics::hadronic::CheckResultVerdict v =
+        physics::hadronic::check_result<real_t, kInteractionSecondaryCap>(
+            proj, target_mass, s.fs, levels, s.pdg_mass, &delta_e);
+    if (v == physics::hadronic::CheckResultVerdict::kAccept) {
+      accepted = true;
+      break;
+    }
+  }
+  if (!accepted) {
+    out.refusal = HadronicRefusal::kInelasticReentryExhausted;
+    return out;
+  }
+
+  // ---- 7. K0 and anti-K0 are mixed to K0S or K0L with ONE uniform each, drawn here and
+  // therefore part of the stream. `core/particle.cuh` has no row for 311/-311 either way, so
+  // the secondary is refused at emission whichever it becomes - but the DRAW happens, because
+  // Geant4 makes it and every later draw of this interaction depends on the position.
+  for (int i = 0; i < s.fs.n_secondaries; ++i) {
+    const int p = s.fs.secondaries[i].pdg;
+    if (p == 311 || p == -311) {
+      s.fs.secondaries[i].pdg = (rng.uniform() > real_t(0.5)) ? 310 : 130;
+    }
+  }
+
+  // ---- 8. FillResult. The direction it rotates the secondaries into is the TRACK's, which the
+  // caller supplies; the model built them about +z.
+  out.n_secondaries = s.fs.n_secondaries;
+  out.ran = true;
+  return out;
+}
+
+// =============================================================================================
+// G4HadronStoppingProcess::AtRestDoIt
+// =============================================================================================
+
+/// `stopping::fritiof_at_rest` with the workspace type widened, and that is the only difference.
+///
+/// P12's own helper is hard-typed on `entry::Handle<entry::HadronWorkspace>`, which is right for
+/// its campaign - an at-rest projectile is one anti-hadron, so `kMaxProjA = 1` saves 81,008
+/// bytes a slot. P15 has ONE pool serving both arms, and the in-flight arm needs
+/// `entry::Workspace` because a GenericIon above 3 GeV per nucleon goes to FTFP. `Workspace` is
+/// strictly the more capable of the two, so the at-rest arm runs in it unchanged.
+///
+/// A DEBT, stated: the day `stopping/stopping_process.cuh` templates `fritiof_at_rest` on the
+/// workspace type, this function goes and the call site takes P12's. It is written out here
+/// rather than by editing that file because P15 owns no model, and the four statuses it maps
+/// are `entry::Status`'s own - so a fifth status added to the contract breaks this switch at
+/// compile time rather than silently landing in the default arm.
+template <typename real_t, int kCap, typename Rng>
+__host__ __device__ inline stop::StoppingRefusal fritiof_at_rest_wide(
+    const ftfe::Handle<ftfe::Workspace>& h, int slot_index,
+    const physics::hadronic::HadProjectile<real_t>& proj,
+    const physics::hadronic::HadNucleus& target,
+    physics::hadronic::HadFinalState<real_t, kCap>& out, ftfe::Report& rep, Rng& rng) {
+  const ftfe::Status st = ftfe::apply(h, slot_index, proj, target, out, rep, rng);
+  switch (st) {
+    case ftfe::Status::kRan:             return stop::StoppingRefusal::kNone;
+    case ftfe::Status::kNoWorkspaceSlot: return stop::StoppingRefusal::kFtfNoSlot;
+    case ftfe::Status::kPrimaryUnchanged:return stop::StoppingRefusal::kFtfPrimaryUnchanged;
+    case ftfe::Status::kRefused:         break;
+  }
+  if (rep.refused == g4gpu::hadronic::ftf::FtfRefusal::kDecayStrongResonances) {
+    return stop::StoppingRefusal::kFtfResonanceDecay;
+  }
+  return stop::StoppingRefusal::kFtfRefused;
+}
+
+/// The at-rest arm: a stopped mu-, pi-, K-, Sigma-, Xi-, Omega-, pbar or nbar.
+///
+/// `stopping::at_rest` is P12's and is called whole. What this function supplies is the six
+/// pieces of caller storage it names - the Bertini arm's seven buffers, two final states, the
+/// nuclear mass function and the FTFP invoke - all out of one slot.
+///
+/// **THE FINAL STATE IS `fs`, NOT `nuclear_fs`.** `at_rest` builds the EM cascade's gammas and
+/// the bound decay's products into `fs`, runs the nuclear model into `nuclear_fs`, and merges;
+/// that split is docs/RISK.md V164's finding on the other side - `entry::apply` REPLACES the
+/// final state it is handed, so the atomic cascade's gammas have to be kept somewhere it does
+/// not reach.
+template <typename real_t, typename Rng, typename NuclearMassFn>
+__host__ __device__ __noinline__ InteractionOutcome run_at_rest(
+    const physics::hadronic::HadProjectile<real_t>& proj,
+    const physics::hadronic::MaterialComposition<real_t>& mat, InteractionSlot<real_t>& s,
+    const InteractionPool<real_t>& pool, int slot_index, const data::LevelTable& lt,
+    const deex::FermiPool& fpool, const NuclearMassFn& nuclear_mass, Rng& rng,
+    stop::AtRestResult& r) {
+  InteractionOutcome out;
+  const preco::PrecoWorkspace pws = preco_workspace_of<real_t>(s);
+
+  stop::BertiniArmState bs;
+  bs.model = &s.bert_model;
+  bs.ws = &s.bert_ws;
+  bs.global_out = &s.co_global;
+  bs.out = &s.co_out;
+  bs.dex_out = &s.co_dex;
+  bs.tmp = &s.co_tmp;
+  bs.epo = &s.epo;
+
+  const bert::CascadeParams par = bert::default_cascade_params();
+  const bert::InterfaceLimits lim = bert::default_interface_limits();
+
+  auto ftf_invoke = [&](const physics::hadronic::HadProjectile<real_t>& p,
+                        const physics::hadronic::HadNucleus& t,
+                        physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap>& o,
+                        Rng& g) -> stop::StoppingRefusal {
+    ftfe::Report rep;
+    return fritiof_at_rest_wide<real_t, kInteractionSecondaryCap>(pool.ftf, slot_index, p, t, o,
+                                                                  rep, g);
+  };
+
+  r = stop::at_rest<real_t, kInteractionSecondaryCap>(
+      proj, mat, s.fs, &s.nuclear_fs, par, lim, bs, lt, fpool, pws, nuclear_mass, ftf_invoke,
+      /*emc_model_id=*/0, /*nc_model_id=*/0, /*dio_model_id=*/0, rng);
+
+  out.target_z = r.z;
+  out.target_a = r.a;
+  out.n_secondaries = s.fs.n_secondaries;
+  if (r.refusal != stop::StoppingRefusal::kNone) {
+    out.refusal = (r.refusal == stop::StoppingRefusal::kFtfNoSlot)
+                      ? HadronicRefusal::kInteractionNoSlot
+                      : HadronicRefusal::kAtRestRefused;
+    // A refusal here still leaves the EM cascade's gammas in `fs`, and they are REAL: P12b
+    // asserted 1,080,164 of them survive the Fritiof arm. So the caller emits them anyway and
+    // the refusal says only that the NUCLEAR half is missing - which is what
+    // `AtRestResult::local_deposit_MeV` being the nuclear model's alone already says.
+    out.ran = (s.fs.n_secondaries > 0);
+    return out;
+  }
+  out.ran = true;
+  return out;
+}
+
+// =============================================================================================
+// Applying what came back
+// =============================================================================================
+
+/// Pushes a filled result's secondaries into the emitter and puts the primary where FillResult
+/// says it goes.
+///
+/// The mapping is `emit_decay_products`' with one addition: an inelastic model emits NUCLEI, and
+/// a nucleus is the one secondary whose species does not say what it is. `a > 0` goes through
+/// `push_nucleus`, which is what carries (Z, A) onto the track; everything else goes by PDG
+/// code, and a code `core/particle.cuh` has no row for is booked under
+/// `kInelasticSecondarySpecies` rather than dropped.
+///
+/// @return the number of secondaries that became tracks or bookings.
+template <typename real_t, typename Emitter>
+__host__ __device__ inline int emit_interaction_result(
+    const physics::hadronic::HadronicStepResult<real_t, kInteractionSecondaryCap>& r,
+    Emitter& em, const HadronicRefusalBooks& books) {
+  int emitted = 0;
+  for (int i = 0; i < r.n_secondaries; ++i) {
+    const physics::hadronic::HadSecondary<real_t>& q = r.secondaries[i];
+    if (q.a > 0) {
+      // A nucleus, including a bare proton or neutron a cascade reports as (Z=1,A=1)/(0,1).
+      // `push_nucleus` answers with one of the five light species or with kGenericIon carrying
+      // its own nuclide, which is exactly what `step_hadron` needs to step it.
+      em.push_nucleus(q.z, q.a, q.direction, q.kin_energy, 0);
+      ++emitted;
+      continue;
+    }
+    const ParticleType t = particle_type_of_pdg(q.pdg);
+    if (t == ParticleType::kNumTypes) {
+      book_refusal<real_t>(books, HadronicRefusal::kInelasticSecondarySpecies, q.kin_energy);
+      continue;
+    }
+    em.push(t, q.direction, q.kin_energy, 0);
+    ++emitted;
+  }
+  if (r.secondary_overflow > 0) {
+    book_refusal<real_t>(books, HadronicRefusal::kInelasticSecondaryOverflow, real_t(0));
+  }
+  return emitted;
+}
+
+}  // namespace g4gpu::had
