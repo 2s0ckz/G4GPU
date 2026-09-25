@@ -140,6 +140,19 @@ struct BicReport {
   double excitation_energy = 0.0;
   int fragment_a = 0;
   int fragment_z = 0;
+  /// `precompoundLorentzboost`, the boost `GetExcitationEnergy` left behind.
+  ///
+  /// The test needs it for the one case where GEANT4 ITSELF does not conserve energy: a residual
+  /// of A == 1 is emitted at its PDG mass and its excitation energy is thrown away.
+  /// `G4BinaryCascade::DeExcite`, the `GetA_asInt() <= 1` branch, builds the product with
+  /// `SetTotalEnergy(GetPDGMass())` and `SetMomentum(G4ThreeVector(0))` and lets
+  /// `ProductsAddPrecompound` boost it - so the product leaves with `gamma*m` where the residual
+  /// carried `gamma*(m + E*)`, and the event is short by exactly `gamma*E*`. Geant4's own
+  /// `debug_BIC_DeexcitationProducts` block prints that difference and calls it "delta E".
+  /// MEASURED: one event in 20,000 on 1.4 GeV neutrons on C12, 25.094 MeV against an excitation
+  /// of 20.832 and a gamma of 1.20455. Reporting the boost is what lets the test assert the
+  /// deficit EQUALS `gamma*E*` instead of excusing the event.
+  deex::Vec3d precompound_boost;
 };
 
 /// The `HadFinalState` width this model instantiates. A 1.4 GeV proton on lead makes a cascade of
@@ -330,6 +343,7 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
   rep.excitation_energy = pr.excitation_energy;
   rep.fragment_a = pr.fragment_a;
   rep.fragment_z = pr.fragment_z;
+  rep.precompound_boost = pr.precompound_boost;
 
   if (!have || pr.n_products == 0) {
     // "no interaction, return primary" - `isAlive`, with the primary's own energy and direction.

@@ -124,6 +124,11 @@ struct PropagateResult {
   imr::LorentzVector fragment_momentum;
   int collisions_applied = 0;  ///< `collisionCount` under debug_BIC_Propagate_Collisions
   int correct_rounds = 0;      ///< how many times CorrectFinalPandE ran, 0..5
+  /// `precompoundLorentzboost` as `GetExcitationEnergy` left it: the boost that takes a
+  /// precompound product from the residual's rest frame back to the lab. The A == 1 arm below
+  /// makes its product AT REST and relies on it, and the energy that arm discards is
+  /// `gamma*E*` with gamma from this vector - see BicReport::precompound_boost.
+  deex::Vec3d precompound_boost;
   int step_out_resets = 0;     ///< StepParticlesOut's `countreset`
   int loop_iterations = 0;     ///< 1000000 - collisionLoopMaxCount
   /// What `Capture`'s gate saw the LAST time it said yes, and how many times it did. The gate
@@ -430,6 +435,7 @@ __host__ __device__ inline PropagateResult propagate(
     } while (++ntry < 5 && excitation < 0.0);
   }
   out.excitation_energy = excitation;
+  out.precompound_boost = st.precompound_boost;
   if (excitation < 0.0) {
     // `ClearAndDestroy(products); return products;` - empty, and "FixMe" in the source.
     out.outcome = kPropagateNegativeExcitation;

@@ -468,13 +468,19 @@ struct TapeRng {
   __host__ __device__ double uniform() {
     if (n >= n_values || n >= kTapeMax) {
       // Past the end of the tape the port is asking for more than Geant4 did, which is already
-      // a failure - but it must be a REPORTED one and not a crash. A constant 0.5 is not safe
-      // to hand back: `CLHEP::RandGauss`\x27 polar method draws pairs until `v1*v1+v2*v2` is in
-      // (0, 1), and 0.5 gives v1 = v2 = 0 exactly, so the loop never ends and the `1/r2` behind
-      // it is a division by zero. MEASURED: a tape one try short sent the second
+      // a failure - but it must be a REPORTED one and not a crash. A CONSTANT is not safe to
+      // hand back, because most of what reads this is a rejection sampler and a constant is a
+      // fixed point of one. MEASURED, when the constant was 0.5: the polar Gaussian this file
+      // used to drive - `CLHEP::RandGauss`, which docs/RISK.md V180 replaced with the
+      // table-driven `RandGaussQ` Geant4 actually uses - draws pairs until
+      // `v1*v1 + v2*v2` is in (0, 1), and 0.5 gives v1 = v2 = 0 exactly, so the loop never ends
+      // and the `1/r2` behind it divides by zero; a tape one try short sent the second
       // `G4Fancy3DNucleus::Init` into NaN positions and the test died with an access violation
-      // (0xC0000005) before it printed a line. The ladder below never yields 0 or 1 and never
-      // gives a degenerate pair, so the run finishes and `overrun` says what happened.
+      // (0xC0000005) before it printed a line. That particular sampler is gone and the hazard is
+      // not: `G4FermiMomentum::GetMomentum` rejects until `|p| <= 1` and a constant 1.0 would
+      // spin forever, and `BetaKopylov` has a rejection loop of its own (V157). The ladder below
+      // never yields 0 or 1 and never repeats within 64 draws, so the run finishes and `overrun`
+      // says what happened.
       const double v = (2.0 * static_cast<double>(overrun % 64) + 1.0) / 128.0;
       ++overrun;
       ++n;

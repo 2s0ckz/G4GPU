@@ -260,6 +260,24 @@ bic::Nucleus3DScratch make_scratch() {
   return s;
 }
 
+/// An engine that serves a prescribed list of uniforms and then repeats its last value.
+///
+/// `bic_argorder.csv` is three uniforms and the vector Geant4 built from them, and the only way
+/// to read it back is to hand those three to the port in the same order the engine served them.
+/// Past the end it returns the last value rather than wrapping or asserting: a function that
+/// asked for a fourth would then be visible as a wrong answer, not as a crash.
+struct ListRng {
+  const double* v = nullptr;
+  int n = 0;
+  int i = 0;
+  __host__ __device__ double uniform() {
+    if (n <= 0) { return 0.5; }
+    const double x = v[(i < n) ? i : (n - 1)];
+    ++i;
+    return x;
+  }
+};
+
 /// One replayed nucleus: (A, Z) and the dumped nucleon list, assembled into the port's own
 /// `Nucleus3D` so that every function the cascade calls on a nucleus can be called on it.
 struct Replay {
@@ -780,6 +798,99 @@ int main() {
       moment("outer_radius", sum_router, sum_router2, kN);
       moment("total_momentum", sum_psum, sum_psum2, kN);
       moment("min_pair_distance", sum_dmin, sum_dmin2, kN);
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 10. CLHEP::RandGaussQ::transformQuick, bitwise
+  // -------------------------------------------------------------------------------------------
+  //
+  // `G4RandGauss` is `#define`d to `CLHEP::RandGaussQ` (Randomize.hh:47), so every Gaussian in
+  // G4Fancy3DNucleus is one uniform through a 1,250-entry inverse-CDF table with linear
+  // interpolation and a series tail. docs/RISK.md V180 is what implementing the OTHER class
+  // cost; this is the oracle for the replacement, and the comparison is EXACT because
+  // `transformQuick` truncates its result to float on the way out - a port that interpolated in
+  // double and kept it would agree to seven digits and diverge after, which for a replayed
+  // stream is the same as being wrong.
+  //
+  // The file covers all three branches (`r <= 2e-6` is the series, `2e-6 < r < 5e-4` the fine
+  // table, `r >= 5e-4` the coarse one), both mirrors about 0.5, and the values on either side
+  // of every boundary by name.
+  {
+    const int b = new_bucket("GaussQTransform", 0.0);
+    int n_small = 0, n_fine = 0, n_coarse = 0, n_upper = 0, n_zero = 0;
+    for (const auto& row : read_csv("bic_gaussq.csv")) {
+      const double r = dv(row, 0);
+      const double want = dv(row, 1);
+      cmp_abs(b, bic::rand_gauss_q_transform(r), want, "r = " + sv(row, 0));
+      const double rr = (r > 0.5) ? (1.0 - r) : r;
+      if (r > 0.5) { ++n_upper; }
+      if (want == 0.0) { ++n_zero; }
+      else if (rr <= bic::kGaussQTable0Step) { ++n_small; }
+      else if (rr < bic::kGaussQTable1Step) { ++n_fine; }
+      else { ++n_coarse; }
+    }
+    // The branch census, so a file that stopped covering a branch fails instead of passing
+    // quietly on the two branches it kept.
+    const int b_cov = new_bucket("GaussQCoverage", 0.0);
+    cmp_int(b_cov, n_small > 0, 1, "series-tail points");
+    cmp_int(b_cov, n_fine > 0, 1, "fine-table points");
+    cmp_int(b_cov, n_coarse > 0, 1, "coarse-table points");
+    cmp_int(b_cov, n_upper > 0, 1, "mirrored points");
+    cmp_int(b_cov, n_zero > 0, 1, "the exact-zero return at r = 0.5");
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // 11. Which argument of a call gets the first random number
+  // -------------------------------------------------------------------------------------------
+  //
+  // Geant4 samples both the Fermi momentum and the C12 cluster positions as one
+  // `G4ThreeVector(a, b, c)` whose three arguments each consume randomness, and the order a C++
+  // implementation evaluates them in is UNSPECIFIED. MSVC, which builds ref/oracle/, evaluates
+  // them RIGHT TO LEFT. `bic_argorder.csv` is the measurement: three uniforms as the engine
+  // served them, and the vector Geant4 built from them. docs/RISK.md V181.
+  //
+  // Reversing the triplet changes no draw count and no distribution - the |p| > 1 rejection is
+  // symmetric in the three components - so this file is the only thing in the suite that can
+  // fail when the order is wrong, and it is the thing that fails if the oracle is ever rebuilt
+  // with a compiler that evaluates left to right.
+  {
+    const int b = new_bucket("ArgumentOrder", 0.0);
+    int n_rows = 0;
+    for (const auto& row : read_csv("bic_argorder.csv")) {
+      const std::string which = sv(row, 0);
+      const double u[3] = {dv(row, 1), dv(row, 2), dv(row, 3)};
+      ListRng rng{u, 3, 0};
+      Vec3<double> got{0.0, 0.0, 0.0};
+      if (which == "uniform") {
+        got = bic::FermiMomentum::uniform_triplet(rng);
+      } else if (which == "gauss") {
+        // `Disp = 1` in the dump, so the row is the raw Gaussian triplet.
+        got = bic::gauss_triplet(rng, 1.0);
+      } else {
+        std::printf("ORACLE CHANGED: bic_argorder.csv has an unknown row \"%s\"\n",
+                    which.c_str());
+        ++fails;
+        continue;
+      }
+      ++n_rows;
+      cmp_abs(b, got.x, dv(row, 4), which + " x");
+      cmp_abs(b, got.y, dv(row, 5), which + " y");
+      cmp_abs(b, got.z, dv(row, 6), which + " z");
+      cmp_int(b, rng.i, 3, which + " draws");
+      // And the statement in words, so the failure says WHAT is wrong and not just that a
+      // number differs: the FIRST uniform is the LAST component.
+      if (which == "uniform" && std::fabs((2.0 * u[0] - 1.0) - dv(row, 6)) > 1e-15) {
+        std::printf("ORACLE CHANGED: bic_argorder.csv no longer has the first uniform in z - "
+                    "the compiler that built the oracle now evaluates arguments left to right, "
+                    "and fermi_momentum.cuh and fancy_3d_nucleus.cuh must be reversed. "
+                    "docs/RISK.md V181\n");
+        ++fails;
+      }
+    }
+    if (n_rows != 2) {
+      std::printf("bic_argorder.csv has %d usable rows, expected 2\n", n_rows);
+      ++fails;
     }
   }
 

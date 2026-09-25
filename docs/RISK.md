@@ -11555,3 +11555,155 @@ projectile whose nucleons have several hundred MeV/c of internal motion, which i
 more defensible answer and is not what Geant4 computes. This one is `Set4Momentum` winning a race
 with its own initialiser list; docs/RISK.md V69 is the same two members seen from the other side.
 
+### V180: G4RandGauss is RandGaussQ, and the port implements the other one
+
+`Randomize.hh`, line 47:
+
+```
+#define G4RandGauss CLHEP::RandGaussQ
+```
+
+Every `G4RandGauss::shoot(...)` in Geant4 is `CLHEP::RandGaussQ`, the TABLE-DRIVEN quick
+Gaussian - `transformQuick` on a 250-entry inverse-CDF table with a polynomial tail - and not
+`CLHEP::RandGauss`, the Box-Muller polar method. The two differ in three ways that all matter to
+a port that has to replay a recorded random stream:
+
+  * **one flat per value against two per pair.** `RandGaussQ::shoot()` is
+    `transformQuick(engine->flat())`: one uniform in, one Gaussian out. `RandGauss::shoot()`
+    draws pairs until `v1*v1 + v2*v2 <= 1`, so it costs 2/0.785 = 2.55 uniforms per PAIR of
+    values.
+  * **a cache that does not exist.** `RandGauss` returns `v2*fac` and stores `v1*fac` in the
+    process-wide static `nextGauss_st`, to be returned free by the next call. `RandGaussQ` has no
+    such state. `CLHEP::RandGauss::getFlag()` is therefore FALSE after any amount of
+    `G4RandGauss` work - measured, in `write_blir_interact`'s probe, after every one of the 20
+    projectile-nucleus builds.
+  * **different numbers.** Same engine, same position in the stream, different value.
+
+In `G4Fancy3DNucleus` the only user is the C12 alpha-cluster branch of `ChoosePositions` - three
+`G4RandGauss::shoot(0., Disp)` per nucleon position - so C12 is the only nucleus this touches,
+and it touches every C12 the port builds.
+
+**Nothing in the port's own test suite could see it, and that is the part worth keeping.**
+`bic_nucleons.csv` is a REPLAY set: the port loads Geant4's nucleons and checks the invariants
+`Init` guarantees - one binding energy per nucleon, zero total three-momentum, the hard-core
+exclusion, the proton and neutron counts, the outer radius. `bic_nucleus_stats.csv` compares the
+port's OWN sampling against Geant4's as a DISTRIBUTION, 20,000 nuclei a nuclide, and a Gaussian
+is a Gaussian whichever way it is generated. Between them they pin everything except the one
+thing that was wrong: that the port's sampler walks the same stream Geant4 walks.
+
+It surfaced only when `G4BinaryLightIonReaction::Interact` needed two `G4Fancy3DNucleus::Init`
+calls replayed back to back off a recorded tape. MEASURED, on the 20 events of
+`bic_blir_tape.csv`: a deuteron or alpha projectile is built bitwise - A = 2 and A = 4 never
+reach the cluster branch - and the C12 target that follows it consumes 174 uniforms where Geant4
+consumes 164, 220 where Geant4 takes 186, 122 where it takes 137; the nucleon positions differ
+from the first one, and the sorted set of radii differs by up to 0.6 fermi. A C12 built FIRST,
+from an untouched stream, differs the same way, which is what says the fault is the sampler and
+not the continuation.
+
+FIXED. `RandGaussQ::transformQuick` and `transformSmall` are transcribed into
+`fancy_3d_nucleus.cuh`, the 1,250-entry table is extracted by `tools/extract_randgaussq.pl` into
+`randgaussq_table.hh`, and `bic_gaussq.csv` is the oracle for the function itself - 4,027 points
+covering the series tail, both tables, both mirrors and every branch boundary by name. The port
+reproduces all 4,027 BITWISE, which is the standard the float truncation at the end of
+`transformQuick` sets: it interpolates in double and returns a `float`, so a port that kept the
+double would agree to seven digits and diverge after, and for a replayed stream that is the same
+as being wrong.
+
+Fixing it moved the C12 target's uniform count from 174 to 164 against Geant4's 164, and from
+220 to 186, and from 122 to 137 - exact on all twenty taped events. It did NOT make the nucleus
+agree: the positions were still out by up to 0.61 fermi with the count already right, which is
+V181.
+
+**TWO OTHER PACKAGES SAY THE SAME WRONG THING, and the lead should decide what to do about
+them; they are not P9's files and P9 has not touched them.** `grep -rl G4RandGauss` over the
+trees this project ports finds three users in QBBC's path: `G4Fancy3DNucleus` (this entry),
+`G4CompetitiveFission::EmittedFragment` and `G4UniversalFluctuation::SampleFluctuations`.
+
+  * `src/physics/hadronic/deexcitation/fission.cuh` carries a `GaussCache` and a `rand_gauss`
+    whose header says "CLHEP::RandGauss::shoot, and its cache ... Note which of the pair is
+    returned". Geant4 calls `G4RandGauss`, so there is no pair and no cache.
+  * `src/physics/em/fluctuation.cuh`'s `g4_gauss` says it "Stands in for G4RandGauss::shoot,
+    which is the same distribution by a different route (CLHEP caches the second deviate)".
+    Same correction.
+
+Neither is the same SEVERITY as this entry, and the reason is worth being precise about: both
+run on Philox, both are compared as DISTRIBUTIONS and neither is stream-comparable against
+Geant4 at all, so the draw count and the per-draw value are unobservable. What IS observable, at
+enough statistics, is that `transformQuick` is not an exact normal: it interpolates a
+1,250-entry table and truncates to float, so it is right to about 1e-7 relative, and its tail
+STOPS - `transformSmall` is entered below r = 2e-6 and the table's own last argument is 2e-6, so
+|z| never exceeds about 7.5 where an exact normal is unbounded. At 20,000 samples neither shows.
+The comments are wrong either way and should be corrected by whoever owns those files.
+
+### V181: which argument of a call gets the first random number, and the compiler decides
+
+`G4FermiMomentum.hh` line 59, the Fermi momentum of every nucleon of every nucleus the Binary
+cascade builds:
+
+```
+do {
+    p=G4ThreeVector(2.*G4UniformRand()-1.,
+                    2.*G4UniformRand()-1.,
+                    2.*G4UniformRand()-1.);
+    } while ( p.mag() > 1. );
+```
+
+`G4Fancy3DNucleus.cc` lines 383, 391, 410 and 429, the alpha-cluster positions of C12:
+
+```
+R1=G4ThreeVector(G4RandGauss::shoot(0.,Disp), G4RandGauss::shoot(0.,Disp),
+                 G4RandGauss::shoot(0.,Disp))*fermi + Corner1;
+```
+
+**The order in which a C++ implementation evaluates the three arguments of a function call is
+unspecified.** It is not left to right, it is not right to left, it is whatever the compiler
+chose; C++17 added only that the evaluations are indeterminately SEQUENCED, not that they are
+ordered. MSVC - the compiler that builds `ref/dumpbuild/Release/g4dump.exe`, and therefore the
+compiler that defines every number in `ref/oracle/` - evaluates them RIGHT TO LEFT. Geant4's `z`
+gets the first uniform off the stream and its `x` gets the third.
+
+So the port draws the last component first. `bic_argorder.csv` is the oracle that says so: two
+rows, one per call site, each recording the three uniforms in the order a tape engine served
+them and the three components that came out. It is not an assumption written into a comment; it
+is a measurement, and if the oracle is ever rebuilt with a compiler that evaluates left to right
+the file changes and `tests/test_bic_apply.cu` says so.
+
+**Why nothing could see it.** Reversing the triplet leaves the DRAW COUNT identical, because the
+rejection `|p| > 1` is symmetric in the three components and no trial is ever accepted or
+rejected differently. It leaves the DISTRIBUTION identical, because a sample uniform in the unit
+ball stays uniform in the unit ball when its components are permuted. `bic_nucleons.csv` is a
+replay set and `bic_nucleus_stats.csv` compares 20,000 nuclei a nuclide as a distribution;
+between them they check everything about `ChooseFermiMomenta` except which nucleon got which
+number. Only an oracle that replays a recorded stream can tell the difference, which is the
+second time in this package that has been the sentence worth keeping - V180 was the first.
+
+MEASURED, on the twenty taped events of `bic_blir_tape.csv`, one fix at a time:
+
+  * with `RandGaussQ` right and the Gaussian triplet drawn left to right, the C12 nucleus took
+    exactly the right number of uniforms and its nucleons were in the wrong places: the radius
+    of each nucleon, matched index by index against Geant4's, was out by up to 0.61 fermi
+    (0.297, 0.608 and 0.407 fm on the first three events). The corner offset `(Lbase/2, 0, 0)`
+    is along x only, so reversing the triplet changes a radius and not merely an orientation -
+    which is why the error survived the random rotation that follows.
+  * reversing it brought the positions to 4e-28 mm, which is double round-off on a 3 fm
+    coordinate, and the per-index radii to 8e-16 fm.
+  * the Fermi momenta were still wrong at that point, by up to 806 MeV/c summed over the three
+    components of one nucleon, with the draw count still exact. Reversing
+    `G4FermiMomentum::GetMomentum`'s triplet brought them to 3.7e-12 MeV/c.
+  * with both fixed, all twenty events of `G4BinaryLightIonReaction::ApplyYourself` replay the
+    tape exactly: 358 draws of 358, 1261 of 1261, 2114 of 2114, ... 20380 of 20380, every
+    nucleon of both nuclei bitwise, and the deuteron, alpha and C12 projectiles alike.
+
+**Where else this can bite.** The pattern is "two or more calls that consume randomness inside
+one argument list, or either side of one binary operator". A sweep of
+`source/processes/hadronic` and `source/processes/electromagnetic` in 11.1.1 finds it at
+`G4FermiMomentum.hh:59`, `G4Fancy3DNucleus.cc:383/391/410/429`, `G4LENDElastic.cc:85`,
+`G4LENDModel.cc:200`, `G4QMDReaction.cc:575`, `G4DNAIRT.cc:432`, `G4DNAMakeReaction.cc:168` and
+`G4DNAOneStepThermalizationModel.cc:141/248` - none of the last six is in QBBC's path for this
+project. The instances of the form `-std::log(G4UniformRand()*G4UniformRand())`
+(`G4Nucleus.cc:154`, `G4ModifiedTsai.cc:106`, `G4LivermoreNuclearGammaConversionModel.cc:374`)
+are safe, because multiplication of the two draws is commutative; `G4Nucleus.cc:158`,
+`-std::log(G4UniformRand()) - std::log(G4UniformRand())*ampl*ampl`, is NOT - the two operands of
+`-` are also unordered and they are not interchangeable - but it is inside
+`G4Nucleus::EvaporationEffects`, which `process.cuh` records as unreachable in QBBC's elastic
+scattering and which this port does not transcribe.

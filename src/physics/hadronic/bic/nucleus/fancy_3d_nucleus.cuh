@@ -1,8 +1,9 @@
 // G4Fancy3DNucleus - the nucleus every intra-nuclear model in QBBC is built on.
 //
 // Transcribed from G4Fancy3DNucleus.{hh,cc}, G4Fancy3DNucleusHelper.hh (hadronic/util) and
-// G4V3DNucleus.hh in 11.1.1, with CLHEP's RandGauss::shoot (externals/clhep/src/RandGauss.cc)
-// for the one branch that needs a Gaussian.
+// G4V3DNucleus.hh in 11.1.1, with CLHEP's RandGaussQ (externals/clhep/src/RandGaussQ.cc and
+// include/CLHEP/Random/gaussQTables.cdat) for the one branch that needs a Gaussian - NOT
+// RandGauss, which is a different class and a different stream; docs/RISK.md V180.
 //
 // It arranges A nucleons in position and momentum: `ChooseNucleons` decides which are protons,
 // `ChoosePositions` places them by rejection against a nuclear density with a hard-core
@@ -38,19 +39,26 @@
 //
 // 4. **The C12 cluster spread is a variance used as a standard deviation.** `Disp = 0.552`
 //    with the comment `// 0.91^2*2/3 fermi^2`, and `G4RandGauss::shoot(0., Disp)`'s second
-//    argument is a STANDARD DEVIATION (RandGauss.icc:25, `shoot()*stdDev + mean`). So the
+//    argument is a STANDARD DEVIATION (RandGaussQ.icc, `shoot()*stdDev + mean`). So the
 //    sampled displacement has sigma = 0.552 fm where the quoted parametrisation gives
 //    sigma = sqrt(0.552) = 0.743 fm - the clusters come out 26% tighter than the paper's.
 //    Reproduced as written; docs/RISK.md V68.
 //
-// 5. **The C12 branch's random stream depends on a process-wide latch.** CLHEP's
-//    `RandGauss::shoot` generates two deviates per polar-method trial and caches the second in
-//    a `CLHEP_THREAD_LOCAL` static (`set_st`, `nextGauss_st`). So whether the FIRST Gaussian of
-//    a C12 `Init` consumes two uniforms or none depends on how many Gaussians the process drew
-//    earlier - anywhere, in any model. The port keeps the latch in the scratch struct so that a
-//    caller that reuses one scratch reproduces the sequence, and a caller that does not gets a
-//    fresh latch; which of the two matches Geant4 depends on what else the run did.
-//    docs/RISK.md V68.
+// 5. **The C12 branch's Gaussian is `RandGaussQ`, and it has no state at all.** `G4RandGauss`
+//    is `#define`d to `CLHEP::RandGaussQ` in Randomize.hh line 47 - a 1,250-entry inverse-CDF
+//    table with linear interpolation and a series tail, ONE uniform per value - and NOT to
+//    `CLHEP::RandGauss`, the Box-Muller polar method, which costs 2.55 uniforms per PAIR and
+//    caches the second of each pair in a process-wide static. There is therefore no latch, no
+//    dependence on what the process drew earlier, and nothing about a C12 build that a shared
+//    scratch carries. This file implemented the polar method for as long as nothing replayed a
+//    recorded stream through two `Init` calls; docs/RISK.md V180 is what that cost and how it
+//    was found, and `bic_gaussq.csv` is the oracle for the replacement.
+//
+//    The three Gaussians go into the LAST component first, and so do the three uniforms of
+//    `G4FermiMomentum::GetMomentum`. Both are written in Geant4 as one `G4ThreeVector(a, b, c)`
+//    whose three arguments consume randomness, and the order a C++ implementation evaluates
+//    them in is unspecified: MSVC, which builds ref/oracle/, evaluates them right to left.
+//    `bic_argorder.csv` measures that rather than assuming it. docs/RISK.md V181.
 //
 // 6. **`ChoosePositions` draws from two streams, interleaved.** The trial position comes from a
 //    block of `min(600, 9*(A-i))` uniforms filled by `G4RandFlat::shootArray` and consumed from
@@ -79,6 +87,7 @@
 #include "data/g4pow.hh"
 #include "physics/hadronic/bic/nucleus/fermi_momentum.cuh"
 #include "physics/hadronic/bic/nucleus/nuclear_density.cuh"
+#include "physics/hadronic/bic/nucleus/randgaussq_table.hh"
 #include "physics/hadronic/bic/nucleus/nucleon.cuh"
 #include "physics/hadronic/deexcitation/nuclear_masses.cuh"
 
@@ -116,11 +125,11 @@ struct NucleusReport {
 };
 
 /// Scratch `Init` needs and the nucleus does not keep: G4Fancy3DNucleus holds these as data
-/// members so it can reuse their allocations, and they carry no state between calls.
-///
-/// The two Gaussian fields are the exception and are deliberately NOT scratch: they mirror
-/// CLHEP's `RandGauss::set_st` / `nextGauss_st` thread-local statics, so reusing one scratch
-/// across `init` calls is what reproduces a Geant4 run's stream. See note 5 in the header.
+/// members so it can reuse their allocations, and they carry NO state between calls - none of
+/// them, since V180. A caller may share one scratch between `nucleus_init` calls or give each
+/// call its own; the stream is identical either way, because the only field that ever carried
+/// state was mirroring a CLHEP static that the right Gaussian class does not have. See note 5
+/// in the header.
 struct Nucleus3DScratch {
   Vec3d* momentum = nullptr;           ///< [capacity] G4Fancy3DNucleus::momentum
   double* fermi_p = nullptr;           ///< [capacity] G4Fancy3DNucleus::fermiM
@@ -128,38 +137,122 @@ struct Nucleus3DScratch {
   double* flat_block = nullptr;        ///< [kFlatBlock] the G4RandFlat::shootArray buffer
   int capacity = 0;
 
-  bool gauss_cached = false;           ///< CLHEP RandGauss::set_st
-  double gauss_next = 0.0;             ///< CLHEP RandGauss::nextGauss_st
+  // No Gaussian cache: `G4RandGauss` is `RandGaussQ`, which has no state at all. There was
+  // one here, mirroring `CLHEP::RandGauss::set_st`, for as long as this file implemented the
+  // wrong class. docs/RISK.md V180.
 };
 
-/// CLHEP::RandGauss::shoot() (RandGauss.cc:62), the polar (Marsaglia) method, with its cache.
+/// `CLHEP::RandGaussQ::transformSmall(r)` - the tail, for `r <= 2e-6`, where the table stops.
 ///
-/// Returns `v2*fac` and caches `v1*fac`, in that order - not the other way round. Three
-/// consequences, all observable: a call consumes either two-or-more uniforms or zero; the
-/// FIRST of a pair returned is the second one computed; and the cache survives across calls.
-template <typename Rng>
-__host__ __device__ inline double rand_gauss_shoot(Nucleus3DScratch& s, Rng& rng) {
-  if (s.gauss_cached) {
-    s.gauss_cached = false;
-    return s.gauss_next;
+/// It solves the asymptotic expansion of the complementary error integral for `-v` by fixed-point
+/// iteration from a guess of 7.5, at most 50 times, stopping when two iterates agree to 1e-7.
+/// The series is carried to `13*11*9*7*5*3 / v^14` - further than the accuracy of the answer
+/// justifies, and the source says why: "to ensure smoothness with the table generator". It is
+/// reached less than once in half a million draws and is transcribed anyway, because a campaign
+/// of a million events reaches it twice.
+__host__ __device__ inline double rand_gauss_q_small(double r) {
+  const double eps = 1.0e-7;
+  double guess = 7.5;
+  double v = guess;
+  for (int i = 1; i < 50; ++i) {
+    const double vn2 = 1.0 / (guess * guess);
+    double s1 = -13.0 * 11.0 * 9.0 * 7.0 * 5.0 * 3.0 * vn2 * vn2 * vn2 * vn2 * vn2 * vn2 * vn2;
+    s1 += 11.0 * 9.0 * 7.0 * 5.0 * 3.0 * vn2 * vn2 * vn2 * vn2 * vn2 * vn2;
+    s1 += -9.0 * 7.0 * 5.0 * 3.0 * vn2 * vn2 * vn2 * vn2 * vn2;
+    s1 += 7.0 * 5.0 * 3.0 * vn2 * vn2 * vn2 * vn2;
+    s1 += -5.0 * 3.0 * vn2 * vn2 * vn2;
+    s1 += 3.0 * vn2 * vn2 - vn2 + 1.0;
+    v = std::sqrt(2.0 * std::log(s1 / (r * guess * std::sqrt(u::twopi<double>()))));
+    if (std::fabs(v - guess) < eps) { break; }
+    guess = v;
   }
-  double r, v1, v2;
-  do {
-    v1 = 2.0 * rng.uniform() - 1.0;
-    v2 = 2.0 * rng.uniform() - 1.0;
-    r = v1 * v1 + v2 * v2;
-  } while (r > 1.0);
-  const double fac = std::sqrt(-2.0 * std::log(r) / r);
-  s.gauss_next = v1 * fac;
-  s.gauss_cached = true;
-  return v2 * fac;
+  return -v;
 }
 
-/// `G4RandGauss::shoot(mean, stdDev)` = `shoot()*stdDev + mean` (RandGauss.icc:25).
+/// `CLHEP::RandGaussQ::transformQuick(r)` - **this is what `G4RandGauss::shoot()` is**.
+///
+/// `Randomize.hh` line 47 is `#define G4RandGauss CLHEP::RandGaussQ`, so every
+/// `G4RandGauss::shoot` in Geant4 is this: ONE uniform in, one Gaussian out, by table lookup and
+/// linear interpolation, with no state of any kind. It is NOT `CLHEP::RandGauss`, the Box-Muller
+/// polar method, which costs 2.55 uniforms per PAIR of values and caches the second of each pair
+/// in a process-wide static. This file used to implement that one; docs/RISK.md V180 is what
+/// that cost and how it was found.
+///
+/// Three branches, and the boundaries are exact comparisons:
+///
+///   * `r > 0.5` is mirrored to `1 - r` with the sign flipped, so the table only ever covers the
+///     lower half. `r == 0.5` is not special-cased here and does not need to be: it lands on the
+///     `index == Table1size` return of exactly zero.
+///   * `r >= 5e-4` indexes the coarse table, `index = int(2000 * r)`, and `int(2000 * 0.5)` is
+///     1000, which is the one value that returns 0.0 outright.
+///   * `2e-6 < r < 5e-4` indexes the fine table through `rr = r * 2000`, and below that the
+///     series above takes over.
+///
+/// **The result is cast to `float` before it is returned**, in CLHEP and here. The interpolation
+/// runs in double and the answer does not: a port that kept the double would agree with Geant4
+/// to about seven digits and then diverge, which for a replayed stream is the same as being
+/// wrong.
+__host__ __device__ inline double rand_gauss_q_transform(double r) {
+  double sign = 1.0;
+  if (r > 0.5) {
+    r = 1.0 - r;
+    sign = -1.0;
+  }
+  int index = 0;
+  double dx = 0.0;
+  if (r >= kGaussQTable1Step) {
+    index = static_cast<int>((kGaussQTable1Size << 1) * r);
+    if (index == kGaussQTable1Size) { return 0.0; }
+    dx = (kGaussQTable1Size << 1) * r - index;
+    index += kGaussQTable0Size - 1;   // Table1offset - 1
+  } else if (r > kGaussQTable0Step) {
+    const double rr = r * (1.0 / kGaussQTable1Step);   // Table0scale
+    index = static_cast<int>(kGaussQTable0Size * rr);
+    dx = kGaussQTable0Size * rr - index;
+    index += -1;                      // Table0offset - 1
+  } else {
+    return sign * rand_gauss_q_small(r);
+  }
+  const float* t = gauss_q_table();
+  const double y0 = t[index++];
+  const double y1 = t[index];
+  return static_cast<double>(static_cast<float>(sign * (y1 * dx + y0 * (1.0 - dx))));
+}
+
+/// The three Gaussians of `G4Fancy3DNucleus::ChoosePositions`'s C12 branch, as ONE call.
+///
+/// It is a named function for the same reason `FermiMomentum::uniform_triplet` is: the ORDER of
+/// the three draws is a fact about the oracle's compiler, `ref/oracle/bic_argorder.csv` is the
+/// measurement of it, and a test can only read that file back against something it can call.
+///
+/// THE LAST COMPONENT TAKES THE FIRST GAUSSIAN. Geant4 writes
+///
+///   R1 = G4ThreeVector(G4RandGauss::shoot(0.,Disp), G4RandGauss::shoot(0.,Disp),
+///                      G4RandGauss::shoot(0.,Disp))*fermi + Corner1;
+///
+/// and MSVC - the compiler that builds ref/oracle/ - evaluates a call's arguments right to
+/// left. Measured on the 20 events of bic_blir_tape.csv: drawing them left to right leaves the
+/// uniform COUNT of every C12 build exactly right and moves every nucleon by up to 0.61 fermi,
+/// because the corner offset `(Lbase/2, 0, 0)` is along x only and reversing the triplet changes
+/// a radius rather than only an orientation. docs/RISK.md V181.
 template <typename Rng>
-__host__ __device__ inline double rand_gauss_shoot(Nucleus3DScratch& s, Rng& rng, double mean,
-                                                   double std_dev) {
-  return rand_gauss_shoot(s, rng) * std_dev + mean;
+__host__ __device__ inline Vec3d gauss_triplet(Rng& rng, double disp) {
+  const double gz = rand_gauss_q(rng, 0.0, disp);
+  const double gy = rand_gauss_q(rng, 0.0, disp);
+  const double gx = rand_gauss_q(rng, 0.0, disp);
+  return Vec3d{gx, gy, gz};
+}
+
+/// `G4RandGauss::shoot()` and `G4RandGauss::shoot(mean, stdDev)`.
+template <typename Rng>
+__host__ __device__ inline double rand_gauss_q(Rng& rng) {
+  return rand_gauss_q_transform(rng.uniform());
+}
+
+template <typename Rng>
+__host__ __device__ inline double rand_gauss_q(Rng& rng, double mean, double std_dev) {
+  // `RandGaussQ::shoot(mean, stdDev)` is `transformQuick(flat())*stdDev + mean`, in that order.
+  return rand_gauss_q_transform(rng.uniform()) * std_dev + mean;
 }
 
 /// G4Fancy3DNucleus. The nucleon array is the caller's; everything else is by value.
@@ -471,11 +564,7 @@ __host__ __device__ inline bool choose_positions_c12(Nucleus3D& nuc, Nucleus3DSc
                            Vec3d{0.0, l_base * 0.866, 0.0}};
 
   // The first nucleon of the first cluster: no overlap test.
-  {
-    const Vec3d g{rand_gauss_shoot(sc, rng, 0.0, disp), rand_gauss_shoot(sc, rng, 0.0, disp),
-                  rand_gauss_shoot(sc, rng, 0.0, disp)};
-    nuc.nucleons[0].position = g * deex::fermi() + corner[0];
-  }
+  nuc.nucleons[0].position = gauss_triplet(rng, disp) * deex::fermi() + corner[0];
 
   for (int cluster = 0; cluster < 3; ++cluster) {
     const int first = (cluster == 0) ? 1 : 4 * cluster;
@@ -484,9 +573,7 @@ __host__ __device__ inline bool choose_positions_c12(Nucleus3D& nuc, Nucleus3DSc
     for (int ii = first; ii < last; ++ii) {
       bool cont;
       do {
-        const Vec3d g{rand_gauss_shoot(sc, rng, 0.0, disp), rand_gauss_shoot(sc, rng, 0.0, disp),
-                      rand_gauss_shoot(sc, rng, 0.0, disp)};
-        nuc.nucleons[ii].position = g * deex::fermi() + corner[cluster];
+        nuc.nucleons[ii].position = gauss_triplet(rng, disp) * deex::fermi() + corner[cluster];
         cont = false;
         for (int jj = 0; jj < ii; ++jj) {
           const Vec3d d = nuc.nucleons[ii].position - nuc.nucleons[jj].position;

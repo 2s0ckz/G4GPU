@@ -61,6 +61,31 @@ struct FermiMomentum {
            data::g4pow_a13<double>(density * static_cast<double>(the_a));
   }
 
+  /// ONE TRIAL of `G4FermiMomentum::GetMomentum`'s rejection loop: a point in the cube.
+  ///
+  /// It is a named function and not three lines inside the loop below because the ORDER of the
+  /// three draws is a fact about the oracle's compiler and has to be testable on its own.
+  /// `ref/oracle/bic_argorder.csv` is three uniforms and the vector Geant4 built from them;
+  /// this is what reads that file back.
+  ///
+  /// THE LAST COMPONENT TAKES THE FIRST UNIFORM. Geant4 writes the trial as one expression,
+  ///
+  ///   p = G4ThreeVector(2.*G4UniformRand()-1., 2.*G4UniformRand()-1., 2.*G4UniformRand()-1.);
+  ///
+  /// and the order in which the three arguments of a function call are evaluated is UNSPECIFIED
+  /// in C++. The MSVC build that produces ref/oracle/ evaluates them RIGHT TO LEFT: Geant4's z
+  /// gets the first uniform off the stream and its x gets the third. Drawing them left to right
+  /// consumes exactly the same number of uniforms - the rejection |p| > 1 is symmetric in the
+  /// three components, so no trial is ever accepted or rejected differently - and returns a
+  /// different vector every time. docs/RISK.md V181.
+  template <typename Rng>
+  __host__ __device__ static Vec3<double> uniform_triplet(Rng& rng) {
+    const double pz = 2.0 * rng.uniform() - 1.0;
+    const double py = 2.0 * rng.uniform() - 1.0;
+    const double px = 2.0 * rng.uniform() - 1.0;
+    return Vec3<double>{px, py, pz};
+  }
+
   /// G4FermiMomentum::GetMomentum(density, maxMomentum = -1).
   ///
   /// Three uniforms per trial, rejecting outside the unit ball, then scaled by `maxMomentum` -
@@ -73,8 +98,7 @@ struct FermiMomentum {
     if (max_momentum < 0.0) { max_momentum = fermi_momentum(density); }
     Vec3<double> p{0.0, 0.0, 0.0};
     do {
-      p = Vec3<double>{2.0 * rng.uniform() - 1.0, 2.0 * rng.uniform() - 1.0,
-                       2.0 * rng.uniform() - 1.0};
+      p = uniform_triplet(rng);
     } while (g4gpu::mag(p) > 1.0);
     return p * max_momentum;
   }

@@ -3774,7 +3774,12 @@ void write_blir_interact() {
   // source's two lines. Without it, a port whose cascade is right and whose deuteron is one
   // Gaussian out looks exactly like a port whose cascade is wrong.
   FILE* q = std::fopen("bic_blir_init.csv", "w");
-  std::fprintf(q, "case,ev,draws_proj,draws_tgt,r_proj,r_tgt,impactmax,ax,ay,posz\n");
+  std::fprintf(q, "case,ev,draws_proj,draws_tgt,r_proj,r_tgt,impactmax,ax,ay,posz,gaussflag\n");
+  // And the two nuclei themselves, nucleon by nucleon. The draw counts say THAT the two builds
+  // diverge; these say WHERE - a position that differs is `ChoosePositions`, a momentum that
+  // differs with the positions equal is `ChooseFermiMomenta`.
+  FILE* nn = std::fopen("bic_blir_initnuc.csv", "w");
+  std::fprintf(nn, "case,ev,which,i,pdg,x,y,z,px,py,pz,e\n");
 
   auto* eng = new ImrTapeEngine(20260919L);
   CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
@@ -3796,17 +3801,49 @@ void write_blir_interact() {
         pn->Init(c.pa, c.pz);
         pn->CenterNucleons();
         const int draws_proj = static_cast<int>(probe->tape().size());
+        // CLHEP caches the second value of every Gaussian PAIR in a process-wide static, and
+        // `Init` does not reset it - so whether the target nucleus's first Gaussian costs two
+        // draws or none depends on what the projectile's build left behind. `getFlag()` is the
+        // public name of that static.
+        const int gauss_flag = CLHEP::RandGauss::getFlag() ? 1 : 0;
         auto* tn = new G4Fancy3DNucleus;
         tn->Init(c.ta, c.tz);
         const int draws_tgt = static_cast<int>(probe->tape().size()) - draws_proj;
+        auto dump_nuc = [&](G4Fancy3DNucleus* n, const char* which) {
+          n->StartLoop();
+          G4Nucleon* a = nullptr;
+          int i = 0;
+          while ((a = n->GetNextNucleon()) != nullptr) {
+            const G4LorentzVector& m = a->GetMomentum();
+            std::fprintf(nn, "%s,%d,%s,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                         c.name, ev, which, i, a->GetDefinition()->GetPDGEncoding(),
+                         a->GetPosition().x(), a->GetPosition().y(), a->GetPosition().z(),
+                         m.x(), m.y(), m.z(), m.t());
+            ++i;
+          }
+        };
+        // And the TARGET built FIRST, from a fresh engine at the same seed. If the port
+        // reproduces this one and not the one built second, the two disagree about
+        // CONTINUING a stream and not about building a nucleus.
+        {
+          auto* probe0 = new ImrTapeEngine(20260919L + 977 * ev + c.ta * 31 + c.pa);
+          CLHEP::HepRandom::setTheEngine(probe0);
+          auto* t0 = new G4Fancy3DNucleus;
+          t0->Init(c.ta, c.tz);
+          dump_nuc(t0, "tgtfirst");
+          CLHEP::HepRandom::setTheEngine(probe);
+          delete probe0;
+        }
+        dump_nuc(pn, "proj");
+        dump_nuc(tn, "tgt");
         const double rp = pn->GetOuterRadius();
         const double rt = tn->GetOuterRadius();
         const double imax = rt + rp;
         const double ax = (2. * G4UniformRand() - 1.) * imax;
         const double ay = (2. * G4UniformRand() - 1.) * imax;
-        std::fprintf(q, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", c.name, ev,
+        std::fprintf(q, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", c.name, ev,
                      draws_proj, draws_tgt, rp, rt, imax, ax, ay,
-                     -2. * imax - 5. * fermi);
+                     -2. * imax - 5. * fermi, gauss_flag);
         CLHEP::HepRandom::setTheEngine(saved);
         delete probe;
         // pn and tn are LEAKED, for the reason write_imr_pauli gives.
@@ -3844,6 +3881,230 @@ void write_blir_interact() {
   std::fclose(g);
   std::fclose(h);
   std::fclose(q);
+  std::fclose(nn);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CLHEP::RandGaussQ::transformQuick, and the order a compiler evaluates three arguments in
+// ---------------------------------------------------------------------------------------------
+//
+// `Randomize.hh` line 47 is `#define G4RandGauss CLHEP::RandGaussQ`, so every
+// `G4RandGauss::shoot()` in Geant4 is one uniform through a 1,250-entry inverse-CDF table with
+// linear interpolation and a series tail - not the Box-Muller polar method of
+// `CLHEP::RandGauss`. docs/RISK.md V180 is what assuming otherwise cost. The port transcribes
+// `transformQuick` (fancy_3d_nucleus.cuh) and extracts the table (tools/extract_randgaussq.pl),
+// and this is the oracle for the transcription: the function is new port code and a table
+// lookup with three branches, two mirrors and a float truncation on the way out has four places
+// to be off by one bin and no physics test that would notice.
+//
+// `transformQuick` is protected, so it is reached through a derived class - which is legal and
+// is the whole reason the access level is protected rather than private.
+namespace {
+struct GaussQProbe : public CLHEP::RandGaussQ {
+  GaussQProbe() : CLHEP::RandGaussQ(*CLHEP::HepRandom::getTheEngine()) {}
+  static G4double tq(G4double r) { return transformQuick(r); }
+};
+}  // namespace
+
+void write_gaussq() {
+  FILE* f = std::fopen("bic_gaussq.csv", "w");
+  std::fprintf(f, "r,v\n");
+  // The three branches and both mirrors, then a sweep. `r <= 2e-6` is `transformSmall`, the
+  // series; `2e-6 < r < 5e-4` is the fine table; `r >= 5e-4` is the coarse one; `r > 0.5` is
+  // mirrored to `1-r` with the sign flipped. The boundaries are exact comparisons in CLHEP, so
+  // the values on either side of each of them are here by name rather than by luck of a grid.
+  const double kEdges[] = {
+    1e-300, 1e-14, 1e-9, 1.9999e-6, 2e-6, 2.0001e-6, 1e-5, 1e-4, 4.9999e-4, 5e-4, 5.0001e-4,
+    1e-3, 0.01, 0.1, 0.25, 0.4, 0.49999, 0.4999999, 0.5, 0.50001, 0.6, 0.9, 0.999, 0.9999,
+    0.99999, 1.0 - 1e-6, 1.0 - 2e-6, 1.0 - 1e-9,
+  };
+  for (double r : kEdges) { std::fprintf(f, "%.17g,%.17g\n", r, GaussQProbe::tq(r)); }
+  for (int i = 1; i < 4000; ++i) {
+    const double r = i / 4000.0;
+    std::fprintf(f, "%.17g,%.17g\n", r, GaussQProbe::tq(r));
+  }
+  std::fclose(f);
+}
+
+/// bic_argorder.csv - WHICH ARGUMENT OF A CALL GETS THE FIRST RANDOM NUMBER.
+///
+/// Geant4 samples a random three-vector as one expression in two places this package ports:
+///
+///   G4FermiMomentum.hh:59   p = G4ThreeVector(2.*G4UniformRand()-1., ..., ...);
+///   G4Fancy3DNucleus.cc:383 R1 = G4ThreeVector(G4RandGauss::shoot(0.,Disp), ..., ...);
+///
+/// The order in which a C++ implementation evaluates the arguments of a function call is
+/// UNSPECIFIED, so which component gets the first number off the stream is a property of the
+/// compiler that built the oracle and not of Geant4. It is also invisible to every test that
+/// does not replay a recorded stream: the rejection `|p| > 1` is symmetric in the three
+/// components, so the DRAW COUNT and the DISTRIBUTION are identical either way and only the
+/// event-by-event correspondence changes. docs/RISK.md V181.
+///
+/// So it is measured here, against a tape, rather than assumed: the row records the three
+/// uniforms in the order the engine served them and the three components that came out. A test
+/// that reads this file learns the order; if the oracle is ever rebuilt with a compiler that
+/// evaluates left to right, the file changes and the test says so instead of the port going
+/// quietly wrong in the sixth digit of every nucleon momentum.
+void write_argorder() {
+  FILE* f = std::fopen("bic_argorder.csv", "w");
+  std::fprintf(f, "which,u0,u1,u2,x,y,z\n");
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  {
+    auto* eng = new ImrTapeEngine(20260919L);
+    CLHEP::HepRandom::setTheEngine(eng);
+    // Exactly G4FermiMomentum::GetMomentum's line, with nothing between the three calls.
+    const G4ThreeVector p(2. * G4UniformRand() - 1., 2. * G4UniformRand() - 1.,
+                          2. * G4UniformRand() - 1.);
+    const std::vector<double>& t = eng->tape();
+    std::fprintf(f, "uniform,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", t[0], t[1], t[2], p.x(),
+                 p.y(), p.z());
+    delete eng;
+  }
+  {
+    auto* eng = new ImrTapeEngine(20260919L);
+    CLHEP::HepRandom::setTheEngine(eng);
+    // And G4Fancy3DNucleus::ChoosePositions's line, with Disp = 1 so the row is the raw
+    // Gaussian and the test can check the transform and the order in the same comparison.
+    const G4ThreeVector g(G4RandGauss::shoot(0., 1.), G4RandGauss::shoot(0., 1.),
+                          G4RandGauss::shoot(0., 1.));
+    const std::vector<double>& t = eng->tape();
+    std::fprintf(f, "gauss,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", t[0], t[1], t[2], g.x(),
+                 g.y(), g.z());
+    delete eng;
+  }
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The ion campaign: G4BinaryLightIonReaction::ApplyYourself ABOVE the fusion gate
+// ---------------------------------------------------------------------------------------------
+//
+// bic_blirapply.csv and bic_blirapply_status.csv, with the columns of bic_blir.csv so that
+// tests/test_bic_apply.cu reads all four files with one reader.
+//
+// {d, alpha, C12} at {50, 200, 1000} MeV/nucleon on {C12, O16, Al27, Fe56} - thirty-six cases -
+// and then Fe56 on Al27 and on Fe56 at 200 and 1000 MeV/nucleon. The last four are the reason
+// this port exists: a galactic-cosmic-ray iron nucleus on aluminium shielding is the case the
+// AstroRad work is about, and an iron projectile is a G4GenericIon that QBBC hands to
+// G4BinaryLightIonReaction up to 6 GeV/nucleon like any other.
+//
+// 50 MeV/nucleon is ON the gate, deliberately. `G4BinaryLightIonReaction::ApplyYourself` tests
+//
+//     if (pInitialState.e()/pInitialState.m() - 1. < 50*MeV/938*MeV) ... fusion ...
+//
+// on the SWAPPED system, so which arm a 50 MeV/nucleon row takes is the oracle's to say and not
+// this comment's; the status column records it.
+void write_blir_apply() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  auto* blir = new G4BinaryLightIonReaction(preco);
+  blir->SetMinEnergy(0.0);
+  blir->SetMaxEnergy(6.0 * CLHEP::GeV);
+  G4IonTable* ions = G4IonTable::GetIonTable();
+
+  struct ACase { int pz, pa; double ekin_per_a; int tz, ta; const char* name; };
+  std::vector<ACase> cases;
+  {
+    const int kProj[3][2] = {{1, 2}, {2, 4}, {6, 12}};
+    const char* kProjName[3] = {"d", "a", "C12"};
+    const double kE[3] = {50.0, 200.0, 1000.0};
+    const int kTgt[4][2] = {{6, 12}, {8, 16}, {13, 27}, {26, 56}};
+    const char* kTgtName[4] = {"C12", "O16", "Al27", "Fe56"};
+    for (int p = 0; p < 3; ++p) {
+      for (int e = 0; e < 3; ++e) {
+        for (int t = 0; t < 4; ++t) {
+          char* nm = new char[64];   // leaked on purpose: the table outlives the loop
+          std::snprintf(nm, 64, "ic_%s%d_%s", kProjName[p], int(kE[e]), kTgtName[t]);
+          cases.push_back({kProj[p][0], kProj[p][1], kE[e], kTgt[t][0], kTgt[t][1], nm});
+        }
+      }
+    }
+    cases.push_back({26, 56,  200.0, 13, 27, "ic_Fe56_200_Al27"});
+    cases.push_back({26, 56, 1000.0, 13, 27, "ic_Fe56_1000_Al27"});
+    cases.push_back({26, 56,  200.0, 26, 56, "ic_Fe56_200_Fe56"});
+    cases.push_back({26, 56, 1000.0, 26, 56, "ic_Fe56_1000_Fe56"});
+  }
+  const int kN = 20000;
+
+  FILE* f = std::fopen("bic_blirapply.csv", "w");
+  std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
+                  "mean_mult2\n");
+  FILE* g = std::fopen("bic_blirapply_status.csv", "w");
+  std::fprintf(g, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,status,n_secondaries,sum_z,sum_a,"
+                  "mean_e_MeV,mean_pz_MeV,mean_mult\n");
+
+  for (const ACase& c : cases) {
+    const G4ParticleDefinition* part = ions->GetIon(c.pz, c.pa, 0.0);
+    if (part == nullptr) {
+      std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,NO_ION,0,0,0,0,0,0\n", c.name, c.pz, c.pa,
+                   c.ekin_per_a, c.tz, c.ta, kN);
+      continue;
+    }
+    CLHEP::HepRandom::setTheSeed(777000L + c.pa * 1000 + c.ta * 7 + G4int(c.ekin_per_a));
+
+    std::map<int, long long> count;
+    std::map<int, double> sum_e, sum_e2, sum_k2;
+    std::map<int, int> per_event;
+    long long n_alive = 0, n_kill = 0, n_sec = 0, n_null = 0;
+    long long sum_z = -1, sum_a = -1;
+    bool za_varies = false;
+    double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+
+    for (int n = 0; n < kN; ++n) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin_per_a * c.pa * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      G4HadFinalState* r = blir->ApplyYourself(proj, nucleus);
+      if (r == nullptr) { ++n_null; continue; }
+      if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
+      ++n_kill;
+      per_event.clear();
+      long long ez = 0, ea = 0;
+      G4LorentzVector tot(0., 0., 0., 0.);
+      const std::size_t ns = r->GetNumberOfSecondaries();
+      n_sec += static_cast<long long>(ns);
+      for (std::size_t i = 0; i < ns; ++i) {
+        const G4DynamicParticle* p = r->GetSecondary(i)->GetParticle();
+        const int pdg = p->GetDefinition()->GetPDGEncoding();
+        const double ekin = p->GetKineticEnergy() / MeV;
+        ++count[pdg];
+        sum_e[pdg] += ekin;
+        sum_e2[pdg] += ekin * ekin;
+        ++per_event[pdg];
+        tot += p->Get4Momentum();
+        if (pdg > 1000000000) {
+          ea += (pdg / 10) % 1000;
+          ez += (pdg / 10000) % 1000;
+        } else if (pdg == 2112) { ea += 1; }
+        else if (pdg == 2212) { ea += 1; ez += 1; }
+      }
+      for (const auto& kv : per_event) { sum_k2[kv.first] += double(kv.second) * kv.second; }
+      if (sum_z < 0) { sum_z = ez; sum_a = ea; }
+      else if (ez != sum_z || ea != sum_a) { za_varies = true; }
+      sum_tot_e += tot.e() / MeV;
+      sum_tot_pz += tot.z() / MeV;
+    }
+
+    const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
+    const char* status = (n_alive == kN) ? "isAlive"
+                                         : ((n_kill == kN) ? "stopAndKill" : "MIXED");
+    std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g\n", c.name,
+                 c.pz, c.pa, c.ekin_per_a, c.tz, c.ta, kN, status, n_sec,
+                 za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
+                 sum_tot_pz / nk, double(n_sec) / nk);
+    for (const auto& kv : count) {
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, c.pz,
+                   c.pa, c.ekin_per_a, c.tz, c.ta, kN, kv.first, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second),
+                   sum_k2[kv.first] / nk);
+    }
+    std::printf("  blirapply %-20s alive %lld kill %lld null %lld mult %.2f\n", c.name, n_alive,
+                n_kill, n_null, double(n_sec) / nk);
+    std::fflush(stdout);
+  }
+  std::fclose(f);
+  std::fclose(g);
 }
 
 void dump_bic(const DumpContext&) {
@@ -3879,7 +4140,10 @@ void dump_bic(const DumpContext&) {
   write_imr_boundary();
   write_imr_fps();
   write_imr_propagate();
+  write_gaussq();
+  write_argorder();
   write_blir_interact();
+  write_blir_apply();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
   write_imr_scatterlife();
@@ -3909,5 +4173,7 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv "
                     "bic_imr_boundary.csv bic_imr_prop.csv bic_imr_propnuc.csv "
                     "bic_imr_proptape.csv bic_imr_propfs.csv bic_imr_propdiag.csv "
-                    "bic_blir_tape.csv bic_blir_tapeval.csv bic_blir_tapefs.csv bic_blir_init.csv",
+                    "bic_blir_tape.csv bic_blir_tapeval.csv bic_blir_tapefs.csv bic_blir_init.csv "
+                    "bic_blir_initnuc.csv bic_gaussq.csv bic_argorder.csv "
+                    "bic_blirapply.csv bic_blirapply_status.csv",
                     dump_bic);

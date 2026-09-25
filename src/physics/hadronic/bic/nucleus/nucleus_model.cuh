@@ -25,9 +25,26 @@
 //     if (rep.fatal()) { ... }   // nothing was built; the nucleus is empty
 //
 // Nothing here allocates and nothing here is a local array: a nucleus is up to 250 nucleons of
-// 72 bytes each, which is 18 kB and does not belong in a kernel's frame. The scratch may be
-// shared between successive `nucleus_init` calls and SHOULD be, because it carries the Gaussian
-// latch that CLHEP keeps in a thread-local static - see note 5 in `fancy_3d_nucleus.cuh`.
+// 72 bytes each, which is 18 kB and does not belong in a kernel's frame. The scratch MAY be
+// shared between successive `nucleus_init` calls and it does not matter either way: it carries
+// no state between calls. It used to carry a Gaussian latch, because this package implemented
+// `CLHEP::RandGauss` where Geant4 uses `CLHEP::RandGaussQ`, which has no such state; the two
+// fields are gone and the struct is two doubles smaller. docs/RISK.md V180, and see note 5 in
+// `fancy_3d_nucleus.cuh`.
+//
+// **What changed under this contract on 2026-09-19, for a caller that compares against an
+// oracle event by event.** Nothing in the SHAPE of a call changed except those two fields, and
+// nothing in any DISTRIBUTION changed. What changed is which random numbers come out:
+//
+//   * every C12 built anywhere now walks Geant4's stream (V180): a different number of uniforms
+//     and different nucleon positions. No other nuclide has a Gaussian in its position sampler.
+//   * every nucleon of EVERY nuclide now gets a different Fermi momentum vector (V181) - the
+//     same number of draws, the same distribution, the three components reversed.
+//
+// A caller whose test is a distribution, a histogram or a moment sees no difference. A caller
+// whose test replays a recorded Geant4 stream - which is the only kind of test that could ever
+// have caught either bug - must re-measure. Nothing in `ref/oracle/` changes: the oracle is
+// Geant4 and Geant4 did not move.
 //
 // `Rng` needs one member: `double uniform()`, in (0,1). `core/rng.cuh`'s `Philox<double>` has it.
 //
