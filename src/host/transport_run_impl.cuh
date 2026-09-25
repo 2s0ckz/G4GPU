@@ -923,17 +923,30 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     // directly into the storage a placement new names, so nothing is copied and nothing is on
     // the stack.
     //
-    // The direction it rotates into is `q.dir_pre`, THE STEP'S PRE-STEP DIRECTION, which is
-    // what `G4HadronicProcess::FillResult` uses - `aT.GetMomentumDirection()` on a track whose
-    // direction the along-step scattering has already changed... and that is exactly why the
-    // queue carries it: the model built its final state about +z relative to the projectile,
-    // and the projectile's direction at the interaction point is `p.dir`, not `q.dir_pre`.
-    // `p.dir` is the one passed. `q.dir_pre` is for the step hook.
+    // THE DIRECTION IT ROTATES INTO IS `p.dir` FOR AN IN-FLIGHT INTERACTION AND +z FOR AN
+    // AT-REST ONE, and the second is not a shortcut.
+    //
+    // `G4HadronicProcess::FillResult` rotates every secondary by `aT.GetMomentumDirection()`,
+    // because an inelastic model builds its final state about +z relative to the projectile.
+    // The projectile's direction at the interaction point is `p.dir` - what the step's own
+    // multiple scattering left it with - and not `q.dir_pre`, which the queue carries for the
+    // step hook.
+    //
+    // `G4HadronStoppingProcess::AtRestDoIt` does NO such rotation: it adds the EM cascade's
+    // gammas, the bound decay's products and the nuclear model's secondaries to the particle
+    // change directly, because a stopped particle has no direction to rotate about.
+    // `stopping::at_rest` builds them in the lab frame for the same reason. Passing `p.dir`
+    // here would turn every at-rest capture through the arbitrary direction the track happened
+    // to stop with - harmless for an isotropic distribution and wrong for the code, so +z it
+    // is, which makes `rotate_uz` the identity.
+    const Vec3<real_t> fill_dir = (q.kind == had::InteractionKind::kAtRest)
+                                      ? Vec3<real_t>{real_t(0), real_t(0), real_t(1)}
+                                      : p.dir;
     ::new (&slot->filled)
         physics::hadronic::HadronicStepResult<real_t, had::kInteractionSecondaryCap>(
             physics::hadronic::fill_result<real_t, had::kInteractionSecondaryCap,
                                            had::kInteractionSecondaryCap>(
-                slot->fs, p.dir, p.global_time, p.weight,
+                slot->fs, fill_dir, p.global_time, p.weight,
                 /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), slot->pdg_mass));
     edep += slot->filled.local_energy_deposit;
     srep.non_ionizing += slot->filled.non_ionizing_energy_deposit;
@@ -970,6 +983,12 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
 
   ++p.step;
   p.advance(srep.true_length, q.ekin_pre, track_mass);
+  // Whether the NEXT step of this track starts on a boundary. `run_step_hadron` does this and
+  // the interaction kernel has to as well, because it is the kernel that writes the track out:
+  // a queued step ended on the interaction and not on geometry, so the flag is CLEARED, and a
+  // surviving primary that kept a stale `kFirstStepInVolume` would tell the next step's
+  // multiple scattering to refresh its `fMinimal` limit at a boundary it never crossed.
+  p.flags &= ~kFirstStepInVolume;
   if (edep != real_t(0) && q.score_slot >= 0) {
     atomicAdd(&score[static_cast<size_t>(q.score_slot) * batch + p.event],
               static_cast<double>(edep));

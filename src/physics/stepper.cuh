@@ -1902,18 +1902,21 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
                  (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1,
                  static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
                  inel_xs, had::bucket_of_model(model), model);
-      if (model == had::InelasticModel::kNone) {
-        // `G4EnergyRangeManager` found no model in range, or more than two competing, or two
-        // nested - Geant4's `had005` FatalException. A tripwire on the transcribed windows; see
-        // `kNoInelasticModel`.
-        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
-      }
       if (!ok) {
-        // The proof in `interaction_queue.cuh`'s header says this cannot happen at the default
-        // capacity. If it does, the interaction is lost and the track is killed with its
-        // kinetic energy deposited locally - the conservative disposal, and NOT what Geant4
-        // does with it.
-        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+        // TWO DIFFERENT FAILURES AND THEY GET DIFFERENT NAMES, which is what a ledger is for.
+        // No model in range is `G4EnergyRangeManager` finding nothing, or more than two
+        // competing, or two nested - Geant4's `had005` FatalException, and a tripwire on the
+        // transcribed windows. A full queue is a capacity, and `interaction_queue.cuh`'s header
+        // has the proof that it cannot happen at the default one. Booking BOTH for either, as
+        // this did first, would trip the capacity tripwire on a windows bug.
+        had::book_refusal<real_t>(
+            had.books,
+            (model == had::InelasticModel::kNone) ? had::HadronicRefusal::kNoInelasticModel
+                                                  : had::HadronicRefusal::kInelasticQueueFull,
+            p.ekin);
+        // And the SIZE counter either way: the interaction happened and no final state came of
+        // it. The track is killed with its kinetic energy deposited locally - the conservative
+        // disposal, and NOT what Geant4 does with it.
         had::book_refusal<real_t>(had.books, had::HadronicRefusal::kChargedHadronInelastic,
                                   p.ekin);
         rep.status = StepStatus::fStopAndKill;
@@ -2365,18 +2368,22 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
       const had::InelasticModel model =
           had::choose_inelastic_model<real_t>(type, p.ekin, had::baryon_number_of(type, 0), rng,
                                               mstat);
-      if (model == had::InelasticModel::kNone) {
-        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
-      } else if (had::enqueue_interaction<real_t>(
-                     had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
-                     pos_before, dir_pre, volume_pre,
-                     scores ? s.geometry.volumes[p.volume].score_index : -1,
-                     static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
-                     real_t(0), had::bucket_of_model(model), model)) {
+      if (model != had::InelasticModel::kNone
+          && had::enqueue_interaction<real_t>(
+                 had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
+                 pos_before, dir_pre, volume_pre,
+                 scores ? s.geometry.volumes[p.volume].score_index : -1,
+                 static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
+                 real_t(0), had::bucket_of_model(model), model)) {
         if (queued != nullptr) { *queued = true; }
         return false;
       }
-      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+      // Two different failures, two different names - see the same block in `step_hadron`.
+      had::book_refusal<real_t>(
+          had.books,
+          (model == had::InelasticModel::kNone) ? had::HadronicRefusal::kNoInelasticModel
+                                                : had::HadronicRefusal::kInelasticQueueFull,
+          p.ekin);
     }
     // No queue (a run built without the interaction pool), or the queue was full: the disposal
     // this branch has used since P8d, with its counter.
