@@ -34,11 +34,12 @@
 #include <vector>
 
 #include "core/particle.cuh"
+#include "core/rand_gauss_q.cuh"
 #include "core/units.cuh"
 #include "core/vec3.cuh"
 #include "data/g4spline.hh"
 #include "data/materials.cuh"
-#include "physics/em/urban_msc.cuh"   // urban_gauss, kFacRange, kFacSafety
+#include "physics/em/urban_msc.cuh"   // kFacRange, kFacSafety
 #include "data/mott.hh"
 #include "physics/em/wentzel_xs.cuh"
 
@@ -581,11 +582,15 @@ __host__ __device__ inline WentzelScatterResult<real_t> wv_sample_scattering(
       const real_t vy1 = sint * sin(phi);
 
       if (lat_displacement) {
+        // G4WentzelVIModel.cc:658-659, two statements and so two draws in a FIXED order - x
+        // takes the first uniform and y the second - each `G4RandGauss::shoot(rndmEngine, 0.0,
+        // 1.0)`, which is RandGaussQ: one uniform apiece, two per sub-step. Until P17 these were
+        // Urban's Box-Muller pair, four uniforms per sub-step. docs/RISK.md V180 and V185.
         constexpr real_t invsqrt12 = real_t(1) / real_t(3.4641016151377544);  // 1/sqrt(12)
         const real_t rms = invsqrt12 * sqrt(real_t(2) * z0);
         const real_t r = x0 * mscfac;
-        const real_t dx = r * (real_t(0.5) * vx1 + rms * urban_gauss(real_t(0), real_t(1), rng));
-        const real_t dy = r * (real_t(0.5) * vy1 + rms * urban_gauss(real_t(0), real_t(1), rng));
+        const real_t dx = r * (real_t(0.5) * vx1 + rms * rand_gauss_q(rng, real_t(0), real_t(1)));
+        const real_t dy = r * (real_t(0.5) * vy1 + rms * rand_gauss_q(rng, real_t(0), real_t(1)));
         const real_t d = r * r - dx * dx - dy * dy;
         if (d >= real_t(0)) {
           const Vec3<real_t> t{dx, dy, sqrt(d) - r};

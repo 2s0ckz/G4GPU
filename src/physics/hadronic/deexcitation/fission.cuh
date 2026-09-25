@@ -1,8 +1,10 @@
 // Competitive fission: channel 1 of the 68, open only for A >= 65 and Z > 16.
 //
 // Transcribed from G4CompetitiveFission, G4FissionBarrier, G4FissionProbability,
-// G4FissionLevelDensityParameter and G4FissionParameters (11.1.1), with CLHEP::RandGauss's
-// polar sampler under the two Gaussians the mass and charge split need.
+// G4FissionLevelDensityParameter and G4FissionParameters (11.1.1), with CLHEP::RandGaussQ -
+// which is what `G4RandGauss` is - under the two Gaussians the charge and the kinetic energy
+// need, through the shared core/rand_gauss_q.cuh. docs/RISK.md V185: this line said
+// "CLHEP::RandGauss's polar sampler" until P17, and the code did what it said.
 //
 // The chain is short and each link is a different kind of object:
 //
@@ -42,6 +44,7 @@
 
 #include <cmath>
 
+#include "core/rand_gauss_q.cuh"
 #include "core/units.cuh"
 #include "data/g4pow.hh"
 #include "data/level_data.cuh"
@@ -54,46 +57,18 @@ namespace g4gpu::deex {
 
 namespace u = g4gpu::units;
 
-/// CLHEP::RandGauss::shoot, and its cache.
-///
-/// The polar (Marsaglia) method produces two standard normals per accepted pair and CLHEP
-/// keeps the spare in a static, returning it on the next call - so RandGauss is stateful and
-/// the state is global in Geant4. It is carried here on a small object instead, because a
-/// device kernel cannot have a mutable global and because a hidden global would make two
-/// fission events in flight interfere.
-///
-/// Note which of the pair is returned: `val = v1*fac` is CACHED and `v2*fac` is returned. The
-/// order matters for a stream comparison and is reproduced, even though this port's engine is
-/// Philox and Geant4's is HepJamesRandom, so no stream comparison is possible in either case -
-/// the distribution is what is compared, and its tails come out of the same rejection.
-struct GaussCache {
-  bool has_spare = false;
-  double spare = 0.0;
-};
-
-template <typename Rng>
-__host__ __device__ inline double rand_gauss(GaussCache& g, Rng& rng) {
-  if (g.has_spare) {
-    g.has_spare = false;
-    return g.spare;
-  }
-  double r, v1, v2;
-  do {
-    v1 = 2.0 * rng.uniform() - 1.0;
-    v2 = 2.0 * rng.uniform() - 1.0;
-    r = v1 * v1 + v2 * v2;
-  } while (r > 1.0);
-  const double fac = std::sqrt(-2.0 * std::log(r) / r);
-  g.spare = v1 * fac;
-  g.has_spare = true;
-  return v2 * fac;
-}
-
-template <typename Rng>
-__host__ __device__ inline double rand_gauss(GaussCache& g, Rng& rng, double mean,
-                                             double std_dev) {
-  return rand_gauss(g, rng) * std_dev + mean;
-}
+// G4CompetitiveFission's two Gaussians are `G4RandGauss::shoot(Zmean, sigma)` (.cc:292, in
+// FissionCharge) and `G4RandGauss::shoot(TaverageAfMax, ESigma)` (.cc:363, in
+// FissionKineticEnergy), and `G4RandGauss` is `CLHEP::RandGaussQ` (Randomize.hh:47):
+// `transformQuick(flat())*stdDev + mean`, ONE uniform per value, no pair and no state. Both
+// call core/rand_gauss_q.cuh.
+//
+// Until P17 this file carried `CLHEP::RandGauss` instead - the polar method, with a
+// `GaussCache` threaded through both samplers to hold the spare of each pair, and a comment
+// saying which of the pair was cached "matters for a stream comparison and is reproduced".
+// It was the other class: Geant4 has no pair here and no cache, and the polar method drew
+// 2.55 uniforms per pair where RandGaussQ draws one per value. The cache and its parameter are
+// gone. docs/RISK.md V180 found the same fault in the Binary cascade, and V185 is this one.
 
 // ---------------------------------------------------------------------------------------------
 // G4FissionBarrier
@@ -355,9 +330,9 @@ __host__ __device__ inline int fission_atomic_number(const FissionParameters& p,
 /// G4CompetitiveFission::FissionCharge - a Gaussian of width 0.6 about (Af/A)*Z + DeltaZ,
 /// rejected until it lands in [1, Z-1] and at or below Af. DeltaZ interpolates between +0.45
 /// and -0.45 across the A = 134 shell, which is the charge polarisation of the fission valley.
+/// One `G4RandGauss::shoot(Zmean, sigma)` - one uniform - per trial.
 template <typename Rng>
-__host__ __device__ inline int fission_charge(GaussCache& g, int A, int Z, double Af,
-                                              Rng& rng) {
+__host__ __device__ inline int fission_charge(int A, int Z, double Af, Rng& rng) {
   const double sigma = 0.6;
   double delta_z;
   if (Af >= 134.0) { delta_z = -0.45; }
@@ -367,7 +342,7 @@ __host__ __device__ inline int fission_charge(GaussCache& g, int A, int Z, doubl
   const double zmean = (Af / A) * Z + delta_z;
   double the_z;
   do {
-    the_z = rand_gauss(g, rng, zmean, sigma);
+    the_z = rand_gauss_q(rng, zmean, sigma);
   } while (the_z < 1.0 || the_z > (Z - 1.0) || the_z > Af);
   return static_cast<int>(std::nearbyint(the_z));
 }
@@ -403,10 +378,13 @@ __host__ __device__ inline double fission_symmetric_ratio(int A, double A11) {
 /// failures the function returns Eaverage itself - not the last draw. That fall-back is a
 /// spike in the spectrum at Eaverage and it is reached whenever Tmax is below
 /// Eaverage - 3.72 sigma, i.e. for a fragment with too little energy to fission comfortably.
+///
+/// Draws: one uniform for the mode, then one `G4RandGauss::shoot(TaverageAfMax, ESigma)` - one
+/// uniform - per trial.
 template <typename Rng>
-__host__ __device__ inline double fission_kinetic_energy(const FissionParameters& p,
-                                                          GaussCache& g, int A, int Z, int Af1,
-                                                          int Af2, double Tmax, Rng& rng) {
+__host__ __device__ inline double fission_kinetic_energy(const FissionParameters& p, int A,
+                                                          int Z, int Af1, int Af2, double Tmax,
+                                                          Rng& rng) {
   const int af_max = (Af1 > Af2) ? Af1 : Af2;
 
   double Pas = 0.0;
@@ -456,7 +434,7 @@ __host__ __device__ inline double fission_kinetic_energy(const FissionParameters
   double ke;
   int i = 0;
   do {
-    ke = rand_gauss(g, rng, t_average, ESigma);
+    ke = rand_gauss_q(rng, t_average, ESigma);
     if (++i > 100) { return Eaverage; }
   } while (ke < Eaverage - 3.72 * ESigma || ke > Eaverage + 3.72 * ESigma || ke > Tmax);
   return ke;
@@ -494,7 +472,6 @@ __host__ __device__ inline FissionProducts fission_emitted_fragment(const Fissio
   FissionParameters p;
   p.define(A, Z, U - pcorr, s.barrier);
 
-  GaussCache g;
   int A1 = 0, Z1 = 0, A2 = 0, Z2 = 0;
   double M1 = 0.0, M2 = 0.0;
   double frag_exc = 0.0;
@@ -502,7 +479,7 @@ __host__ __device__ inline FissionProducts fission_emitted_fragment(const Fissio
   int trials = 0;
   do {
     A1 = fission_atomic_number(p, A, rng);
-    Z1 = fission_charge(g, A, Z, static_cast<double>(A1), rng);
+    Z1 = fission_charge(A, Z, static_cast<double>(A1), rng);
     M1 = deex::nuclear_mass(A1, Z1);
 
     A2 = A - A1;
@@ -517,7 +494,7 @@ __host__ __device__ inline FissionProducts fission_emitted_fragment(const Fissio
       frag_exc = -1.0;
       continue;
     }
-    frag_ke = fission_kinetic_energy(p, g, A, Z, A1, A2, Tmax, rng);
+    frag_ke = fission_kinetic_energy(p, A, Z, A1, A2, Tmax, rng);
     frag_exc = Tmax - frag_ke + pcorr;
   } while (frag_exc < 0.0 && ++trials < 100);
 

@@ -40,6 +40,7 @@
 #include <cmath>
 
 #include "core/particle.cuh"
+#include "core/rand_gauss_q.cuh"
 #include "data/g4pow.hh"
 #include "data/materials.cuh"
 #include "data/yang_fluctuation.hh"
@@ -271,10 +272,16 @@ __host__ __device__ inline real_t sample_ion_fluctuation(
   if (sn >= real_t(2)) {
     // Gaussian, truncated to (0, 2*meanLoss) by rejection - which is what keeps the sampled
     // mean equal to the mean handed in, since the truncation is symmetric about it.
+    //
+    // `G4RandGauss::shoot(rndmEngine, meanLoss, siga)` (G4IonFluctuations.cc:149), and
+    // `G4RandGauss` is `CLHEP::RandGaussQ`: one uniform per trial, through the shared
+    // core/rand_gauss_q.cuh. This called the Universal model's Box-Muller pair until P17: two
+    // uniforms a trial, and an exact normal where Geant4's has a variance of 1.000135.
+    // docs/RISK.md V180 and V185.
     real_t loss;
     int guard = 0;
     do {
-      loss = g4_gauss<real_t>(mean_loss, siga, rng);
+      loss = rand_gauss_q(rng, mean_loss, siga);
       if (++guard > 1000) { return mean_loss; }
     } while (loss < real_t(0) || loss > two_mean);
     return loss;

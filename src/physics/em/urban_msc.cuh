@@ -44,6 +44,7 @@
 // `ref/oracle/ion_msc_sample.csv`. See tests/test_ion_msc.cu.
 #pragma once
 #include <cmath>
+#include "core/rand_gauss_q.cuh"
 #include "core/units.cuh"
 #include "core/vec3.cuh"
 #include "data/materials.cuh"
@@ -692,12 +693,15 @@ __host__ __device__ inline real_t urban_tlimitmin(const UrbanCoeffs<real_t>& c, 
   return fmax(x, kTlimitMinFix<real_t>());
 }
 
-/// Gaussian deviate, for Randomizetlimit. Box-Muller; only one of the pair is used.
-template <typename real_t, typename Rng>
-__host__ __device__ inline real_t urban_gauss(real_t mean, real_t sigma, Rng& rng) {
-  const real_t u1 = rng.uniform(), u2 = rng.uniform();
-  return mean + sigma * sqrt(real_t(-2) * log(u1)) * cos(units::twopi<real_t>() * u2);
-}
+// `Randomizetlimit`'s Gaussian (G4UrbanMscModel.hh:220) is
+//
+//     res = G4RandGauss::shoot(rndmEngineMod, tlimit, 0.1*(tlimit-tlimitmin));
+//
+// and `G4RandGauss` is `CLHEP::RandGaussQ` (Randomize.hh:47): ONE uniform, through the shared
+// core/rand_gauss_q.cuh, at both step-limit branches below. This file had its own `urban_gauss`
+// here until P17, a Box-Muller pair whose comment said "only one of the pair is used" - true of
+// the values, and it still drew both uniforms, so every randomised step limit cost two where
+// Geant4's costs one. docs/RISK.md V180 and V185.
 
 /// Step limitation, transcribed from the fUseSafety branch of ComputeTruePathLengthLimit.
 /// G4EmParameters defaults mscStepLimit to fUseSafety, and G4EmStandardPhysics - the EM
@@ -727,10 +731,10 @@ __host__ __device__ inline real_t urban_step_limit(const UrbanCoeffs<real_t>& c,
   real_t tlimit = (range > safety) ? fmax(tlimit_base, kFacSafety<real_t>() * safety) : range;
   tlimit = fmax(tlimit, tlimitmin);
   if (tlimit >= range) { return range; }
-  // Randomizetlimit
+  // Randomizetlimit - one G4RandGauss, one uniform
   real_t res = tlimitmin;
   if (tlimit > tlimitmin) {
-    res = fmax(urban_gauss(tlimit, real_t(0.1) * (tlimit - tlimitmin), rng), tlimitmin);
+    res = fmax(rand_gauss_q(rng, tlimit, real_t(0.1) * (tlimit - tlimitmin)), tlimitmin);
   }
   return fmin(range, res);
 }
@@ -794,10 +798,10 @@ __host__ __device__ inline real_t urban_step_limit_heavy(const UrbanCoeffs<real_
   }
   if (!(tlimit > real_t(0))) { return t_path; }  // still geombig: the track has no limit yet
   if (tlimit >= t_path) { return t_path; }
-  // Randomizetlimit
+  // Randomizetlimit - one G4RandGauss, one uniform
   real_t res = tlimitmin;
   if (tlimit > tlimitmin) {
-    res = fmax(urban_gauss(tlimit, real_t(0.1) * (tlimit - tlimitmin), rng), tlimitmin);
+    res = fmax(rand_gauss_q(rng, tlimit, real_t(0.1) * (tlimit - tlimitmin)), tlimitmin);
   }
   return fmin(t_path, res);
 }

@@ -17,6 +17,14 @@
 // Gamma deviate. Both are below, and both are transcriptions rather than inventions - G4Poisson
 // exactly, G4RandGamma by algorithm rather than by line, since its result only has to have the
 // right distribution and its internal rejection sequence is not observable.
+//
+// The Gaussian is NOT made here. SampleFluctuations (G4UniversalFluctuation.cc:138) and
+// SampleGauss (G4UniversalFluctuation.hh:156) both call `G4RandGauss::shoot(rndm, mean, sigma)`,
+// and `G4RandGauss` is `CLHEP::RandGaussQ` (Randomize.hh:47): one uniform per value, through the
+// shared transcription in core/rand_gauss_q.cuh. Until P17 this file drew a Box-Muller pair at
+// both sites, under a comment calling it "the same distribution by a different route"; it is
+// not the same distribution (RandGaussQ's variance is 1.000135) and it was two uniforms where
+// Geant4 takes one. docs/RISK.md V180 and V185.
 #pragma once
 #include <cmath>
 
@@ -28,6 +36,7 @@
 #endif
 
 #include "core/particle.cuh"
+#include "core/rand_gauss_q.cuh"
 #include "core/units.cuh"
 #include "data/materials.cuh"
 #include "physics/em/electron_processes.cuh"  // twopi_mc2_rcl2
@@ -64,13 +73,20 @@ __host__ __device__ inline int g4_poisson(real_t mean, Rng& rng) {
   return static_cast<int>(fmin(value, kLimit));
 }
 
-/// Gaussian deviate, Box-Muller. Stands in for G4RandGauss::shoot, which is the same
-/// distribution by a different route (CLHEP caches the second deviate; nothing here can
-/// observe that, and caching across a device thread's step would be worse than not).
+/// The standard normal inside `g4_gamma`'s Marsaglia-Tsang rejection, by Box-Muller - and NOT a
+/// `G4RandGauss` site, which is why it is not `rand_gauss_q`.
+///
+/// `G4RandGamma` is `CLHEP::RandGamma`, and `RandGamma::genGamma` draws the normal its
+/// algorithm GD needs INLINE, by the polar method (RandGamma.cc:130-134); nothing in it calls
+/// `G4RandGauss`. `g4_gamma` below is a surrogate for that function by distribution, not a
+/// transcription of it, and Marsaglia-Tsang is exact only on an exact normal, which RandGaussQ
+/// is not (docs/RISK.md V185). So this stays what it was - `g4_gauss(0, 1)` before P17, the
+/// same Box-Muller pair to the bit - and the surrogate itself is refused by name there rather
+/// than changed here.
 template <typename real_t, typename Rng>
-__host__ __device__ inline real_t g4_gauss(real_t mean, real_t sigma, Rng& rng) {
+__host__ __device__ inline real_t gamma_box_muller_normal(Rng& rng) {
   const real_t u1 = rng.uniform(), u2 = rng.uniform();
-  return mean + sigma * sqrt(real_t(-2) * log(u1)) * cos(units::twopi<real_t>() * u2);
+  return sqrt(real_t(-2) * log(u1)) * cos(units::twopi<real_t>() * u2);
 }
 
 /// Gamma deviate with shape @p a and unit scale, standing in for G4RandGamma::shoot(a, 1).
@@ -92,7 +108,7 @@ __host__ __device__ inline real_t g4_gamma(real_t a, Rng& rng) {
   for (int i = 0; i < 100; ++i) {
     real_t x, v;
     do {
-      x = g4_gauss(real_t(0), real_t(1), rng);
+      x = gamma_box_muller_normal<real_t>(rng);
       v = real_t(1) + c * x;
     } while (v <= real_t(0));
     v = v * v * v;
@@ -140,6 +156,10 @@ __host__ __device__ inline void fluc_add_excitation(real_t ax, real_t ex, real_t
 /// G4UniversalFluctuation::SampleGauss. Note the small-mean branch, which replaces the
 /// Gaussian by a uniform: a truncated Gaussian whose mean is under a quarter of its width is
 /// not a Gaussian, and sampling one by rejection would spin.
+///
+/// The Gaussian is `G4RandGauss::shoot(rndm, eav, sig)` (G4UniversalFluctuation.hh:156), which
+/// is `CLHEP::RandGaussQ`: ONE uniform per trial of the rejection loop, as Geant4 draws it.
+/// tests/test_rand_gauss_q.cu counts them. docs/RISK.md V185.
 template <typename real_t, typename Rng>
 __host__ __device__ inline void fluc_sample_gauss(real_t eav, real_t esig2, real_t& eloss,
                                                   Rng& rng) {
@@ -150,7 +170,7 @@ __host__ __device__ inline void fluc_sample_gauss(real_t eav, real_t esig2, real
   } else {
     bool ok = false;
     for (int i = 0; i < 100 && !ok; ++i) {
-      x = g4_gauss(eav, sig, rng);
+      x = rand_gauss_q(rng, eav, sig);
       ok = (x >= real_t(0) && x <= real_t(2) * eav);
     }
     if (!ok) { x = eav; }
@@ -262,10 +282,11 @@ __host__ __device__ G4GPU_NOINLINE inline real_t sample_fluctuation(
     if (!(siga > real_t(0))) { return mean_loss; }
     const real_t sn = mean_loss / siga;
     if (sn >= real_t(2)) {
-      // Truncated Gaussian on (0, 2*mean).
+      // Truncated Gaussian on (0, 2*mean). `G4RandGauss::shoot(rndmEngineF, meanLoss, siga)`
+      // (G4UniversalFluctuation.cc:138) is RandGaussQ: one uniform per trial. docs/RISK.md V185.
       const real_t two_mean = mean_loss + mean_loss;
       for (int i = 0; i < 100; ++i) {
-        const real_t loss = g4_gauss(mean_loss, siga, rng);
+        const real_t loss = rand_gauss_q(rng, mean_loss, siga);
         if (loss >= real_t(0) && loss <= two_mean) { return loss; }
       }
       return mean_loss;
