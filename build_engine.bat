@@ -168,6 +168,19 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
+
+rem Which units ptxas could not compile at -O2. An artefact and not a memory: build_engine_unit
+rem writes a .o1 beside the log for each one and deletes it when -O2 succeeds, so this list is
+rem what THIS build did. docs/RISK.md V63 and V191.
+set ANYO1=
+for %%O in ("%~dp0out\transport_run*.o1") do set ANYO1=1
+if defined ANYO1 (
+  echo.
+  echo NOTE: these units are compiled at -Xptxas -O1 because ptxas died at -O2 with an
+  echo       access violation. docs/RISK.md V63, V191.
+  for %%O in ("%~dp0out\transport_run*.o1") do echo        %%~nO
+  echo.
+)
 popd
 echo built transport_run.lib
 exit /b 0

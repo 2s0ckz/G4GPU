@@ -251,8 +251,13 @@ is in `ref/b1hadron/stage1_README.md`.
 
 #### Phase 3 - the inelastic models, in progress
 
-Two packages are on main. Neither is reached by a particle yet: the inelastic sub-process is
-still refused by name, and what each package did not finish is refused by name inside it.
+All of these are on main, and **since P15 every one of them is reached by a particle**
+([`docs/PORTED.md`](docs/PORTED.md) 2.1.15). The models are not in the stepping kernels: a
+stepper draws the interaction length, chooses the model as `G4EnergyRangeManager` chooses it,
+and queues the track; five separate interaction kernels — one per model, because ptxas cannot
+compile four of them into one module (RISK V189) — run it out of a pool of 1.6 MB workspace
+slots. What each package did not finish is still refused by name inside it, and P15's own
+validation measures how often the transport hits each refusal.
 
 | Geant4 | what | test | worst deviation |
 |---|---|---|---|
@@ -322,10 +327,10 @@ closed - the same question has the mechanism.
 | | status |
 |---|---|
 | γ, e⁻, e⁺ | **transported** |
-| μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name |
-| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). The inelastic sub-process is selectable and refused by name with the energy it costs (P9–P11). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once |
+| μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name. **`<species>Inelastic` acts since P15** for π± and K± (the Binary cascade below 1.5 GeV, Bertini above 1, FTFP above 3, chosen as `G4EnergyRangeManager` chooses) and for d and t (the light-ion reaction's fusion arm below 50 MeV per nucleon, and refused by name above it until `Interact` lands). The antiproton has no inelastic process either, and for the same reason as its elastic one: `BuildAntiLightIonsFTFP` gives it `G4ComponentAntiNuclNuclearXS`, which P2 refuses. A stopped μ⁻, π⁻ or K⁻ is **captured** rather than decayed, which is what `G4HadronStoppingProcess` does — its at-rest interaction length is zero and pre-empts `G4Decay` |
+| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). **The inelastic sub-process ACTS since P15** - the same three models a proton's does, reached through the interaction queue instead of refused by name, which closes what was this port's largest named hole (18% of the interactions in water at 10 MeV, 39% in air, 25% in bone, 51% in lead). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
-| proton, alpha | **transported**. Multiple scattering is WentzelVI for the proton and `G4UrbanMscModel` for the alpha, which is what QBBC gives each of them — the substitution named in open question 2 ended with P8e |
+| proton, alpha | **transported**. Multiple scattering is WentzelVI for the proton and `G4UrbanMscModel` for the alpha, which is what QBBC gives each of them — the substitution named in open question 2 ended with P8e. **`protonInelastic` acts since P15**, through the Binary cascade below 1.5 GeV, Bertini 1-6 GeV and FTFP above 3, with the model chosen as `G4EnergyRangeManager` chooses it; what it still refuses is a HYDROGEN target (`G4BinaryCascade::Propagate1H1`, P9), measured at 0 of 93 interactions for a 210 MeV proton in water and 31 of 256 at 1 GeV. **`alphaInelastic` is wired and mostly refused**: `G4BinaryLightIonReaction` fuses below 50 MeV per nucleon and calls `Interact` at or above it, `Interact` is P9e's, and FTFP does not start until 3 GeV per nucleon - so an alpha between those two has no model here and 195 of 215 interactions in water are refused by name. Every alpha beam of the B1 sweep sits in that window |
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
@@ -335,8 +340,8 @@ closed - the same question has the mechanism.
 
 | Geant4 | what | status |
 |---|---|---|
-| the **inelastic** sub-process of `G4NeutronGeneralProcess` | a neutron that reacts rather than being killed | the process itself is wired (the row above); its inelastic sub-process is what is left, and it is Phase 3's `G4BinaryCascade`/Bertini/FTFP rather than anything about the neutron. It is selectable — `G4NeutronGeneralProcess::BuildPhysicsTable` sums elastic + inelastic + capture unconditionally, so leaving the term out would be a different cross section — so it is refused by name, `had::HadronicRefusal::kNeutronInelastic`, and the neutron is killed with its kinetic energy deposited locally, which is NOT what Geant4 does with it. Above 1 MeV that is a large share of the interactions: 18% in water at 10 MeV, 39% in air, 25% in bone, 51% in lead. Measured, in `tests/test_neutron_general.cu` |
-| `G4BinaryCascade::Propagate1H1`, and the destroyed-nucleus branch `FillVoidNucleusProducts` | what the Binary cascade still refuses: a nucleon or pion on a hydrogen target, and 0.3% of ion events | Phase 3, remaining. The cascade runs for nucleons, pions and ions on every other target - the Phase 3 table above and [`docs/PORTED.md`](docs/PORTED.md) 2.1.10 - and the cascade is refused by name at the point it would be needed |
+| `G4BinaryLightIonReaction::Interact` | every ion at or above 50 MeV per NUCLEON | Phase 3, P9e - committed on `phys/bic` and not yet on main. THE LARGEST NAMED HOLE P15 LEAVES. QBBC gives an ion the light-ion reaction from 0 to 6 GeV per nucleon and FTFP from 3, so the window with no model here is 50 MeV/n to 3 GeV/n - and that is where a therapeutic alpha beam lives. Measured: 195 of 215 alpha interactions in water refused, 914 of 1,021 refused charged-hadron interactions over the whole validation grid. `had::HadronicRefusal::kLightIonCascade`, counted with the energy it costs, and `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic` stay inactivated on the Geant4 side of every like-for-like column until it lands |
+| `G4BinaryCascade::Propagate1H1` | a nucleon or pion on a HYDROGEN target | Phase 3, P9. Reached now that `protonInelastic` and the pion processes are wired, and not a corner in water, where hydrogen is two atoms in three: 107 of 1,021 refused interactions over P15's validation grid, 0 of 93 for a 210 MeV proton in water and 31 of 256 at 1 GeV. `had::HadronicRefusal::kBinaryHydrogenTarget` |
 | Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in), `generateSCMmuonAbsorption`, the anti-hyperon decay tables, K0S and K0L as Bertini projectiles | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the pieces named | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and nothing calls it from the transport yet |
 | the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); nothing calls it from the transport yet |
 | the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and nothing calls it from the transport yet |
@@ -407,7 +412,7 @@ send every one of them somewhere else.
    Geant4's code and it leaves the port inside the same statistics, so it is on. RISK **V66**.
    The ion path has had it all along, where `tsmall` is the constant 1e-7 mm that `fMinimal`
    never recomputes.
-4. **The neutron's inelastic sub-process, and what the port does with it instead.** The first
+4. **CLOSED by P15. The neutron's inelastic sub-process acts.** The first
    like-for-like with a hadronic-chain process wired — decay — put every positive hadron within
    two sigma of Geant4 with elastic inactivated on both sides
    (`ref/b1hadron/stage1_compare.ps1`). P8b added the isotope abundances that `SampleZandA`
@@ -418,9 +423,15 @@ send every one of them somewhere else.
    row needed a second reference binary and a finding to get one — RISK V60: the flag that makes
    its three processes one is set in a CONSTRUCTOR and has no UI command, so
    `ref/b1neutron/b1neutron.cc` is Geant4's own example B1 with one line added. What is left is
-   the inelastic final state itself, which is Phase 3's: in the final configuration it is
-   selectable, refused by name, and the neutron is then killed with its energy deposited
-   locally, which is not what Geant4 does.
+   the inelastic final state itself, and **P15 wired it**: the sub-process is still selected
+   from `G4NeutronGeneralProcess`'s combined table by the cumulative partials, and the final
+   state now comes from the same three models a proton's does - the Binary cascade below
+   1.5 GeV, Bertini 1–6 GeV, FTFP above 3 - through the interaction queue. The neutron is no
+   longer killed with its kinetic energy deposited locally, which was never what Geant4 does
+   with it and which was worth 18% of the interactions in water at 10 MeV and 51% in lead.
+   What is left in its place is smaller and named: a nucleon on a HYDROGEN target is
+   `G4BinaryCascade::Propagate1H1`, which P9 refused, and in water hydrogen is two atoms in
+   three. `had::HadronicRefusal::kBinaryHydrogenTarget`, counted with the energy it costs.
  5. **Electrons and positrons above 100 MeV: the clamp is gone, the msc model is Geant4's, and
    the row is still 2.8 sigma low.** The B1
    sweep of 2026-09-11 (docs/B1_SWEEP.md) put a 1 GeV electron beam through B1 for the first

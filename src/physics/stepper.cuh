@@ -1407,18 +1407,25 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // matters twice over here: the proton's and the alpha's B1 doses are the numbers this
     // project is judged on, and the antiproton is the one charged hadron with neither an
     // elastic nor an inelastic process, so its stream must be untouched by both.
+    // ONE CALL, AND NO `MaterialXs` IN THIS FRAME. `inelastic_length` computes the cross
+    // section, keeps its partial sums on its OWN `__noinline__` frame and draws
+    // `-log(u)/sigma`; the sums are discarded because `G4HadronicProcess::PostStepDoIt`
+    // recomputes them at the END of the step anyway. Written out here with the array as a local
+    // - which is how it was first - the proton and antiproton units died with
+    // `ptxas ... 0xC0000005 (ACCESS_VIOLATION)` even with `inelastic_xs_per_volume` and
+    // `choose_inelastic_model` both already `__noinline__`. See that function's header and
+    // docs/RISK.md V55/V63.
+    //
+    // `h.z`/`h.a` are zero for everything but a real nuclide, which is what
+    // `inelastic_projectile` wants: only the `kGenericIon` row reads them, and the
+    // Glauber-Gribov nucl-nucl component needs the projectile's OWN (Z, A) rather than
+    // G4GenericIon's placeholder.
     real_t inel_xs = real_t(0);
-    if (had.hadron_inelastic) {
-      hadronic::xs::MaterialXs<real_t> tmp{};
-      // `h.z`/`h.a` are zero for everything but a real nuclide, which is exactly what
-      // `inelastic_projectile` wants: only the `kGenericIon` row reads them, and the
-      // Glauber-Gribov nucl-nucl component needs the projectile's OWN (Z, A) rather than
-      // G4GenericIon's placeholder.
-      inel_xs = had::inelastic_xs_per_volume<real_t>(had.inelastic, mm, type, p.ekin, h.z, h.a,
-                                                     tmp);
-    }
-    const real_t d_inelastic = (inel_xs > real_t(0)) ? -log(rng.uniform()) / inel_xs
-                                                     : geom::kInfinity<real_t>();
+    const real_t d_inelastic =
+        had.hadron_inelastic
+            ? had::inelastic_length<real_t>(had.inelastic, mm, type, p.ekin, h.z, h.a, rng,
+                                            inel_xs)
+            : geom::kInfinity<real_t>();
 
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
@@ -2350,12 +2357,22 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
       // and never reads `theLastCrossSection` - which is also why the neutron's interaction
       // length can come from a COMBINED table while its target draw comes from a
       // per-sub-process one without the two having to agree.
-      if (had::enqueue_interaction<real_t>(
-              had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
-              pos_before, dir_pre, volume_pre,
-              scores ? s.geometry.volumes[p.volume].score_index : -1,
-              static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
-              real_t(0))) {
+      // The model, chosen here as `step_hadron` chooses it and for the same reason: it decides
+      // which interaction kernel runs the entry. A neutron's list is the proton's - QBBC
+      // registers the same three objects on both processes - so this is the Binary cascade
+      // below 1.5 GeV, Bertini 1-6 and FTFP above 3, with one uniform across an overlap.
+      physics::hadronic::ModelChoice mstat = physics::hadronic::ModelChoice::kOk;
+      const had::InelasticModel model =
+          had::choose_inelastic_model<real_t>(type, p.ekin, had::baryon_number_of(type, 0), rng,
+                                              mstat);
+      if (model == had::InelasticModel::kNone) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
+      } else if (had::enqueue_interaction<real_t>(
+                     had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
+                     pos_before, dir_pre, volume_pre,
+                     scores ? s.geometry.volumes[p.volume].score_index : -1,
+                     static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
+                     real_t(0), had::bucket_of_model(model), model)) {
         if (queued != nullptr) { *queued = true; }
         return false;
       }

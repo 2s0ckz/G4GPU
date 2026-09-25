@@ -342,8 +342,18 @@ __host__ __device__ inline InelasticModelList<real_t> inelastic_models(ParticleT
 ///         which case `status` says which, and the caller must refuse by name rather than pick
 ///         the nearest. Geant4 prints its model table and returns nullptr there, and
 ///         `G4HadronicProcess::PostStepDoIt` then raises a FatalException.
+///
+/// `__noinline__`, AND IT IS THE FIFTH TIME IN THIS FILE'S NEIGHBOURHOOD. Written `inline`, the
+/// `InelasticModelList` it builds - three `ModelRange`s and three enum values, about 90 bytes -
+/// lands in `step_hadron`'s body twice, and `nvcc error : 'ptxas' died with status 0xC0000005
+/// (ACCESS_VIOLATION)` on `transport_run_proton.cu` and `transport_run_antiproton.cu`.
+/// Measured: those two units, and only those two, out of the seventeen stepping units - which
+/// is docs/RISK.md **V63**'s own observation that the cliff is not a function of size in any
+/// way a reader can predict. V55 is the first occurrence, `had::enqueue_interaction` the
+/// fourth, this the fifth. The fix is the same one every time: give the compiler a call
+/// boundary.
 template <typename real_t, typename Rng>
-__host__ __device__ inline InelasticModel choose_inelastic_model(ParticleType t,
+__host__ __device__ __noinline__ InelasticModel choose_inelastic_model(ParticleType t,
                                                                  real_t kin_energy,
                                                                  int baryon_number, Rng& rng,
                                                                  hp::ModelChoice& status) {
@@ -562,6 +572,41 @@ __host__ __device__ __noinline__ real_t inelastic_xs_per_volume(
   const hxs::XsValue<real_t> v = hxs::store_compute_cross_section_fn<real_t>(
       fn, mat, hxs::nist_isotopes_of<real_t>(mat), mxs);
   return (v.value > real_t(0)) ? v.value : real_t(0);
+}
+
+/// The distance to the next `*Inelastic` interaction, mm, and the cross section it was drawn
+/// with - one call, so the stepper never sees a `MaterialXs`.
+///
+/// `__noinline__`, AND THIS IS THE SIXTH TIME. `step_hadron` computed the cross section into a
+/// local `hxs::MaterialXs<real_t>` and drew `-log(u)/xs` in its own body, which is about 140
+/// bytes of partial sums plus the call. With `inelastic_xs_per_volume` and
+/// `choose_inelastic_model` BOTH already `__noinline__`, that was still enough for
+/// `nvcc error : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)` on
+/// `transport_run_proton.cu` and `transport_run_antiproton.cu` - and on those two only, out of
+/// seventeen stepping units, which is docs/RISK.md V63's point that the cliff is not a function
+/// of size in any way a reader can predict.
+///
+/// THE PARTIAL SUMS ARE DELIBERATELY DISCARDED and that is not a loss:
+/// `G4HadronicProcess::PostStepDoIt` recomputes the cross section at the END of the step for a
+/// charged projectile and `SampleZandA` draws the element from THOSE sums, so the ones computed
+/// here would have to be thrown away anyway. Keeping them would be the trap `elastic_apply`'s
+/// own note records - selecting an element by an energy the track no longer has.
+///
+/// @return `geom::kInfinity`'s 1e30 when the species has no inelastic process this port can
+///         evaluate, in which case no uniform is drawn at all.
+template <typename real_t, typename Rng>
+__host__ __device__ __noinline__ real_t inelastic_length(const InelasticTables<real_t>& t,
+                                                          const data::Material<real_t>& mat,
+                                                          ParticleType type, real_t ekin, int z,
+                                                          int a, Rng& rng, real_t& xs_out) {
+  hxs::MaterialXs<real_t> mxs{};
+  const real_t xs = inelastic_xs_per_volume<real_t>(t, mat, type, ekin, z, a, mxs);
+  xs_out = xs;
+  // `geom::kInfinity` is 1e30 and is what every other discrete competitor in `step_hadron`
+  // returns for "no process"; spelled out here rather than included, because this header has no
+  // other reason to know about the geometry.
+  if (!(xs > real_t(0))) { return real_t(1e30); }
+  return -log(rng.uniform()) / xs;
 }
 
 /// `G4CrossSectionDataStore::SampleZandA`, with Geant4's draw order and Geant4's draw COUNT.

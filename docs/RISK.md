@@ -12306,3 +12306,50 @@ WHAT WOULD MOVE IT, in the order a future package should try:
     boundary in the right place can lower the maximum rather than merely move it.
   * NOT a smaller launch. That is the thing this entry exists to say: the reservation is a
     property of the device and the kernel, and no launch configuration touches it.
+
+### V191: four `__noinline__` boundaries moved the ptxas crash and did not remove it; `-Xptxas -O1` did
+
+The fifth and sixth times P15 met `nvcc error : 'ptxas' died with status 0xC0000005
+(ACCESS_VIOLATION)`, and the first time the answer was not another call boundary.
+
+Wiring `*Inelastic` into `step_hadron` added four things to that function: an interaction-length
+draw, `G4EnergyRangeManager`'s model choice, an enqueue, and an at-rest enqueue on the dying
+branch. Each was moved behind `__noinline__` as the crash appeared, in this order, and each
+compile was measured rather than assumed:
+
+| boundary added | what it took out of the kernel frame | result |
+|---|---|---|
+| `inelastic_xs_per_volume` (already, from the elastic side's precedent) | the whole cross-section tree | `transport_run_proton.cu`, `transport_run_antiproton.cu` crash |
+| `had::enqueue_interaction` | a 392-byte `PendingInteraction` and eighteen assignments, twice | `tests/test_step_hadron.cu` compiles; the two engine units still crash |
+| `choose_inelastic_model` | an `InelasticModelList` - three `ModelRange`s and three enums, ~90 B | still crash |
+| `inelastic_length` | a `hxs::MaterialXs` - `kMaxElements` doubles of partial sums | still crash |
+
+**Two units out of seventeen, and they are the proton and the antiproton.** The pion, kaon,
+muon, alpha, deuteron, triton, He3, GenericIon and neutral units all compile at `-O2` with
+exactly the same code in them - and the ANTIPROTON's inelastic channel is
+`kAntiNucleusRefused`, so its cross section returns zero without evaluating anything. The crash
+is therefore not about what the code computes; it is about what is in the module. That is
+docs/RISK.md **V63**'s own finding restated: the cliff is not a function of size in any way a
+reader can predict, and V63 got one of nine arrangements to compile by moving code around.
+
+`-Xptxas -O1` compiles both, in the same time (78 s against 69), with frames of **4,096** and
+**3,824** bytes against the 3,936 and 3,776 that `-O2` produced before the process was wired.
+
+So `build_engine_unit.bat` RETRIES at `-Xptxas -O1` when, and only when, `-O2` died with an
+access violation. Three properties of that, each deliberate:
+
+  * **Per unit.** Nothing that compiles at `-O2` is degraded, which is the whole reason not to
+    lower the flag for the build. The gamma, lepton and neutral kernels - the ones B1's gate
+    and the electron rows are measured on - are untouched.
+  * **It prints, at the unit and again at the end of the build.** A build that silently drops
+    an optimisation level is a build whose numbers nobody can explain six weeks later.
+  * **The list is an artefact.** `build_engine_unit.bat` writes a `.o1` beside the log when it
+    falls back and deletes it when `-O2` succeeds, so `out\transport_run*.o1` is what THIS
+    build did rather than what someone remembers it doing.
+
+What is NOT known and should not be guessed: what `-O1` costs those two kernels at run time.
+The frames are within 4% of the `-O2` ones and the register count is unchanged at 255, but
+instruction scheduling is not visible from either. The proton is the species this project's
+headline numbers are measured on, so if a proton beam's throughput moves in the sweep, this is
+the first thing to hold it against - and the way to separate them is to build the unit both
+ways, which is one flag.
