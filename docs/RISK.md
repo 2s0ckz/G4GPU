@@ -11863,3 +11863,235 @@ electrons; putting the nucleon path's term in is what creates the discrepancy.
 without a conversion electron, and keeps `IonBalanceIC(MeV/electron)` as a separate bucket
 bounded at 1e-3 rather than at a rest mass - so that if the surplus ever stops being absorbed,
 the number that comes back is 0.511 and says so.
+
+### V185: G4RandGauss is RandGaussQ at six more sites, and the port drew three other Gaussians there
+
+V180 found the Binary cascade's nucleus drawing `CLHEP::RandGauss` where Geant4 calls
+`G4RandGauss`, which `Randomize.hh` line 47 defines as `CLHEP::RandGaussQ`, and it named two
+other packages with the same fault. There were six sites on QBBC's path, not two, and three
+different wrong Gaussians among them. The survey was the lead's and was re-read against 11.1.1
+line by line; a `grep` for `G4RandGauss` over the whole source tree finds nothing else QBBC reaches
+through a ported path (the rows below the table say why each of the others is not one).
+
+| Geant4 11.1.1 call | port site | port drew | uniforms per value, before -> now |
+|---|---|---|---|
+| `G4UniversalFluctuation::SampleFluctuations` .cc:138 (thick absorber) | `em/fluctuation.cuh` | Box-Muller `g4_gauss` | 2 -> 1 |
+| `G4UniversalFluctuation::SampleGauss` .hh:156 (Glandz) | `em/fluctuation.cuh` | Box-Muller `g4_gauss` | 2 -> 1 |
+| `G4IonFluctuations::SampleFluctuations` .cc:149 | `em/ion_fluctuation.cuh` | Box-Muller `g4_gauss` | 2 -> 1 |
+| `G4UrbanMscModel::Randomizetlimit` .hh:220 (fUseSafety and fMinimal) | `em/urban_msc.cuh` | Box-Muller `urban_gauss` | 2 -> 1 |
+| `G4WentzelVIModel::SampleScattering` .cc:658-659 (displacement, x then y) | `em/wentzel_msc.cuh` | `urban_gauss` twice | 4 -> 2 per sub-step |
+| `G4CompetitiveFission::FissionCharge` .cc:292, `FissionKineticEnergy` .cc:363 | `deexcitation/fission.cuh` | the polar method with a `GaussCache` spare | 2.55 per pair, the spare free -> 1 |
+
+Not sites, each for a reason already recorded where it lives: `G4eeToTwoGammaModel`'s
+positronium motion (off unless `fSampleAtomicPDF`), `G4ICRU49NuclearStoppingModel`'s straggling
+(QBBC builds no `G4NuclearStopping`), `G4Nucleus::GetThermalPz` (elastic has no thermal motion
+here), `G4StatMF` (unreachable, refused by name), `G4NuclNuclDiffuseElastic::SampleThetaCMS` (dead
+in 11.1.1 - `SampleInvariantT` calls `SampleCoulombMuCMS`; `elastic/nucl_nucl_diffuse_elastic.cuh`
+refuses the table machinery by name), `G4LFission` (QBBC has no neutron-fission process), Bertini's
+`randomGauss` and FTF's `GaussianPt` (their own functions), and the monopole, adjoint, DNA,
+optical, GPS, LEND, INCL++ and GFlash users (not in QBBC).
+
+**What the comments said.** `fluctuation.cuh`: "Box-Muller. Stands in for G4RandGauss::shoot,
+which is the same distribution by a different route (CLHEP caches the second deviate; nothing here
+can observe that...)". Both halves are wrong: the cache belongs to `RandGauss`, the class V180 was
+about, and `RandGaussQ` has none; and it is not the same distribution (below). `urban_msc.cuh`:
+"Box-Muller; only one of the pair is used" - true of the values, and both uniforms were drawn.
+`fission.cuh`: "CLHEP::RandGauss::shoot, and its cache ... Note which of the pair is returned ...
+The order matters for a stream comparison and is reproduced" - the wrong class, reproduced
+carefully - under a file header that put "CLHEP::RandGauss's polar sampler under the two Gaussians
+the mass and charge split need", when the mass is sampled by rejection on uniforms and the two
+Gaussians are the charge and the kinetic energy. And V68's paragraph "the random stream depends on
+a process-wide latch" is about the same wrong class: `RandGaussQ` has no latch, V180 removed it
+from the scratch, and nothing about C12 depends on what the process drew before.
+
+**FIXED, by moving one function rather than writing three.** P9e's transcription of
+`transformQuick`, `transformSmall` and both `shoot` overloads is now `src/core/rand_gauss_q.cuh`,
+moved unchanged, with the table `git mv`-ed to `src/core/randgaussq_table.hh` (the extractor
+writes it there now and regenerates it byte-identical below its header). `fancy_3d_nucleus.cuh`
+re-declares every name the cascade, FTF and `test_bic_nucleus` use, and the move is BITWISE:
+`test_bic_nucleus`, `test_bic_imr`, `test_ftf_entry`, `test_ftf_model`, `test_stopping` and
+`test_bic_apply` print output identical to the byte before and after, including the 4,027-point
+`bic_gaussq.csv` at 0 and the twenty taped ion events. With fission's Gaussian changed as well,
+the first four are still byte-identical to 3ea5035, `test_stopping` differs only in its Pb
+capture rows, where the residues are heavy enough to fission, and `test_bic_apply` - its tapes
+still exact - passes every bucket but one conversion-electron balance whose limit was a
+measurement, which V187 is about. The `shoot(mean, sd)` overload is templated
+on the caller's type so the EM `real_t` sites compile unchanged: the Gaussian is computed in
+double exactly as CLHEP computes it and converted once, on the way out, and for `double` the casts
+are the identity. `GaussCache` is gone with the parameter it threaded through both fission
+samplers. The sites' comments now say what Geant4 calls and why the old ones were wrong.
+
+`g4_gamma`'s internal normal stays Box-Muller, deliberately, and is NOT a site: `G4RandGamma` is
+`CLHEP::RandGamma`, whose algorithm GD draws its normal INLINE by the polar method
+(RandGamma.cc:130-134) and never calls `G4RandGauss`. `g4_gamma` is Marsaglia-Tsang, a surrogate
+for that function by distribution, and exact only on an exact normal - which RandGaussQ is not. So
+it keeps its bits (renamed `gamma_box_muller_normal`), and the surrogate itself - with
+`wentzel_msc.cuh`'s `gamma2` for `G4RandGamma::shoot(rndm, 2, 2)` - is REFUSED BY NAME here as
+outside this package: two `G4RandGamma` stand-ins whose streams are not Geant4's, recorded for
+whoever takes `CLHEP::RandGamma`.
+
+**The oracle and the count.** `ref/dump/dump_gaussq.cc` writes `gaussq_transform.csv`, CLHEP's own
+`transformQuick` and `transformSmall` (protected statics, reached through a derived struct's
+`using` declarations) on 5,735 stated points - the series tail from 1e-300 with each engine
+lattice's smallest uniform, every node of both tables with the double either side and the
+midpoint, the median, the mirror, and r = 0 and 1, which are NaN in CLHEP - and
+`gaussq_shoot.csv`, both `shoot` overloads on a recorded HepJamesRandom stream, 32,000 values with
+the uniform each consumed and a count of how many (one, every time) and a check that 32,000
+RandGaussQ draws leave `RandGauss`'s cached pair exactly as they found it.
+`tests/test_rand_gauss_q.cu` reproduces all 37,735 values BITWISE, including the `float`
+conversion of the `real_t` overload,
+and then drives each site's own function with a counting tape: the value must be the tape's
+RandGaussQ and the count must be one per Gaussian (two at the displacement, x from the first).
+Each assertion was run with the old sampler put back and fails: Box-Muller at SampleFluctuations,
+SampleGauss, the ion model and both Urban branches draws 2 where 1 is asserted (SampleGauss 4 for
+2 on the rejection tape); at the displacement 4 for 2 and 6 for 4; the polar method with its cache
+draws 2 for 1 in FissionCharge and 3 for 2 and 5 for 3 in FissionKineticEnergy; drawing y before
+x fails both displacement values with the count right; `transformQuick` without its float cast
+fails 2,760 of the 5,735 points; `transformSmall` iterated to 1e-8 instead of 1e-7 fails 1,025;
+and the `real_t` overload computed in `float` fails the float rows alone.
+
+**THE DISTRIBUTIONS, BEFORE AND AFTER.** One program built twice, against 3ea5035's `src/` and
+against this branch's, calling the port's own functions with the same Philox keys:
+
+| 10^7 samples | before (Box-Muller / polar) | after (RandGaussQ) | exact difference, by quadrature |
+|---|---|---|---|
+| A: `sample_fluctuation`, proton 100 MeV, G4_WATER, 5 mm; mean loss 3.628158 MeV, siga 0.219957 MeV (thick-absorber Gaussian, sn = 16.5) | mean 3.628020(70), var/siga^2 - 1 = +6.1e-5 +- 4.5e-4; 2.000000 uniforms a sample | mean 3.628124(70), var/siga^2 - 1 = -1.3e-5 +- 4.5e-4; 1.000000 | mean 0; variance +1.346e-4 relative |
+| B: U238 at U = 20 MeV into 140 + 98, `FissionCharge(Af = 140)` then `FissionKineticEnergy`, Tmax 200 MeV | Z1 53.66783(21), var 0.44387; KE 172.0646(32) MeV, var 100.012(45); 3.5537 uniforms an event | Z1 53.66781(21), var 0.44396; KE 172.0642(32) MeV, var 99.916(45); 3.0031 | KE mean -3.5e-4 MeV; variance +1.2e-3 MeV^2 (+1.2e-5 relative) |
+
+Nothing moves outside its own error, and the exact differences say why: RandGaussQ's variance is
+1.000135 of a normal's, which a sample variance resolves at 3 sigma only past N = 2*9/(1.35e-4)^2 =
+1e9, and fission's window truncates at +2.8 sigma, below the bins where the excess lives. The
+largest comparison in the suite that draws these Gaussians is 400,000 samples a cell, where a
+variance is known to 2.2e-3 - sixteen times the shift. What did move is the tests' own random
+numbers: `test_fluctuation`, `test_ion_fluctuation`, `test_wentzel_msc`, `test_ion_msc` and
+`test_deex_breakup` (its two fissioning campaigns only) print different numbers and pass.
+`test_ion_msc`'s worst randomised-limit mean went from 1.10 to 3.04 sigma (limit 5) on Ca40 in
+bone, and that row is not the Gaussian: with the OLD Box-Muller over eight Philox keys it sits at
++0.6 to +3.3 sigma, all eight on the same side, so it is that row's 20,000-draw Geant4 sample.
+
+The tail, over 10^8 deviates of each on one Philox key: Box-Muller reached |z| = 6.548, the polar
+method 5.698, RandGaussQ 5.702; beyond the table's last value 4.6114, 427, 374 and 455 of them
+against 400 +- 20 expected (455 is that key's uniform stream, which puts 455 draws within 2e-6 of
+0 or 1; five other keys give 359 to 403).
+
+**WHAT RANDGAUSSQ IS, which answers V180's last paragraph and corrects three things in it.**
+
+  * The table has 1,250 entries - 250 on a grid of 2e-6 below r = 5e-4 and 1,000 on a grid of
+    5e-4 above it - not 250.
+  * It is not "right to about 1e-7 relative". Linear interpolation of the inverse CDF on a uniform
+    PROBABILITY grid is good where the curve is straight and poor where it bends. Against the
+    exact inverse normal CDF (Acklam plus Halley steps on erfc, self-consistent to 8e-14), the
+    worst error in z is 2.5e-7 for r in [0.25, 0.5), 1.4e-6 in [0.1, 0.25), 4.9e-6 in
+    [0.05, 0.1), 9.8e-5 in [0.01, 0.05), 5.7e-3 in [0.001, 0.01), **1.59e-2 at r = 7.2e-4
+    (z = -3.19)** in the first coarse bin, then on the fine grid 1.2e-5 in [1e-4, 5e-4), 8.9e-4 in
+    [1e-5, 1e-4), 4.2e-3 in [4e-6, 1e-5) and **1.20e-2 at r = 2.9e-6 (z = -4.53)** in its first
+    bin, and 6.0e-6 in the series tail. Each bin still carries exactly its probability, so the
+    distribution is right bin by bin and wrong WITHIN the tail bins, where it is flat in z
+    instead of falling - which makes it wider than a normal: E[z^2] = 1.000134625 and E[z^4] =
+    3.002441, by quadrature over r (the same quadrature gives a normal 0.99999999996). The series
+    and the table do not quite meet at r = 2e-6: 4.6113764 from one side, 4.6113825 from the
+    other.
+  * Its tail does not stop "near |z| = 7.5". 7.5 is `transformSmall`'s starting guess. The TABLE
+    stops at 4.6114, and below r = 2e-6 the series carries on as far as the engine's uniforms go:
+    6.3380 for this port's Philox<double> ((k + 0.5)/2^32, so 2^-33 at the bottom), 5.2947 for
+    HepJamesRandom (a 2^-24 lattice - the oracle's tapes never exceed it), and 8.13 to 8.85 for
+    MixMaxRng, Geant4's default, whose `flat()` serves most values through a 52-bit conversion on
+    MSVC and some through a 61-bit one. Box-Muller and the polar method were not unbounded either
+    on Philox<double>: 6.7637 and 8.9040.
+
+So the answer to V180's closing line - "The comments are wrong either way and should be corrected
+by whoever owns those files" - is that the comments are corrected and so is the code: all eight
+`G4RandGauss` calls on the port's path now draw one uniform through one transcription, bitwise
+against CLHEP, and the difference that makes to any distribution this project compares is below
+its resolution by more than an order of magnitude. The count is what changed, and the count is
+what a replayed stream sees.
+
+**Found in passing, not this package's files, named for their owners:**
+
+  * `bic/light_ion_reaction.cuh:413-419` still says `ChooseFermiMomenta` "draws through
+    `CLHEP::RandGauss`, whose cached second value is a THREAD-LOCAL static that survives from one
+    Init to the next" (it is `ChoosePositions`, it is RandGaussQ, and nothing survives), and
+    `ftf/ftf_model.cuh:122-123` that the shared scratch "carries the Gaussian latch that CLHEP
+    keeps in a thread-local static" - both stale since V180; the shared scratch is harmless.
+  * `tests/test_ion_msc.cu:343`: "The port draws its Gaussian from Box-Muller where Geant4 uses
+    G4RandGauss" - stale since this entry; the comparison stays a distribution comparison
+    because the engines differ. And `ref/dump/dump_bic.cc:3895` places the transcription in
+    `fancy_3d_nucleus.cuh`, which is where it was until this entry.
+  * `src/g4/Randomize.hh`, the user-facing shim, defines no `G4RandGauss`, while
+    `G4ParticleGun.hh:206` and the model builder's generated `PrimaryGeneratorAction`
+    (`builder/write_project.cc:638`) show `G4RandGauss::shoot(0, 3*mm)` as the idiom for a beam
+    spot. A user who follows it gets a compile error, not a wrong answer. If it is added, the
+    function to put behind it is this one, over `G4UniformRand()`.
+  * docs/RISK.md V186, below: the FP32 build.
+
+### V186: under G4GPU_FP32 the uniform can be exactly 1.0f, and RandGaussQ of 1 is NaN
+
+`core/rng.cuh` promises "Uniform in (0,1). Never returns exactly 0 or 1" and computes
+`(real_t(r) + real_t(0.5)) * 2^-32`. In double that holds - the extremes are 2^-33 and 1 - 2^-33.
+In float it does not: `float(r)` rounds every 32-bit r from 2^32 - 128 upwards to 2^32, the 0.5
+is lost against it, and the product is exactly 1.0f. MEASURED: 128 of the top 1,000 counter values
+give 1.0f, so one uniform in 2^25 = 3.4e7.
+
+Before V185 nothing noticed: Box-Muller of u1 = 1 is 0 and of u2 = 1 is `cos(2*pi)`, and the polar
+method's trials are rejection-safe. `transformQuick(1.0)` mirrors to r = 0, `transformSmall(0)`
+divides by zero on its first pass and multiplies 0 by infinity on its second, and the answer is
+NaN - in CLHEP too, which `gaussq_transform.csv`'s last two rows record; no CLHEP engine returns
+0 or 1. At the sites, a NaN Gaussian is rejected and redrawn by `sample_fluctuation` and
+`fluc_sample_gauss` (their acceptance tests fail on NaN), becomes `tlimitmin` in Urban (`fmax`
+drops a NaN), skips one displacement in WentzelVI (`d >= 0` fails), and in
+`sample_ion_fluctuation` - whose loop is Geant4's `while (loss < 0 || loss > 2*mean)` - EXITS
+with a NaN energy loss. `fission.cuh`'s charge loop has the same shape, if it is ever driven by a
+float engine.
+
+The default build is double throughout and does not reach this; `G4GPU_FP32` is a compile switch
+nothing in `build_all.bat` builds (V185 changed no behaviour of a double build's uniforms). The
+fix belongs in `core/rng.cuh` - a float uniform that cannot round to 1, for instance 23 bits,
+`((r >> 9) + 0.5) * 2^-23`, every value of which is exact in float (24 bits would not do: its top
+value 1 - 2^-25 rounds to 1.0f) - and is REFUSED here by name rather than hidden by a guard in the
+transcription, which would make RandGaussQ return something for an argument CLHEP never receives.
+
+### V187: test_bic_apply's 2e-3 MeV on a conversion-electron event is a measurement, not a bound, and a fast fragment crosses it
+
+With fission's Gaussian on RandGaussQ (V185), `tests/test_bic_apply.cu` FAILS one bucket:
+
+```
+BalanceWithIC(MeV/event)            138     0.003378  FAIL camp_p1400_Pb208
+```
+
+The bucket is the per-event energy balance of the nucleon cascade path for events that emitted
+a conversion electron, after subtracting `n_e * m_e` flat for the rest mass `GenerateGamma`
+creates (V76), and its limit is 2e-3 MeV. The file's own comment says what the flat subtraction
+leaves: the electron's mass is added to the EMITTING nucleus's invariant mass, so in the lab it
+arrives as `gamma * m_e` and `m_e * (gamma - 1)` is left over per electron - "a residue of order
+1e-4 MeV". That is true of a slow emitter and not of a fast one, and 2e-3 was the worst seen
+(0.0017 on camp_pip800_Pb208) rounded up.
+
+MEASURED, on the failing event - camp_p1400_Pb208, the test's own Philox key, event 17095: one
+conversion electron, 58 products, and among them a Na27 at 166.16 MeV, gamma - 1 = 6.609e-3, so
+`m_e * (gamma - 1)` = 3.377e-3 MeV against a residue of 3.378e-3. A light fragment that fast is
+the second fission of a fission fragment - the event carries Al28, Ni62, Na27 and Cl37 - and it is
+the port's physics, not an accounting error: over fifteen Philox keys x 20,000 events of this case
+on each tree, 101,712 conversion-electron events after V185 and 101,152 before, the residue
+never exceeds `n_e * m_e * max(gamma - 1)` over the event's nuclear products (A >= 2) by more than
+7.5e-7 MeV.
+
+AND THE OLD CODE FAILS IT TOO. The same fifteen keys at 3ea5035, Box-Muller and all: key 9 has an
+event at 2.044e-3 MeV - three conversion electrons from one Rb84 at 104.2 MeV, 3 x m_e x 1.333e-3
+= 2.043e-3. The limit held at 3ea5035 because the one key the test uses happened not to reach it.
+After V185, five of the fifteen keys cross 2e-3 against one before, and the tails differ by
+29 events against 16 above 1.5e-3: 1.9 sigma, in a cumulative tail, and an eighty per cent excess
+that RandGaussQ's shape cannot make - every table bin carries its exact probability, so a tail
+probability past any threshold differs from a normal's by a fraction of one bin, which at
+z = 3.15 to 3.2 is 4 to 6 per cent of it and less everywhere else.
+
+The fix is `tests/test_bic_apply.cu`'s, which is P9's file and is NOT changed here: bound the
+residue by what it is, per event -
+
+```
+de  <=  n_ev_electrons * m_e * max over products with A >= 2 of (kin_energy / mass)  +  1e-5
+```
+
+- instead of by 2e-3. It is exact to 7.5e-7 on every conversion-electron event measured, it keeps
+the bucket's point - a lost or doubled electron rest mass is 0.511 MeV - and it needs no
+threshold that the next random stream can cross. **Until it is made, build_all.bat is red on
+test_bic_apply for a reason that is not a defect of either stream.**
