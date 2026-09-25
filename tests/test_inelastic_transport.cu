@@ -667,6 +667,17 @@ int main() {
                 if (slot.filled.status == hp::TrackStatusChange::kAlive) {
                   b_out += proj.baryon_number;
                   q_out += static_cast<int>(std::lrint(proj.charge));
+                  // "NOTHING HAPPENED" LEAVES THE TARGET UNTOUCHED AND OUT OF THE FINAL STATE, so
+                  // it balances by construction. The Binary cascade returns exactly that when
+                  // both of its retry loops give up - Geant4's own answer, the primary alive and
+                  // unchanged - and a 300 MeV pion in bone does it about once in 1,200
+                  // interactions: 7 of 8,209 in a 10,000-track run, each read as a whole target
+                  // nucleus of baryon number lost. Too rare for a 400-track cell to meet, which
+                  // is why this balance passed for a week without it.
+                  if (slot.filled.n_secondaries == 0) {
+                    b_out += oc.target_a;
+                    q_out += oc.target_z;
+                  }
                 }
                 if (b_out != b_in) { ++cell.bad_baryon; }
                 if (q_out != q_in) { ++cell.bad_charge; }
