@@ -962,21 +962,44 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
       p.ekin = real_t(0);
     }
   }
+  // ---- the two ledger groups, and they are booked on DIFFERENT conditions.
+  //
+  // THE `WHY` IS BOOKED WHENEVER THERE IS ONE, `ran` or not, and that is not a detail. An
+  // at-rest capture that refuses its NUCLEAR half still emitted the atomic cascade's gammas -
+  // P12b asserted 1,080,164 of them survive the Fritiof arm - so `run_at_rest` reports
+  // `ran = true` and a real refusal together. Booking the reason only when nothing came back
+  // would have made every one of those silent, which is the shape of hole this project keeps
+  // writing up.
+  if (outc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
+    had::book_refusal<real_t>(had.books, outc.refusal, q.track.ekin);
+  }
   if (!outc.ran && !outc.rejected_by_integral_xs) {
-    // The interaction happened and no final state came back. TWO bookings, in the two groups
-    // `had::HadronicRefusal` keeps apart: the SIZE, one per lost interaction with the
-    // projectile's kinetic energy on it, and the WHY.
-    had::book_refusal<real_t>(
-        had.books,
-        (q.species == ParticleType::kNeutron) ? had::HadronicRefusal::kNeutronInelastic
-                                              : had::HadronicRefusal::kChargedHadronInelastic,
-        q.track.ekin);
-    if (outc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
-      had::book_refusal<real_t>(had.books, outc.refusal, q.track.ekin);
+    // The `HOW MUCH`: one booking per lost interaction. Which counter depends on WHICH PROCESS
+    // was lost, not on the species alone - a stopped pi- whose capture produced nothing is
+    // missing its whole rest mass, which is what `stopped_refusal_energy` computes and what the
+    // three `kStopped*` counters have always meant.
+    if (q.kind == had::InteractionKind::kAtRest) {
+      const had::HadronicRefusal r = had::stopped_refusal(q.species);
+      if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+        had::book_refusal<real_t>(
+            had.books, r, had::stopped_refusal_energy<real_t>(q.species, q.track.ekin));
+      }
+    } else {
+      had::book_refusal<real_t>(
+          had.books,
+          (q.species == ParticleType::kNeutron) ? had::HadronicRefusal::kNeutronInelastic
+                                                : had::HadronicRefusal::kChargedHadronInelastic,
+          q.track.ekin);
     }
     // The conservative disposal, as `kNeutronInelastic` has used since P8d and NOT what Geant4
     // does: the energy goes to the volume rather than into secondaries that leave it.
-    if (q.score_slot >= 0) { edep += p.ekin; }
+    //
+    // AND ONLY FOR AN IN-FLIGHT INTERACTION. A stopped track's residual kinetic energy was
+    // already deposited by `step_hadron`'s dying branch - that is the port's stop-at-the-
+    // tracking-cut convention and it is also `G4Decay::DecayIt`'s own `energyDeposit` on the
+    // at-rest branch - and `q.edep` carries it. Adding it again here would score the last few
+    // tens of keV of every refused capture twice.
+    if (q.kind != had::InteractionKind::kAtRest && q.score_slot >= 0) { edep += p.ekin; }
     p.ekin = real_t(0);
     srep.status = StepStatus::fStopAndKill;
   }

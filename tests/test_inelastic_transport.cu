@@ -603,6 +603,12 @@ int main() {
             // where deliverable 6 lives: a refusal is not refused by name until its RATE is on
             // a report. Without this the alpha rows below read "215 queued, 20 ran" and say
             // nothing about where the other 195 went.
+            // The WHY whenever there is one, `ran` or not - see `run_interaction`'s own note:
+            // an at-rest capture that refuses its nuclear half still emitted the atomic
+            // cascade's gammas, so `ran` and a real refusal arrive together.
+            if (oc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
+              had::book_refusal<real_t>(had.books, oc.refusal, q.track.ekin);
+            }
             if (!oc.ran && !oc.rejected_by_integral_xs) {
               had::book_refusal<real_t>(
                   had.books,
@@ -610,9 +616,6 @@ int main() {
                       ? had::HadronicRefusal::kNeutronInelastic
                       : had::HadronicRefusal::kChargedHadronInelastic,
                   q.track.ekin);
-              if (oc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
-                had::book_refusal<real_t>(had.books, oc.refusal, q.track.ekin);
-              }
             }
             if (oc.rejected_by_integral_xs) {
               ++cell.rejected;
