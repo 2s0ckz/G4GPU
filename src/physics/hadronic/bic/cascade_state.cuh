@@ -92,6 +92,14 @@ struct CascadeTrack {
   double formation_time = 0.0;
   int state = kUndefined;
   int nucleon_index = -1;    ///< the G4Nucleon this track is, or -1 for a cascade particle
+  /// WHICH nucleus that G4Nucleon belongs to: 0 for the target, 1 for the PROJECTILE.
+  ///
+  /// `G4KineticTrack::theNucleon` is a pointer and does not need to say; the port indexes an
+  /// array and does. It matters because `G4BinaryLightIonReaction::Interact` builds a projectile
+  /// nucleus too and hands `Propagate` one track per projectile nucleon, each constructed from
+  /// its own `G4Nucleon` - and the whole of `SortResult` is that the projectile nucleons NOTHING
+  /// hit come back with `IsParticipant()` false and become the spectator fragment.
+  int nucleon_owner = 0;
   double projectile_potential = 0.0;
   int creator_model_id = -1;
   int parent_resonance_pdg = 0;
@@ -150,7 +158,10 @@ struct CascadeLists {
 /// which is the per-track enum in `kinetic_track.cuh` and already has that name.
 struct BicCascadeState {
   CascadeLists lists;
-  /// The nucleus's own nucleon array, so that `Hit()` can mark what Geant4 marks.
+  /// The PROJECTILE nucleus's nucleon array, for `G4BinaryLightIonReaction` only. Null for a
+  /// hadron projectile, which has no nucleus of its own.
+  Nucleon* projectile_nucleons = nullptr;
+  /// The target nucleus's own nucleon array, so that `Hit()` can mark what Geant4 marks.
   ///
   /// `G4KineticTrack::Hit()` is `if (theNucleon) theNucleon->Hit(1, 1.)` - it sets a flag on the
   /// **G4Nucleon**, not on the track - and `IsParticipant()` reads it back through the same
@@ -186,10 +197,15 @@ struct BicCascadeState {
 
 /// `G4KineticTrack::Hit()` - the flag goes on the NUCLEON when there is one, and on the track
 /// either way. See the note on `BicCascadeState::nucleons` for why both.
+__host__ __device__ inline Nucleon* owning_nucleons(const BicCascadeState& st, int owner) {
+  return (owner == 1) ? st.projectile_nucleons : st.nucleons;
+}
+
 __host__ __device__ inline void mark_hit(BicCascadeState& st, int pool_index) {
   CascadeTrack& t = st.lists.pool[pool_index];
   t.hit = true;
-  if (t.nucleon_index >= 0 && st.nucleons != nullptr) { st.nucleons[t.nucleon_index].hit = true; }
+  Nucleon* n = owning_nucleons(st, t.nucleon_owner);
+  if (t.nucleon_index >= 0 && n != nullptr) { n[t.nucleon_index].hit = true; }
 }
 
 /// `G4KineticTrack::IsParticipant()`, and it is NOT what the name says:
@@ -209,7 +225,8 @@ __host__ __device__ inline void mark_hit(BicCascadeState& st, int pool_index) {
 __host__ __device__ inline bool is_participant(const BicCascadeState& st,
                                                const CascadeTrack& t) {
   if (t.nucleon_index < 0) { return true; }
-  return st.nucleons != nullptr && st.nucleons[t.nucleon_index].hit;
+  const Nucleon* n = owning_nucleons(st, t.nucleon_owner);
+  return n != nullptr && n[t.nucleon_index].hit;
 }
 
 /// Move a track into theFinalState, keeping the ORDER it was pushed in.

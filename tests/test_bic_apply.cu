@@ -99,9 +99,10 @@ using namespace g4gpu;
 __global__ void bic_blir_probe(physics::hadronic::HadProjectile<double> proj,
                                physics::hadronic::HadNucleus tgt, const data::LevelTable* lt,
                                const deex::FermiPool* pool, preco::PrecoWorkspace ws,
-                               bic::BlirFinalState* fs, bic::BlirRefusal* ref) {
+                               bic::BlirStorage store, bic::BlirFinalState* fs,
+                               bic::BlirRefusal* ref, bic::BlirReport* rep) {
   Philox<double> rng(1u, 2u, 3u);
-  bic::blir_apply_yourself(proj, tgt, *lt, *pool, ws, rng, *fs, *ref);
+  bic::blir_apply_yourself(proj, tgt, *lt, *pool, ws, store, rng, *fs, *ref, *rep);
 }
 
 /// The nucleon entry point, likewise never launched.
@@ -454,6 +455,7 @@ int main() {
 
   for (const OracleCase& c : cases) {
     const bool is_ion = (c.model == "bic_blir");
+    const long long refused_before = n_refused;
     physics::hadronic::HadProjectile<double> proj;
     proj.baryon_number = c.pa;
     proj.charge = static_cast<double>(c.pz);
@@ -517,6 +519,55 @@ int main() {
     static bic::CascadeBuffers apply_buffers;
     static bic::CascadeProduct apply_products[256];
     static bic::CascadeProduct apply_preco[64];
+    // And the ION reaction's, which needs a second nucleus and its own product lists. Every
+    // case in the campaign that takes the cascade arm reads all of it.
+    static bic::Nucleon ion_pnuc[256];
+    static bic::Nucleon ion_tnuc[256];
+    static deex::Vec3d ion_mom[256];
+    static double ion_fermi[256];
+    static bic::NucleusSortEntry ion_sums[256];
+    static double ion_flat[bic::kFlatBlock];
+    static double ion_pfield[bic::kMaxFieldTable];
+    static double ion_nfield[bic::kMaxFieldTable];
+    static bic::CascadeTrack ion_pool[1024];
+    static bic::imr::CollisionInitialState ion_colls[8192];
+    static bic::imr::ConcreteChannel ion_chans[bic::imr::kConcreteChannelCount];
+    static bic::CascadeBuffers ion_buffers;
+    static bic::CascadeProduct ion_products[512];
+    static bic::CascadeProduct ion_preco[256];
+    static bic::BlirProduct ion_spec[512];
+    static bic::BlirProduct ion_casc[512];
+    static bic::CascadeTrack ion_initial[256];
+    bic::BlirStorage ion_store;
+    ion_store.projectile_nucleons = ion_pnuc;
+    ion_store.target_nucleons = ion_tnuc;
+    ion_store.scratch.momentum = ion_mom;
+    ion_store.scratch.fermi_p = ion_fermi;
+    ion_store.scratch.test_sums = ion_sums;
+    ion_store.scratch.flat_block = ion_flat;
+    ion_store.scratch.capacity = 256;
+    ion_store.proton_field = ion_pfield;
+    ion_store.neutron_field = ion_nfield;
+    ion_store.field_capacity = bic::kMaxFieldTable;
+    ion_store.cascade.pool = ion_pool;
+    ion_store.cascade.pool_capacity = 1024;
+    ion_store.cascade.collisions = ion_colls;
+    ion_store.cascade.collision_capacity = 8192;
+    ion_store.cascade.channels = ion_chans;
+    ion_store.cascade.n_channels =
+        bic::imr::build_concrete_channels(ion_chans, bic::imr::kConcreteChannelCount);
+    ion_store.cascade.buffers = &ion_buffers;
+    ion_store.cascade.products = ion_products;
+    ion_store.cascade.product_capacity = 512;
+    ion_store.cascade.preco_products = ion_preco;
+    ion_store.cascade.preco_capacity = 256;
+    ion_store.spectators = ion_spec;
+    ion_store.spectator_capacity = 512;
+    ion_store.cascaders = ion_casc;
+    ion_store.cascader_capacity = 512;
+    ion_store.initial = ion_initial;
+    ion_store.initial_capacity = 256;
+
     bic::BicStorage store;
     store.nucleons = apply_nucleons;
     store.scratch.momentum = apply_mom;
@@ -539,15 +590,16 @@ int main() {
     store.cascade.product_capacity = 256;
     store.cascade.preco_products = apply_preco;
     store.cascade.preco_capacity = 64;
-    bool refused_cascade = false;
     for (long long ev = 0; ev < c.n; ++ev) {
       bic::BlirRefusal bref;
+      bic::BlirReport brep;
       bic::BicRefusal nref;
       bic::BicReport nrep;
       preco::PrecoWorkspace ws = bufs.view();
       preco::PrecoStatus st;
       if (is_ion) {
-        st = bic::blir_apply_yourself(proj, tgt, lt, pool, ws, rng, result, bref);
+        st = bic::blir_apply_yourself(proj, tgt, lt, pool, ws, ion_store, rng, result, bref,
+                                      brep);
       } else {
         st = bic::apply_yourself(proj, tgt, lt, pool, ws, store, rng, result, nref, nrep);
       }
@@ -555,7 +607,6 @@ int main() {
       const bool other = is_ion ? bref.anti_or_hyper : (nref.species || nref.preco_projectile);
       if (cascade || other) {
         ++n_refused;
-        refused_cascade = cascade;
         // WHICH refusal, by name. A count on its own says only that something was refused, and
         // the whole point of refusing by name is that the name travels.
         if (!is_ion) {
@@ -677,11 +728,16 @@ int main() {
       ++fails;
       continue;
     }
-    if (n_refused > 0) {
+    // `n_refused` is a RUNNING total over every case - the tally at the end reads it
+    // that way - so the per-case line needs the DIFFERENCE. Without it every case from
+    // the tenth on reported the same 109 refusals, which is the running total and not
+    // what any of them did.
+    const long long case_refused = n_refused - refused_before;
+    if (case_refused > 0) {
       std::printf("  incomplete %s: %lld of %lld events refused (%.3g%%) - see the by-name "
                   "tally at the end\n",
-                  c.name.c_str(), n_refused, c.n,
-                  100.0 * static_cast<double>(n_refused) / static_cast<double>(c.n));
+                  c.name.c_str(), case_refused, c.n,
+                  100.0 * static_cast<double>(case_refused) / static_cast<double>(c.n));
     }
 
     // ---- exact: the fusion gate's verdict, over the events the port ANSWERED.
@@ -849,7 +905,6 @@ int main() {
     }
   }
 
-  // -------------------------------------------------------------------------------------------
   std::printf("\n%-30s %8s %12s  %s\n", "bucket", "points", "worst", "where");
   struct Row { const char* name; long long n; double worst; double tol; std::string at; };
   const Row rows[] = {

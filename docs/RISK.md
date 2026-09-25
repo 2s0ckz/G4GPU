@@ -11521,3 +11521,37 @@ reproduces all three because it transcribes the same table lookup - 11,132 eleme
 For P15 this reduces to one sentence: **do not add an upper energy check to the lepto-nuclear
 processes.** Geant4 does not have one, and a track above 1 PeV must produce the 1 PeV cross
 section and the model's own refusal, not a silently dropped interaction.
+
+### V179: the projectile nucleon's Fermi momentum is set and then thrown away, one line later
+
+`G4BinaryLightIonReaction::Interact` builds one `G4KineticTrack` per projectile nucleon through
+the `G4Nucleon*` constructor, and that constructor looks as though it gives each of them the
+Fermi momentum it had inside the projectile:
+
+```
+G4KineticTrack::G4KineticTrack(G4Nucleon * nucleon, const G4ThreeVector& aPosition,
+                               const G4LorentzVector& a4Momentum)
+  :  theDefinition(nucleon->GetDefinition()),
+     the4Momentum(a4Momentum),
+     theFermi3Momentum(nucleon->GetMomentum()),     // <- the nucleon's Fermi momentum
+     theNucleon(nucleon), ...
+{
+     theFermi3Momentum.setE(0);
+     Set4Momentum(a4Momentum);                      // <- and this wipes it
+}
+```
+
+`Set4Momentum` is three lines: `theTotal4Momentum = a4Momentum; the4Momentum = theTotal4Momentum;
+theFermi3Momentum = G4LorentzVector(0);`. So the member the initialiser list just filled is
+overwritten with zero before the constructor returns, and every projectile nucleon enters the
+cascade with EXACTLY the beam momentum per nucleon, `(0, 0, |p|/pA, E/pA)`, and no Fermi motion
+at all. The Fermi momentum of the projectile is not lost to the model - `GetProjectileExcitation`
+reads it back off the `G4Nucleon` afterwards, and `SetProjectilePotential(-Efermi)` carries the
+Fermi ENERGY - but it is not in the track's four-momentum.
+
+Worth writing down because the natural transcription is the wrong one. A port that reads the
+initialiser list and adds `nucleon->GetMomentum()` to the beam momentum per nucleon produces a
+projectile whose nucleons have several hundred MeV/c of internal motion, which is physically the
+more defensible answer and is not what Geant4 computes. This one is `Set4Momentum` winning a race
+with its own initialiser list; docs/RISK.md V69 is the same two members seen from the other side.
+

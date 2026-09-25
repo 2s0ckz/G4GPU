@@ -438,9 +438,11 @@ struct CycleRng {
   }
 };
 
-/// The largest tape any case in `bic_imr_proptape.csv` needs. The whole file is 2,620 values
-/// across forty cases; 8,192 is room for a case ten times the worst of them.
-inline constexpr int kTapeMax = 8192;
+/// The largest tape any case in this file needs. `bic_imr_proptape.csv` is 2,620 values across
+/// forty cases; `bic_blir_tapeval.csv` reaches 20,380 in ONE event, because an ion event builds
+/// two nuclei before it starts. 32,768 is room for half again on the worst of them - and a
+/// `TapeRng` is a quarter of a megabyte, so every one of them is `static` and not a local.
+inline constexpr int kTapeMax = 32768;
 
 /// A RECORDED random stream, replayed value by value.
 ///
@@ -465,9 +467,18 @@ struct TapeRng {
   int overrun = 0;
   __host__ __device__ double uniform() {
     if (n >= n_values || n >= kTapeMax) {
+      // Past the end of the tape the port is asking for more than Geant4 did, which is already
+      // a failure - but it must be a REPORTED one and not a crash. A constant 0.5 is not safe
+      // to hand back: `CLHEP::RandGauss`\x27 polar method draws pairs until `v1*v1+v2*v2` is in
+      // (0, 1), and 0.5 gives v1 = v2 = 0 exactly, so the loop never ends and the `1/r2` behind
+      // it is a division by zero. MEASURED: a tape one try short sent the second
+      // `G4Fancy3DNucleus::Init` into NaN positions and the test died with an access violation
+      // (0xC0000005) before it printed a line. The ladder below never yields 0 or 1 and never
+      // gives a degenerate pair, so the run finishes and `overrun` says what happened.
+      const double v = (2.0 * static_cast<double>(overrun % 64) + 1.0) / 128.0;
       ++overrun;
       ++n;
-      return 0.5;
+      return v;
     }
     return value[n++];
   }
@@ -2964,7 +2975,7 @@ int main() {
       if (n_loaded != a) { continue; }
 
       // The tape.
-      TapeRng tape;
+      static TapeRng tape;
       tape.n_values = 0;
       for (const auto& tr : taperows) {
         if (iv(tr, 0) != icase) { continue; }

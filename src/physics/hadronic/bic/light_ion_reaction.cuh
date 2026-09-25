@@ -105,6 +105,7 @@
 #include "core/units.cuh"
 #include "core/vec3.cuh"
 #include "physics/hadronic/bic/bic_params.cuh"
+#include "physics/hadronic/bic/cascade_propagate.cuh"
 #include "physics/hadronic/bic/rk_propagation.cuh"
 #include "physics/hadronic/capture/neutron_rad_capture.cuh"
 #include "physics/hadronic/deexcitation/nuclear_masses.cuh"
@@ -136,15 +137,27 @@ namespace capture = g4gpu::physics::hadronic::capture;
 struct BlirRefusal {
   /// The projectile's kinetic energy per nucleon is at or above 50 MeV, so Geant4 would have
   /// run `Interact` and this package has no cascade. Named, not approximated.
+  /// The cascade arm refused - `Propagate` could not finish. `cascade_ref` says which of its
+  /// refusals it was. Until P9e this flag meant "the cascade is not here at all".
   bool cascade = false;
   bool no_fusion = false;      ///< the kinematic gate failed; the primary is returned unchanged
   bool capacity = false;       ///< the caller's product or secondary buffer
   bool anti_or_hyper = false;  ///< a negative baryon number or a lambda
+  bool nucleus = false;        ///< one of the two `G4Fancy3DNucleus::Init` calls failed
+  /// 150 impact parameters and no final state. Geant4 prints "no final state for:" and returns
+  /// the primary unchanged, which is what the port does; the flag is here because an event that
+  /// comes back alive after 150 tries is a different thing from one that missed.
+  bool no_final_state = false;
+  /// The momentum non-conservation exit: `momentum.vect().mag() - momentum.e() >= 10 keV` after
+  /// the correction loop, which Geant4 calls "invalid final state" and answers with the primary.
+  bool momentum_not_conserved = false;
   int refused_pdg = 0;
   double refused_kin_per_nucleon = 0.0;
+  CascadeRefusal cascade_ref;
 
   __host__ __device__ bool any() const {
-    return cascade || no_fusion || capacity || anti_or_hyper;
+    return cascade || no_fusion || capacity || anti_or_hyper || nucleus || no_final_state ||
+           momentum_not_conserved;
   }
 };
 
@@ -376,13 +389,375 @@ __host__ __device__ inline double blir_projectile_excitation_term(const Nucleon&
 // The entry point
 // =============================================================================================
 
+
+// ---------------------------------------------------------------------------------------------
+// The CASCADE arm: G4BinaryLightIonReaction::Interact and the three functions that take its
+// output apart again.
+// ---------------------------------------------------------------------------------------------
+//
+// ## TWO NUCLEI, AND THE PROJECTILE'S NUCLEONS ARE THE SECONDARIES
+//
+// `Interact` builds a `G4Fancy3DNucleus` for the PROJECTILE as well as the target, centres it,
+// picks an impact parameter in the disc of radius `tOuter + pOuter`, and hands
+// `G4BinaryCascade::Propagate` one `G4KineticTrack` per projectile nucleon - each built from its
+// own `G4Nucleon`, each `outside`, each with the SAME four-momentum `(0, 0, |p|/pA, E/pA)`. So
+// the cascade this package already has runs unchanged; what is new is who the secondaries are.
+//
+// **That is also the whole of `SortResult`.** A projectile nucleon nothing hit comes back with
+// `IsParticipant()` false (docs/RISK.md V163: false means "a nucleon that was not touched") and
+// is a SPECTATOR; everything else is a cascader. The spectators are counted into (spectatorA,
+// spectatorZ) and become a fragment for the de-excitation handler. A port that stored the hit
+// flag on the track instead of on the nucleon, or that read the predicate the obvious way round,
+// would sort every product into the wrong pile.
+//
+// ## THE NUCLEUS BUILDS SHARE ONE SCRATCH, AND THAT IS NOT AN OPTIMISATION
+//
+// `projectile3dNucleus->Init(pA,pZ)` and `target3dNucleus->Init(tA,tZ)` run one after the other
+// on the same random stream, and `G4Fancy3DNucleus::ChooseFermiMomenta` draws through
+// `CLHEP::RandGauss`, whose cached second value is a THREAD-LOCAL static that survives from one
+// Init to the next (see `Nucleus3DScratch` in nucleus/fancy_3d_nucleus.cuh, note 5). Giving the
+// two builds separate scratches puts the port half a Gaussian out of step on the second one.
+//
+// ## REFUSED, by name
+//
+//   * nothing new. `Propagate`'s own refusals travel out in `BlirRefusal::cascade_ref`, and
+//     `Propagate1H1` cannot be reached from here: `Interact` always calls `Propagate`, whatever
+//     the target's A, because `G4BinaryLightIonReaction` does not have the A == 1 branch
+//     `G4BinaryCascade::ApplyYourself` has.
+
+/// Every array the ion reaction needs and cannot allocate. `scratch` is shared by BOTH nucleus
+/// builds on purpose; see the note above.
+struct BlirStorage {
+  Nucleon* projectile_nucleons = nullptr;
+  Nucleon* target_nucleons = nullptr;
+  Nucleus3DScratch scratch;
+  double* proton_field = nullptr;
+  double* neutron_field = nullptr;
+  int field_capacity = 0;
+  CascadeWorkspace cascade;
+  /// `SortResult`'s two output vectors, and the de-excitation's own products.
+  BlirProduct* spectators = nullptr;
+  int spectator_capacity = 0;
+  BlirProduct* cascaders = nullptr;
+  int cascader_capacity = 0;
+  /// `Interact`'s own secondary list - one track per projectile nucleon.
+  ///
+  /// Caller-owned like everything else here, and that is not only the rule: as a LOCAL of
+  /// `blir_interact` it is 256 `CascadeTrack`s, 38 kilobytes, on the frame that then calls
+  /// `propagate` - which has its own 256-entry `DecayTrack` and three 256-entry index arrays,
+  /// and which calls the de-excitation below that. MEASURED: with it on the stack the test
+  /// died with an access violation (0xC0000005) before it printed a line.
+  CascadeTrack* initial = nullptr;
+  int initial_capacity = 0;
+};
+
+/// `G4BinaryLightIonReaction::GetProjectileExcitation`.
+///
+/// The excitation the projectile remnant is left with, summed over the projectile nucleons that
+/// WERE hit: for each one, the local Fermi energy at its own position minus the kinetic energy
+/// it had in the nucleus. `aNuc->GetMomentum()` is the nucleus's own record and the cascade
+/// never writes to it, so this reads the nucleon as it was built - the only thing the cascade
+/// changed about it is the hit flag.
+///
+/// It can come out NEGATIVE, and `DeExciteSpectatorNucleus` clamps it with `std::max(0., ...)`
+/// rather than here.
+__host__ __device__ inline double blir_projectile_excitation(const Nucleus3D& proj) {
+  double total = 0.0;
+  for (int i = 0; i < proj.my_a; ++i) {
+    const Nucleon& n = proj.nucleons[i];
+    if (!n.hit) { continue; }
+    const double density = proj.density.density(n.position);
+    const double p_fermi = proj.fermi.fermi_momentum(density);
+    const double mass = n.pdg_mass();
+    const double e_fermi = std::sqrt(mass * mass + p_fermi * p_fermi) - mass;
+    // `aNuc->GetMomentum().t() - aNuc->GetMomentum().mag()`: the nucleon's kinetic energy as the
+    // nucleus stored it, with `mag()` its own invariant mass and not the PDG mass.
+    total += e_fermi - (n.momentum.e - n.momentum.mag());
+  }
+  return total;
+}
+
+/// What one `Interact` did.
+struct BlirInteractReport {
+  bool ok = false;           ///< a non-empty product list came back
+  int tries = 0;             ///< `tryCount`, at most 150
+  int n_products = 0;
+  double projectile_excitation = 0.0;
+  deex::Vec3d position{0.0, 0.0, 0.0};   ///< the impact parameter of the LAST try
+  double impact_max = 0.0;
+  CascadeRefusal cascade_ref;
+  NucleusReport projectile_rep;
+  NucleusReport target_rep;
+  PropagateResult propagate;
+};
+
+/// `G4BinaryLightIonReaction::Interact(mom, toBreit)`.
+///
+/// `proj` and `tgt` are the caller's two `Nucleus3D` objects; both are rebuilt on every try, as
+/// Geant4 rebuilds both (it `new`s them inside the loop and deletes them again whenever the
+/// result is empty). `de_excite` is `Propagate`'s exit into the precompound model.
+///
+/// `it = toBreit * G4LorentzVector(projectileMass, G4ThreeVector(0,0,0))` is computed on every
+/// try and never read; `projectileMass` is only used to build it. Both are here in the comment
+/// and not in the code, because a variable nothing reads is not part of the answer - but the
+/// `GetIonMass(Z, A)` call behind it is, in the sense that a release which made it throw would
+/// change this loop's behaviour.
+template <typename Prop, typename Rng, typename DeExcite>
+__host__ __device__ inline BlirInteractReport blir_interact(
+    const BlirFrame& f, Nucleus3D& proj, Nucleus3D& tgt, Prop& propagator, BlirStorage& store,
+    BicCascadeState& st, const CascadeSpecies& sp, Rng& rng, DeExcite&& de_excite,
+    BlirRefusal& ref) {
+  BlirInteractReport rep;
+  CascadeTrack* initial = store.initial;
+
+  int try_count = 0;
+  do {
+    ++try_count;
+    proj.nucleons = store.projectile_nucleons;
+    proj.capacity = store.scratch.capacity;
+    rep.projectile_rep = nucleus_init(proj, store.scratch, f.pa, f.pz, rng);
+    if (rep.projectile_rep.fatal()) {
+      ref.nucleus = true;
+      break;
+    }
+    proj.center_nucleons();
+
+    tgt.nucleons = store.target_nucleons;
+    tgt.capacity = store.scratch.capacity;
+    rep.target_rep = nucleus_init(tgt, store.scratch, f.ta, f.tz, rng);
+    if (rep.target_rep.fatal()) {
+      ref.nucleus = true;
+      break;
+    }
+
+    const double impact_max = tgt.outer_radius() + proj.outer_radius();
+    rep.impact_max = impact_max;
+    const double ax = (2.0 * rng.uniform() - 1.0) * impact_max;
+    const double ay = (2.0 * rng.uniform() - 1.0) * impact_max;
+    // "-2.*impactMax-5.*fermi": far enough upstream that every nucleon starts outside.
+    const deex::Vec3d pos{ax, ay, -2.0 * impact_max - 5.0 * deex::fermi()};
+    rep.position = pos;
+
+    // `G4LorentzVector nucleonMom(1./pA*mom); nucleonMom.setZ(nucleonMom.vect().mag());
+    //  nucleonMom.setX(0); nucleonMom.setY(0);` - the order is load-bearing: `setZ` runs FIRST,
+    // so the magnitude it stores is that of the whole scaled three-vector, and only then are x
+    // and y zeroed. Every projectile nucleon gets this same four-momentum.
+    const double inv_pa = 1.0 / static_cast<double>(f.pa);
+    const deex::Vec3d scaled = inv_pa * f.mom.v;
+    const imr::LorentzVector nucleon_mom(deex::Vec3d{0.0, 0.0, std::sqrt(g4gpu::mag2(scaled))},
+                                         inv_pa * f.mom.e);
+
+    int n_initial = 0;
+    for (int i = 0; i < proj.my_a && n_initial < store.initial_capacity; ++i) {
+      const Nucleon& n = proj.nucleons[i];
+      CascadeTrack t;
+      t.pdg = n.pdg();
+      t.pdg_mass = n.pdg_mass();
+      t.charge = n.charge();
+      t.baryon = 1;
+      t.momentum = nucleon_mom;
+      t.position = n.position + pos;
+      t.formation_time = 0.0;
+      t.state = kOutside;
+      t.nucleon_index = i;
+      t.nucleon_owner = 1;       ///< the PROJECTILE's nucleon; see `CascadeTrack::nucleon_owner`
+      t.creator_model_id = blir_model_id();
+      // `SetProjectilePotential(-Efermi)` with the Fermi energy at the nucleon's own position in
+      // the PROJECTILE, before the impact parameter is added.
+      const double density = proj.density.density(n.position);
+      const double p_fermi = proj.fermi.fermi_momentum(density);
+      const double e_fermi =
+          std::sqrt(t.pdg_mass * t.pdg_mass + p_fermi * p_fermi) - t.pdg_mass;
+      t.projectile_potential = -e_fermi;
+      initial[n_initial++] = t;
+    }
+    if (n_initial != proj.my_a) {
+      ref.capacity = true;
+      break;
+    }
+
+    // `thePropagator->Init(the3DNucleus)` happens inside Propagate in Geant4; the port builds
+    // the field maps here because they need the caller's tables.
+    NucleusReport frep;
+    propagator = make_rk_propagation(tgt, frep, store.proton_field, store.neutron_field,
+                                     store.field_capacity);
+    CascadeRefusal cref;
+    st.projectile_nucleons = proj.nucleons;
+    const PropagateResult pr =
+        propagate(st, tgt, propagator, sp, store.cascade, initial, n_initial, tgt.density,
+                  coulomb_barrier_mev(f.ta, f.tz), de_excite, rng, cref);
+    rep.propagate = pr;
+    rep.cascade_ref = cref;
+    if (cref.any()) {
+      ref.cascade = true;
+      ref.refused_pdg = cref.refused_pdg;
+      break;
+    }
+    // "if( result && result->size()==0) { delete result; result=0; }" - an empty vector is a
+    // NULL here, so both of `Propagate`'s failure returns send this loop round again. That is
+    // the one place `G4BinaryLightIonReaction` does NOT distinguish them.
+    if (pr.outcome != kPropagateNoCollision && pr.n_products > 0) {
+      rep.ok = true;
+      rep.n_products = pr.n_products;
+    }
+  } while (!rep.ok && try_count < 150);
+
+  rep.tries = try_count;
+  if (rep.ok) { rep.projectile_excitation = blir_projectile_excitation(proj); }
+  return rep;
+}
+
+/// `G4BinaryLightIonReaction::SortResult`.
+///
+/// Splits the cascade's products on `GetNewlyAdded()`, which `ProductsAddFinalState` set from
+/// `IsParticipant()`. Returns the spectators' summed four-momentum and fills `spectator_a` and
+/// `spectator_z`; `p_final_state` receives the cascaders' sum, which `ApplyYourself` reads.
+///
+/// `spectatorA` counts one per spectator PRODUCT, not its baryon number - every spectator is a
+/// single projectile nucleon that was never touched, so the two agree, and the source counts
+/// products.
+__host__ __device__ inline imr::LorentzVector blir_sort_result(
+    const CascadeProduct* result, int n_result, BlirProduct* spectators, int spectator_capacity,
+    BlirProduct* cascaders, int cascader_capacity, int& n_spectators, int& n_cascaders,
+    int& spectator_a, int& spectator_z, imr::LorentzVector& p_final_state, BlirRefusal& ref) {
+  imr::LorentzVector p_spectators;
+  p_final_state = imr::LorentzVector();
+  n_spectators = 0;
+  n_cascaders = 0;
+  spectator_a = 0;
+  spectator_z = 0;
+  for (int i = 0; i < n_result; ++i) {
+    BlirProduct p;
+    p.momentum = result[i].momentum;
+    p.pdg_mass = result[i].pdg_mass;
+    p.pdg = result[i].pdg;
+    p.z = result[i].nucleus_z;
+    p.a = result[i].nucleus_a;
+    p.newly_added = result[i].newly_added;
+    if (result[i].newly_added) {
+      if (n_cascaders >= cascader_capacity) {
+        ref.capacity = true;
+        return p_spectators;
+      }
+      p_final_state = p_final_state + p.momentum;
+      cascaders[n_cascaders++] = p;
+    } else {
+      if (n_spectators >= spectator_capacity) {
+        ref.capacity = true;
+        return p_spectators;
+      }
+      p_spectators = p_spectators + p.momentum;
+      spectators[n_spectators++] = p;
+      ++spectator_a;
+      // `G4lrint(GetDefinition()->GetPDGCharge()/eplus)` - the real charge, so a spectator
+      // proton counts and a spectator neutron does not.
+      spectator_z += (result[i].pdg == imr::kPdgProton) ? 1 : 0;
+    }
+  }
+  return p_spectators;
+}
+
+/// `G4BinaryLightIonReaction::DeExciteSpectatorNucleus`.
+///
+/// The projectile remnant. Three things about it are worth naming:
+///
+///   * the fragment is built with **zero particles and zero charged excitons** and
+///     `holes = pA - spectatorA`, and its four-momentum is AT REST:
+///     `(0, 0, 0, mFragment + max(0, theStatisticalExEnergy))`. So the excitation
+///     `GetProjectileExcitation` computed is the whole of what the handler is told, the
+///     spectators' own momenta are thrown away, and the products are boosted back afterwards by
+///     `pSpectators.boostVector()`.
+///   * it is the EXCITATION HANDLER, `theHandler->BreakItUp`, and not the precompound model -
+///     which is why the exciton counts are zero and why this is P3's entry point and not P6's.
+///   * when the spectators cannot make a fragment - `spectatorZ == 0` or `spectatorA == 1` -
+///     they are not de-excited at all: each one is marked `SetNewlyAdded(true)` and pushed onto
+///     the CASCADERS, and its momentum joins `pFinalState`. A single spectator neutron leaves
+///     the reaction as a neutron.
+///
+/// Then the cascaders are corrected twice: once against `pInitialState - pFragments`, and again
+/// against `pInitialState` if the first did not converge. The de-excitation products are appended
+/// AFTER the first correction and are not themselves corrected.
+template <typename Rng>
+__host__ __device__ inline void blir_deexcite_spectator(
+    BlirProduct* spectators, int n_spectators, BlirProduct* cascaders, int& n_cascaders,
+    int cascader_capacity, int spectator_a, int spectator_z, int pa,
+    double statistical_ex_energy, const imr::LorentzVector& p_spectators,
+    const imr::LorentzVector& p_initial_state, imr::LorentzVector& p_final_state,
+    const data::LevelTable& lt, const deex::FermiPool& pool, const deex::DeexWorkspace& dws,
+    Rng& rng, deex::DeexStatus& dstatus, BlirRefusal& ref) {
+  int n_frag = 0;
+  imr::LorentzVector p_fragments;
+  const int first_frag = n_cascaders;   // where the de-excitation products will go
+
+  if (spectator_z > 0 && spectator_a > 1) {
+    deex::Fragment pro_res;
+    const double m_fragment = deex::nuclear_mass(spectator_a, spectator_z);
+    const double e = m_fragment + ((statistical_ex_energy > 0.0) ? statistical_ex_energy : 0.0);
+    pro_res.set_za_and_momentum(imr::LorentzVector(deex::Vec3d{0.0, 0.0, 0.0}, e), spectator_z,
+                                spectator_a);
+    // SetNumberOfParticles(0), SetNumberOfCharged(0), SetNumberOfHoles(pA-spectatorA): the
+    // handler reads none of the three, and they are written out because the fragment Geant4
+    // hands over carries them.
+    (void)pa;
+    dstatus = deex::deexcite(pro_res, lt, pool, dws, rng);
+    n_frag = dstatus.n_products;
+  } else if (spectator_a != 0) {
+    for (int i = 0; i < n_spectators; ++i) {
+      if (n_cascaders >= cascader_capacity) {
+        ref.capacity = true;
+        return;
+      }
+      BlirProduct p = spectators[i];
+      p.newly_added = true;
+      p_final_state = p_final_state + p.momentum;
+      cascaders[n_cascaders++] = p;
+    }
+  }
+
+  // The de-excitation products, boosted into the spectators' frame. `boost_fragments` is
+  // `G4LorentzRotation(pSpectators.boostVector())` - the forward boost, not its inverse.
+  if (n_frag > 0) {
+    const imr::LorentzRotation boost =
+        imr::LorentzRotation::from_boost(p_spectators.boost_vector());
+    for (int i = 0; i < n_frag; ++i) {
+      const deex::DeexProduct& d = dws.products[i];
+      BlirProduct p;
+      p.pdg = d.pdg;
+      p.z = d.z;
+      p.a = d.a;
+      p.newly_added = true;
+      p.pdg_mass = (d.a > 0) ? (deex::nuclear_mass(d.a, d.z) + d.excitation)
+                             : ((d.pdg == deex::kPdgElectron)
+                                    ? u::electron_mass_c2<double>() : 0.0);
+      p.momentum = boost * d.momentum;
+      p_fragments = p_fragments + p.momentum;
+      if (first_frag + i >= cascader_capacity) {
+        ref.capacity = true;
+        return;
+      }
+      // Held back: they are appended AFTER the correction below, which is the source's order.
+      cascaders[first_frag + i] = p;
+    }
+  }
+
+  // "the creation of excited fragment did violate E/p, so correct cascaders to get overall
+  // conservation" - on the cascaders ONLY, with the de-excitation products not yet in the list.
+  const imr::LorentzVector p_cas = p_initial_state - p_fragments;
+  const BlirCorrectorReport r1 = blir_energy_and_momentum_corrector(cascaders, n_cascaders,
+                                                                    p_cas);
+  n_cascaders += n_frag;
+  if (!r1.ok) {
+    blir_energy_and_momentum_corrector(cascaders, n_cascaders, p_initial_state);
+  }
+}
+
 /// The `HadFinalState` width this model instantiates. A 50 MeV/nucleon C12 on Pb208 fuses into
 /// a compound of A = 220 and E* of a few hundred MeV, and P3's evaporation cascade on that emits
 /// tens of fragments and gammas; 128 is generous and the overflow is reported, never silent.
 inline constexpr int kBlirMaxSecondaries = 128;
 using BlirFinalState = physics::hadronic::HadFinalState<double, kBlirMaxSecondaries>;
 
-/// `G4BinaryLightIonReaction::ApplyYourself`, with the cascade arm refused.
+/// `G4BinaryLightIonReaction::ApplyYourself`, both arms.
 ///
 /// `projectile` and `target` are P5's shapes. The projectile's four-momentum is reconstructed as
 /// `(0, 0, sqrt(T(T+2m)), T+m)` because that is what `G4HadProjectile::Get4Momentum()` returns -
@@ -391,21 +766,249 @@ using BlirFinalState = physics::hadronic::HadFinalState<double, kBlirMaxSecondar
 ///
 /// Three outcomes, and they are not interchangeable:
 ///
-///   * **kinetic energy per nucleon at or above 50 MeV**: `ref.cascade` and an EMPTY final
-///     state. Geant4 would have run a cascade; this package has none, and returning the fusion
-///     answer for an energy where the cascade runs would be an approximation rather than a
-///     refusal.
+///   * **kinetic energy per nucleon at or above 50 MeV**: `Interact` - the 150-try loop, the
+///     projectile nucleus whose nucleons become `outside` tracks at a sampled impact parameter,
+///     the same `propagate`, then `SortResult`, the correction loop and
+///     `DeExciteSpectatorNucleus`. Until P9e this was `ref.cascade` and an empty final state.
 ///   * **below 50 MeV/nucleon and the nuclei cannot fuse**: `ref.no_fusion`, and the final state
 ///     is the PRIMARY UNCHANGED - `isAlive`, its own kinetic energy, its own direction. That is
 ///     Geant4's answer and it is the only branch of this model that does not kill the primary.
 ///   * **below 50 MeV/nucleon and they fuse**: `stopAndKill` and P6's whole product list, with
 ///     the swap undone and mirrored if `SetLighterAsProjectile` swapped.
+/// What the cascade arm did, for a caller that wants to see the loop counts rather than only
+/// the products. Every field is zero on the fusion arm.
+struct BlirReport {
+  bool cascade_arm = false;
+  int interact_tries = 0;      ///< `tryCount`, at most 150
+  int spectator_a = 0;
+  int spectator_z = 0;
+  int n_cascaders = 0;
+  int n_spectators = 0;
+  double projectile_excitation = 0.0;
+  int correction_loops = 0;    ///< `loopcount` in the E/p loop, at most 11
+  bool correction_gave_up = false;
+  PropagateResult propagate;
+};
+
+/// **This lives here and not in `binary_cascade.cuh` because BOTH entry points need it and
+/// that file includes this one.** `G4BinaryCascade::ApplyYourself` reaches it through its own
+/// `Propagate`, and `G4BinaryLightIonReaction::Interact` reaches the same `Propagate` with the
+/// projectile nucleons as its secondaries. Putting it in `cascade_propagate.cuh` instead would
+/// make that file depend on P6, and the whole point of the de-excitation being a parameter
+/// there is that it does not.
+/// The cascade's exit into the precompound model - `theDeExcitation->DeExcite(*fragment)` with
+/// `G4Fragment(a, z, GetFinalNucleusMomentum())` and the three exciton counters FindFragments set.
+///
+/// `__noinline__` for the reason docs/RISK.md V55 gives and one more that is specific here: P6's
+/// `deexcite` drives P3's whole evaporation cascade, and inlining it into `propagate` - which is
+/// already the deepest frame in this package - puts both stack frames live at once for the entire
+/// cascade loop, when the de-excitation runs exactly once and at the very end.
+template <typename Rng>
+__host__ __device__ __noinline__ int bic_deexcite_fragment(
+    const CascadeFragment& frag, CascadeProduct* out, int capacity, const data::LevelTable& lt,
+    const deex::FermiPool& pool, const preco::PrecoWorkspace& ws, Rng& rng,
+    preco::PrecoStatus& status, bool& overflow) {
+  deex::Fragment f;
+  f.set_za_and_momentum(frag.momentum, frag.z, frag.a);
+  preco::Excitons ex;
+  ex.particles = frag.particles;
+  ex.charged = frag.charged;
+  ex.holes = frag.holes;
+  status = preco::deexcite(f, ex, lt, pool, ws, rng);
+  int n = 0;
+  for (int i = 0; i < status.n_products; ++i) {
+    if (n >= capacity) {
+      overflow = true;
+      break;
+    }
+    const deex::DeexProduct& p = ws.products[i];
+    out[n] = CascadeProduct{};
+    out[n].pdg = p.pdg;
+    // The same two-branch mass rule `deex::deex_kinetic_energy` uses: for a nucleus the table
+    // mass plus whatever excitation P3 left on it, for A = 0 the electron's mass or nothing.
+    const double pdg_mass =
+        (p.a > 0) ? (deex::nuclear_mass(p.a, p.z) + p.excitation)
+                  : ((p.pdg == deex::kPdgElectron) ? u::electron_mass_c2<double>() : 0.0);
+    // P3 hands back a full four-momentum, so there is nothing to rebuild - only the definition
+    // mass to record alongside it.
+    out[n].momentum = p.momentum;
+    // `G4PreCompoundModel` products carry their own creator ids, which P3 does not keep; -1 says
+    // so rather than claiming theBIC_ID for something the cascade did not emit.
+    out[n].creator_model_id = -1;
+    out[n].nucleus_z = p.z;
+    out[n].nucleus_a = p.a;
+    out[n].pdg_mass = pdg_mass;
+    ++n;
+  }
+  return n;
+}
+
+/// `G4BinaryLightIonReaction::ApplyYourself`'s cascade branch, from `Interact` to the secondary
+/// list. It is a separate function only because the fusion branch is already long; Geant4 has it
+/// all in one.
+///
+/// ## THE CORRECTION LOOP IS ON THE ENERGY AND THE EXIT IS ON THE MOMENTUM
+///
+///     while (std::abs(momentum.e()-pspectators.e()) > 10*MeV)
+///     {  pCorrect = pInitialState - pspectators;
+///        EnergyAndMomentumCorrector(cascaders, pCorrect);
+///        pFinalState = sum over cascaders;
+///        momentum = pInitialState - pFinalState;
+///        if (++loopcount > 10) {
+///           if (momentum.vect().mag() - momentum.e() > 10*keV) throw;
+///           else break; } }
+///
+/// The `while` tests the ENERGY against 10 MeV and the give-up test inside it compares a
+/// three-momentum magnitude against an energy - `|p| - E`, which for a timelike remnant is
+/// negative and for a spacelike one is positive. So the loop runs until the cascaders carry the
+/// energy the spectators left them, and gives up after eleven passes; the throw is for the case
+/// where what is left over is spacelike, and a kernel cannot throw, so it is
+/// `BlirRefusal::momentum_not_conserved` and the primary comes back alive - which is also what
+/// the `spectatorA > 0` branch below does with the same test.
+///
+/// ## `pInitialState` IS THE PROJECTILE PLUS THE TARGET'S MASS AND NOTHING ELSE
+///
+///     pInitialState = mom;
+///     pInitialState.setT(pInitialState.getT() + GetIonMass(tZ,tA));
+///
+/// The target's REST MASS is added to the energy and not as a four-vector, which is the same
+/// thing for a target at rest and is what makes the corrector's target four-momentum exact.
+template <typename Rng>
+__host__ __device__ inline preco::PrecoStatus blir_cascade_arm(
+    const physics::hadronic::HadProjectile<double>& projectile, const BlirFrame& f,
+    const data::LevelTable& lt, const deex::FermiPool& pool, const preco::PrecoWorkspace& ws,
+    BlirStorage& store, Rng& rng, BlirFinalState& result, BlirRefusal& ref, BlirReport& rep) {
+  preco::PrecoStatus status;
+  rep.cascade_arm = true;
+
+  Nucleus3D proj;
+  Nucleus3D tgt;
+  RkPropagation propagator;
+  BicCascadeState st;
+  CascadeSpecies sp;
+  sp.proton_mass = u::proton_mass_c2<double>();
+  sp.neutron_mass = u::neutron_mass_c2<double>();
+  sp.pi_plus_mass = pdg_mass_pion_charged();
+  sp.pi_zero_mass = pdg_mass_pion_zero();
+
+  bool preco_overflow = false;
+  auto de = [&](const CascadeFragment& frag, CascadeProduct* out, int capacity) {
+    return bic_deexcite_fragment(frag, out, capacity, lt, pool, ws, rng, status, preco_overflow);
+  };
+
+  const BlirInteractReport ir =
+      blir_interact(f, proj, tgt, propagator, store, st, sp, rng, de, ref);
+  rep.interact_tries = ir.tries;
+  rep.propagate = ir.propagate;
+  rep.projectile_excitation = ir.projectile_excitation;
+  ref.cascade_ref = ir.cascade_ref;
+  if (preco_overflow) { ref.capacity = true; }
+  if (ref.any()) { return status; }
+  if (!ir.ok) {
+    // "G4BinaryLightIonReaction no final state for:" - 150 impact parameters and nothing came
+    // back. Geant4 prints and returns the primary unchanged.
+    ref.no_final_state = true;
+    result.status = physics::hadronic::HadFinalStateStatus::kIsAlive;
+    result.energy_change = projectile.kin_energy;
+    result.momentum_change = Vec3<double>{0.0, 0.0, 1.0};
+    return status;
+  }
+
+  imr::LorentzVector p_initial_state = f.mom;
+  p_initial_state.e += deex::nuclear_mass(f.ta, f.tz);
+
+  imr::LorentzVector p_final_state;
+  int n_spectators = 0, n_cascaders = 0, spectator_a = 0, spectator_z = 0;
+  const imr::LorentzVector p_spectators = blir_sort_result(
+      store.cascade.products, ir.n_products, store.spectators, store.spectator_capacity,
+      store.cascaders, store.cascader_capacity, n_spectators, n_cascaders, spectator_a,
+      spectator_z, p_final_state, ref);
+  rep.spectator_a = spectator_a;
+  rep.spectator_z = spectator_z;
+  rep.n_spectators = n_spectators;
+  if (ref.any()) { return status; }
+
+  imr::LorentzVector momentum = p_initial_state - p_final_state;
+  int loopcount = 0;
+  while (std::fabs(momentum.e - p_spectators.e) > 10.0 * u::MeV<double>()) {
+    const imr::LorentzVector p_correct = p_initial_state - p_spectators;
+    blir_energy_and_momentum_corrector(store.cascaders, n_cascaders, p_correct);
+    p_final_state = imr::LorentzVector();
+    for (int i = 0; i < n_cascaders; ++i) { p_final_state = p_final_state + store.cascaders[i].momentum; }
+    momentum = p_initial_state - p_final_state;
+    if (++loopcount > 10) {
+      if (std::sqrt(g4gpu::mag2(momentum.v)) - momentum.e > 10.0 * u::keV<double>()) {
+        // `throw G4HadronicException(... "G4BinaryCasacde::ApplyCollision()")` - the typo and
+        // the wrong function name are Geant4's. A kernel cannot throw.
+        ref.momentum_not_conserved = true;
+        result.status = physics::hadronic::HadFinalStateStatus::kIsAlive;
+        result.energy_change = projectile.kin_energy;
+        result.momentum_change = Vec3<double>{0.0, 0.0, 1.0};
+        rep.correction_loops = loopcount;
+        rep.correction_gave_up = true;
+        return status;
+      }
+      break;
+    }
+  }
+  rep.correction_loops = loopcount;
+
+  if (spectator_a > 0) {
+    if (std::sqrt(g4gpu::mag2(momentum.v)) - momentum.e < 10.0 * u::keV<double>()) {
+      deex::DeexStatus dstatus;
+      blir_deexcite_spectator(store.spectators, n_spectators, store.cascaders, n_cascaders,
+                              store.cascader_capacity, spectator_a, spectator_z, f.pa,
+                              ir.projectile_excitation, p_spectators, p_initial_state,
+                              p_final_state, lt, pool, ws.deex, rng, dstatus, ref);
+      status.deex = dstatus;
+      if (ref.any()) { return status; }
+    } else {
+      // "G4BinaryLightIonReaction invalid final state for:" - the primary, unchanged.
+      ref.momentum_not_conserved = true;
+      result.status = physics::hadronic::HadFinalStateStatus::kIsAlive;
+      result.energy_change = projectile.kin_energy;
+      result.momentum_change = Vec3<double>{0.0, 0.0, 1.0};
+      return status;
+    }
+  }
+  rep.n_cascaders = n_cascaders;
+
+  // `toZ.rotateZ(-mom.phi()); toZ.rotateY(-mom.theta()); toLab = toZ.inverse()` - the identity
+  // for a projectile already along +z, which is what P5 hands over. See the file header.
+  result.status = physics::hadronic::HadFinalStateStatus::kStopAndKill;
+  const deex::Vec3d inv_boost{-f.breit_boost.x, -f.breit_boost.y, -f.breit_boost.z};
+  for (int i = 0; i < n_cascaders; ++i) {
+    // `if((*iter)->GetNewlyAdded())` - and ONLY those. A spectator that was de-excited is gone,
+    // and one that could not be is in this list with the flag set.
+    if (!store.cascaders[i].newly_added) { continue; }
+    imr::LorentzVector q = store.cascaders[i].momentum;
+    if (f.swapped) {
+      q = boost_by_rotation(q, inv_boost);
+      q.v = deex::Vec3d{-q.v.x, -q.v.y, -q.v.z};
+    }
+    physics::hadronic::HadSecondary<double> s;
+    s.pdg = store.cascaders[i].pdg;
+    s.z = store.cascaders[i].z;
+    s.a = store.cascaders[i].a;
+    s.time = 0.0;   // `G4double time = 0;` with the creation time commented out
+    s.weight = 1.0;
+    s.creator_model_id = blir_model_id();
+    capture::set_four_momentum(s, q, store.cascaders[i].pdg_mass);
+    if (!result.add_secondary(s)) {
+      ref.capacity = true;
+      break;
+    }
+  }
+  return status;
+}
+
+
 template <typename Rng>
 __host__ __device__ inline preco::PrecoStatus blir_apply_yourself(
     const physics::hadronic::HadProjectile<double>& projectile,
     const physics::hadronic::HadNucleus& target, const data::LevelTable& lt,
-    const deex::FermiPool& pool, const preco::PrecoWorkspace& ws, Rng& rng,
-    BlirFinalState& result, BlirRefusal& ref) {
+    const deex::FermiPool& pool, const preco::PrecoWorkspace& ws, BlirStorage& store,
+    Rng& rng, BlirFinalState& result, BlirRefusal& ref, BlirReport& rep) {
   preco::PrecoStatus status;
   result.clear();
 
@@ -426,9 +1029,7 @@ __host__ __device__ inline preco::PrecoStatus blir_apply_yourself(
   const double kin_per_nucleon = blir_kin_per_nucleon(f);
   ref.refused_kin_per_nucleon = kin_per_nucleon;
   if (!(kin_per_nucleon < blir_fusion_threshold_per_nucleon())) {
-    ref.cascade = true;
-    ref.refused_pdg = projectile.pdg;
-    return status;
+    return blir_cascade_arm(projectile, f, lt, pool, ws, store, rng, result, ref, rep);
   }
 
   if (!blir_fuse_nuclei_and_precompound(f, lt, pool, ws, rng, status, ref)) {

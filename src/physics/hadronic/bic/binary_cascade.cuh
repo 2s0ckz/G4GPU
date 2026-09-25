@@ -161,53 +161,6 @@ struct BicStorage {
   const preco::PrecoWorkspace* preco = nullptr;
 };
 
-/// The cascade's exit into the precompound model - `theDeExcitation->DeExcite(*fragment)` with
-/// `G4Fragment(a, z, GetFinalNucleusMomentum())` and the three exciton counters FindFragments set.
-///
-/// `__noinline__` for the reason docs/RISK.md V55 gives and one more that is specific here: P6's
-/// `deexcite` drives P3's whole evaporation cascade, and inlining it into `propagate` - which is
-/// already the deepest frame in this package - puts both stack frames live at once for the entire
-/// cascade loop, when the de-excitation runs exactly once and at the very end.
-template <typename Rng>
-__host__ __device__ __noinline__ int bic_deexcite_fragment(
-    const CascadeFragment& frag, CascadeProduct* out, int capacity, const data::LevelTable& lt,
-    const deex::FermiPool& pool, const preco::PrecoWorkspace& ws, Rng& rng,
-    preco::PrecoStatus& status, bool& overflow) {
-  deex::Fragment f;
-  f.set_za_and_momentum(frag.momentum, frag.z, frag.a);
-  preco::Excitons ex;
-  ex.particles = frag.particles;
-  ex.charged = frag.charged;
-  ex.holes = frag.holes;
-  status = preco::deexcite(f, ex, lt, pool, ws, rng);
-  int n = 0;
-  for (int i = 0; i < status.n_products; ++i) {
-    if (n >= capacity) {
-      overflow = true;
-      break;
-    }
-    const deex::DeexProduct& p = ws.products[i];
-    out[n] = CascadeProduct{};
-    out[n].pdg = p.pdg;
-    // The same two-branch mass rule `deex::deex_kinetic_energy` uses: for a nucleus the table
-    // mass plus whatever excitation P3 left on it, for A = 0 the electron's mass or nothing.
-    const double pdg_mass =
-        (p.a > 0) ? (deex::nuclear_mass(p.a, p.z) + p.excitation)
-                  : ((p.pdg == deex::kPdgElectron) ? u::electron_mass_c2<double>() : 0.0);
-    // P3 hands back a full four-momentum, so there is nothing to rebuild - only the definition
-    // mass to record alongside it.
-    out[n].momentum = p.momentum;
-    // `G4PreCompoundModel` products carry their own creator ids, which P3 does not keep; -1 says
-    // so rather than claiming theBIC_ID for something the cascade did not emit.
-    out[n].creator_model_id = -1;
-    out[n].nucleus_z = p.z;
-    out[n].nucleus_a = p.a;
-    out[n].pdg_mass = pdg_mass;
-    ++n;
-  }
-  return n;
-}
-
 /// `G4BinaryCascade::ApplyYourself`.
 ///
 /// `projectile` and `target` are P5's shapes. Geant4's test is on

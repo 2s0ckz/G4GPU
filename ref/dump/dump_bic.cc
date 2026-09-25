@@ -3716,6 +3716,136 @@ void write_imr_propagate() {
   std::fclose(dbg);
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4BinaryLightIonReaction::ApplyYourself ABOVE the fusion gate, with the random stream recorded
+// ---------------------------------------------------------------------------------------------
+//
+// The same technique as `write_imr_propagate` and for the same reason: the ion cascade consumes
+// uniforms from the first nucleus it builds to the last evaporation step, in an order that
+// depends on everything before it, and no intermediate quantity is reachable from outside -
+// `Interact`, `GetProjectileExcitation`, `SortResult` and `DeExciteSpectatorNucleus` are all
+// private, and `spectatorA`, `spectatorZ` and `theStatisticalExEnergy` are private members.
+//
+// What IS public is `ApplyYourself` and the `G4HadFinalState` it returns. So this records every
+// value the engine serves across the WHOLE call and writes the secondaries out with it. The port
+// replays the tape through `bic::blir_apply_yourself` and compares secondary by secondary. The
+// tape starts before the first `G4Fancy3DNucleus::Init`, so the two nuclei are replayed rather
+// than dumped - P9 validated that construction bitwise, and a tape that begins after it would
+// leave the impact parameter unanchored.
+//
+// The precompound model is the REAL one here, not the recording stub `write_imr_propagate` uses:
+// the ion arm calls the de-excitation twice - once inside `Propagate` for the target remnant and
+// once in `DeExciteSpectatorNucleus` for the projectile's - and both are on the critical path of
+// the random stream, so leaving either out would compare a different event.
+//
+// The grid is small and the energies are just above the 50 MeV/nucleon gate, because one tape is
+// the whole event: a C12 on Fe56 at 200 MeV/nucleon spends tens of thousands of uniforms before
+// it reaches a single collision.
+void write_blir_interact() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  auto* blir = new G4BinaryLightIonReaction(preco);
+  blir->SetMinEnergy(0.0);
+  blir->SetMaxEnergy(6.0 * CLHEP::GeV);
+  G4IonTable* ions = G4IonTable::GetIonTable();
+
+  struct ICase { int pz, pa; double ekin_per_a; int tz, ta; const char* name; int events; };
+  const ICase kCases[] = {
+    {1, 2,   60.0,  6,  12, "id_d60_C12", 3},
+    {1, 2,  200.0,  6,  12, "id_d200_C12", 3},
+    {2, 4,   60.0,  6,  12, "id_a60_C12", 3},
+    {2, 4,  200.0,  6,  12, "id_a200_C12", 3},
+    {2, 4,   60.0,  8,  16, "id_a60_O16", 2},
+    {2, 4,  200.0, 13,  27, "id_a200_Al27", 2},
+    {6, 12,  60.0,  6,  12, "id_C12_60_C12", 2},
+    {6, 12, 200.0, 13,  27, "id_C12_200_Al27", 2},
+  };
+
+  FILE* f = std::fopen("bic_blir_tape.csv", "w");
+  std::fprintf(f, "case,ev,pz,pa,ekin_per_a,tz,ta,ndraws,status,nsec,bltid\n");
+  FILE* g = std::fopen("bic_blir_tapeval.csv", "w");
+  std::fprintf(g, "case,ev,i,u\n");
+  FILE* h = std::fopen("bic_blir_tapefs.csv", "w");
+  std::fprintf(h, "case,ev,i,pdg,px,py,pz,e,time,creatorid\n");
+  // `Interact`'s first four steps, re-expressed from the public API on the SAME tape so that a
+  // divergence can be placed: how many uniforms each of the two `G4Fancy3DNucleus::Init` calls
+  // takes, the two outer radii, and the impact parameter the next two draws produce. Everything
+  // here is public - `Init`, `CenterNucleons`, `GetOuterRadius` - and the arithmetic is the
+  // source's two lines. Without it, a port whose cascade is right and whose deuteron is one
+  // Gaussian out looks exactly like a port whose cascade is wrong.
+  FILE* q = std::fopen("bic_blir_init.csv", "w");
+  std::fprintf(q, "case,ev,draws_proj,draws_tgt,r_proj,r_tgt,impactmax,ax,ay,posz\n");
+
+  auto* eng = new ImrTapeEngine(20260919L);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  const int bltid = G4PhysicsModelCatalog::GetModelID("model_G4BinaryLightIonReaction");
+
+  for (const ICase& c : kCases) {
+    const G4ParticleDefinition* part = ions->GetIon(c.pz, c.pa, 0.0);
+    if (part == nullptr) { continue; }
+    for (int ev = 0; ev < c.events; ++ev) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin_per_a * c.pa * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      // The stage counts first, on a tape of their own with the SAME seed, so that reading
+      // them does not move the stream the reaction then replays.
+      {
+        auto* probe = new ImrTapeEngine(20260919L + 977 * ev + c.ta * 31 + c.pa);
+        CLHEP::HepRandom::setTheEngine(probe);
+        auto* pn = new G4Fancy3DNucleus;
+        pn->Init(c.pa, c.pz);
+        pn->CenterNucleons();
+        const int draws_proj = static_cast<int>(probe->tape().size());
+        auto* tn = new G4Fancy3DNucleus;
+        tn->Init(c.ta, c.tz);
+        const int draws_tgt = static_cast<int>(probe->tape().size()) - draws_proj;
+        const double rp = pn->GetOuterRadius();
+        const double rt = tn->GetOuterRadius();
+        const double imax = rt + rp;
+        const double ax = (2. * G4UniformRand() - 1.) * imax;
+        const double ay = (2. * G4UniformRand() - 1.) * imax;
+        std::fprintf(q, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n", c.name, ev,
+                     draws_proj, draws_tgt, rp, rt, imax, ax, ay,
+                     -2. * imax - 5. * fermi);
+        CLHEP::HepRandom::setTheEngine(saved);
+        delete probe;
+        // pn and tn are LEAKED, for the reason write_imr_pauli gives.
+      }
+
+      eng->restart(20260919L + 977 * ev + c.ta * 31 + c.pa);
+      CLHEP::HepRandom::setTheEngine(eng);
+      G4HadFinalState* r = blir->ApplyYourself(proj, nucleus);
+      CLHEP::HepRandom::setTheEngine(saved);
+      const int ns = (r != nullptr) ? static_cast<int>(r->GetNumberOfSecondaries()) : -1;
+      const char* status = (r == nullptr) ? "NULL"
+                                          : ((r->GetStatusChange() == isAlive) ? "isAlive"
+                                                                               : "stopAndKill");
+      std::fprintf(f, "%s,%d,%d,%d,%.17g,%d,%d,%d,%s,%d,%d\n", c.name, ev, c.pz, c.pa,
+                   c.ekin_per_a, c.tz, c.ta, static_cast<int>(eng->tape().size()), status, ns,
+                   bltid);
+      const std::vector<double>& tape = eng->tape();
+      for (size_t k = 0; k < tape.size(); ++k) {
+        std::fprintf(g, "%s,%d,%d,%.17g\n", c.name, ev, static_cast<int>(k), tape[k]);
+      }
+      for (int k = 0; k < ns; ++k) {
+        const G4HadSecondary* sec = r->GetSecondary(k);
+        const G4DynamicParticle* p = sec->GetParticle();
+        const G4LorentzVector p4 = p->Get4Momentum();
+        std::fprintf(h, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%d\n", c.name, ev, k,
+                     p->GetDefinition()->GetPDGEncoding(), p4.x(), p4.y(), p4.z(), p4.t(),
+                     sec->GetTime(), sec->GetCreatorModelID());
+      }
+      if (r != nullptr) { r->Clear(); }
+    }
+  }
+  delete eng;
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+  std::fclose(q);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -3749,6 +3879,7 @@ void dump_bic(const DumpContext&) {
   write_imr_boundary();
   write_imr_fps();
   write_imr_propagate();
+  write_blir_interact();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
   write_imr_scatterlife();
@@ -3777,5 +3908,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_ionmass.csv bic_imr_pauli.csv "
                     "bic_imr_capture.csv bic_imr_absorbcut.csv bic_imr_capturefield.csv "
                     "bic_imr_boundary.csv bic_imr_prop.csv bic_imr_propnuc.csv "
-                    "bic_imr_proptape.csv bic_imr_propfs.csv bic_imr_propdiag.csv",
+                    "bic_imr_proptape.csv bic_imr_propfs.csv bic_imr_propdiag.csv "
+                    "bic_blir_tape.csv bic_blir_tapeval.csv bic_blir_tapefs.csv bic_blir_init.csv",
                     dump_bic);
