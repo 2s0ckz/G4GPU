@@ -118,10 +118,10 @@ struct FtfModelWorkspace {
   // ---- the two nuclei, P9's model ----
   bic::Nucleon target_nucleons[kMaxTargetA];
   bic::Nucleon proj_nucleons[kMaxProjA];
-  // ONE scratch, shared between the two nucleus_init calls - which is what
-  // bic/nucleus/nucleus_model.cuh's contract asks for: it carries the Gaussian latch that
-  // CLHEP keeps in a thread-local static, and a second scratch would restart the pair cache and
-  // give a different stream from Geant4's.
+  // ONE scratch, shared between the two nucleus_init calls. It once had to be one, because it
+  // carried the Gaussian pair cache that `CLHEP::RandGauss` keeps in a thread-local static;
+  // `G4RandGauss` is `RandGaussQ` and keeps nothing (docs/RISK.md V180), so the scratch is stateless
+  // and sharing it is an allocation choice, not a stream requirement.
   Vec3d scratch_momentum[kScratchA];
   double scratch_fermi_p[kScratchA];
   bic::NucleusSortEntry scratch_sums[kScratchA];

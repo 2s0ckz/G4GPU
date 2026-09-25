@@ -410,13 +410,13 @@ __host__ __device__ inline double blir_projectile_excitation_term(const Nucleon&
 // flag on the track instead of on the nucleon, or that read the predicate the obvious way round,
 // would sort every product into the wrong pile.
 //
-// ## THE NUCLEUS BUILDS SHARE ONE SCRATCH, AND THAT IS NOT AN OPTIMISATION
+// ## THE NUCLEUS BUILDS SHARE ONE SCRATCH, AND SINCE V180 THAT IS ONLY AN ALLOCATION
 //
 // `projectile3dNucleus->Init(pA,pZ)` and `target3dNucleus->Init(tA,tZ)` run one after the other
-// on the same random stream, and `G4Fancy3DNucleus::ChooseFermiMomenta` draws through
-// `CLHEP::RandGauss`, whose cached second value is a THREAD-LOCAL static that survives from one
-// Init to the next (see `Nucleus3DScratch` in nucleus/fancy_3d_nucleus.cuh, note 5). Giving the
-// two builds separate scratches puts the port half a Gaussian out of step on the second one.
+// on the same random stream. This comment once said the scratch had to be shared because
+// `ChooseFermiMomenta` drew through `CLHEP::RandGauss` and its cached second value had to
+// survive from one Init to the next; `G4RandGauss` is `RandGaussQ`, which keeps nothing
+// (docs/RISK.md V180), so `Nucleus3DScratch` carries no state and the sharing saves memory only.
 //
 // ## REFUSED, by name
 //

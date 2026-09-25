@@ -12050,6 +12050,13 @@ fix belongs in `core/rng.cuh` - a float uniform that cannot round to 1, for inst
 value 1 - 2^-25 rounds to 1.0f) - and is REFUSED here by name rather than hidden by a guard in the
 transcription, which would make RandGaussQ return something for an argument CLHEP never receives.
 
+Integration note (lead, integ/gaussq): fixed in `core/rng.cuh` on this branch. `uniform()` now
+goes through a static `uniform_from_word(r)`; the double map is the same expression as before,
+bitwise, and the float map keeps the top 23 bits - `((r >> 9) + 0.5) * 2^-23`, in
+[2^-24, 1 - 2^-24]. Twenty-four bits was tried first and MEASURED to fail: 16,777,215 + 0.5 has
+twenty-five significant bits, rounds up, and the product is 1.0f again. `tests/test_core.cu`
+hands both maps the words 0 and 0xFFFFFFFF and pins the double values exactly.
+
 ### V187: test_bic_apply's 2e-3 MeV on a conversion-electron event is a measurement, not a bound, and a fast fragment crosses it
 
 With fission's Gaussian on RandGaussQ (V185), `tests/test_bic_apply.cu` FAILS one bucket:

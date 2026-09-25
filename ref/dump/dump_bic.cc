@@ -3892,7 +3892,7 @@ void write_blir_interact() {
 // `G4RandGauss::shoot()` in Geant4 is one uniform through a 1,250-entry inverse-CDF table with
 // linear interpolation and a series tail - not the Box-Muller polar method of
 // `CLHEP::RandGauss`. docs/RISK.md V180 is what assuming otherwise cost. The port transcribes
-// `transformQuick` (fancy_3d_nucleus.cuh) and extracts the table (tools/extract_randgaussq.pl),
+// `transformQuick` (core/rand_gauss_q.cuh, shared since V185) and extracts the table (tools/extract_randgaussq.pl),
 // and this is the oracle for the transcription: the function is new port code and a table
 // lookup with three branches, two mirrors and a float truncation on the way out has four places
 // to be off by one bin and no physics test that would notice.

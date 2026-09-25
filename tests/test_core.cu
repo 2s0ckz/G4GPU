@@ -22,6 +22,16 @@ int main() {
   for (int i = 0; i < 100000; ++i) { double u = rng.uniform(); sum += u; if (u <= 0 || u >= 1) in_range = false; }
   check(in_range, "uniform() strictly inside (0,1)");
   check(std::fabs(sum / 100000.0 - 0.5) < 0.005, "uniform() mean ~0.5");
+  // The two extreme words, in both precisions, deterministically: 100,000 draws cannot see a
+  // float rounding that happens once in 3.4e7 (docs/RISK.md V186). The double map is pinned to
+  // its exact values because every recorded stream in this repository was drawn through it.
+  check(Philox<float>::uniform_from_word(0xFFFFFFFFu) < 1.0f, "float uniform: top word < 1");
+  check(Philox<float>::uniform_from_word(0u) > 0.0f, "float uniform: word 0 > 0");
+  check(Philox<double>::uniform_from_word(0xFFFFFFFFu) < 1.0, "double uniform: top word < 1");
+  check(Philox<double>::uniform_from_word(0u) == 0.5 * 2.3283064365386963e-10,
+        "double uniform: word 0 is exactly 2^-33");
+  check(Philox<double>::uniform_from_word(0xFFFFFFFFu) == 4294967295.5 * 2.3283064365386963e-10,
+        "double uniform: top word is exactly 1 - 2^-33");
   Philox<real_t> a(3, 4), b(3, 4);
   check(a.uniform() == b.uniform(), "same (event,track) reproduces stream");
   Philox<real_t> c(3, 5);

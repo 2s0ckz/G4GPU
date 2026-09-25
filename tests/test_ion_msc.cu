@@ -340,8 +340,9 @@ int main() {
   // The 14 rows where it does are compared as moments. `Randomizetlimit` is
   // `max(Gauss(tlimit, 0.1*(tlimit - tlimitmin)), tlimitmin)` clamped to the proposed step, so
   // the mean is tlimit and the sd a tenth of it, and 20,000 draws pin the mean to 7e-4 of the
-  // sd. The port draws its Gaussian from Box-Muller where Geant4 uses G4RandGauss, so these
-  // two samples are not the same numbers and this is a distribution comparison by construction.
+  // sd. Both sides draw `RandGaussQ` since docs/RISK.md V185, but from different engines (Philox
+  // here, HepJamesRandom there), so these two samples are not the same numbers and this is a
+  // distribution comparison by construction.
   {
     int bad_branch = 0, compared = 0, flat = 0;
     double worst_mean = 0, worst_sd = 0;

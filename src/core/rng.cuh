@@ -42,8 +42,23 @@ class Philox {
   /// Uniform in (0,1). Never returns exactly 0 or 1, so log() and division are safe.
   __host__ __device__ real_t uniform() {
     if (idx_ >= 4) { advance(); idx_ = 0; }
-    const uint32_t r = buf_[idx_++];
-    return (real_t(r) + real_t(0.5)) * real_t(2.3283064365386963e-10);  // /2^32
+    return uniform_from_word(buf_[idx_++]);
+  }
+
+  /// The word-to-(0,1) map, a static so a test can hand it the two extreme words. In double,
+  /// `(r + 0.5) * 2^-32` is exact and lies in [2^-33, 1 - 2^-33]. In float the same expression
+  /// ROUNDS: a word above 2^32 - 2^8 converts to 2^32, the half is lost, and the product is
+  /// exactly 1.0f - which RandGaussQ turns into a NaN (docs/RISK.md V186) - so the float map
+  /// keeps the top 23 bits, so that the half-offset sum has 24 significant bits, which is what a
+  /// float carries exactly (24 bits plus the half is 25, and rounds back up to 1.0f - measured):
+  /// `((r >> 9) + 0.5) * 2^-23` lies in [2^-24, 1 - 2^-24]. The double map is unchanged, and
+  /// every recorded stream in this repository depends on it staying so.
+  __host__ __device__ static real_t uniform_from_word(uint32_t r) {
+    if constexpr (sizeof(real_t) == 4) {
+      return (real_t(r >> 9) + real_t(0.5)) * real_t(1.1920928955078125e-07);  // /2^23
+    } else {
+      return (real_t(r) + real_t(0.5)) * real_t(2.3283064365386963e-10);  // /2^32
+    }
   }
 
  private:
