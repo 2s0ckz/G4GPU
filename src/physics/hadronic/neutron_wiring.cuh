@@ -119,10 +119,20 @@ namespace nhp = g4gpu::physics::hadronic;
 /// `G4NeutronGeneralProcess::PostStepDoIt` calls `ComputeCrossSection` on before delegating.
 ///
 /// `host/neutron_upload.cuh` fills them.
+///
+/// THE INELASTIC ONE WAS BUILT AND THROWN AWAY UNTIL P15. `upload_neutron_tables` has always
+/// loaded all three data sets, because `ngp_build_table` sums elastic + inelastic + capture to
+/// make the combined table - and it uploaded only two of them, because the inelastic
+/// sub-process was refused by name and a refusal needs no target draw. P15 applies that
+/// sub-process, so it needs the same thing the other two need: the data store
+/// `G4NeutronGeneralProcess::PostStepDoIt` calls `ComputeCrossSection` on before delegating, so
+/// that `SampleZandA` draws the element and isotope from the INELASTIC partial sums and not
+/// from another process's.
 template <typename real_t>
 struct NeutronSubTables {
-  const hadronic::xs::PxsDataSet<real_t>* elastic = nullptr;  ///< G4NeutronElasticXS
-  const hadronic::xs::PxsDataSet<real_t>* capture = nullptr;  ///< G4NeutronCaptureXS
+  const hadronic::xs::PxsDataSet<real_t>* elastic = nullptr;    ///< G4NeutronElasticXS
+  const hadronic::xs::PxsDataSet<real_t>* capture = nullptr;    ///< G4NeutronCaptureXS
+  const hadronic::xs::PxsDataSet<real_t>* inelastic = nullptr;  ///< G4NeutronInelasticXS (P15)
 };
 
 /// `G4HadProjectile` for a neutron at this kinetic energy.

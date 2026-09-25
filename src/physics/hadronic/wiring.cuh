@@ -104,9 +104,26 @@ __host__ __device__ inline const char* hadronic_stage_name(HadronicStage s) {
 /// applied, which is after the cross section has already decided an interaction happens - so
 /// the count is a number of interactions the answer is missing, not a number of chances.
 enum class HadronicRefusal : int {
-  /// The neutron general process selected `inelastic`. P9/P10/P11.
+  /// A neutron's inelastic interaction that produced no final state. P15 wired the process;
+  /// this counts what is still missing from it, whatever the cause.
   ///
-  /// REACHED, AND ONLY IN `kFinal`, WHICH IS THE WHOLE DIFFERENCE BETWEEN THE TWO STAGES.
+  /// **THE TWO GROUPS IN THIS ENUM MUST NOT BE ADDED TOGETHER.** Since P15 the ledger answers
+  /// two different questions and answers both about the same event:
+  ///
+  ///   * `kNeutronInelastic` and `kChargedHadronInelastic` say **how much is missing**, one
+  ///     booking per lost interaction with the projectile's kinetic energy on it. Summing these
+  ///     two gives the size of the inelastic hole in the answer.
+  ///   * `kLightIonCascade`, `kBinaryHydrogenTarget`, `kFtfpRefused`, `kBertiniRefused`,
+  ///     `kBinaryRefused`, `kNoInelasticModel`, `kInelasticSecondaryOverflow`,
+  ///     `kInelasticQueueFull`, `kInteractionNoSlot` and `kInelasticReentryExhausted` say
+  ///     **why**, and every one of them is booked on an event that is ALSO in the first group.
+  ///
+  /// Two groups rather than one deep enum because the questions have different consumers: a
+  /// dose comparison wants the first and a package triage wants the second, and a single
+  /// counter that tried to be both would have to be read with a key. The run's report prints
+  /// them under separate headings for exactly that reason.
+  ///
+  /// REACHED IN BOTH STAGES SINCE P15, and it used to be reached only in `kFinal`.
   /// `G4NeutronGeneralProcess::BuildPhysicsTable` sums elastic + inelastic + capture
   /// unconditionally, so in the final configuration the interaction length includes the
   /// inelastic term, `select()` can name it, and this counter says how often with what energy
@@ -120,10 +137,15 @@ enum class HadronicRefusal : int {
   /// process to select. docs/RISK.md V53's addendum is why "left out of the total" was the
   /// wrong description of it.
   kNeutronInelastic = 0,
-  /// A charged hadron's inelastic process. Also P9/P10/P11, and also absent from the cross
-  /// section rather than present and refused - a charged hadron in this transport has NO
-  /// hadronic process at all, so this counter is at zero for the same reason as the one above
-  /// and not because nothing happened.
+  /// A charged hadron's inelastic interaction that produced no final state - the "how much"
+  /// counter of the other species, and the other half of the note above.
+  ///
+  /// REACHED SINCE P15. This used to read "absent from the cross section rather than present
+  /// and refused - a charged hadron in this transport has NO hadronic process at all, so this
+  /// counter is at zero". It has one now: `had::inelastic_xs_per_volume` is a fourth discrete
+  /// competitor in `step_hadron` for p, pi+-, K+-, d, t, He3, alpha and GenericIon, and what is
+  /// left is the interactions the models refuse. The antiproton is still structurally zero and
+  /// is `kAntiNucleusInelastic` below, which says why.
   kChargedHadronInelastic,
   /// A stopped pi- or K-: `G4HadronicAbsorptionBertini`, P12. Reached only in the final stage.
   /// The particle's REST MASS is lost from the answer, which for a pi- is 139.6 MeV.
@@ -218,15 +240,117 @@ enum class HadronicRefusal : int {
   /// above about 17 GeV per nucleon. `step_hadron` tests it with the ion's OWN definition,
   /// which is exact.
   kIonDeltaRay,
+
+  // -------------------------------------------------------------------------------------------
+  // P15's second group: WHY an inelastic interaction produced no final state. Every booking
+  // here is on an event that is ALSO booked under `kNeutronInelastic` or
+  // `kChargedHadronInelastic`, so the two groups are not summed - see the note on
+  // `kNeutronInelastic`.
+  // -------------------------------------------------------------------------------------------
+
+  /// `G4BinaryLightIonReaction::Interact` - every ion whose kinetic energy per nucleon is at or
+  /// above **50 MeV**, which is the `(mom.t()-mom.mag())/pA < 50*MeV` test at
+  /// G4BinaryLightIonReaction.cc:119. P9 ported the fusion arm below it and P9e is writing the
+  /// cascade above it.
+  ///
+  /// **THE LARGEST NAMED HOLE P15 LEAVES, and it is not a corner.** The light-ion reaction's
+  /// window is 0 to 6 GeV per nucleon, so an alpha beam at 840, 1600 or 4000 MeV - 210, 400 and
+  /// 1000 MeV per nucleon - is above the fusion threshold for the whole of its useful range and
+  /// gets FTFP only above 3 GeV per nucleon, which none of those beams reaches. That is why
+  /// `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic` stay
+  /// inactivated on the Geant4 side of `tools/b1_sweep.ps1` while `protonInelastic` and the
+  /// pion, kaon and neutron ones come off: a process wired and then refused for most of its
+  /// interactions is not a like-for-like column. docs/B1_SWEEP.md carries the measured rate per
+  /// beam, and the day `Interact` lands this counter and those five inactivations go together.
+  kLightIonCascade,
+  /// `G4BinaryCascade::Propagate1H1` - a nucleon or charged pion on a HYDROGEN target, which P9
+  /// refused by name. Small but not zero in water: hydrogen is 2 of every 3 atoms and about
+  /// 11% of the electrons, though its inelastic cross section is the smallest of the two.
+  kBinaryHydrogenTarget,
+  /// `ftf::entry::apply` came back `kRefused`, with a reason of its own that `entry::Report`
+  /// carries. The FTFP-side refusals are P11's and are listed in docs/PORTED.md 2.1.11b.
+  kFtfpRefused,
+  /// `bert::apply_yourself` came back with an `InterfaceRefusal`, or with `no_interaction`.
+  /// P10's, and listed in docs/PORTED.md 2.1.12 - `kFate`, K0S/K0L, hyper-nuclei.
+  kBertiniRefused,
+  /// `bic::apply_yourself` or `bic::blir_apply_yourself` refused for a reason that is not the
+  /// hydrogen target or the cascade arm: an inapplicable species, a PreCompound projectile
+  /// refusal, or one of the two capacity guards. A TRIPWIRE - this wiring sends the Binary
+  /// cascade only nucleons and charged pions and the light-ion reaction only ions, so a
+  /// species refusal here means the model table and `inelastic_models` have drifted apart.
+  kBinaryRefused,
+  /// `G4EnergyRangeManager::GetHadronicInteraction` found no model covering the energy, or more
+  /// than two competing, or two fully nested. Geant4 prints its model table and returns
+  /// nullptr, and `G4HadronicProcess::PostStepDoIt` then raises the `had005` FatalException; a
+  /// kernel cannot throw, so it is carried out by name.
+  ///
+  /// A TRIPWIRE AT ZERO for every species this port transports, and the arithmetic is in
+  /// `inelastic_models`: the three-model lists have no gap (BIC to 1.5 GeV, Bertini from 1) and
+  /// no triple overlap (BIC ends at 1.5 and FTFP starts at 3), and the two-model lists cover
+  /// [0, 100 TeV] between them. If it ever moves, a window was transcribed wrong.
+  kNoInelasticModel,
+  /// A final state with more secondaries than `kInteractionSecondaryCap` (256). A TRIPWIRE on a
+  /// measured number: P10's campaign of 190,000 Bertini events and P11d's 36,000 ion events at
+  /// a 512-track list both fit inside it, and P12b's 1,000,000 at-rest captures ran at exactly
+  /// this capacity. If it moves, a model started emitting more than anything either campaign
+  /// saw and the secondaries past the 256th are missing from the answer.
+  kInelasticSecondaryOverflow,
+  /// An inelastic secondary whose PDG code `core/particle.cuh` has no row for.
+  ///
+  /// NOT A TRIPWIRE and not expected to be zero: an inelastic model at a few GeV emits
+  /// hyperons, K0S/K0L and anti-nuclei, all of which this port refuses at emission already
+  /// (README's species table). This counter separates "the model produced something this
+  /// transport cannot step" from "the model produced nothing", which the two `*Inelastic`
+  /// counters above cannot distinguish.
+  kInelasticSecondarySpecies,
+  /// The `do { ApplyYourself } while(!CheckResult)` loop ran its 100 attempts out. Geant4
+  /// raises the `had006` FatalException there; a kernel cannot throw.
+  ///
+  /// Note what is NOT in this port's `check_result`: the short-lived escape clause, which lets
+  /// a resonance's dynamic mass sit within three PDG widths of its definition mass
+  /// (G4HadronicProcess.cc:657). P5 refused it by name for want of a width table. All three
+  /// models decay their strong resonances before returning, so no short-lived secondary should
+  /// reach the test - and this counter is what says whether that is true.
+  kInelasticReentryExhausted,
+  /// The interaction queue was full when a stepper tried to enqueue. A TRIPWIRE, and the file
+  /// header of `interaction_queue.cuh` has the proof that it cannot fire at the default
+  /// capacity: one track queues at most one interaction per launch and a launch steps at most
+  /// `pool` tracks. The track is killed with its kinetic energy deposited locally.
+  kInelasticQueueFull,
+  /// A thread of the interaction kernel found no workspace slot. A TRIPWIRE for the same
+  /// reason: the engine launches `min(n_queued, n_slots)` threads per chunk and drains the
+  /// queue in chunks, so a thread index past the last slot cannot occur. It is kept because the
+  /// alternative to refusing is two threads sharing one 1.48 MB workspace, which is a data race
+  /// whose symptom is a wrong shower (docs/RISK.md V145).
+  kInteractionNoSlot,
+  /// An antiproton's inelastic process. STRUCTURALLY ZERO, and for the same reason as
+  /// `kAntiNucleusElastic`: `G4HadronicBuilder::BuildAntiLightIonsFTFP` gives it
+  /// `G4CrossSectionInelastic(G4ComponentAntiNuclNuclearXS)`, the component P2 refuses by name,
+  /// so an antiproton draws no inelastic interaction length at all. The gap is in the CROSS
+  /// SECTION and not in a final state that could not be applied - the MODEL runs, as P12b's
+  /// at-rest campaign shows - and booking it per step would count chances.
+  kAntiNucleusInelastic,
+  /// A stopped negative hadron's at-rest capture that produced no final state:
+  /// `stopping::at_rest` came back with a `StoppingRefusal`. The chain's own reasons are
+  /// P12's and are listed in docs/PORTED.md 2.1.13 - the anti-nucleus hand-over, the P6
+  /// interface refusals and the handful of Bertini ones.
+  ///
+  /// It REPLACES `kStoppedNegativeHadron`, `kStoppedMuonMinus` and `kStoppedAntiProton` as the
+  /// thing that is booked when the capture runs and fails; those three stay for the case P15
+  /// did not change, which is a stage whose at-rest processes are inactivated on both sides.
+  kAtRestRefused,
+
   kNumHadronicRefusals,
 };
 
 __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) {
   switch (r) {
     case HadronicRefusal::kNeutronInelastic:
-      return "neutronInelastic final state (G4BinaryCascade / Bertini / FTFP; P9-P11)";
+      return "a neutron's inelastic interaction with no final state [SIZE - do not add to the "
+             "WHY group]";
     case HadronicRefusal::kChargedHadronInelastic:
-      return "charged-hadron inelastic final state (P9-P11)";
+      return "a charged hadron's inelastic interaction with no final state [SIZE - do not add "
+             "to the WHY group]";
     case HadronicRefusal::kStoppedNegativeHadron:
       return "stopped pi-/K- capture (G4HadronicAbsorptionBertini; P12) - its rest mass is "
              "lost from the answer";
@@ -255,6 +379,40 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kIonDeltaRay:
       return "an ion's delta-ray channel (G4ionIonisation above ~17 GeV/u) - counted PER STEP, "
              "not per interaction";
+    case HadronicRefusal::kLightIonCascade:
+      return "WHY: G4BinaryLightIonReaction::Interact - an ion at or above 50 MeV per nucleon "
+             "(P9e)";
+    case HadronicRefusal::kBinaryHydrogenTarget:
+      return "WHY: G4BinaryCascade::Propagate1H1 - a nucleon or pion on hydrogen (P9)";
+    case HadronicRefusal::kFtfpRefused:
+      return "WHY: ftf::entry::apply refused by name (P11; see its Report)";
+    case HadronicRefusal::kBertiniRefused:
+      return "WHY: bert::apply_yourself refused by name (P10)";
+    case HadronicRefusal::kBinaryRefused:
+      return "WHY: the Binary cascade or the light-ion reaction refused for a reason that is "
+             "neither hydrogen nor the cascade arm - a tripwire on the model table";
+    case HadronicRefusal::kNoInelasticModel:
+      return "WHY: G4EnergyRangeManager found no model in range (G4Exception had005) - a "
+             "tripwire on the transcribed windows";
+    case HadronicRefusal::kInelasticSecondaryOverflow:
+      return "WHY: an inelastic final state with more than 256 secondaries";
+    case HadronicRefusal::kInelasticSecondarySpecies:
+      return "an inelastic secondary whose PDG code core/particle.cuh has no row for - "
+             "hyperons, K0S/K0L, anti-nuclei; NOT expected to be zero";
+    case HadronicRefusal::kInelasticReentryExhausted:
+      return "WHY: ApplyYourself/CheckResult ran 100 attempts out (G4Exception had006)";
+    case HadronicRefusal::kInelasticQueueFull:
+      return "WHY: the interaction queue was full - a tripwire; the track is killed with its "
+             "energy deposited locally";
+    case HadronicRefusal::kInteractionNoSlot:
+      return "WHY: no workspace slot for this interaction thread - a tripwire under the "
+             "chunked drain";
+    case HadronicRefusal::kAntiNucleusInelastic:
+      return "antiproton inelastic (G4ComponentAntiNuclNuclearXS refused by P2) - "
+             "structurally zero";
+    case HadronicRefusal::kAtRestRefused:
+      return "a stopped negative hadron's at-rest capture with no final state "
+             "(stopping::at_rest; P12's own refusals)";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";

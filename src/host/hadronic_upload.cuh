@@ -37,11 +37,15 @@
 #pragma once
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
 #include "data/atomic_masses.cuh"
 #include "data/nuclei_mass_ame12.hh"
+#include "host/g4data.cuh"
+#include "host/neutron_upload.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
+#include "physics/hadronic/inelastic_wiring.cuh"
 
 namespace g4gpu::host {
 
@@ -187,6 +191,126 @@ inline void free_elastic_tables(ElasticTableOwner<real_t>& own) {
   cudaFree(own.he_grid);
   cudaFree(own.he_bnd);
   own = ElasticTableOwner<real_t>{};
+}
+
+// =============================================================================================
+// P15: the INELASTIC cross sections
+// =============================================================================================
+//
+// Five `G4ParticleInelasticXS` data sets and one `G4BGGPionInelasticXS` table. The neutron's
+// `G4NeutronInelasticXS` is NOT here - it is loaded and uploaded beside the other two neutron
+// data sets in `host/neutron_upload.cuh`, because all three have to come from the same load
+// that builds `G4NeutronGeneralProcess`'s combined table or the sub-process partials and the
+// total would be two different numbers.
+//
+// FIVE DATA SETS AND NOT ONE SCALED. `G4ParticleInelasticXS`'s constructor takes the particle
+// and reads `G4PARTICLEXS4.0/<name>/inel<Z>` for it - `proton/`, `deuteron/`, `triton/`,
+// `He3/`, `alpha/` are five directories of per-element and per-isotope files - and it picks the
+// high-energy hand-over component by particle name as well: Glauber-Gribov hadron-nucleus for
+// the proton and Glauber-Gribov NUCL-NUCL for the four ions (`pxs_high_energy`'s switch). A
+// port that loaded `proton/` once and scaled by A would be wrong in both halves.
+//
+// WHAT IT COSTS, measured by the printout below rather than estimated: the five tables together
+// are about 3 MB of device memory for a full 92-element load, against the 9.52 MB of
+// PhotonEvaporation level data already uploaded unconditionally. Built here beside the elastic
+// tables and for the same reason: a run that will carry a charged hadron needs them before the
+// first primary is seeded.
+
+/// Everything `upload_inelastic_tables` allocated, so a run can give it back.
+template <typename real_t>
+struct InelasticTableOwner {
+  had::InelasticTables<real_t> view{};
+  std::vector<void*> allocs;
+  std::size_t bytes = 0;
+  /// False when `G4PARTICLEXSDATA` could not be resolved. Nothing is uploaded then and every
+  /// species' inelastic channel behaves exactly as a species with no such process does - an
+  /// infinite interaction length and no uniform drawn.
+  bool ok = false;
+  int n_pxs = 0;
+};
+
+/// Loads and uploads the five `G4ParticleInelasticXS` data sets and `G4BGGPionInelasticXS`.
+///
+/// A missing dataset is FATAL, here as everywhere (`src/host/g4data.cuh`), for the reason that
+/// file states: a hadron with a partial cross section is a transport that is quietly wrong in
+/// one element. The one thing that is NOT fatal is the whole `G4PARTICLEXSDATA` variable being
+/// unset, which is the pre-P2 state and leaves every inelastic channel switched off.
+template <typename real_t>
+inline InelasticTableOwner<real_t> upload_inelastic_tables(bool verbose = true) {
+  namespace hxs = g4gpu::hadronic::xs;
+  InelasticTableOwner<real_t> own;
+
+  // The five species, in `had::particle_inelastic_slot` order. The directory names are
+  // `G4ParticleDefinition::GetParticleName()`, which is what `G4ParticleInelasticXS`'s
+  // constructor builds its path from.
+  struct Row {
+    const char* dir;
+    hxs::Projectile<real_t> (*proj)();
+  };
+  const Row rows[5] = {
+      {"proton",   &hxs::proton<real_t>},
+      {"deuteron", &hxs::deuteron<real_t>},
+      {"triton",   &hxs::triton<real_t>},
+      {"He3",      &hxs::he3<real_t>},
+      {"alpha",    &hxs::alpha<real_t>},
+  };
+
+  if (g4particlexs_subdir("proton").empty()) {
+    if (verbose) {
+      std::printf("inelastic tables: G4PARTICLEXSDATA could not be resolved - no charged "
+                  "hadron has an inelastic process\n");
+    }
+    return own;
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    const std::string d = g4particlexs_subdir(rows[i].dir);
+    auto* t = new data::ParticleXsTable<real_t>();
+    hxs::PxsDataSet<real_t> ds;
+    if (!hxs::pxs_load<real_t>(hxs::PxsKind::kParticleInelastic, rows[i].proj(), d, *t, ds)) {
+      std::printf("\nFATAL: G4PARTICLEXS4.0/%s is incomplete - an element file is missing.\n"
+                  "  A missing dataset is fatal here as everywhere (src/host/g4data.cuh),\n"
+                  "  because a hadron with a partial cross section is a transport that is\n"
+                  "  quietly wrong in one element.\n", rows[i].dir);
+      std::exit(1);
+    }
+    own.view.particle[i] = detail::upload_pxs<real_t>(*t, ds, own);
+    ++own.n_pxs;
+    delete t;
+  }
+
+  // G4BGGPionInelasticXS, both pion charges in one table. `is_elastic = false` selects the
+  // inelastic arrays throughout - `theLowEPiPlus`/`theLowEPiMinus` rather than the elastic
+  // pair, and the 20 MeV boundary on the other side (see `xs/bgg_pion_xs.cuh`'s header, which
+  // records that at exactly 20 MeV the two classes take different branches).
+  {
+    auto* h = new hxs::BggPionTable<real_t>();
+    hxs::bgg_build_pion_table<real_t>(/*is_elastic=*/false, *h);
+    void* p = nullptr;
+    if (cudaMalloc(&p, sizeof(*h)) != cudaSuccess
+        || cudaMemcpy(p, h, sizeof(*h), cudaMemcpyHostToDevice) != cudaSuccess) {
+      std::printf("\nFATAL: could not upload %zu bytes of G4BGGPionInelasticXS\n", sizeof(*h));
+      std::exit(1);
+    }
+    own.allocs.push_back(p);
+    own.bytes += sizeof(*h);
+    own.view.bgg_pion = static_cast<const hxs::BggPionTable<real_t>*>(p);
+    delete h;
+  }
+
+  own.ok = true;
+  if (verbose) {
+    std::printf("inelastic tables: %.2f MB - %d G4ParticleInelasticXS data sets "
+                "(p, d, t, He3, alpha), G4BGGPionInelasticXS %zu B\n",
+                double(own.bytes) / 1048576.0, own.n_pxs, sizeof(hxs::BggPionTable<real_t>));
+  }
+  return own;
+}
+
+template <typename real_t>
+inline void free_inelastic_tables(InelasticTableOwner<real_t>& own) {
+  for (void* p : own.allocs) { cudaFree(p); }
+  own = InelasticTableOwner<real_t>{};
 }
 
 }  // namespace g4gpu::host

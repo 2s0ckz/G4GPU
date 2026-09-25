@@ -73,19 +73,25 @@ namespace detail {
 /// Four allocations: the concatenated energies, the concatenated values, the isotope slices, and
 /// then the two structs. The order matters only in that the structs are uploaded LAST, after
 /// their pointers have been repointed.
-template <typename real_t>
+/// @tparam Owner any struct with `std::vector<void*> allocs` and `std::size_t bytes`. Generic
+///         since P15, which uploads the same shape of data set for the proton and the four
+///         light ions (`host/hadronic_upload.cuh`) and would otherwise have copied these forty
+///         lines of cudaMalloc plumbing. `NeutronTableOwner` is still the only caller in this
+///         file and the existing calls are unchanged: `Owner` is deduced.
+template <typename real_t, typename Owner>
 inline const hadronic::xs::PxsDataSet<real_t>* upload_pxs(
     const data::ParticleXsTable<real_t>& h_table,
-    const hadronic::xs::PxsDataSet<real_t>& h_ds, NeutronTableOwner<real_t>& own) {
+    const hadronic::xs::PxsDataSet<real_t>& h_ds, Owner& own) {
   auto up = [&](const void* src, std::size_t n) -> void* {
     if (n == 0) { return nullptr; }
     void* p = nullptr;
     if (cudaMalloc(&p, n) != cudaSuccess) {
-      std::printf("\nFATAL: could not allocate %zu bytes for a neutron cross-section table\n", n);
+      std::printf("\nFATAL: could not allocate %zu bytes for a hadronic cross-section table\n",
+                  n);
       std::exit(1);
     }
     if (cudaMemcpy(p, src, n, cudaMemcpyHostToDevice) != cudaSuccess) {
-      std::printf("\nFATAL: could not upload %zu bytes of a neutron cross-section table\n", n);
+      std::printf("\nFATAL: could not upload %zu bytes of a hadronic cross-section table\n", n);
       std::exit(1);
     }
     own.allocs.push_back(p);
@@ -181,6 +187,11 @@ inline NeutronTableOwner<real_t> upload_neutron_tables(const data::Material<real
 
   own.sub.elastic = detail::upload_pxs<real_t>(*t_el, ds_el, own);
   own.sub.capture = detail::upload_pxs<real_t>(*t_cap, ds_cap, own);
+  // The third data set, uploaded since P15. It was built and thrown away for two packages -
+  // `ngp_build_table` below sums it into the combined table and nothing else read it - because
+  // the inelastic sub-process was refused by name and a refusal draws no target. It is applied
+  // now, so it needs its own data store for `SampleZandA`: see `had::NeutronSubTables`.
+  own.sub.inelastic = detail::upload_pxs<real_t>(*t_inel, ds_inel, own);
 
   // ---- G4NeutronGeneralProcess's five tables, for this scene's materials.
   auto* gt = new hxs::NeutronGeneralTable<real_t>();
