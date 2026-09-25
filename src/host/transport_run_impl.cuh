@@ -996,7 +996,13 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
       atomicAdd(&voxel_score[vcell], static_cast<double>(edep));
     }
   }
-  traj.add(q.pos_pre, p.pos, q.species, p.event, p.rng_key);
+  // NO `traj.add` HERE. The step's trajectory segment was recorded by the STEPPER, before the
+  // enqueue: `step_hadron` calls it after the boundary handling and `step_neutral` after the
+  // sub-process is named, and the inelastic branch of both is downstream of that call. Adding
+  // it again here would draw every inelastic step twice in the viewer - not a dose, but a
+  // picture that says a track was somewhere twice. `traj` is still passed so that a future
+  // secondary drawn from this kernel has somewhere to go.
+  (void)traj;
 
   DeviceStep<real_t> ds{};
   ds.species = q.species;
