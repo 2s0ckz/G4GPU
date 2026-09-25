@@ -12652,3 +12652,61 @@ probe reports. And the run report now reads the limit back after the run: if it 
 reserved, the driver had to raise it at an interaction launch, and the report says so by name.
 That tripwire is the only way a short reservation could ever be seen, because the probe above is
 the proof that nothing else would complain.
+
+### V197: three arms mistook what a model said, in both directions
+
+Found by reading P9e's `BlirRefusal` beside this package's own wiring of it - which is the only
+reason to read the refusal structs of the models one calls line by line, and the reason this
+entry exists: every one of these passed every test P15 had, because no test ever put a refused
+or a null answer through an arm and then looked at what the arm did with it.
+
+**1. A refusal applied as a final state.** `run_arm_binary` tested four of `bic::BicRefusal`'s six
+flags - `species`, `hydrogen`, `preco_projectile`, `capacity`. The other two are `nucleus`
+(`G4Fancy3DNucleus::Init` could not place the nucleons) and `cascade` (whatever
+`G4BinaryCascade::Propagate` refused, `FillVoidNucleusProducts` included), and both return early
+with `bic_fs` holding nothing a caller may apply. The arm copied it into the slot and reported a
+final state. `BicRefusal::any()` names all six and the arm uses it now.
+
+**2. and 3. Two answers applied as refusals.** A refusal's disposal is to kill the track and deposit
+its energy where it stands - the conservative choice for a final state that does not exist, and
+the wrong one for a final state that does:
+
+  * `run_arm_bertini` booked `bert::ApplyResult::no_interaction` as `kBertiniRefused`. That flag is
+    `G4CascadeInterface::NoInteraction` after `maximumTries` = 20 fruitless attempts, which LEAVES
+    THE TRACK ALIVE AND UNCHANGED, and `bert::apply_yourself` builds exactly that into the final
+    state. What is still a refusal: `refusal != kNone` - which carries the cascader's own,
+    `kFate` included, as `kCascader` - and `would_throw`, `throwNonConservationFailure`, which
+    ends a Geant4 job and so has no Geant4 final state to claim.
+  * `run_arm_ftfp` booked `ftfe::Status::kPrimaryUnchanged` as `kFtfpRefused` - directly under a
+    comment saying it is a final state and "treating it as a hole would not" be right. It is
+    `G4VPartonStringModel::Scatter`'s 1,000-attempt fallback, and what comes back is Geant4's:
+    measured, a 1 MeV proton on O16 returns {2212 at 1 MeV along +z, 1000080160 at 0 MeV} - the
+    primary re-emitted whole and the untouched target as the residual.
+
+THE TESTS, `tests/test_inelastic_transport.cu` sections 7 and 8, and each case was chosen so the
+model's answer is known in advance rather than hoped for:
+
+    p 400 MeV on O16          20 of 20 run                    (the control)
+    p 400 MeV on H1           20 of 20 kBinaryHydrogenTarget  (Propagate1H1, still refused)
+    p 400 MeV on A = 300      20 of 20 kBinaryRefused         (256 nucleons a slot: nucleus)
+    FTFP p 1 MeV on O16        5 of 5 the primary, whole      (the entry's documented case)
+    Bertini K+ 1 MeV on Pb208 20 of 20 the primary, whole     (far below the Coulomb barrier)
+    Bertini p 1 MeV on Pb208  20 applied, none empty          (it interacts; the contrast)
+
+With each fix removed, by name: "p 400 MeV on A=300: 20 of 20 were APPLIED as final states - the
+model refused and the arm reported success"; "FTFP p 1 MeV on O16: 0 of 5 came back as the
+primary, whole (5 booked as refusals)"; "Bertini K+ 1 MeV on Pb208: 0 of 20 came back as the
+primary, whole (20 booked as refusals)". Section 8 also refuses to pass if no case produces the
+answer at all, and it checks WHAT was applied - alive with the whole energy and nothing emitted,
+or killed with one secondary of the projectile's species and nothing but the target at rest -
+because a return value of `true` is not yet a final state that keeps the projectile.
+
+WHAT IT COST, which is not measured and is bounded: the three reach the rows this port is judged
+on only at their margins. The Binary arm's `nucleus` and `cascade` fire where a nucleus cannot be
+built or a cascade destroys one; Bertini's NoInteraction and FTFP's fallback fire where a model is
+asked about a projectile it cannot interact with - below a Coulomb barrier, or outside the window
+QBBC hands it. None of them is common in a B1 beam, and none of them is zero, which is exactly
+the kind of defect a dose comparison cannot see and a mapping test must.
+
+`run_at_rest` is NOT changed: it maps `stopping::at_rest`'s own `StoppingRefusal`, and whether a
+stopped particle's "primary unchanged" is a refusal is P12's contract, stated there.

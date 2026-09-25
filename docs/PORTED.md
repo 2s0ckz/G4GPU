@@ -1728,6 +1728,27 @@ a name the ion column must not switch. docs/RISK.md V192 has the measurement; th
 is unchanged and is still wrong in the same way for every refused interaction, the proton's
 `Propagate1H1` included, which is why proton_1000 is reported with its rate rather than tuned.
 
+**And three arms that misread what a model said** (docs/RISK.md V197), found by reading P9e's
+`BlirRefusal` beside this package's wiring of its own. The Binary arm tested four of
+`BicRefusal`'s six flags and applied the other two - a nucleus that could not be built, a
+`Propagate` that refused - as final states; it tests `any()` now. And the Bertini and FTFP arms
+did the opposite: `G4CascadeInterface::NoInteraction` and `G4VPartonStringModel::Scatter`'s
+1,000-attempt fallback are Geant4's own answers, the primary alive or re-emitted whole, and both
+were booked as refusals - whose disposal kills the track and deposits its energy on the spot.
+Sections 7 and 8 of `tests/test_inelastic_transport.cu` assert all three with cases whose answer
+is known in advance, and check WHAT was applied rather than only that something was.
+
+**Two engine findings the same pass turned up, neither of them physics.** The GenericIon stepping
+unit - one kernel on its own, the shape V65 had found always compiles - died in ptxas at -O3, -O2
+and -O1 from 2bad77b on. Isolated commit by commit with that one kernel (docs/RISK.md V195): one
+refusal booked as `book_refusal(books, cond ? A : B, e)` crashes it, and the same booking as an
+`if`/`else` compiles at -O3 with the 3,952-byte frame it had before; and `build_engine_unit.bat`
+had been reporting "-O2" for ptxas's default, which is -O3. And the interaction kernels' stack
+reservation is read off their `localSizeBytes` now rather than written down as 86,016, which is
+the only form of it that covers P9e's `Interact` by construction - after two probes showed that
+this driver raises the limit ITSELF for a kernel ptxas can size and faults only the recursive
+kind (docs/RISK.md V196, which scopes P9e's V183).
+
 **The numbers.** `tests/test_inelastic_models.cu`: 24 (model, window) triples exact against
 `ftf_windows.csv`, 440 (species, energy) cells, 30 overlaps at 200,000 draws each, worst 1.46
 sigma, 0 draw-count mismatches. `tests/test_inelastic_transport.cu`: 1,152 cross-section points

@@ -1022,6 +1022,202 @@ int main() {
     qcursor = 0;
   }
 
+  // ============================================================================================
+  // 7. Every refusal the Binary cascade can raise is a refusal here
+  // ============================================================================================
+  //
+  // WHY THIS SECTION EXISTS. `run_arm_binary` tested four of `bic::BicRefusal`'s six flags -
+  // `species`, `hydrogen`, `preco_projectile`, `capacity` - from P15's first commit. The other
+  // two, `nucleus` (`G4Fancy3DNucleus::Init` could not place the nucleons) and `cascade`
+  // (whatever `Propagate` refused, `FillVoidNucleusProducts` included), return early with
+  // `bic_fs` holding nothing a caller may apply, and the arm copied it and reported a final
+  // state. `BicRefusal::any()` names all six; the arm uses it now.
+  //
+  // The nucleus refusal is forced with a target the slot cannot hold - A = 300 against the 256
+  // nucleons `InteractionSlot` carries - which is `NucleusReport::capacity` and therefore
+  // `nucleus`. No material in this port has such a nuclide, and that is the point: the test is
+  // of the MAPPING, which must be total whatever reaches it. A real target and a hydrogen target
+  // are run beside it, so the section cannot pass by refusing everything.
+  std::printf("== 7. every Binary-cascade refusal reaches the ledger ==\n");
+  {
+    had::InteractionSlot<real_t>& slot = pool.slots[0];
+    const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(slot);
+    hp::HadProjectile<real_t> proj;
+    proj.pdg = pdg_code(ParticleType::kProton);
+    proj.charge = particle_def<real_t>(ParticleType::kProton).charge;
+    proj.mass = particle_def<real_t>(ParticleType::kProton).mass;
+    proj.kin_energy = 400;
+    proj.baryon_number = 1;
+
+    struct Case {
+      int z, a;
+      const char* name;
+      bool expect_ran;
+      had::HadronicRefusal expect_refusal;
+    };
+    const Case cases[] = {
+        {8, 16, "p 400 MeV on O16", true, had::HadronicRefusal::kNumHadronicRefusals},
+        {1, 1, "p 400 MeV on H1", false, had::HadronicRefusal::kBinaryHydrogenTarget},
+        {120, 300, "p 400 MeV on A=300", false, had::HadronicRefusal::kBinaryRefused},
+    };
+    for (const Case& c : cases) {
+      int ran = 0, refused_as_expected = 0, other = 0;
+      for (unsigned int k = 0; k < 20u; ++k) {
+        hp::HadNucleus tgt;
+        tgt.z = c.z;
+        tgt.a = c.a;
+        Philox<real_t> rng(424242u + 7919u * k, 0u, had::kInteractionRngPurpose);
+        had::InteractionOutcome out;
+        const bool ok = had::run_arm_binary<real_t>(proj, tgt, slot, pool.view, pws, lt,
+                                                    pool.view.fermi, rng, out);
+        if (ok) {
+          ++ran;
+        } else if (out.refusal == c.expect_refusal) {
+          ++refused_as_expected;
+        } else {
+          ++other;
+        }
+      }
+      std::printf("   %-22s ran %2d   refused as expected %2d   other %2d\n", c.name, ran,
+                  refused_as_expected, other);
+      if (c.expect_ran) {
+        if (ran != 20) {
+          fail(std::string(c.name) + ": " + std::to_string(ran) + " of 20 ran - a real target "
+               "must give a final state every time, so the other cases would prove nothing");
+        }
+      } else {
+        if (ran != 0) {
+          fail(std::string(c.name) + ": " + std::to_string(ran) + " of 20 were APPLIED as "
+               "final states - the model refused and the arm reported success");
+        }
+        if (refused_as_expected != 20) {
+          fail(std::string(c.name) + ": only " + std::to_string(refused_as_expected)
+               + " of 20 booked the expected refusal name");
+        }
+      }
+    }
+  }
+
+  // ============================================================================================
+  // 8. A model's own "nothing happened" is Geant4's answer, not a hole
+  // ============================================================================================
+  //
+  // WHY THIS SECTION EXISTS. Two arms booked a model's legitimate no-interaction answer as a
+  // refusal, and a refusal's disposal KILLS the track and deposits its energy where it stands:
+  //
+  //   * Bertini: `G4CascadeInterface::NoInteraction` after 20 fruitless tries, which leaves the
+  //     track alive and unchanged. The arm tested `!no_interaction` beside `refusal == kNone`.
+  //   * FTFP: `G4VPartonStringModel::Scatter`'s 1,000-attempt fallback, which returns the
+  //     primary. The arm's own comment said it was a final state and the code booked
+  //     `kFtfpRefused`.
+  //
+  // What each arm must do instead is APPLY what the model built, and what the model built must
+  // be the primary, whole: alive with `energy_change` equal to its kinetic energy and nothing
+  // emitted, or killed with ONE secondary of its own species carrying the same energy. Anything
+  // else fails, so the section checks the final state and not only the return value. Each case is
+  // one Geant4 is known to answer that way - a projectile far outside the window QBBC gives the
+  // model, or below the Coulomb barrier - and the section fails if none of them produces the
+  // answer at all, which would make the rest of it vacuous.
+  std::printf("== 8. a model's own no-interaction answer is applied, whole ==\n");
+  {
+    had::InteractionSlot<real_t>& slot = pool.slots[0];
+    const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(slot);
+    struct Case {
+      ParticleType t;
+      real_t e;
+      int z, a;
+      const char* name;
+      bool ftfp;  // else Bertini
+      int n;
+      /// Every call must come back as the primary, whole. True where the model's answer is
+      /// known to be "nothing happened" every time: FTFP at 1 MeV is the entry contract's own
+      /// documented `kPrimaryUnchanged` case, and a 1 MeV K+ is far below lead's Coulomb barrier,
+      /// so `G4CascadeInterface` exhausts its 20 tries on every call (measured: 20 of 20). The
+      /// 1 MeV proton on lead is here for contrast - it interacts - and asserts only that nothing
+      /// applied loses the projectile.
+      bool all_whole;
+    };
+    const Case cases[] = {
+        {ParticleType::kProton, 1, 8, 16, "FTFP p 1 MeV on O16", true, 5, true},
+        {ParticleType::kKaonPlus, 1, 82, 208, "Bertini K+ 1 MeV on Pb208", false, 20, true},
+        {ParticleType::kProton, 1, 82, 208, "Bertini p 1 MeV on Pb208", false, 20, false},
+    };
+    int whole_primary_total = 0;
+    for (const Case& c : cases) {
+      hp::HadProjectile<real_t> proj;
+      proj.pdg = pdg_code(c.t);
+      proj.charge = particle_def<real_t>(c.t).charge;
+      proj.mass = particle_def<real_t>(c.t).mass;
+      proj.kin_energy = c.e;
+      proj.baryon_number = had::baryon_number_of(c.t, 0);
+      int applied = 0, whole = 0, refused = 0, broken = 0;
+      for (int k = 0; k < c.n; ++k) {
+        hp::HadNucleus tgt;
+        tgt.z = c.z;
+        tgt.a = c.a;
+        Philox<real_t> rng(515151u + 104729u * static_cast<unsigned int>(k), 0u,
+                           had::kInteractionRngPurpose);
+        had::InteractionOutcome out;
+        const bool ok = c.ftfp ? had::run_arm_ftfp<real_t>(proj, tgt, slot, pool.view, 0, rng, out)
+                               : had::run_arm_bertini<real_t>(proj, tgt, slot, pws, lt,
+                                                              pool.view.fermi, rng, out);
+        if (!ok) {
+          ++refused;
+          continue;
+        }
+        ++applied;
+        const auto& fs = slot.fs;
+        const bool alive_unchanged = fs.status == hp::HadFinalStateStatus::kIsAlive
+                                     && std::fabs(double(fs.energy_change) - double(c.e)) < 1e-9
+                                     && fs.n_secondaries == 0;
+        // Killed and RE-EMITTED: exactly one secondary of the projectile's own species with its
+        // whole kinetic energy, and nothing else but the target nucleus itself at rest. That
+        // second piece is Geant4's too, and it is not decoration: FTFP's 1,000-attempt fallback
+        // hands the primary to `G4GeneratorPrecompoundInterface`, which returns the untouched
+        // target as the residual - measured, a 1 MeV proton on O16 comes back as
+        // {2212 at 1 MeV along +z, 1000080160 at 0 MeV}. Any other secondary, or any energy on
+        // the nucleus, is not "the primary, whole".
+        int same_species = 0, at_rest_target = 0, other_sec = 0;
+        double same_species_t = 0;
+        for (int j = 0; j < fs.n_secondaries; ++j) {
+          const auto& q = fs.secondaries[j];
+          if (q.pdg == proj.pdg && q.a == 0) {
+            ++same_species;
+            same_species_t = double(q.kin_energy);
+          } else if (q.a == c.a && q.z == c.z && double(q.kin_energy) < 1e-9) {
+            ++at_rest_target;
+          } else {
+            ++other_sec;
+          }
+        }
+        const bool reemitted = fs.status == hp::HadFinalStateStatus::kStopAndKill
+                               && same_species == 1 && other_sec == 0 && at_rest_target <= 1
+                               && std::fabs(same_species_t - double(c.e)) < 1e-6;
+        if (alive_unchanged || reemitted) {
+          ++whole;
+        } else if (fs.n_secondaries == 0 && fs.status == hp::HadFinalStateStatus::kStopAndKill) {
+          ++broken;  // the primary deleted and nothing put in its place
+        }
+      }
+      whole_primary_total += whole;
+      std::printf("   %-26s applied %2d (primary whole %2d)   refused %2d   empty kill %d\n",
+                  c.name, applied, whole, refused, broken);
+      if (broken != 0) {
+        fail(std::string(c.name) + ": " + std::to_string(broken) + " final states killed the "
+             "primary and emitted nothing - an applied answer that loses the projectile");
+      }
+      if (c.all_whole && whole != c.n) {
+        fail(std::string(c.name) + ": " + std::to_string(whole) + " of " + std::to_string(c.n)
+             + " came back as the primary, whole (" + std::to_string(refused)
+             + " booked as refusals) - the model's own answer here is 'nothing happened', and a "
+               "refusal is the defect this section is for");
+      }
+    }
+    if (whole_primary_total == 0) {
+      fail("no case produced the model's own no-interaction answer, so section 8 tested nothing");
+    }
+  }
+
   std::printf("\n%s (%d failures)\n", g_fails == 0 ? "PASSED" : "FAILED", g_fails);
   return (g_fails == 0) ? 0 : 1;
 }

@@ -363,11 +363,16 @@ __host__ __device__ __noinline__ bool run_arm_ftfp(
   const ftfe::Status st =
       ftfe::apply<real_t, kInteractionSecondaryCap>(pool.ftf, slot_index, proj, tgt, s.fs, rep,
                                                     rng);
-  if (st == ftfe::Status::kRan) { return true; }
   // `kPrimaryUnchanged` IS a final state - `G4VPartonStringModel::Scatter`'s 1,000-attempt
-  // fallback returns the primary, and Geant4 calls that the answer with a JustWarning. It is
-  // booked under its own name rather than as a refusal, because treating it as "nothing
-  // happened" would be right and treating it as a hole would not.
+  // fallback returns the primary, and Geant4 calls that the answer with a JustWarning.
+  //
+  // THIS COMMENT WAS HERE BEFORE THE CODE AGREED WITH IT. It went on "treating it as nothing
+  // happened would be right and treating it as a hole would not" above a line that returned
+  // false for it with `kFtfpRefused` - a hole, and the refusal's disposal kills the track and
+  // deposits its energy where it stands. The entry contract says a final state came back (it
+  // is tested before the generic refusal for exactly that reason), so it is applied like any
+  // other; `tests/test_inelastic_transport.cu` section 8 asserts what it holds.
+  if (st == ftfe::Status::kRan || st == ftfe::Status::kPrimaryUnchanged) { return true; }
   out.refusal = (st == ftfe::Status::kNoWorkspaceSlot) ? HadronicRefusal::kInteractionNoSlot
                                                        : HadronicRefusal::kFtfpRefused;
   return false;
@@ -392,7 +397,19 @@ __host__ __device__ __noinline__ bool run_arm_bertini(
       proj, tgt, s.fs, bert::DeexciteChoice::kPreCompound, par, lim, s.bert_model, s.co_global,
       s.co_out, s.co_dex, s.co_tmp, s.epo, s.bert_ws, lt, fpool, pws,
       /*secondary_model_id=*/0, rng);
-  if (r.refusal == bert::InterfaceRefusal::kNone && !r.no_interaction) { return true; }
+  // `NoInteraction` IS AN ANSWER, AND IT IS GEANT4'S. `G4CascadeInterface::ApplyYourself`
+  // gives up after `maximumTries` = 20 attempts that produced no collision and calls
+  // `NoInteraction(aTrack)`, which leaves the track ALIVE with its energy and direction
+  // unchanged; `bert::apply_yourself` builds exactly that into `fs` (`kIsAlive`,
+  // `energy_change` = the kinetic energy) and says so with `no_interaction`. This arm used to
+  // test `!r.no_interaction` as well, which turned Geant4's "nothing happened" into a refusal
+  // - and the refusal's disposal KILLS the track and deposits its energy on the spot. Asserted in
+  // `tests/test_inelastic_transport.cu` section 8.
+  //
+  // What IS a refusal: `refusal != kNone` - which carries the cascader's own, `kFate`
+  // included, as `kCascader` - and `would_throw`, `throwNonConservationFailure`, which in
+  // Geant4 ends the job and therefore has no final state this port could claim is Geant4's.
+  if (r.refusal == bert::InterfaceRefusal::kNone && !r.would_throw) { return true; }
   out.refusal = HadronicRefusal::kBertiniRefused;
   return false;
 }
@@ -409,9 +426,19 @@ __host__ __device__ __noinline__ bool run_arm_binary(
   bic::BicReport rep;
   bic::apply_yourself(proj, tgt, lt, fpool, pws, bic_storage_of<real_t>(s, pool, pws), rng,
                       s.bic_fs, ref, rep);
-  if (ref.species || ref.hydrogen || ref.preco_projectile || ref.capacity) {
-    // `hydrogen` is `Propagate1H1`, which P9 refused by name and P9e is writing; the other
-    // three are tripwires on a projectile this wiring should never send here.
+  // `ref.any()`, AND NOT A LIST OF FLAGS. This tested `species`, `hydrogen`,
+  // `preco_projectile` and `capacity` from P15's first commit, and `BicRefusal` has two more
+  // that its own `any()` counts as making the final state meaningless: `nucleus` - 
+  // `G4Fancy3DNucleus::Init` could not place the nucleons - and `cascade`, which is whatever
+  // `Propagate` refused, `FillVoidNucleusProducts` included. Both return early with `bic_fs`
+  // holding nothing a caller may apply, and this arm copied it into `s.fs` and reported a final
+  // state. Found by reading P9e's `BicRefusal` beside this one; asserted in
+  // `tests/test_inelastic_transport.cu` section 7, which fails with the flag list restored.
+  if (ref.any()) {
+    // `hydrogen` is `Propagate1H1`, which P9 refused by name and which is still not written.
+    // Every other flag is `kBinaryRefused`: `species`, `preco_projectile` and `capacity`
+    // are tripwires on a projectile this wiring should never send here, and `nucleus` and
+    // `cascade` are the model's own refusals.
     out.refusal = ref.hydrogen ? HadronicRefusal::kBinaryHydrogenTarget
                                : HadronicRefusal::kBinaryRefused;
     return false;
