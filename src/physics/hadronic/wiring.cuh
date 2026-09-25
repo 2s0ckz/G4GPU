@@ -249,20 +249,18 @@ enum class HadronicRefusal : int {
   // `kNeutronInelastic`.
   // -------------------------------------------------------------------------------------------
 
-  /// `G4BinaryLightIonReaction::Interact` - every ion whose kinetic energy per nucleon is at or
-  /// above **50 MeV**, which is the `(mom.t()-mom.mag())/pA < 50*MeV` test at
-  /// G4BinaryLightIonReaction.cc:119. P9 ported the fusion arm below it and P9e is writing the
-  /// cascade above it.
+  /// `G4BinaryLightIonReaction`'s CASCADE arm refused - `G4BinaryCascade::Propagate`, inside
+  /// `Interact`, could not finish; `bic::BlirRefusal::cascade_ref` says which of its refusals.
   ///
-  /// **THE LARGEST NAMED HOLE P15 LEAVES, and it is not a corner.** The light-ion reaction's
-  /// window is 0 to 6 GeV per nucleon, so an alpha beam at 840, 1600 or 4000 MeV - 210, 400 and
-  /// 1000 MeV per nucleon - is above the fusion threshold for the whole of its useful range and
-  /// gets FTFP only above 3 GeV per nucleon, which none of those beams reaches. That is why
-  /// `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic` stay
-  /// inactivated on the Geant4 side of `tools/b1_sweep.ps1` while `protonInelastic` and the
-  /// pion, kaon and neutron ones come off: a process wired and then refused for most of its
-  /// interactions is not a like-for-like column. docs/B1_SWEEP.md carries the measured rate per
-  /// beam, and the day `Interact` lands this counter and those five inactivations go together.
+  /// **UNTIL P9e THIS WAS THE WHOLE CASCADE ARM, AND THE LARGEST NAMED HOLE P15 HAD.** Every ion
+  /// at or above 50 MeV per nucleon - the `(mom.t()-mom.mag())/pA < 50*MeV` test at
+  /// G4BinaryLightIonReaction.cc:119 - was booked here, because `Interact` did not exist: 10,266
+  /// of 11,223 queued interactions of an 840 MeV alpha beam (91.5%), and 914 of the 1,021
+  /// refusals over `tests/test_inelastic_transport.cu`'s grid. It is kept as the NAME of what is
+  /// left rather than retired, so that a ledger read across the two builds shows the rate
+  /// falling instead of a line disappearing: the same grid books 49 here with `Interact` wired.
+  /// The five ion processes came off the inactivation list of every like-for-like column with it
+  /// (docs/RISK.md V192, V198).
   kLightIonCascade,
   /// `G4BinaryCascade::Propagate1H1` - a nucleon or charged pion on a HYDROGEN target, which P9
   /// refused by name. Small but not zero in water: hydrogen is 2 of every 3 atoms and about
@@ -381,8 +379,8 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "an ion's delta-ray channel (G4ionIonisation above ~17 GeV/u) - counted PER STEP, "
              "not per interaction";
     case HadronicRefusal::kLightIonCascade:
-      return "WHY: G4BinaryLightIonReaction::Interact - an ion at or above 50 MeV per nucleon "
-             "(P9e)";
+      return "WHY: G4BinaryLightIonReaction's cascade arm - G4BinaryCascade::Propagate "
+             "refused inside Interact";
     case HadronicRefusal::kBinaryHydrogenTarget:
       return "WHY: G4BinaryCascade::Propagate1H1 - a nucleon or pion on hydrogen (P9)";
     case HadronicRefusal::kFtfpRefused:
@@ -539,8 +537,13 @@ struct HadronicWiring {
   /// OF THE REFUSAL: 6.03e6 MeV, 36% of that beam's energy, dumped in the water upstream of
   /// B1's scoring trapezoid. A Geant4 run with `alphaInelastic` inactivated carries every alpha
   /// to full range instead, and the two columns then differ by -39.27% (-201.8 sigma) for a
-  /// reason that is the refusal's disposal and not the physics. Off on both sides is the only
-  /// honest comparison until P9e lands. docs/RISK.md V192.
+  /// reason that is the refusal's disposal and not the physics. Off on both sides WAS the only
+  /// honest comparison until P9e landed. docs/RISK.md V192.
+  ///
+  /// SINCE P9e IT IS A STUDY KNOB AND NOTHING SETS IT. `Interact` is wired, the five come off
+  /// the Geant4 side's inactivation list, and the default - on - is the like-for-like
+  /// configuration. What it is still good for is the question it was built to answer: what the
+  /// ion inelastic process is worth to a beam, on the port side, one binary run both ways.
   bool ion_inelastic = true;
   /// `G4HadronStoppingProcess` for a stopped mu-, pi-, K-, Sigma-, Xi-, Omega-, pbar or nbar:
   /// `hBertiniCaptureAtRest`, `hFritiofCaptureAtRest` and `muMinusCaptureAtRest`, which are

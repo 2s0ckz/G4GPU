@@ -337,18 +337,14 @@ int main(int argc, char** argv) {
     rm->GetEngine().SetLiveTracksPerEvent(live);
   }
 
-  // AND THE PORT HOLDS OFF EXACTLY WHAT `inactivate()` HOLDS OFF ON THE GEANT4 SIDE.
-  //
-  // `dInelastic`, `tInelastic`, `He3Inelastic`, `alphaInelastic` and `ionInelastic` are on that
-  // list because P9e's `G4BinaryLightIonReaction::Interact` is not wired. Until this line, the
-  // port kept its own copies of those five ON: it drew an interaction length, reached the
-  // interaction, refused it by name, and disposed of the ion by killing it with its kinetic
-  // energy deposited AT THE REFUSAL POINT - which for a heavy charged particle moves the deposit
-  // upstream, out of the residual range it would have travelled. A one-sided inactivation, and
-  // the one that read -39.27% (-201.8 sigma) on the sweep's 840 MeV alpha beam before it was
-  // found. It is small here - a 100 MeV proton makes few energetic ions - but "small" is not a
-  // reason to compare two different physics lists. docs/RISK.md V192.
-  rm->GetEngine().SetIonInelastic(false);
+  // THE PORT HOLDS OFF EXACTLY WHAT `inactivate()` HOLDS OFF ON THE GEANT4 SIDE, and since P9e
+  // that is none of the five ion processes. While `G4BinaryLightIonReaction::Interact` was
+  // missing, `inactivate()` carried `dInelastic`/`tInelastic`/`He3Inelastic`/
+  // `alphaInelastic`/`ionInelastic` and this line called `SetIonInelastic(false)`, because a
+  // refused ion is killed with its energy deposited where the refusal happened - upstream of
+  // its range - and one side switched alone read -39.27% (-201.8 sigma) on the sweep's 840 MeV
+  // alpha beam (docs/RISK.md V192). `Interact` is wired, both sides run the five, and the
+  // engine's default is already ON, so there is no call here to be forgotten when it changes.
 
   // AND THE NEUTRON'S SIDE OF THE SAME RULE, which is the other half of what P15 changed here.
   // `NeutronGeneralProc` came OFF `inactivate()`'s list because the port wires the inelastic
@@ -395,14 +391,13 @@ int main(int argc, char** argv) {
         // (`tests/test_inelastic_transport.cu`); the run reports that fraction rather than
         // hiding it behind the whole process.
         //
-        // These five STAY, and the reason is a threshold rather than a gap in the transcription:
-        // `G4BinaryLightIonReaction::ApplyYourself` fuses below **50 MeV per nucleon** and calls
-        // `Interact` at or above it, and `Interact` is P9e's. QBBC gives an ion the light-ion
-        // reaction from 0 to 6 GeV/n and FTFP from 3 GeV/n, so between 50 MeV/n and 3 GeV/n
-        // there is no model this port can run - which is where a 100 MeV proton's alpha and He3
-        // secondaries live. Refused by name, `had::HadronicRefusal::kLightIonCascade`, and
-        // counted; the day `Interact` lands these five come off together.
-        "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic", "ionInelastic",
+        // AND THE FIVE ION INELASTIC PROCESSES CAME OFF IT IN P15'S SECOND PASS, with P9e's
+        // `G4BinaryLightIonReaction::Interact`. They were here because `ApplyYourself` fuses
+        // below 50 MeV per nucleon and calls `Interact` at or above it, and between 50 MeV/n
+        // and FTFP's 3 GeV/n the port had no model - which is where a 100 MeV proton's alpha and
+        // He3 secondaries live. With `Interact` wired, inactivating them would switch off
+        // physics the port has. What is left of that hole is `kLightIonCascade`: the cascade
+        // arm's own `Propagate` refusals, counted by name.
         // `NeutronGeneralProc` IS NO LONGER HERE EITHER, and it is the line that mattered most.
         //
         // It used to say "no neutron is made in this configuration anyway - nothing but an

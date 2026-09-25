@@ -89,26 +89,20 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 #                     rather than a statement: a 1 GeV proton makes pions and Geant4's were
 #                     interacting where the port's were not. They are wired now.
 #
-# STAYING ON THE LIST (the port still refuses these, with a rate):
-#   alphaInelastic, dInelastic, tInelastic, He3Inelastic, ionInelastic
+#   alphaInelastic, dInelastic, tInelastic, He3Inelastic, ionInelastic   OFF SINCE P9e.
 #                     `G4BinaryLightIonReaction::Interact` - every ion at or above 50 MeV per
-#                     NUCLEON - is P9e's and is refused by name. The window it leaves open is
-#                     the fusion arm below 50 MeV/n and FTFP above 3 GeV/n, and all three alpha
-#                     beams of this sweep sit between those at 210, 400 and 1000 MeV/n. So the
-#                     port refuses essentially every alpha inelastic interaction: measured, 195
-#                     of 215 in water. A process wired and then refused for 91% of its
-#                     interactions is NOT a like-for-like column, and `alphaInelastic` stays
-#                     off on the Geant4 side until `Interact` lands. The other four are here
-#                     for the same reason and were MISSING before - d, t and He3 are made as
-#                     secondaries by a proton beam, their inelastic processes were active on
-#                     the Geant4 side and the port had none, which nobody had noticed because
-#                     the port had no inelastic process at all to compare against.
-#                     THE PORT HOLDS THE SAME FIVE OFF, via `G4GPU_ION_INELASTIC=0` below. A
-#                     process inactivated on one side only is not a like-for-like column in
-#                     either direction, and the first run of this sweep with the five off on the
-#                     Geant4 side and ON in the port read alpha_840 at -39.27% (-201.8 sigma)
-#                     purely because the port's refusal kills the ion and deposits its energy
-#                     where the refusal happened. docs/RISK.md V192.
+#                     NUCLEON - was refused by name until P9e ported it, and all three alpha
+#                     beams of this sweep sit above that threshold at 210, 400 and 1000 MeV/n:
+#                     measured, 10,266 of 11,223 queued interactions of the 840 MeV beam refused.
+#                     So the five stayed off on the Geant4 side, and - after the first sweep read
+#                     alpha_840 at -39.27% (-201.8 sigma) for no reason but a one-sided switch -
+#                     on the port side too, through `G4GPU_ION_INELASTIC=0` (docs/RISK.md V192).
+#                     With `Interact` wired both come off together, which is what V192 said the
+#                     day it landed would look like: `tests/test_inelastic_transport.cu`'s grid
+#                     books 49 cascade-arm refusals where it booked 914. The switch stays, as a
+#                     study knob, and nothing below sets it.
+#
+# STAYING ON THE LIST (the port still lacks these):
 #   hBrems, hPairProd    the radiative processes of a charged hadron: both models' dE/dx is
 #                     exact and neither has a SampleSecondaries (docs/PORTED.md 1.3).
 #   ionElastic        G4NuclNuclDiffuseElastic, both halves ported and the channel not wired.
@@ -116,10 +110,10 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 #                     the WIRING is not P15's, so they stay off and the gamma and electron rows
 #                     do not move.
 $emOnly = @{
-  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
-  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
-  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic", "alphaInelastic") }
-  "alpha"  = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "alphaInelastic", "ionElastic", "ionInelastic", "dInelastic", "tInelastic", "He3Inelastic") }
+  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic") }
+  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic") }
+  "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic") }
+  "alpha"  = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic") }
 }
 
 $beams = @(
@@ -231,17 +225,15 @@ foreach ($b in $beams) {
   # is set per beam here so that what each row was measured with is in this file.
   $isHadron = ($b.Particle -eq "proton" -or $b.Particle -eq "alpha")
   if ($isHadron) { $env:G4GPU_LIVE_PER_EVENT = "32" } else { Remove-Item Env:\G4GPU_LIVE_PER_EVENT -ErrorAction SilentlyContinue }
-  # THE PORT SIDE HOLDS OFF EXACTLY WHAT THE GEANT4 SIDE HOLDS OFF. `$emOnly` inactivates
-  # dInelastic/tInelastic/He3Inelastic/alphaInelastic/ionInelastic on EVERY beam because the
-  # port refuses P9e's `G4BinaryLightIonReaction::Interact`; until this line existed, the port
-  # kept its own copy of those five processes ON, drew an interaction length, refused 91.5% of
-  # the interactions (measured: 10,266 of 11,223 queued in 20,000 alpha_840 events) and disposed
-  # of each refused ion by killing it with its kinetic energy deposited AT THE REFUSAL POINT -
-  # 6.03e6 MeV, 36% of that beam's energy, in the water upstream of the scoring trapezoid, where
-  # the Geant4 column carries every alpha to full range. That is not a physics disagreement, it
-  # is a one-sided inactivation, and it read as -39.27% / -201.8 sigma on alpha_840.
-  # `G4GPU_ION_INELASTIC=0` is the port's half of the same switch (docs/RISK.md V192).
-  $env:G4GPU_ION_INELASTIC = "0"
+  # THE PORT SIDE HOLDS OFF EXACTLY WHAT THE GEANT4 SIDE HOLDS OFF - which since P9e is none of
+  # the five ion processes. Until `G4BinaryLightIonReaction::Interact` landed, `$emOnly`
+  # inactivated them on every beam and this line held them off in the port as well, through
+  # `G4GPU_ION_INELASTIC=0`, because the port refused 91.5% of an ion's interactions and disposed
+  # of each by killing the ion where the refusal happened - 6.03e6 MeV of the 840 MeV beam dumped
+  # upstream of the scoring trapezoid, which read as -39.27% / -201.8 sigma when only ONE side was
+  # switched (docs/RISK.md V192). Both switches came off together; the variable is cleared rather
+  # than set so that no stale value in the caller's environment decides the column.
+  Remove-Item Env:\G4GPU_ION_INELASTIC -ErrorAction SilentlyContinue
   # AND THE NEUTRON'S SIDE OF THE SAME RULE. The Geant4 column above does NOT inactivate
   # `NeutronGeneralProc`, so its secondary neutrons scatter, capture AND react inelastically.
   # The port's default hadronic stage is `kStage1`, where a neutron has `hadElastic` and

@@ -1802,7 +1802,8 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // launches and not interactions, because the drain loop in BeamOn chunks.
     //
     // THE DEFAULT SLOT COUNT IS 128 AND THE BINDING CONSTRAINT IS NOT THROUGHPUT, IT IS THE
-    // DEVICE STACK. At 1,604,928 bytes a slot, 128 slots is 195.9 MB - and what is left of an
+    // DEVICE STACK. At 2,020,152 bytes a slot, 128 slots is 246.6 MB (195.9 MB before P9e's
+    // ion arm) - and what is left of an
     // 8 GB card after 86,016 bytes a thread of reserved stack is 0.95 GB, measured (see the
     // `cudaDeviceSetLimit` above and docs/RISK.md V190). 256 slots would take 392 MB of that
     // 0.95 GB and leave the track pool, the queue, the 9.52 MB level scheme and the scene to

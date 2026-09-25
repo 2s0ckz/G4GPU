@@ -75,6 +75,13 @@ namespace ftfe = g4gpu::hadronic::ftf::entry;
 /// silent.
 inline constexpr int kInteractionSecondaryCap = 256;
 
+/// The Binary cascade's list capacities in a slot - `tests/test_bic_apply.cu`'s ION envelope,
+/// which contains the nucleon one. See `InteractionSlot`'s cascade block.
+inline constexpr int kCascadePoolCap = 1024;
+inline constexpr int kCascadeCollisionCap = 8192;
+inline constexpr int kCascadeProductCap = 512;
+inline constexpr int kCascadePrecoCap = 256;
+
 /// Everything ONE thread inside the interaction kernel needs, by value.
 template <typename real_t>
 struct InteractionSlot {
@@ -87,8 +94,17 @@ struct InteractionSlot {
   bert::CollisionOutput co_tmp;
   bert::ColliderOutput epo;
 
-  // ---- Binary cascade: what `bic::BicStorage` points at. The capacities are
-  // `tests/test_bic_apply.cu`'s, which is the campaign's envelope.
+  // ---- Binary cascade: what `bic::BicStorage` and `bic::BlirStorage` point at.
+  //
+  // ONE SET OF CASCADE ARRAYS FOR BOTH ENTRY POINTS, sized to the LARGER envelope. The nucleon
+  // arm (`bic::apply_yourself`) and the ion arm (`G4BinaryLightIonReaction::Interact`, P9e) run
+  // in different kernels and never in the same slot at once, so they share the target nucleus,
+  // the fields, the track pool, the collision list and the product lists; the capacities are
+  // `tests/test_bic_apply.cu`'s ION envelope - 1,024 tracks, 8,192 collisions, 512 products and
+  // 256 PreCompound products - because P9e's 800,000-event campaign measured that "every case in
+  // the campaign that takes the cascade arm reads all of it", and the nucleon arm's own
+  // envelope (512 / 2,048 / 256 / 64) fits inside it. The ion arm's own arrays follow. The cost,
+  // measured with `sizeof`: 411,136 bytes a slot, 1,069,920 -> 1,481,056.
   bic::Nucleon nucleons[256];
   deex::Vec3d nucleus_mom[256];
   double fermi_p[256];
@@ -96,11 +112,19 @@ struct InteractionSlot {
   double flat_block[bic::kFlatBlock];
   double proton_field[bic::kMaxFieldTable];
   double neutron_field[bic::kMaxFieldTable];
-  bic::CascadeTrack cascade_pool[512];
-  bic::imr::CollisionInitialState collisions[2048];
+  bic::CascadeTrack cascade_pool[kCascadePoolCap];
+  bic::imr::CollisionInitialState collisions[kCascadeCollisionCap];
   bic::CascadeBuffers cascade_buffers;
-  bic::CascadeProduct products[256];
-  bic::CascadeProduct preco_products[64];
+  bic::CascadeProduct products[kCascadeProductCap];
+  bic::CascadeProduct preco_products[kCascadePrecoCap];
+  // ---- the ion arm's own: the PROJECTILE nucleus (the target is `nucleons` above, and both
+  // nucleus builds share `nucleus_mom`/`fermi_p`/`sort_sums`/`flat_block` on purpose - see
+  // `bic::BlirStorage`), `SortResult`'s two lists, and `Interact`'s one-track-per-nucleon
+  // secondary list, which P9e measured as a 38 kB stack local that killed its test when it was one.
+  bic::Nucleon projectile_nucleons[256];
+  bic::BlirProduct spectators[512];
+  bic::BlirProduct cascaders[512];
+  bic::CascadeTrack initial[256];
 
   // ---- PreCompound and P3's de-excitation, the tail of all four arms.
   deex::Fragment evap_list[4096];
@@ -167,17 +191,57 @@ __host__ __device__ inline bic::BicStorage bic_storage_of(InteractionSlot<real_t
   st.neutron_field = s.neutron_field;
   st.field_capacity = bic::kMaxFieldTable;
   st.cascade.pool = s.cascade_pool;
-  st.cascade.pool_capacity = 512;
+  st.cascade.pool_capacity = kCascadePoolCap;
   st.cascade.collisions = s.collisions;
-  st.cascade.collision_capacity = 2048;
+  st.cascade.collision_capacity = kCascadeCollisionCap;
   st.cascade.channels = pool.bic_channels;
   st.cascade.n_channels = pool.n_bic_channels;
   st.cascade.buffers = &s.cascade_buffers;
   st.cascade.products = s.products;
-  st.cascade.product_capacity = 256;
+  st.cascade.product_capacity = kCascadeProductCap;
   st.cascade.preco_products = s.preco_products;
-  st.cascade.preco_capacity = 64;
+  st.cascade.preco_capacity = kCascadePrecoCap;
   st.preco = &pws;
+  return st;
+}
+
+/// `bic::BlirStorage` pointed at one slot's arrays - P9e's `G4BinaryLightIonReaction` entry.
+///
+/// The same target nucleus, scratch, fields and cascade lists `bic_storage_of` hands the nucleon
+/// arm, plus the ion arm's own four. `scratch` is ONE object serving both nucleus builds, which
+/// is P9e's contract and not an economy: `projectile3dNucleus->Init` and
+/// `target3dNucleus->Init` run back to back on one random stream (`bic::BlirStorage`'s header).
+template <typename real_t>
+__host__ __device__ inline bic::BlirStorage blir_storage_of(InteractionSlot<real_t>& s,
+                                                            const InteractionPool<real_t>& pool) {
+  bic::BlirStorage st;
+  st.projectile_nucleons = s.projectile_nucleons;
+  st.target_nucleons = s.nucleons;
+  st.scratch.momentum = s.nucleus_mom;
+  st.scratch.fermi_p = s.fermi_p;
+  st.scratch.test_sums = s.sort_sums;
+  st.scratch.flat_block = s.flat_block;
+  st.scratch.capacity = 256;
+  st.proton_field = s.proton_field;
+  st.neutron_field = s.neutron_field;
+  st.field_capacity = bic::kMaxFieldTable;
+  st.cascade.pool = s.cascade_pool;
+  st.cascade.pool_capacity = kCascadePoolCap;
+  st.cascade.collisions = s.collisions;
+  st.cascade.collision_capacity = kCascadeCollisionCap;
+  st.cascade.channels = pool.bic_channels;
+  st.cascade.n_channels = pool.n_bic_channels;
+  st.cascade.buffers = &s.cascade_buffers;
+  st.cascade.products = s.products;
+  st.cascade.product_capacity = kCascadeProductCap;
+  st.cascade.preco_products = s.preco_products;
+  st.cascade.preco_capacity = kCascadePrecoCap;
+  st.spectators = s.spectators;
+  st.spectator_capacity = 512;
+  st.cascaders = s.cascaders;
+  st.cascader_capacity = 512;
+  st.initial = s.initial;
+  st.initial_capacity = 256;
   return st;
 }
 
@@ -447,31 +511,54 @@ __host__ __device__ __noinline__ bool run_arm_binary(
   return true;
 }
 
-/// `G4BinaryLightIonReaction::ApplyYourself` - the FUSION arm, which is all P9 ported.
+/// `G4BinaryLightIonReaction::ApplyYourself` - BOTH arms, since P9e.
+///
+/// Below 50 MeV per nucleon the fusion arm, which P9 ported; at or above it `Interact`, which
+/// P9e ported - a `G4Fancy3DNucleus` for the projectile as well as the target, one
+/// `G4KineticTrack` per projectile nucleon handed to the same `G4BinaryCascade::Propagate` the
+/// nucleon arm runs, and `SortResult`'s spectators de-excited by the handler. Until P9e this
+/// arm refused every ion above 50 MeV/n by name (`kLightIonCascade`), 91.5% of an 840 MeV
+/// alpha's interactions, which is why the five ion processes were inactivated on BOTH sides of
+/// every like-for-like column (docs/RISK.md V192).
+///
+/// THE MAPPING, and it cannot be `ref.any()` the way the nucleon arm's is: P9e's `any()` also
+/// counts three outcomes that are Geant4's own answer, the primary returned alive and unchanged,
+/// which this port applies exactly as Geant4 does:
+///
+///   `no_fusion`               "abort!! happens for too low energy for nuclei to fuse"
+///   `no_final_state`          150 impact parameters and nothing - "no final state for:"
+///   `momentum_not_conserved`  from "invalid final state for:", which prints and returns
+///
+/// and ONE that is not: `momentum_not_conserved` with `correction_gave_up`, the correction
+/// loop that ends in `throw G4HadronicException(... "G4BinaryCasacde::ApplyCollision()")`
+/// (G4BinaryLightIonReaction.cc:220). `G4HadronicProcess::PostStepDoIt` catches that and raises
+/// `had006` as a FatalException (G4HadronicProcess.cc:425) - the job ends - so there is no
+/// Geant4 final state to claim, and it is booked. The genuine refusals are `cascade`
+/// (`Propagate` could not finish), `nucleus` (a `G4Fancy3DNucleus::Init` failed), `capacity`
+/// and `anti_or_hyper`.
 template <typename real_t, typename Rng>
 __host__ __device__ __noinline__ bool run_arm_light_ion(
     const physics::hadronic::HadProjectile<real_t>& proj,
     const physics::hadronic::HadNucleus& tgt, InteractionSlot<real_t>& s,
-    const preco::PrecoWorkspace& pws, const data::LevelTable& lt, const deex::FermiPool& fpool,
-    Rng& rng, InteractionOutcome& out) {
+    const InteractionPool<real_t>& pool, const preco::PrecoWorkspace& pws,
+    const data::LevelTable& lt, const deex::FermiPool& fpool, Rng& rng, InteractionOutcome& out) {
   bic::BlirRefusal ref;
-  bic::blir_apply_yourself(proj, tgt, lt, fpool, pws, rng, s.blir_fs, ref);
+  bic::BlirReport rep;
+  bic::BlirStorage store = blir_storage_of<real_t>(s, pool);
+  bic::blir_apply_yourself(proj, tgt, lt, fpool, pws, store, rng, s.blir_fs, ref, rep);
   if (ref.cascade) {
-    // `(mom.t()-mom.mag())/pA >= 50 MeV`: `G4BinaryLightIonReaction::Interact`, which P9e is
-    // writing. THE LARGEST NAMED HOLE P15 LEAVES - every ion above 50 MeV per nucleon - and the
-    // reason `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic`
-    // stay inactivated on the Geant4 side of `tools/b1_sweep.ps1`. docs/B1_SWEEP.md has the
-    // measured rate per beam.
+    // `G4BinaryCascade::Propagate` refused inside `Interact` - `ref.cascade_ref` says which of
+    // its refusals. The name is the one this hole had while `Interact` was missing, because a
+    // ledger read across the two builds should show the rate falling rather than a name
+    // disappearing.
     out.refusal = HadronicRefusal::kLightIonCascade;
     return false;
   }
-  if (ref.anti_or_hyper || ref.capacity) {
+  const bool would_throw = ref.momentum_not_conserved && rep.correction_gave_up;
+  if (ref.anti_or_hyper || ref.capacity || ref.nucleus || would_throw) {
     out.refusal = HadronicRefusal::kBinaryRefused;
     return false;
   }
-  // `no_fusion` is NOT a refusal: it is Geant4's own "too low energy for nuclei to fuse", and
-  // the final state is the primary unchanged and alive. The model said so and the model is
-  // right.
   copy_final_state<real_t>(s.blir_fs, s.fs);
   return true;
 }
@@ -500,7 +587,7 @@ __host__ __device__ inline bool run_one_model(
     return run_arm_binary<real_t>(proj, tgt, s, pool, pws, lt, fpool, rng, out);
   } else if constexpr (kModel == InelasticModel::kLightIon) {
     const preco::PrecoWorkspace pws = preco_workspace_of<real_t>(s);
-    return run_arm_light_ion<real_t>(proj, tgt, s, pws, lt, fpool, rng, out);
+    return run_arm_light_ion<real_t>(proj, tgt, s, pool, pws, lt, fpool, rng, out);
   } else {
     out.refusal = HadronicRefusal::kNoInelasticModel;
     return false;

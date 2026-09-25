@@ -96,9 +96,23 @@ struct CountingEmitter {
     ++n_secondaries;
     secondary_energy += static_cast<double>(ekin);
     baryon += had::baryon_number_of(t, ion_a_of(za));
-    charge += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
+    // THE BALANCE IS OF NUCLEAR CHARGE, AND AN ELECTRON IN A HADRONIC FINAL STATE IS ATOMIC.
+    // The only electron any of these models emits is P3's internal conversion:
+    // `G4GammaTransition` hands the transition energy to a SHELL electron instead of a photon,
+    // which leaves the atom ionised and the nucleus's Z untouched. Counting its -1 against
+    // projectile + target Z is comparing two different charges. Found when P9e's corrected
+    // random stream (V180/V181) reshuffled the events and the grid sampled its first conversion
+    // electrons - a 1 GeV proton and a 100 MeV neutron on Ca40, each leaving Ar37 and a 15 keV
+    // e-, each one short by exactly that electron. `conversion_electrons` keeps the count, so a
+    // stray electron from anywhere else is still visible rather than silently excused.
+    if (t == ParticleType::kElectron) {
+      ++conversion_electrons;
+    } else {
+      charge += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
+    }
     return 0;
   }
+  int conversion_electrons = 0;
   __host__ __device__ int push_nucleus(int z, int a, const Vec3<real_t>& dir, real_t ekin,
                                        int event_id) {
     ++child_count;
@@ -162,7 +176,7 @@ static void section_sizes() {
   // that only a comment carries drifts. A change to any array in `InteractionSlot` fails the
   // build here with the new figure in the message. Update the assertion and the prose together,
   // or not at all.
-  static_assert(sizeof(had::InteractionSlot<double>) == 1065824,
+  static_assert(sizeof(had::InteractionSlot<double>) == 1481056,
                 "had::InteractionSlot changed size. interaction_apply.cuh's header table, "
                 "docs/RISK.md V189 and this assertion all carry the number - update all three.");
   static_assert(sizeof(had::PendingInteraction<double>) == G4GPU_PENDING_BYTES,
@@ -1215,6 +1229,123 @@ int main() {
     }
     if (whole_primary_total == 0) {
       fail("no case produced the model's own no-interaction answer, so section 8 tested nothing");
+    }
+  }
+
+  // ============================================================================================
+  // 9. The light-ion arm with P9e's Interact: the cascade runs, and the new flags map
+  // ============================================================================================
+  //
+  // WHY THIS SECTION EXISTS. Until P9e every ion at or above 50 MeV per nucleon was
+  // `kLightIonCascade` by construction, so nothing downstream of the arm had ever seen an ion
+  // cascade's final state. Three things are asserted, each of which the arm could get wrong:
+  //
+  //   * an 840 MeV alpha (210 MeV/n) on O16 RUNS - the cascade arm, not a refusal - and what it
+  //     applies conserves baryon number and nuclear charge;
+  //   * `BlirRefusal::nucleus`, new with P9e, is a refusal: an alpha on an A = 300 target cannot
+  //     be built in a slot of 256 nucleons, and an arm that tested only the pre-P9e flags would
+  //     apply the empty result as a final state (V197's defect, one arm over);
+  //   * the fusion arm's `no_fusion` - "abort!! happens for too low energy for nuclei to fuse" -
+  //     is Geant4's answer and is APPLIED: a 1 MeV alpha on Pb208 must come back alive with its
+  //     whole energy. THE GATE IS A MASS TEST, NOT A COULOMB BARRIER, and the first version of
+  //     this case got that wrong: `G4BinaryLightIonReaction::ApplyYourself` fuses whenever
+  //     `pCompound.m2() >= sqr(mFused)`, and alpha + Pb208 -> Po212 needs only its Q-value,
+  //     8.95 MeV in the centre of mass (Po212's own alpha-decay energy). A 10 MeV alpha clears
+  //     that and FUSES - measured, 10 of 10 - barrier or no barrier; 1 MeV does not.
+  std::printf("== 9. the light-ion arm runs Interact, and its flags map ==\n");
+  {
+    had::InteractionSlot<real_t>& slot = pool.slots[0];
+    const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(slot);
+    hp::HadProjectile<real_t> proj;
+    proj.pdg = pdg_code(ParticleType::kAlpha);
+    proj.charge = particle_def<real_t>(ParticleType::kAlpha).charge;
+    proj.mass = particle_def<real_t>(ParticleType::kAlpha).mass;
+    proj.baryon_number = 4;
+
+    struct Case {
+      real_t e;
+      int z, a;
+      const char* name;
+      int n;
+    };
+    const Case cases[] = {
+        {840, 8, 16, "alpha 840 MeV on O16", 20},
+        {840, 120, 300, "alpha 840 MeV on A=300", 10},
+        {1, 82, 208, "alpha 1 MeV on Pb208", 10},
+    };
+    for (const Case& c : cases) {
+      proj.kin_energy = c.e;
+      int ran = 0, refused = 0, balanced = 0, alive_whole = 0;
+      had::HadronicRefusal last_refusal = had::HadronicRefusal::kNumHadronicRefusals;
+      for (int k = 0; k < c.n; ++k) {
+        hp::HadNucleus tgt;
+        tgt.z = c.z;
+        tgt.a = c.a;
+        Philox<real_t> rng(777001u + 65537u * static_cast<unsigned int>(k), 0u,
+                           had::kInteractionRngPurpose);
+        had::InteractionOutcome out;
+        const bool ok = had::run_arm_light_ion<real_t>(proj, tgt, slot, pool.view, pws, lt,
+                                                       pool.view.fermi, rng, out);
+        if (!ok) {
+          ++refused;
+          last_refusal = out.refusal;
+          continue;
+        }
+        ++ran;
+        const auto& fs = slot.fs;
+        if (fs.status == hp::HadFinalStateStatus::kIsAlive && fs.n_secondaries == 0
+            && std::fabs(double(fs.energy_change) - double(c.e)) < 1e-9) {
+          ++alive_whole;
+        }
+        int b = 0, q = 0;
+        for (int j = 0; j < fs.n_secondaries; ++j) {
+          const auto& s2 = fs.secondaries[j];
+          if (s2.a > 0) {
+            b += s2.a;
+            q += s2.z;
+          } else if (s2.pdg != 11) {  // the atomic conversion electron: see CountingEmitter
+            const ParticleType t = particle_type_of_pdg(s2.pdg);
+            b += had::baryon_number_of(t, 0);
+            q += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
+          }
+        }
+        if (fs.status == hp::HadFinalStateStatus::kIsAlive) {
+          b += 4;
+          q += 2;
+        }
+        // "Nothing happened" leaves the target where it was and out of the final state, so it
+        // balances by construction; everything else must carry the target's A and Z out.
+        const bool untouched = fs.status == hp::HadFinalStateStatus::kIsAlive
+                               && fs.n_secondaries == 0;
+        if (untouched || (b == 4 + c.a && q == 2 + c.z)) { ++balanced; }
+      }
+      std::printf("   %-24s ran %2d (balanced %2d, alive whole %2d)   refused %2d\n", c.name, ran,
+                  balanced, alive_whole, refused);
+      if (c.a == 16) {
+        if (ran < c.n - 2) {
+          fail(std::string(c.name) + ": only " + std::to_string(ran) + " of "
+               + std::to_string(c.n) + " ran - the cascade arm should run all but the rare "
+                 "refusal P9e's campaign measured");
+        }
+        if (balanced != ran) {
+          fail(std::string(c.name) + ": " + std::to_string(ran - balanced) + " applied final "
+               "states do not balance baryon number and nuclear charge");
+        }
+      } else if (c.a == 300) {
+        if (ran != 0) {
+          fail(std::string(c.name) + ": " + std::to_string(ran) + " were APPLIED - a nucleus "
+               "that could not be built is a refusal (BlirRefusal::nucleus)");
+        }
+        if (refused != c.n || last_refusal != had::HadronicRefusal::kBinaryRefused) {
+          fail(std::string(c.name) + ": expected " + std::to_string(c.n) + " kBinaryRefused");
+        }
+      } else {
+        if (alive_whole != c.n) {
+          fail(std::string(c.name) + ": " + std::to_string(alive_whole) + " of "
+               + std::to_string(c.n) + " came back alive and whole - no_fusion is Geant4's "
+                 "answer, not a refusal");
+        }
+      }
     }
   }
 

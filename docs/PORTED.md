@@ -1638,7 +1638,7 @@ and get a final state; a stopped mu-, pi-, K- or negative hyperon is captured.
 | `G4HadronicProcess::PostStepDoIt` - the integral rejection first, then `SampleZandA` from the RECOMPUTED partial sums, then the model, then `do { ApplyYourself } while(!CheckResult)` bounded at 100, then the K0/anti-K0 mixing, then `FillResult` | y | **V** | `hadronic/interaction_apply.cuh`. The interaction RATE against the cross section: 24 (beam, material) cells, 400 tracks each, Poisson mean `sum(L_i/lambda_i)` over the realised path - worst **2.58 sigma** against a 5 sigma gate |
 | `G4HadronStoppingProcess::AtRestDoIt` in the transport | y | **T** | `physics/stepper.cuh`'s dying branch through `had::at_rest_bucket`. 200 stopped pi- and 200 mu- in water: 197 and 200 reach `stopping::at_rest` (the other three pions decay in flight - see below), all capture, 1,639 and 1,772 atomic-cascade secondaries and 916 and 677 nuclear ones, with 173 of the 200 muons decaying in orbit |
 | `G4NeutronGeneralProcess`'s inelastic sub-process | y | **T** | `step_neutral`. It was `HadronicRefusal::kNeutronInelastic` from P8d to P15 - the port's largest named hole, 18% of the interactions in water at 10 MeV and 51% in lead - and it is applied now. `NeutronSubTables::inelastic` is the data set `upload_neutron_tables` had always built and thrown away |
-| `G4BinaryLightIonReaction::Interact` | y | **-** | **REFUSED BY NAME**, `kLightIonCascade`, and it is the largest hole P15 leaves. See below |
+| `G4BinaryLightIonReaction::Interact` | y | **T** | P9e's, on main at 3ea5035, and called by `run_arm_light_ion` since P15's second pass. It was REFUSED BY NAME (`kLightIonCascade`) and the largest hole P15 had; over the test grid the refusals fell from 914 to 49, which are `Propagate`'s own. `tests/test_inelastic_transport.cu` section 9; docs/RISK.md V198 |
 | `G4BinaryCascade::Propagate1H1` | y | **-** | **REFUSED BY NAME**, `kBinaryHydrogenTarget`. 107 of 1,021 refused interactions over the test grid; in water hydrogen is two atoms in three |
 
 **The design, and the measurement that forced it.** The models are not in the stepping kernels
@@ -1646,35 +1646,40 @@ and cannot be: docs/RISK.md **V188** and **V189** have the two halves. A stepper
 interaction happens, chooses the model, and puts the track and the step into an
 `had::InteractionQueue`; the engine bins the queue by model with the same counting sort the
 species dispatch uses, and launches one of FIVE interaction kernels per non-empty bucket, in
-chunks of the slot count. One slot is **1,604,928 bytes** (`InteractionSlot` 1,065,824 +
-`ftf::entry::Workspace` 539,104) and a queue entry is **392**; the default pool is 256 slots,
-391.8 MB, and the queue is sized at the track pool, which is a BOUND rather than an estimate -
-one track queues at most one interaction per launch.
+chunks of the slot count. One slot is **2,020,152 bytes** since P9e's ion arm (`InteractionSlot`
+1,481,056 + `ftf::entry::Workspace` 539,096; it was 1,604,928) and a queue entry is **392**; the
+default pool is 128 slots, 246.6 MB, because the device stack decides what is left (V190), and
+the queue is sized at `pool / 48 + 1024` - the per-launch stepping throttle's bound, a BOUND
+rather than an estimate, since a track queues at most one interaction per launch.
 
 **V189 is the finding worth reading twice**: every test of P9's, P10's, P11's and P12's models
 is host-only, so no hadronic model in this port had ever been compiled as device code at all.
 Four of them in one kernel is past ptxas - 22.6 GB of working set at 200 seconds, still climbing
 - and one each compiles at 6.1 to 19.8 GB. Five translation units, `if constexpr` on the bucket
-and the model, and `cudaLimitStackSize` from 16,384 to 49,152 because the frames are 31,968 to
-35,360 bytes.
+and the model. The device stack is READ OFF the five kernels' `localSizeBytes` rather than
+written down (V196): 86,016 bytes a thread against `run_interaction<kBinary>`'s 81,584 until
+P9e, and 94,208 against `run_interaction<kLightIon>`'s 88,240 since - the stepping kernels
+keep their 16,384 floor, which is the one a driver cannot enforce for them.
 
 **What is refused, by name, with its rate.** Over the validation grid - 8 beams x 3 materials x
-400 tracks - 1,021 charged-hadron interactions produced no final state, and the ledger says why:
+400 tracks - 156 charged-hadron interactions produced no final state since P9e (1,021 before), and
+the ledger says why:
 
 | refusal | count | energy | whose |
 |---|--:|--:|---|
-| `kLightIonCascade` - an ion at or above **50 MeV per nucleon** | 914 | 387,270 MeV | P9e |
+| `kLightIonCascade` - `Propagate` refused inside `Interact` (until P9e: every ion at or above **50 MeV per nucleon**) | 49 (914) | 15,759 MeV (387,270) | P9's cascade |
 | `kBinaryHydrogenTarget` - `Propagate1H1` | 107 | 57,824 MeV | P9 |
-| `kInelasticSecondarySpecies` - a hyperon, a K0S/K0L, an anti-nucleus | 3 | 1,395 MeV | P1's species set |
+| `kInelasticSecondarySpecies` - a hyperon, a K0S/K0L, an anti-nucleus | 0 (3) | 0 (1,395 MeV) | P1's species set |
 
-The first is not a corner and it decides a column of the B1 sweep.
-`G4BinaryLightIonReaction::ApplyYourself` fuses below 50 MeV/n and calls `Interact` at or above
-it; QBBC gives an ion the light-ion reaction to 6 GeV/n and FTFP from 3 GeV/n, so between
-50 MeV/n and 3 GeV/n there is no model this port can run - and all three alpha beams of the
-sweep sit there, at 210, 400 and 1000 MeV per nucleon. Measured: **195 of 215** alpha
-interactions in water are refused. So `alphaInelastic`, `dInelastic`, `tInelastic`,
-`He3Inelastic` and `ionInelastic` stay inactivated on the Geant4 side of every like-for-like
-column until `Interact` lands, and `protonInelastic` and `NeutronGeneralProc` come off.
+The figures in brackets are the grid before P9e's `Interact` reached this branch. The first row
+was not a corner and it decided a column of the B1 sweep: `G4BinaryLightIonReaction::ApplyYourself`
+fuses below 50 MeV/n and calls `Interact` at or above it, QBBC gives an ion the light-ion
+reaction to 6 GeV/n and FTFP from 3 GeV/n, and all three alpha beams of the sweep sit between, at
+210, 400 and 1000 MeV per nucleon - measured, **195 of 215** alpha interactions in water were
+refused. So `alphaInelastic`, `dInelastic`, `tInelastic`, `He3Inelastic` and `ionInelastic`
+stayed inactivated on both sides of every like-for-like column while it was missing, and came off
+both together when it landed (docs/RISK.md V192, V198). `protonInelastic` and `NeutronGeneralProc`
+had come off in P15's first pass.
 
 **The refusal ledger has two groups now and they must not be added.**
 `kNeutronInelastic` and `kChargedHadronInelastic` say how MUCH is missing, one booking per lost

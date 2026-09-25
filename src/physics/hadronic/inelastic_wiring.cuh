@@ -87,11 +87,12 @@
 //   BIC         `bic::apply_yourself`, PORTED 2.1.10. Runs for nucleons and charged pions on
 //               any target with A > 1; a HYDROGEN target is `Propagate1H1` and is refused by
 //               name inside the model (`BicRefusal::hydrogen`).
-//   BLIR        `bic::blir_apply_yourself`, PORTED 2.1.10. Runs the FUSION arm only - the
-//               `(mom.t()-mom.mag())/pA < 50*MeV` branch of
-//               `G4BinaryLightIonReaction::ApplyYourself` (line 119). At or above **50 MeV per
-//               nucleon** Geant4 calls `Interact` and this port has no cascade there;
-//               `BlirRefusal::cascade` names it and P9e is writing it.
+//   BLIR        `bic::blir_apply_yourself`, PORTED 2.1.10. Runs BOTH arms since P9e: the
+//               FUSION arm below **50 MeV per nucleon** - the `(mom.t()-mom.mag())/pA < 50*MeV`
+//               branch of `G4BinaryLightIonReaction::ApplyYourself` (line 119) - and
+//               `Interact` at or above it, two `G4Fancy3DNucleus` builds and the same
+//               `G4BinaryCascade::Propagate` the nucleon arm runs. What `Propagate` itself
+//               refuses is `BlirRefusal::cascade` and `kLightIonCascade` in the ledger.
 //
 //   THE ANTI-NUCLEON ROW HAS NO CROSS SECTION AT ALL, and that is a P2 refusal rather than a
 //   P15 one. `BuildAntiLightIonsFTFP` passes `xsName = "AntiAGlauber"`, which

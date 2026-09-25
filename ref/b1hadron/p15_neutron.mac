@@ -19,14 +19,11 @@
 #
 # WHAT IS STILL INACTIVATED, and it is the same list the sweep uses:
 #
-#   dInelastic, tInelastic, He3Inelastic, alphaInelastic, ionInelastic
-#                   P9e's `G4BinaryLightIonReaction::Interact` is not wired, so the port refuses
-#                   every ion interaction at or above 50 MeV per nucleon. The PORT holds the
-#                   same five off through `G4GPU_ION_INELASTIC=0` - a process inactivated on one
-#                   side only is not a like-for-like column in either direction, and that is
-#                   exactly the defect docs/RISK.md V192 records.
 #   ionElastic      `G4NuclNuclDiffuseElastic`, both halves ported and the channel not wired.
 #
+# and NOT the five ion inelastic processes, which were on this list until P9e's
+# `G4BinaryLightIonReaction::Interact` landed - while it was missing the port refused every ion
+# at or above 50 MeV per nucleon, and both sides held the five off together (docs/RISK.md V192).
 # A 100 MeV neutron beam is the case the two groups of the refusal ledger were built for: the
 # neutron itself has a full inelastic process now, and what it MAKES - deuterons, tritons,
 # alphas and recoil nuclides - is what the five names above cover.
@@ -35,11 +32,6 @@
 /control/verbose 0
 /run/verbose 1
 
-/process/inactivate dInelastic
-/process/inactivate tInelastic
-/process/inactivate He3Inelastic
-/process/inactivate alphaInelastic
-/process/inactivate ionInelastic
 /process/inactivate ionElastic
 
 # The stage, recorded by what RAN and not by what was intended: Active/InActive for every

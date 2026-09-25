@@ -1,9 +1,9 @@
 # The port's half of the P15 neutron like-for-like. Its partner is `p15_neutron.mac`, which runs
 # through `ref/b1neutron/run.bat`; this one runs through `examples/B1/exampleB1.exe`.
 #
-# TWO ENVIRONMENT VARIABLES HAVE TO BE SET AROUND THIS MACRO, and they are not in the file
-# because this port's G4UImanager rejects an unknown command rather than ignoring it - the
-# convention P1 set, and the reason the two sides of every comparison are two files:
+# ONE ENVIRONMENT VARIABLE HAS TO BE SET AROUND THIS MACRO, and it is not in the file because
+# this port's G4UImanager rejects an unknown command rather than ignoring it - the convention P1
+# set, and the reason the two sides of every comparison are two files:
 #
 #   G4GPU_HADRONIC_STAGE=final    `G4NeutronGeneralProcess` as QBBC builds it: one interaction
 #                                 length from the combined table, then elastic, inelastic or
@@ -12,11 +12,9 @@
 #                                 separate processes and NO INELASTIC AT ALL - so without this
 #                                 variable the run measures the hole P15 closed rather than the
 #                                 physics it wired. docs/RISK.md V194.
-#   G4GPU_ION_INELASTIC=0         the five ion names `p15_neutron.mac` inactivates on the Geant4
-#                                 side, held off here too: P9e's
-#                                 `G4BinaryLightIonReaction::Interact` is refused, and a process
-#                                 inactivated on one side only is not a like-for-like column in
-#                                 either direction. docs/RISK.md V192.
+#
+# `G4GPU_ION_INELASTIC=0` was the second one until P9e's `Interact` landed; it must be UNSET
+# now, because `p15_neutron.mac` no longer inactivates the five ion processes (V192).
 #
 # A 100 MeV NEUTRON IS THE BEAM THIS PACKAGE IS MOST EXPOSED ON. It has no charge, so there is
 # no continuous loss to dominate the answer and no Bragg peak to hide behind: essentially all of

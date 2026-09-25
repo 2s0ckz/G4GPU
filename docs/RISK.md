@@ -12676,6 +12676,27 @@ reserved, the driver had to raise it at an interaction launch, and the report sa
 That tripwire is the only way a short reservation could ever be seen, because the probe above is
 the proof that nothing else would complain.
 
+WHAT P9e DID TO IT, measured the moment `Interact` was wired: `run_interaction<kLightIon>` went
+from 31,952 bytes of frame to **88,240** - past the Binary kernel's 81,584 and past P9e's own
+probe's 63,088, because the kernel is the model plus `fill_result`, the emission and the
+slot's addressing, all overlaid into one entry frame. ptxas took 437 s and peaked at 15.7 GB for
+that unit alone, against 40 s and 6.1 GB before. So the kernel that sets the reservation changed,
+and the reservation followed it without an edit: 88,240 rounds to **94,208 bytes a thread**, 8 kB
+more than the 86,016 that was written down - 0.54 GB of this card, measured today at 1.355 GB free
+at 86,016 and 0.816 at 94,208 before anything is allocated. A constant would have been 6,224
+bytes short on the first build after P9e, and the only symptom would have been the driver
+spending the difference at a launch.
+
+AND THE CARD OVERSUBSCRIBES RATHER THAN REFUSE, on this Windows (WDDM) driver, which changes what
+"it does not fit" means. B1's automatic batch sizes the track buffers to 55% of the memory free
+at `Upload`, before the lazy raise, so a hadron run asks for a stack reservation the card does
+not have - and `cudaDeviceSetLimit` succeeds anyway: a probe that allocates and touches 3.8 GB,
+then sets 94,208, reports 0.000 GB free and still runs an 88 kB-frame kernel to the right answer.
+What that costs was measured on the transport, not assumed: a 50,000-event 210 MeV proton run
+whose batch fits with 0.20 GB to spare is 6.6% faster than the same run oversubscribed, with the
+dose identical to every digit (V193). So a short card is a few percent of throughput here, not a
+crash - which is also why nothing had noticed it.
+
 ### V197: three arms mistook what a model said, in both directions
 
 Found by reading P9e's `BlirRefusal` beside this package's own wiring of it - which is the only
@@ -12733,3 +12754,58 @@ the kind of defect a dose comparison cannot see and a mapping test must.
 
 `run_at_rest` is NOT changed: it maps `stopping::at_rest`'s own `StoppingRefusal`, and whether a
 stopped particle's "primary unchanged" is a refusal is P12's contract, stated there.
+
+### V198: the light-ion arm runs Interact, and what the port had to change to let it
+
+P9e's `G4BinaryLightIonReaction::Interact` reached main at 3ea5035. This package's side of it is
+the arm that calls it, the slot that holds its storage and the two like-for-like columns that
+stop inactivating the five ion processes. The eight `bic/` files and FTF's two pinned sizes are
+taken from main byte for byte and compared against the tree they were tested in.
+
+**THE RATE.** Over `tests/test_inelastic_transport.cu`'s grid - 24 (beam, material) cells, 400
+tracks each - the ion arm's refusals fall from **914 to 49**. What is left is `Propagate`'s own
+refusals inside `Interact`, and it keeps the name `kLightIonCascade` so a ledger read across the
+two builds shows a rate falling rather than a line disappearing.
+
+**THE STORAGE.** `bic::BlirStorage` is caller-owned like everything in the cascade, and P9e's
+campaign envelope is larger than the nucleon arm's - 1,024 tracks, 8,192 collisions, 512 products
+and 256 PreCompound products against 512 / 2,048 / 256 / 64 - plus a second nucleus, `SortResult`'s
+two lists and `Interact`'s one-track-per-nucleon secondary list, which P9e measured as a 38 kB stack
+local that killed its own test when it was one. The two arms run in different kernels and never
+in one slot at once, so they SHARE the cascade arrays at the larger envelope; the slot grows by
+411,136 bytes, measured with `sizeof`, to 1,481,056, and one slot with its FTF workspace is
+2,020,152 - 246.6 MB for the 128-slot pool.
+
+**THE MAPPING, which cannot be `ref.any()`.** P9e's `BlirRefusal::any()` counts three outcomes
+that are Geant4's own answer - the primary returned alive and unchanged - and one of them has two
+sources:
+
+    no_fusion                   "abort!! ... too low energy for nuclei to fuse"      APPLIED
+    no_final_state              150 impact parameters, "no final state for:"         APPLIED
+    momentum_not_conserved      "invalid final state for:" - prints, returns          APPLIED
+      + correction_gave_up      throw G4HadronicException (cc:220), which
+                                PostStepDoIt raises as had006 FatalException (cc:425) REFUSED
+    cascade, nucleus, capacity, anti_or_hyper                                         REFUSED
+
+Section 9 asserts three of those with cases whose answer is known in advance: an 840 MeV alpha
+on O16 runs 20 of 20, all balancing baryon number and nuclear charge; on an A = 300 target -
+which a 256-nucleon slot cannot build - it is refused 10 of 10 as `kBinaryRefused`; and a 1 MeV
+alpha on Pb208 comes back alive and whole 10 of 10. With `nucleus` dropped from the refusal list,
+by name: "alpha 840 MeV on A=300: 10 were APPLIED - a nucleus that could not be built is a
+refusal"; with `no_fusion` added to it: "alpha 1 MeV on Pb208: 0 of 10 came back alive and
+whole". The first version of the third case used a 10 MeV alpha, on the reasoning that it is far
+below the Coulomb barrier - and it fused, 10 of 10, because Geant4's gate is a MASS test
+(`pCompound.m2() >= sqr(mFused)`), and alpha + Pb208 -> Po212 needs only its 8.95 MeV Q-value.
+
+**AND A TEST THAT WAS WRONG ABOUT CHARGE.** P9e's corrected random stream (its V180 and V181)
+reshuffled every event, and section 4's balance failed on two of them - a 1 GeV proton and a
+100 MeV neutron on Ca40, each leaving Ar37 and a 15 keV electron, each one short by exactly that
+electron. It is P3's internal conversion: `G4GammaTransition` hands the transition energy to a
+SHELL electron, which ionises the atom and leaves the nucleus's Z alone. The balance is of
+nuclear charge, so the counting emitter no longer adds an electron's -1, and counts the electrons
+instead so a stray one from anywhere else stays visible. It had passed before only because the
+old stream had never sampled a conversion electron in that grid.
+
+WHAT IT COSTS, measured: `transport_run_int_lightion` alone now takes 437 s of ptxas at a
+15.7 GB peak (40 s and 6.1 GB before), and `run_interaction<kLightIon>`'s frame is 88,240 bytes -
+the largest of the five, and so the one the device stack is now reserved against (V196).
