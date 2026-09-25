@@ -353,6 +353,18 @@ __host__ __device__ inline bool has_at_rest_arm(ParticleType t) {
 /// Off the PDG code, as Geant4 does. A nuclear code is 10LZZZAAAI, so A is `(|pdg|/10) % 1000`
 /// and the sign is the code's; for `kGenericIon` the code is G4GenericIon's placeholder and the
 /// mass number travels on the track instead, which is what `ion_a` is for.
+///
+/// **THE NUCLEAR-CODE DECODING IS NOT REACHABLE ABOVE A = 4, AND IT IS WRITTEN ANYWAY.** Every
+/// `ParticleType` with a nuclear PDG code is the deuteron, the triton, He3 or the alpha, and
+/// `kGenericIon` returns before reaching this line - so `% 1000`, `% 100` and `% 10` are the
+/// same function on every input this enum can produce. `tests/test_inelastic_transport.cu`'s
+/// anti-vacuity pass found that by perturbing `% 1000` to `% 100` and watching the test pass,
+/// which is the right way to learn it: a branch nothing can reach is a fact about the code and
+/// not a gap in the test. It is general rather than four cases because the day a heavier
+/// nuclide joins the enum the right answer should already be here, and because
+/// `G4ParticleDefinition::GetBaryonNumber` is general - the anti-nucleus SIGN arm below is
+/// unreachable today for exactly the same reason (anti-nuclei are refused at emission) and is
+/// there for exactly the same one.
 __host__ __device__ inline int baryon_number_of(ParticleType t, int ion_a) {
   if (t == ParticleType::kGenericIon) { return (ion_a > 0) ? ion_a : 1; }
   const int pdg = pdg_code(t);
