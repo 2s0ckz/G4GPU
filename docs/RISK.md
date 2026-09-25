@@ -12107,3 +12107,74 @@ Integration note (lead, integ/gaussq): made, in `tests/test_bic_apply.cu`. The n
 bucket is now `BalanceWithICExcess`: per event, `de - n_e * m_e * max(kin/mass)` over the
 event's products with A >= 2, its limit 1e-5 MeV, and the worst event is printed with its
 residue, its bound and its electron count.
+
+### V188: the models cannot be inlined into a stepping kernel, and ptxas does not say so - it takes 33 GB and never answers
+
+P15's brief says: "Do not put the models inline in the steppers without measuring what it does to
+registers, stack, occupancy and the 6 MeV gamma gate's throughput." The measurement was taken and
+it has an unusual shape, which is why it is written down rather than summarised as "the queue
+won": **the inline alternative's register and stack cost cannot be measured, because the compiler
+does not produce one.**
+
+THE EXPERIMENT. One throwaway translation unit, two `__global__` kernels identical except for one
+block, both instantiated at `ParticleType::kProton` with the stock `StepTap` hook:
+
+    probe_step_only      loads a track, calls `step_hadron`, scores, appends - the shape
+                         `run_step_hadron` has today
+    probe_step_models    the same, plus `ftf::entry::apply`, `bert::apply_yourself`,
+                         `bic::apply_yourself` and `bic::blir_apply_yourself` called from
+                         inside it, with their workspaces as kernel arguments
+
+compiled with the engine's own flags (`-std=c++17 -O2 -arch=sm_86 -Xptxas -v`).
+
+THE BASELINE, from this branch's own `build_engine.bat` run, `out\transport_run_*.log`:
+
+| kernel | registers | stack frame | spill st/ld |
+|---|--:|--:|--:|
+| `run_step_hadron<kProton>` | 255 | 3,936 B | 192 / 332 |
+| `run_step_hadron<kAlpha>` | 255 | 3,776 B | 148 / 208 |
+| `run_step_hadron<kPionMinus>` | 255 | 4,592 B | 72 / 28 |
+| `run_step_hadron<kGenericIon>` | 255 | 3,776 B | 256 / 332 |
+| `run_step_neutral<kNeutron>` | 255 | 2,352 B | 316 / 444 |
+| `run_step_gamma` | 255 | 3,056 B | 60 / 36 |
+| `run_step_lepton<true>` | 255 | 3,488 B | 100 / 56 |
+
+Seventeen units, six at a time, about seven minutes of wall clock; each ptxas peaks at 2.1 to
+2.8 GB, which is the number `build_engine.bat`'s `CAP=6` was chosen from.
+
+THE INLINE UNIT, one kernel pair, alone on the machine:
+
+    ptxas   26.5 minutes elapsed, 1,587 seconds of CPU, 33,521 MB of working set,
+            no output written, killed
+
+It was killed rather than waited out, and the reason is not impatience: 33.5 GB on a 64 GB
+machine that runs four other worktrees is a risk to everyone else's build, and the working set
+was still the peak when it was stopped. There is no register count and no stack frame to report
+for the inline arrangement. That IS the measurement.
+
+This is docs/RISK.md **V55** (inlining the far smaller ELASTIC package into `run_step_hadron`
+killed ptxas with an access violation), **V63** (`ptxas died with status 0xC0000005`,
+deterministically, in nine arrangements) and **V65** (a translation unit does not get safer by
+being made smaller) meeting a fourth time, with a fourth failure mode: not a crash and not a
+refusal, but an allocation that grows until someone stops it.
+
+THE SECOND ARGUMENT IS ARITHMETIC AND DOES NOT DEPEND ON A COMPILER. A slot of every workspace
+the four arms need is **1,439,608 bytes for a hadron projectile and 1,520,616 for an ion**, by
+`sizeof` (`tests/test_inelastic_transport.cu` prints the table from the types). A stepping kernel
+runs over a 65,536-track batch, so an inline model needs either 65,536 slots - **92 GB**, past
+every card this project targets by an order of magnitude - or a pool indexed by the thread, with
+the threads past the last slot refused. And that is the difference that decides it:
+
+    inline, slot = tid          a shortage of slots costs INTERACTIONS. The tracks past slot N
+                                never react and the hole is proportional to the batch size.
+    queued, drained in chunks   a shortage of slots costs TIME. Every entry is processed; the
+                                launch is made ceil(n_queued / n_slots) times.
+
+A capacity whose shortage costs physics has to be sized for the worst case of a distribution
+nobody controls. A capacity whose shortage costs latency can be sized by what fits. The second
+is the one to have, and it is why `n_slots` is a stated, printed, measured number in this port
+rather than an implicit consequence of the batch size.
+
+So: `physics/stepper.cuh` includes `hadronic/interaction_queue.cuh`, which includes no model at
+all, and `hadronic/interaction_apply.cuh` is the only file in the port that includes all four
+entry points. The stepping kernels' frames in the table above are what they must stay.
