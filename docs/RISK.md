@@ -12932,3 +12932,29 @@ names), and V192's point stands - a refused interaction is not "no process", and
 deposits a GeV where it stands will always be visible in a scorer the refusal happens inside. The
 counter is on every run's ledger now, so the next package can read the share directly instead of
 bracketing it.
+
+### V202: the GenericIon unit died at every ptxas level once P15's kernel met P17's inlined Gaussian, and one `__noinline__` brings it back to -O1
+Gate ba48 - main 1ddcd5b (P17's shared RandGaussQ, V185) plus P15's twenty-seven picks - ended
+    transport_run_generic_ion: ptxas died with an access violation above -O2; retrying at -Xptxas -O2
+    transport_run_generic_ion: ptxas died with an access violation above -O1; retrying at -Xptxas -O1
+    nvcc error   : 'ptxas' died with status 0xC0000005 (ACCESS_VIOLATION)
+Each branch alone was fine: P15's worktree holds a `.o1` marker for that unit (V195 is the ladder
+that put it there), and P17's engine built on its own tree, which had no P15 in it. The union of
+the two is what ptxas could not take: P15 added the inelastic competitor and the ion delta-ray
+branch (V200) to the GenericIon stepping kernel, and P17 replaced the Box-Muller Gaussian at that
+kernel's three sites - `em/ion_fluctuation.cuh`, and the two `Randomizetlimit` calls in
+`em/urban_msc.cuh` - with `rand_gauss_q_transform`, a table lookup with two regions, a series tail
+and a float truncation, inlined at each of them.
+ISOLATED, the unit alone through `build_engine_unit.bat`'s own ladder, on a quiet machine (no
+other compiler, no GPU run, 40 GB free), so the gate's parallel load is excluded as a cause:
+| tree | -O3 | -O2 | -O1 |
+|---|---|---|---|
+| integ/wiring4 as committed | died | died | died (4 min for the three) |
+| the same with `rand_gauss_q_transform` `__noinline__` | died | died | **compiles**: 255 registers, 3,952 B frame, 348/860 B spill |
+The frame is the one V195 recorded for this kernel at -O1 on P15's tree, so the out-of-line call
+costs the kernel nothing it did not already pay. It changes no result: `rand_gauss_q_transform`
+computes the same doubles whether or not it is a call, `tests/test_rand_gauss_q.cu` pins its
+values to CLHEP's to the last bit and the Binary cascade's tapes replay through it. The
+`__noinline__` is on the transform in `core/rand_gauss_q.cuh` with this entry cited; the ion
+stepping kernel stays at -O1, which it already was, and which the performance phase inherits
+along with V193's and V195's reasons for it.
