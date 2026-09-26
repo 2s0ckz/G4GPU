@@ -12978,3 +12978,36 @@ the 19.8 GB peaks. The `__noinline__` on the transform stays: it makes the kerne
 changes no result, but it is no longer claimed as the fix. What -O0 costs is the ion stepping
 kernel's speed, which is the performance phase's (V193) and today sits behind the interaction
 kernel's 95% (V193) in any case; the marker beside the log records the rung the build took. In that build the deuteron's unit needed the ladder too, for the first time - it shares the ion code paths - and stopped at -O2 with a 4,304 B frame; every other unit compiled at -O3.
+
+### V203: CUDA 11.6's ptxas was the defect, and CUDA 12.9's compiles the same kernel at -O3 in two minutes
+V55, V63, V65, V195 and V202 are one story: `ptxas died with status 0xC0000005 (ACCESS_VIOLATION)`
+on the big stepping kernels, met first in Phase 1 and answered each time by reshaping the source
+or stepping down the optimisation ladder, until the ladder's last rung was a coin toss (V202) and
+the engine shipped its GenericIon kernel compiled at -O0. A compiler that crashes, and that gives
+two verdicts on one input, is the defect; the build used CUDA 11.6's ptxas (V11.6.55, January
+2022) because it was what the machine had, alongside 10.0 and 11.2.
+MEASURED with a newer one: NVIDIA publishes every toolkit component as a plain archive
+(`developer.download.nvidia.com/compute/cuda/redist/`, indexed by `redistrib_12.9.2.json`), so a
+portable CUDA 12.9.2 - `cuda_nvcc` 12.9.86, `cuda_cudart` 12.9.79, `cuda_cccl` 12.9.27 and
+`cuda_cuobjdump` 12.9.82, 133 MB, SHA-256 checked - was unpacked under `D:\cuda129` with no
+installer and nothing system-wide changed, and `transport_run_generic_ion.cu` was compiled alone
+through `build_engine_unit.bat` with that toolkit first on the PATH:
+| toolkit | -O3 | frame | spill | time |
+|---|---|---|---|---|
+| 11.6 (V202, row E) | died, -O2 died, -O1 died, **-O0 compiled** | 4,288 B | 692/3,976 B | 4 rungs |
+| 12.9.86 | **compiled** | 4,080 B | 276/672 B | 2 min |
+Same source, same host compiler (MSVC 14.29, which CUDA 12.9 accepts), same `-arch=sm_86`. The
+kernel that could not be optimised at all is now optimised at the default level, with a frame
+192 bytes SMALLER than 11.6's -O0 and a sixth of its spill.
+WHAT CHANGES WITH IT, and what does not. `setupenv.bat` puts `D:\cuda129\bin` first on the PATH
+when the folder exists, sets `CUDA_PATH`, and sets `NVCC_APPEND_FLAGS=-static-global-template-stub=false`:
+nvcc 12 warns (#20279-D) that the one-kernel-per-translation-unit design - `extern template`
+declarations of `__global__` templates in `transport_run_impl.cuh` (V65) - will stop working when
+that option's default flips to `true`, and the environment variable reaches every nvcc call in
+this tree and in the projects the model builder writes. The unit ladder and V202's serial pass
+stay in `build_engine.bat`, unexercised, for the day a rung is needed again. What does NOT change
+is any number the model tests check: they are host-only (V189), compiled by the same MSVC, and
+the tapes and campaigns cannot see which ptxas built the engine. What CAN change is a GPU result
+at the level of contraction and instruction selection, which is why this switch is its own
+integration with its own gate: the dose gates, the depth-dose gate, the pool-size and replay
+checks and the sweep measure it, and the numbers are in this entry's integration note.
