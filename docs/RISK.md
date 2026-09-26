@@ -13017,3 +13017,149 @@ twenty-two engine units at ptxas's default -O3 - no unit took a rung, no marker 
 `#20279-D` warnings with the flag on - and the three stepping kernels that had needed the ladder
 under 11.6 now report: GenericIon 4,080 B frame, 276/672 B spill; deuteron 4,384 B, 216/532 B;
 proton 4,240 B, 240/844 B. The interaction units' peaks were the same 15-19 GB. The gate itself (ba52: 98 tests, the B1 dose against Geant4 at a ratio of 1.0007, the proton depth-dose like for like at -0.165% contained, +0.133% plateau and R80 -0.025 mm, the pool-size, replay, mesh, hook and physics-switch checks) passed ALL OK - after one red run whose only failure was the old EM-only proton reference on disk: `run.bat tables` regenerates the tables and not the transport references, P15 had regenerated those in its own worktree, so the lead ran the full `ref\oracle\run.bat` once and the regenerated CSV was byte-identical to P15's.
+
+### V204: below 500 MeV the Binary cascade answers a proton's inelastic interaction on hydrogen with an elastic scatter
+
+`G4BinaryCascade::Propagate1H1` (G4BinaryCascade.cc:2649) is the whole of what the Binary cascade
+does for a target of A == 1, and its loop reads:
+
+```
+while(!done && tryCount++ <200)
+{
+    ...
+    secs = theH1Scatterer->Scatter(*(*secondaries).front(), aTarget);
+    for(size_t ss=0; secs && ss<secs->size(); ss++)
+    {
+        // must have one resonance in final state, or it was elastic, not allowed here.
+        if((*secs)[ss]->GetDefinition()->IsShortLived()) done = true;
+    }
+}
+```
+
+An elastic outcome is drawn again, up to 200 times, and when the 200 run out `secs` still holds
+the last scatter's products and they are returned: the decay pass finds nothing short-lived and
+the packaging ships the two entrance particles, scattered. Nothing says so.
+
+**It happens wherever `G4CollisionNN` cannot make a resonance, and that is not where the process
+thinks an inelastic interaction is possible.** `G4ParticleInelasticXS` gives p + H an inelastic
+cross section from 261 MeV (0.011 mb there, 1.18 mb at 383, 2.54 mb at 464, 11.8 mb at 562 -
+`had_particlexs.csv`), and QBBC sends every one of those interactions below 1.5 GeV to the Binary
+cascade. But `G4CollisionNN::FinalState` sums its six resonance components from 32-point buffers
+(V109, V112), and for pp all six are zero up to sqrt(s) = 2100 MeV and 2.1 mb at 2120
+(`bic_imr_nnpartial.csv`) - a lab kinetic energy between 474 and 519 MeV. For np the N N*
+component opens first, near 400 MeV, with a few hundredths of a millibarn against thirty of
+elastic.
+
+MEASURED, Geant4 against the port (`bic_1h1_scan.csv`, 2,000 events a point, against 20,000):
+
+| T (MeV) | p on H: G4 | port | n on H: G4 | port |
+|--:|--:|--:|--:|--:|
+| 300 to 400 | 100% | 100% | 100% | 100% |
+| 425 | 100% | 100% | 88.35% | 88.80% |
+| 450 | 100% | 100% | 84.20% | 85.16% |
+| 475 | 100% | 100% | 82.05% | 81.72% |
+| 500 | 0.80% | 0.98% | 78.85% | 78.33% |
+| 525 to 700 | 0 | 0 | 0 | 0.01% |
+
+and the campaign's 100 and 400 MeV nucleon rows are 20,000 of 20,000 in Geant4 and 200,000 of
+200,000 in the port. **So in QBBC an inelastic interaction of a proton with hydrogen below about
+490 MeV is a second elastic scattering**, with the elastic angular distribution of
+`G4CollisionnpElastic`/`G4CollisionNNElastic` and the inelastic cross section's rate. It is
+transcribed, not improved - a port that "fixed" it would be a port of something else - and it is
+counted: `bic::H1Report::exhausted`, which `tests/test_bic_1h1.cu` checks event by event against
+the only observable Geant4 leaves (an exhausted event is precisely one in which no secondary
+carries a parent resonance).
+
+What it costs, which is also Geant4's: 200 scatters of three uniforms each, and before them the
+two things every outer turn of `ApplyYourself` does for any target - a `G4Fancy3DNucleus` of ONE
+nucleon, built by the same rejection sampling as lead's (15 to 388 uniforms on the tape, because
+a point uniform in a ball of radius `GetNuclearRadius(0.001)` rarely passes a Gaussian density
+test), and a `GetSpherePoint` whose position `Scatter` never reads. None of it reaches the answer.
+
+**One more thing in the same function Geant4 does not guard.** The decay pass writes
+`G4KineticTrackVector * dec = (*secs)[current]->Decay(); for(jter=dec->begin(); ...)`, and
+`G4KineticTrack::Decay` returns 0 for a zero total actual width or a failed phase-space decay -
+`G4DecayKineticTracks` tests for it, `Propagate1H1` dereferences it. There is no Geant4 answer to
+port, so it is `bic::H1Refusal::decay_null`, named at the point of the null. MEASURED: 0 in the
+3,640,000 events of the port's campaign and scan, and the 364,320 Geant4 events of the dump did
+not crash.
+
+### V205: the hydrogen arm costs the Binary interaction kernel 128 bytes of frame, and neither the pool nor the stack reservation moves
+
+P15 recorded the Binary interaction kernel at 81,648 bytes under CUDA 11.6 (V190 first measured
+81,600). The toolkit changed since (V203), so the two numbers this entry compares are BOTH CUDA
+12.9.86 at ptxas's default -O3, read off `-Xptxas -v` in `out/transport_run_int_binary.log`
+exactly as `build_engine_unit.bat` writes it:
+
+| build | `run_interaction<kBinary>` | registers | spill st/ld | cmem[2] |
+|---|--:|--:|--:|--:|
+| aaf0552 (the arm refused) | 82,288 B | 255 | 580 / 992 | 8,240 |
+| P18 (the arm ported) | **82,416 B** | 255 | 580 / 992 | 10,200 |
+
+The 640 bytes between P15's 81,648 and aaf0552's 82,288 are a different compiler on a newer tree
+and are not attributed here; the 128 between aaf0552 and P18 are the arm. It is
+`apply_yourself_h1`, behind `__noinline__`, with `propagate_1h1` beside it - both separate
+functions in the report - so what the kernel's cumulative stack takes is the larger of two call
+chains, and `Propagate`'s is still the larger by far: the hydrogen arm puts nothing sized by the
+event on its own frame (its working list is the slot's `cascade_pool`, its products the slot's
+`products`, its channel buffers the slot's `cascade_buffers`). The constant bank grows by the
+arm's literals.
+
+**Neither the slot pool nor the stack reservation moves.** The reservation has been read off the
+five interaction kernels' `localSizeBytes` since V196 rather than written down, and the largest
+of them is still `run_interaction<kLightIon>`, 88,880 bytes on both builds, which the engine
+reserves as **94,208** - the same `stack:` line on the aaf0552 and the P18 runs of both beams in
+V206. 82,416 is 6,464 bytes under the light-ion kernel; the Binary kernel would have to grow by
+that much before it set the reservation. The pool is 128 slots on both builds.
+
+### V206: with the hydrogen target answered, proton_1000 goes from +14.1% to -0.6% of Geant4, and its rms falls to Geant4's
+
+V201 bracketed the B1 sweep's two rows outside three sigma with the refusals' disposal and said
+what would close them: the missing arms. P18 closes one of the two. `tools/b1_sweep.ps1` for
+proton_1000 and alpha_4000 (the latter at a tenth of the counts, as P15 ran it), and the
+`ref/b1neutron/` pair for the 100 MeV neutron, each side of the port built from the same CUDA
+12.9.86 toolkit: "before" is aaf0552 compiled from a clean `git archive` in the scratchpad, not
+the 09-25 sweep's number (which 11.6 built), because a before and an after that do not share a
+compiler do not measure one change. The Geant4 columns were re-run and read the same as P15's to
+every digit (seeded): 3.90403E-07 ± 1.33E-09, 6.69757E-08 ± 7.11E-10 and 132.135 ± 0.753 nGy.
+
+| beam | events | port, aaf0552 | port, P18 | Geant4 | before | after |
+|---|--:|--:|--:|--:|--:|--:|
+| proton 1000 MeV | 200,000 | 4.45528E-07 ± 2.87E-09 | **3.87985E-07 ± 1.33E-09** | 3.90403E-07 ± 1.33E-09 | +14.12%, +17.4 σ | **-0.62%, -1.3 σ** |
+| neutron 100 MeV | 500,000 | 133.056 ± 0.754 nGy | 133.068 ± 0.754 nGy | 132.135 ± 0.753 nGy | +0.70%, +0.9 σ | +0.71%, +0.9 σ |
+| alpha 4000 MeV | 10,000 | 7.77456E-08 ± 2.12E-09 | 7.51027E-08 ± 2.05E-09 | 6.69757E-08 ± 7.11E-10 | +16.08%, +4.8 σ | +12.13%, +3.7 σ |
+
+and the ledger, by name, over the port's queued interactions:
+
+| beam | aaf0552 | P18 |
+|---|---|---|
+| proton 1000 MeV | 8.52%: `Propagate1H1` 8,181 of 95,974 (7.74e6 MeV), 922 of them depositing 845,608 MeV inside the scorer; `kBinaryRefused` 4 | 0.004%: `kBinaryRefused` 4 of 99,743 (3,807 MeV), one depositing 940 MeV in the scorer |
+| neutron 100 MeV | 0.009%: `Propagate1H1` 15 of 174,615 | none of 174,618 |
+| alpha 4000 MeV | 3.96%: `kLightIonCascade` 344 (1.15e6 MeV), `Propagate1H1` 227 (171,213 MeV; 81 of them neutrons); 166,001 MeV in the scorer | 2.37%: `kLightIonCascade` 344 of 14,488, 132,613 MeV in the scorer |
+
+**proton_1000 lands where V201's bracket said Geant4 was.** Without the refusals' deposits the
+aaf0552 port would have read 3.67E-07 (845,608 MeV is 17.6% of its scored energy), and Geant4 sat
+between that and the port's 4.46E-07; with the interactions answered the port reads 3.88E-07,
+0.6% under Geant4 and inside 1.3 sigma. The other signature V199 and V201 named goes with it: the
+port's rms was 0.64% of its dose against Geant4's 0.34% - a few interactions each depositing a
+GeV where they were refused - and it is 0.34% now, Geant4's own.
+
+**Two consequences worth reading off the ledger.** The queue grows by 3.9% (95,974 to 99,743):
+a hydrogen reaction now emits nucleons and pions that interact again, where the refusal killed
+the projectile. And the port's event loop grows by 39% (196.6 s to 273.8 s): the hydrogen
+interactions run in the Binary kernel, and every one of them below about 490 MeV spends 200
+elastic scatters on one thread before it returns (V204) - V193's slowest-thread shape, with a new
+thread in it.
+
+**The neutron row does not move and should not.** Its 15 hydrogen interactions a run are all
+below the resonance turn-on, so they come back as elastic np scatters, and the two runs agree to
+0.012 nGy because every other track's random stream is its own. The ledger has no inelastic
+refusal left for this beam at all.
+
+**alpha_4000 moves by a quarter of its excess, and the rest is the other arm.** 227 of its 571
+refused interactions were a nucleon on hydrogen - fragments and knock-ons, 81 of them neutrons -
+and 344 are `Propagate` refusing inside `Interact`, `kLightIonCascade`, P9's cascade and not this
+package's. Those 344 still deposit 132,613 MeV in the scorer, 16.3% of its energy; without them the
+port would read 6.28E-08 against Geant4's 6.70E-08, so Geant4 is inside the bracket the remaining
+refusals define, as V201 found before either arm was answered. That row stays outside three sigma
+until `kLightIonCascade` is closed.

@@ -352,3 +352,29 @@ MeV of proton_1000's scored energy in 50,000 events (17.5%) and 157,092 MeV of a
 66.98 - so Geant4 sits inside the bracket those refusals define in both, and the disposal of
 P9's two refused arms (a nucleon on hydrogen; `Propagate` refusing inside `Interact`) is
 sufficient to explain both excesses.
+
+## The hydrogen target, after P18 (2026-09-26)
+
+P18 ported `G4BinaryCascade::Propagate1H1`, the first of those two arms (docs/PORTED.md 2.1.10),
+and re-ran the three rows it touches with the same script and counts: proton_1000 at 200,000,
+alpha_4000 at 10,000 - a tenth of its count, as above - and the neutron pair at 500,000. "aaf0552" is the port
+BEFORE the change built with the same CUDA 12.9 toolkit as the P18 column - compiled from a clean
+copy of that commit, not the 12:49 table's number above, which CUDA 11.6 built. The Geant4
+columns are fresh runs and read the same as the table above to every digit.
+
+| beam | events | port, aaf0552 | port, P18 | Geant4 | diff before | diff after | refused, by name: before / after |
+|---|--:|--:|--:|--:|--:|--:|---|
+| **proton 1000 MeV** | 200,000 | 4.45528E-07 | **3.87985E-07** | 3.90403E-07 | +14.12%, +17.4 σ | **-0.62%, -1.3 σ** | 8.52%: `Propagate1H1` 8,181 of 95,974 / 0.004%: `kBinaryRefused` 4 of 99,743 |
+| neutron 100 MeV | 500,000 | 133.056 nGy | 133.068 nGy | 132.135 nGy | +0.70%, +0.9 σ | +0.71%, +0.9 σ | 0.009%: `Propagate1H1` 15 of 174,615 / none |
+| alpha 4000 MeV | 10,000 | 7.77456E-08 | 7.51027E-08 | 6.69757E-08 | +16.08%, +4.8 σ | +12.13%, +3.7 σ | 3.96%: `kLightIonCascade` 344, `Propagate1H1` 227 / 2.37%: `kLightIonCascade` 344 |
+
+**proton_1000 is inside two sigma now, and V201's bracket is what said it would be.** Its port rms
+went from 0.64% of the dose to 0.34%, which is Geant4's: the signature of a few interactions
+each dumping a GeV where it was refused is gone with them. The price is on the loop clock - 197 s
+to 274 s - because the hydrogen interactions run now, and every one of them below about 490 MeV
+spends 200 elastic scatters on one thread before returning the last (docs/RISK.md V204: that is
+Geant4's answer and it is transcribed). The neutron row does not move - its hydrogen interactions
+are all below that turn-on and come back as elastic scatters - and has no inelastic refusal left.
+alpha_4000 loses a quarter of its excess and stays outside three sigma on the other arm,
+`kLightIonCascade`, which still puts 16.3% of the scored energy in the trapezoid. docs/RISK.md
+V206 has the ledgers.
