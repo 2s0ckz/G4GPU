@@ -682,9 +682,9 @@ void write_bic_apply() {
   //
   // WATER is in the brief and is not a row here, because a material is not a target: the
   // hadronic framework samples an ELEMENT per interaction and water offers hydrogen and oxygen.
-  // O16 is below; H1 is `G4BinaryCascade::Propagate1H1`, which this package refuses by name, so
-  // water is answered for its oxygen and refused for its hydrogen. Adding a row called "water"
-  // would hide that behind a number.
+  // O16 is below; H1 is `G4BinaryCascade::Propagate1H1`, a different function with a campaign of
+  // its own in `write_bic_1h1` (P18), and refused by name until then. Adding a row called "water"
+  // would hide that split behind a number.
   const NCase kCases[] = {
     {2212,  5.0,  6,  12, "p5_C12", 5000},     {2112,  5.0,  6,  12, "n5_C12", 5000},
     {2212, 20.0,  6,  12, "p20_C12", 5000},    {2112, 20.0,  6,  12, "n20_C12", 5000},
@@ -4115,6 +4115,372 @@ void write_blir_apply() {
   std::fclose(g);
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4BinaryCascade::Propagate1H1 - a nucleon or a charged pion on HYDROGEN (P18)
+// ---------------------------------------------------------------------------------------------
+//
+// `ApplyYourself` sends a target of A == 1 to `Propagate1H1` instead of `Propagate`
+// (G4BinaryCascade.cc:329), and that function is private, so the whole public call is wrapped
+// the way `write_blir_interact` wraps the ion arm: a HepJamesRandom that records every value it
+// serves, from before the one-nucleon `G4Fancy3DNucleus::Init` to the last decay, and every
+// secondary written out with it - its definition, its four-momentum, its creator id and its
+// parent-resonance definition and id. The port replays the tape through `bic::apply_yourself`.
+//
+// {p, n, pi+, pi-} at {100, 400, 800, 1400} MeV on H1, which is QBBC's Binary window for all
+// four (0 to 1.5 GeV) and brackets the thresholds that matter: 100 MeV is below the Delta for a
+// nucleon, so every event there burns all 200 of `Propagate1H1`'s tries and returns the last
+// elastic scatter - and so, MEASURED, is 400 MeV, which is above the physical pion threshold and
+// below the Binary cascade's own (the scan below says where that is) - and 1400 MeV reaches the
+// Delta* and N* families.
+//
+// Seven files:
+//
+//   bic_1h1_tape.csv      one row per tape event: the draw count, the status, the secondary
+//                         count, and what a replay of `Propagate1H1`'s own body out of PUBLIC
+//                         pieces saw on a second engine at the same seed - how many uniforms the
+//                         one-nucleon Init took, how many `GetSpherePoint` took, how many times
+//                         `Scatter` was called, whether the 200 tries ran out, how many
+//                         resonances were decayed, and whether that replay reproduced the real
+//                         call's draw count and products (`probe_ok`). The probe is what places a
+//                         divergence; the real call is what is compared.
+//   bic_1h1_tapeval.csv   the tapes.
+//   bic_1h1_tapefs.csv    every secondary of every tape event.
+//   bic_1h1.csv / bic_1h1_status.csv   THE CAMPAIGN: the same sixteen cases at 20,000 events
+//                         each, with bic_apply.csv's columns so one reader serves both, plus the
+//                         status file's three extras - events returned alive, events whose 200
+//                         tries ran out, and the total multiplicity's second moment.
+//   bic_1h1_scan.csv      the elastic-return fraction for protons and neutrons from 300 to 700
+//                         MeV, 2,000 events a point - where the resonances turn on; see the scan.
+//   bic_1h1_parent.csv    per case and per PARENT RESONANCE PDG code (0 for none): the number of
+//                         killed events in which some secondary has that parent, and the number
+//                         of such secondaries. `Propagate1H1` forms one resonance per event (an
+//                         N* can decay through a Delta, which is then a second parent), so the
+//                         event count is the channel selection seen through its decay products,
+//                         and it is a binomial count the test can put a band on.
+//
+// THE 200 TRIES ARE COUNTED IN THE CAMPAIGN WITHOUT BEING OBSERVABLE, AND THAT IS EXACT. The loop
+// counter is private, but `done` is set by a short-lived product and by nothing else, every
+// short-lived product is decayed, and every decay daughter carries its parent's definition. So
+// an event whose loop ran out is precisely a killed event with NO secondary carrying a parent
+// resonance, and one whose loop did not is one with at least one. `n_exhausted` is that count.
+struct H1ProbeResult {
+  int draws_init = 0;
+  int draws_sphere = 0;
+  int scatters = 0;
+  int exhausted = 0;
+  int n_decays = 0;
+  int decay_null = 0;
+  std::vector<int> pdg;
+  std::vector<G4LorentzVector> p4;
+};
+
+/// `Propagate1H1`'s first outer turn - the one-nucleon Init, `GetSpherePoint` and the function
+/// body - out of public pieces, on whatever engine is installed. `imr_scatterer()` stands in for
+/// `theH1Scatterer`: both read the class-static `G4Scatterer::collisions` (docs/RISK.md V155),
+/// which is the only state a `G4Scatterer` has.
+H1ProbeResult h1_probe(const G4ParticleDefinition* part, const G4LorentzVector& p4, int tz,
+                       const ImrTapeEngine& eng) {
+  H1ProbeResult out;
+  auto* nuc = new G4Fancy3DNucleus;
+  nuc->Init(1, tz);
+  out.draws_init = static_cast<int>(eng.tape().size());
+  const double radius = nuc->GetOuterRadius() + 3 * fermi;
+  const G4ThreeVector pos = imr_sphere_point(1.1 * radius, p4);
+  out.draws_sphere = static_cast<int>(eng.tape().size()) - out.draws_init;
+  G4KineticTrack kt(part, 0.0, pos, p4);
+  kt.SetState(G4KineticTrack::outside);
+  const G4ParticleDefinition* h = G4Proton::ProtonDefinition();
+  if (nuc->GetCharge() == 0) { h = G4Neutron::NeutronDefinition(); }
+  G4KineticTrack target(h, 0.0, G4ThreeVector(0, 0, 0), G4LorentzVector(h->GetPDGMass()));
+  delete nuc;
+
+  G4KineticTrackVector* secs = nullptr;
+  bool done = false;
+  int try_count = 0;
+  while (!done && try_count++ < 200) {
+    if (secs != nullptr) {
+      for (auto* t : *secs) { delete t; }
+      delete secs;
+    }
+    secs = imr_scatterer().Scatter(kt, target);
+    ++out.scatters;
+    for (size_t ss = 0; secs != nullptr && ss < secs->size(); ++ss) {
+      if ((*secs)[ss]->GetDefinition()->IsShortLived()) { done = true; }
+    }
+  }
+  out.exhausted = done ? 0 : 1;
+  std::vector<G4KineticTrack*> fs;
+  for (size_t current = 0; secs != nullptr && current < secs->size(); ++current) {
+    G4KineticTrack* t = (*secs)[current];
+    if (t->GetDefinition()->IsShortLived()) {
+      G4KineticTrackVector* dec = t->Decay();
+      // Geant4 dereferences this without a test; the probe records it instead of crashing.
+      if (dec == nullptr) { out.decay_null = 1; break; }
+      for (auto* d : *dec) { secs->push_back(d); }
+      delete dec;
+      ++out.n_decays;
+    } else {
+      fs.push_back(t);
+    }
+  }
+  for (const G4KineticTrack* t : fs) {
+    out.pdg.push_back(t->GetDefinition()->GetPDGEncoding());
+    out.p4.push_back(t->Get4Momentum());
+  }
+  return out;
+}
+
+void write_bic_1h1() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  // NEVER DELETED, like every other binary cascade in this file: its destructor deletes
+  // `theH1Scatterer`, and destroying one G4Scatterer empties the static channel list for every
+  // G4Scatterer in the process (docs/RISK.md V155).
+  auto* bic = new G4BinaryCascade(preco);
+  bic->SetMaxEnergy(1.5 * CLHEP::GeV);
+  const int bicid = G4PhysicsModelCatalog::GetModelID("model_G4BinaryCascade");
+
+  struct HCase { int pdg; double ekin; const char* name; };
+  const HCase kCases[] = {
+    {2212,  100.0, "h1_p100"},   {2212,  400.0, "h1_p400"},
+    {2212,  800.0, "h1_p800"},   {2212, 1400.0, "h1_p1400"},
+    {2112,  100.0, "h1_n100"},   {2112,  400.0, "h1_n400"},
+    {2112,  800.0, "h1_n800"},   {2112, 1400.0, "h1_n1400"},
+    { 211,  100.0, "h1_pip100"}, { 211,  400.0, "h1_pip400"},
+    { 211,  800.0, "h1_pip800"}, { 211, 1400.0, "h1_pip1400"},
+    {-211,  100.0, "h1_pim100"}, {-211,  400.0, "h1_pim400"},
+    {-211,  800.0, "h1_pim800"}, {-211, 1400.0, "h1_pim1400"},
+  };
+  const int kTz = 1;
+  const int kTa = 1;
+  auto definition = [](int pdg) -> const G4ParticleDefinition* {
+    switch (pdg) {
+      case 2212: return G4Proton::Proton();
+      case 2112: return G4Neutron::Neutron();
+      case 211:  return G4PionPlus::PionPlus();
+      default:   return G4PionMinus::PionMinus();
+    }
+  };
+
+  // ---- the tape
+  FILE* f = std::fopen("bic_1h1_tape.csv", "w");
+  std::fprintf(f, "case,ev,pdg,ekin,tz,ta,ndraws,status,nsec,bicid,draws_init,draws_sphere,"
+                  "scatters,exhausted,ndecays,probe_ok\n");
+  FILE* g = std::fopen("bic_1h1_tapeval.csv", "w");
+  std::fprintf(g, "case,ev,i,u\n");
+  FILE* h = std::fopen("bic_1h1_tapefs.csv", "w");
+  std::fprintf(h, "case,ev,i,pdg,px,py,pz,e,time,creatorid,parentpdg,parentid\n");
+  const int kTapeEvents = 20;
+  auto* eng = new ImrTapeEngine(20260926L);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  int icase = 0;
+  int probe_bad = 0;
+  for (const HCase& c : kCases) {
+    const G4ParticleDefinition* part = definition(c.pdg);
+    for (int ev = 0; ev < kTapeEvents; ++ev) {
+      const long seed = 20260926L + 977L * ev + 31L * icase;
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(kTa, kTz);
+
+      // The probe first, on its own engine at the same seed, so reading it does not move the
+      // stream the real call replays.
+      auto* probe = new ImrTapeEngine(seed);
+      CLHEP::HepRandom::setTheEngine(probe);
+      const H1ProbeResult pr = h1_probe(part, proj.Get4Momentum(), kTz, *probe);
+      const int probe_draws = static_cast<int>(probe->tape().size());
+      CLHEP::HepRandom::setTheEngine(saved);
+      delete probe;
+
+      eng->restart(seed);
+      CLHEP::HepRandom::setTheEngine(eng);
+      G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+      CLHEP::HepRandom::setTheEngine(saved);
+      const int ns = (r != nullptr) ? static_cast<int>(r->GetNumberOfSecondaries()) : -1;
+      const char* status = (r == nullptr) ? "NULL"
+                                          : ((r->GetStatusChange() == isAlive) ? "isAlive"
+                                                                               : "stopAndKill");
+      // The probe covers ONE outer turn, which is every event whose 200th scatter was not empty
+      // - so it must reproduce the real call's draw count and products exactly, or this dump's
+      // reading of `ApplyYourself` for A == 1 is wrong.
+      bool ok = (pr.decay_null == 0) && (probe_draws == static_cast<int>(eng->tape().size())) &&
+                (static_cast<int>(pr.pdg.size()) == ns);
+      for (int k = 0; ok && k < ns; ++k) {
+        const G4DynamicParticle* p = r->GetSecondary(k)->GetParticle();
+        const G4LorentzVector q = p->Get4Momentum();
+        ok = (p->GetDefinition()->GetPDGEncoding() == pr.pdg[k]) &&
+             std::fabs(q.e() - pr.p4[k].e()) <= 1e-9 * q.e();
+      }
+      if (!ok) { ++probe_bad; }
+      std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d\n", c.name, ev, c.pdg,
+                   c.ekin, kTz, kTa, static_cast<int>(eng->tape().size()), status, ns, bicid,
+                   pr.draws_init, pr.draws_sphere, pr.scatters, pr.exhausted, pr.n_decays,
+                   ok ? 1 : 0);
+      const std::vector<double>& tape = eng->tape();
+      for (size_t k = 0; k < tape.size(); ++k) {
+        std::fprintf(g, "%s,%d,%d,%.17g\n", c.name, ev, static_cast<int>(k), tape[k]);
+      }
+      for (int k = 0; k < ns; ++k) {
+        const G4HadSecondary* sec = r->GetSecondary(k);
+        const G4DynamicParticle* p = sec->GetParticle();
+        const G4LorentzVector p4 = p->Get4Momentum();
+        const G4ParticleDefinition* parent = sec->GetParentResonanceDef();
+        std::fprintf(h, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d\n", c.name, ev, k,
+                     p->GetDefinition()->GetPDGEncoding(), p4.x(), p4.y(), p4.z(), p4.t(),
+                     sec->GetTime(), sec->GetCreatorModelID(),
+                     (parent != nullptr) ? parent->GetPDGEncoding() : 0,
+                     sec->GetParentResonanceID());
+      }
+    }
+    ++icase;
+  }
+  delete eng;
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+  std::printf("  1h1 tape: %d of %d events not reproduced by the public-piece probe\n",
+              probe_bad, icase * kTapeEvents);
+
+  // ---- the campaign
+  FILE* cf = std::fopen("bic_1h1.csv", "w");
+  std::fprintf(cf, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
+                   "mean_mult2\n");
+  FILE* cg = std::fopen("bic_1h1_status.csv", "w");
+  std::fprintf(cg, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,status,n_secondaries,sum_z,sum_a,"
+                   "mean_e_MeV,mean_pz_MeV,mean_mult,n_alive,n_exhausted,mean_mult2\n");
+  FILE* cp = std::fopen("bic_1h1_parent.csv", "w");
+  std::fprintf(cp, "case,N,parentpdg,events,products\n");
+  const int kN = 20000;
+  for (const HCase& c : kCases) {
+    const G4ParticleDefinition* part = definition(c.pdg);
+    const int pz = (c.pdg == 2212 || c.pdg == 211) ? 1 : ((c.pdg == -211) ? -1 : 0);
+    const int pa = (c.pdg == 2212 || c.pdg == 2112) ? 1 : 0;
+    CLHEP::HepRandom::setTheSeed(818000L + G4int(c.ekin) + 10000L * (pz + 2) + 7L * pa);
+
+    std::map<int, long long> count, parents, parent_events;
+    std::map<int, double> sum_e, sum_e2, sum_k2;
+    std::map<int, int> per_event, parent_seen;
+    long long n_alive = 0, n_kill = 0, n_sec = 0, n_exhausted = 0;
+    long long sum_z = -1, sum_a = -1;
+    bool za_varies = false;
+    double sum_tot_e = 0.0, sum_tot_pz = 0.0, sum_mult2 = 0.0;
+
+    for (int n = 0; n < kN; ++n) {
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(kTa, kTz);
+      G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+      if (r == nullptr) { continue; }
+      if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
+      ++n_kill;
+      per_event.clear();
+      parent_seen.clear();
+      long long ez = 0, ea = 0;
+      bool any_parent = false;
+      G4LorentzVector tot(0., 0., 0., 0.);
+      const std::size_t ns = r->GetNumberOfSecondaries();
+      n_sec += static_cast<long long>(ns);
+      sum_mult2 += double(ns) * double(ns);
+      for (std::size_t i = 0; i < ns; ++i) {
+        const G4HadSecondary* s = r->GetSecondary(i);
+        const G4DynamicParticle* p = s->GetParticle();
+        const int pdg = p->GetDefinition()->GetPDGEncoding();
+        const double ekin = p->GetKineticEnergy() / MeV;
+        ++count[pdg];
+        sum_e[pdg] += ekin;
+        sum_e2[pdg] += ekin * ekin;
+        ++per_event[pdg];
+        tot += p->Get4Momentum();
+        const G4ParticleDefinition* parent = s->GetParentResonanceDef();
+        const int ppdg = (parent != nullptr) ? parent->GetPDGEncoding() : 0;
+        ++parents[ppdg];
+        ++parent_seen[ppdg];
+        if (parent != nullptr) { any_parent = true; }
+        // The same (Z, A) rule write_bic_apply uses: a nucleon's charge and baryon number, a
+        // charged pion's charge, and nothing else.
+        if (pdg == 2112) { ea += 1; }
+        else if (pdg == 2212) { ea += 1; ez += 1; }
+        else if (pdg == 211) { ez += 1; }
+        else if (pdg == -211) { ez -= 1; }
+      }
+      if (!any_parent) { ++n_exhausted; }
+      for (const auto& kv : parent_seen) { ++parent_events[kv.first]; }
+      for (const auto& kv : per_event) { sum_k2[kv.first] += double(kv.second) * kv.second; }
+      if (sum_z < 0) { sum_z = ez; sum_a = ea; }
+      else if (ez != sum_z || ea != sum_a) { za_varies = true; }
+      sum_tot_e += tot.e() / MeV;
+      sum_tot_pz += tot.z() / MeV;
+    }
+    const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
+    std::fprintf(cg, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g,%lld,%lld,"
+                     "%.17g\n",
+                 c.name, pz, pa, c.ekin, kTz, kTa, kN,
+                 (n_alive == kN) ? "isAlive" : ((n_kill == kN) ? "stopAndKill" : "MIXED"), n_sec,
+                 za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk, sum_tot_pz / nk,
+                 double(n_sec) / nk, n_alive, n_exhausted, sum_mult2 / nk);
+    for (const auto& kv : count) {
+      std::fprintf(cf, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, pa,
+                   c.ekin, kTz, kTa, kN, kv.first, kv.second,
+                   sum_e[kv.first] / double(kv.second), sum_e2[kv.first] / double(kv.second),
+                   sum_k2[kv.first] / nk);
+    }
+    for (const auto& kv : parents) {
+      std::fprintf(cp, "%s,%d,%d,%lld,%lld\n", c.name, kN, kv.first, parent_events[kv.first],
+                   kv.second);
+    }
+    std::printf("  1h1 %-12s alive %lld kill %lld exhausted %lld mult %.3f\n", c.name, n_alive,
+                n_kill, n_exhausted, double(n_sec) / nk);
+    std::fflush(stdout);
+  }
+  std::fclose(cf);
+  std::fclose(cg);
+  std::fclose(cp);
+
+  // ---- where the resonances turn on
+  //
+  // The campaign's 400 and 800 MeV rows bracket the energy at which a nucleon on hydrogen stops
+  // returning its 200th elastic scatter, and the bracket is wide: `G4CollisionNN`'s resonance
+  // partials, as its own `FinalState` sums them (bic_imr_nnpartial.csv), are zero for pp up to
+  // sqrt(s) = 2100 MeV and 2.1 mb at 2120 - a lab kinetic energy between 474 and 519 MeV - while
+  // `G4ParticleInelasticXS` has given p + H an inelastic cross section since 261 MeV. So the
+  // elastic-return fraction is scanned across that window, nucleons only (a pion forms a
+  // resonance on its first scatter at every energy of the campaign), 2,000 events a point.
+  FILE* cs = std::fopen("bic_1h1_scan.csv", "w");
+  std::fprintf(cs, "pdg,ekin,N,n_alive,n_exhausted,mean_mult\n");
+  const double kScanE[] = {300.0, 350.0, 400.0, 425.0, 450.0, 475.0, 500.0, 525.0, 550.0,
+                           600.0, 700.0};
+  const int kScanN = 2000;
+  for (int pdg : {2212, 2112}) {
+    const G4ParticleDefinition* part = definition(pdg);
+    for (double e : kScanE) {
+      CLHEP::HepRandom::setTheSeed(919000L + G4int(e) + ((pdg == 2212) ? 0L : 5000L));
+      long long n_alive = 0, n_kill = 0, n_sec = 0, n_exhausted = 0;
+      for (int n = 0; n < kScanN; ++n) {
+        G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), e * MeV);
+        G4HadProjectile proj(dp);
+        G4Nucleus nucleus(kTa, kTz);
+        G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+        if (r == nullptr) { continue; }
+        if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
+        ++n_kill;
+        const std::size_t ns = r->GetNumberOfSecondaries();
+        n_sec += static_cast<long long>(ns);
+        bool any_parent = false;
+        for (std::size_t i = 0; i < ns; ++i) {
+          if (r->GetSecondary(i)->GetParentResonanceDef() != nullptr) { any_parent = true; }
+        }
+        if (!any_parent) { ++n_exhausted; }
+      }
+      std::fprintf(cs, "%d,%.17g,%d,%lld,%lld,%.17g\n", pdg, e, kScanN, n_alive, n_exhausted,
+                   (n_kill > 0) ? double(n_sec) / double(n_kill) : 0.0);
+      std::printf("  1h1 scan %4d %6.1f MeV: elastic returns %lld of %lld\n", pdg, e,
+                  n_exhausted, n_kill);
+    }
+  }
+  std::fclose(cs);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -4152,6 +4518,9 @@ void dump_bic(const DumpContext&) {
   write_argorder();
   write_blir_interact();
   write_blir_apply();
+  // `Propagate1H1`, P18's. Before the lifetime sweep below like everything that scatters: its
+  // probe and the cascade's `theH1Scatterer` both read the static channel list.
+  write_bic_1h1();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
   write_imr_scatterlife();
@@ -4183,5 +4552,7 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_imr_proptape.csv bic_imr_propfs.csv bic_imr_propdiag.csv "
                     "bic_blir_tape.csv bic_blir_tapeval.csv bic_blir_tapefs.csv bic_blir_init.csv "
                     "bic_blir_initnuc.csv bic_gaussq.csv bic_argorder.csv "
-                    "bic_blirapply.csv bic_blirapply_status.csv",
+                    "bic_blirapply.csv bic_blirapply_status.csv "
+                    "bic_1h1_tape.csv bic_1h1_tapeval.csv bic_1h1_tapefs.csv bic_1h1.csv "
+                    "bic_1h1_status.csv bic_1h1_parent.csv bic_1h1_scan.csv",
                     dump_bic);

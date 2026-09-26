@@ -1103,8 +1103,11 @@ int main() {
   // The nucleus refusal is forced with a target the slot cannot hold - A = 300 against the 256
   // nucleons `InteractionSlot` carries - which is `NucleusReport::capacity` and therefore
   // `nucleus`. No material in this port has such a nuclide, and that is the point: the test is
-  // of the MAPPING, which must be total whatever reaches it. A real target and a hydrogen target
-  // are run beside it, so the section cannot pass by refusing everything.
+  // of the MAPPING, which must be total whatever reaches it. Two real targets are run beside it,
+  // so the section cannot pass by refusing everything - and one of them is HYDROGEN, which
+  // expected `kBinaryHydrogenTarget` 20 times in 20 until P18 ported `Propagate1H1` and retired
+  // the name. It must RUN now, every time, through the same `run_arm_binary`, and what it applies
+  // must carry the entrance charge and baryon number out: p + p is (Q, B) = (2, 2).
   std::printf("== 7. every Binary-cascade refusal reaches the ledger ==\n");
   {
     had::InteractionSlot<real_t>& slot = pool.slots[0];
@@ -1124,11 +1127,11 @@ int main() {
     };
     const Case cases[] = {
         {8, 16, "p 400 MeV on O16", true, had::HadronicRefusal::kNumHadronicRefusals},
-        {1, 1, "p 400 MeV on H1", false, had::HadronicRefusal::kBinaryHydrogenTarget},
+        {1, 1, "p 400 MeV on H1", true, had::HadronicRefusal::kNumHadronicRefusals},
         {120, 300, "p 400 MeV on A=300", false, had::HadronicRefusal::kBinaryRefused},
     };
     for (const Case& c : cases) {
-      int ran = 0, refused_as_expected = 0, other = 0;
+      int ran = 0, refused_as_expected = 0, other = 0, unbalanced = 0;
       for (unsigned int k = 0; k < 20u; ++k) {
         hp::HadNucleus tgt;
         tgt.z = c.z;
@@ -1139,6 +1142,25 @@ int main() {
                                                     pool.view.fermi, rng, out);
         if (ok) {
           ++ran;
+          if (c.a == 1) {
+            // What the hydrogen arm APPLIED, not only that it returned true: a proton on a
+            // proton leaves with charge 2 and baryon number 2 in nucleons and pions.
+            int q = 0, b = 0;
+            for (int j = 0; j < slot.fs.n_secondaries; ++j) {
+              const auto& s2 = slot.fs.secondaries[j];
+              if (s2.a > 0) {
+                q += s2.z;
+                b += s2.a;
+              } else {
+                const ParticleType t = particle_type_of_pdg(s2.pdg);
+                b += had::baryon_number_of(t, 0);
+                q += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
+              }
+            }
+            if (slot.fs.status != hp::HadFinalStateStatus::kStopAndKill || q != 2 || b != 2) {
+              ++unbalanced;
+            }
+          }
         } else if (out.refusal == c.expect_refusal) {
           ++refused_as_expected;
         } else {
@@ -1147,6 +1169,10 @@ int main() {
       }
       std::printf("   %-22s ran %2d   refused as expected %2d   other %2d\n", c.name, ran,
                   refused_as_expected, other);
+      if (unbalanced != 0) {
+        fail(std::string(c.name) + ": " + std::to_string(unbalanced) + " applied final states do "
+             "not carry charge 2 and baryon number 2 out of a p + p reaction");
+      }
       if (c.expect_ran) {
         if (ran != 20) {
           fail(std::string(c.name) + ": " + std::to_string(ran) + " of 20 ran - a real target "

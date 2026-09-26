@@ -65,13 +65,29 @@
 // 1.65 outer radii upstream, which is far enough that the `outside` state is never in doubt. The
 // comment is wrong and the code is what runs; ported as written.
 //
+// ## THE A == 1 ARM RUNS THE SAME TWO LOOPS, AND NEITHER OF THEM EVER TURNS FOR IT
+//
+// `Propagate1H1` (`propagate_1h1.cuh`) is the whole of what differs for a hydrogen target, and it
+// begins `G4ReactionProductVector * products = new G4ReactionProductVector;` - it NEVER returns
+// NULL, so the inner loop runs exactly once per outer turn, and the outer loop turns only when
+// the product vector came back EMPTY, which is when the 200th `Scatter` returned nothing. Every
+// outer turn still does what an outer turn does: `the3DNucleus->Init(1, Z)` - a one-nucleon
+// `G4Fancy3DNucleus`, built by the same `ChooseNucleons`, `ChoosePositions` and
+// `ChooseFermiMomenta` as any other, and paid for in uniforms - and one `GetSpherePoint` for a
+// position `Scatter` never reads. Both are on the stream, so both are here.
+//
+// `thePropagator->Init(the3DNucleus)` is NOT here for A == 1. It builds `G4RKPropagation`'s field
+// maps for the nucleus, draws no uniform and is read only by `Propagate`; `Propagate1H1` never
+// touches the propagator, so building it would change no number this function returns.
+//
 // ## REFUSED, by name
 //
-//   * **G4BinaryCascade::Propagate1H1**, the A == 1 arm - a 230-line hand-written single-nucleon
-//     reaction with its own elastic/inelastic split and its own `G4Scatterer` instance
-//     (`theH1Scatterer`), not the cascade at all. `BicRefusal::hydrogen` is set at the point it
-//     would have been needed. That is what makes water incomplete: `Propagate` answers for the
-//     oxygen and nothing answers for the hydrogen.
+//   * **inside `Propagate1H1`, only what Geant4 cannot answer either** - a short-lived track whose
+//     `Decay()` returns 0, which `Propagate1H1` dereferences, the scatterer's charge-balance
+//     FatalException, and the caller's capacities. `BicRefusal::hydrogen` says the arm refused
+//     and `BicRefusal::h1` says which. The arm itself is ported (P18); until then the flag meant
+//     "`Propagate1H1` is not written", and `Propagate` answered for water's oxygen while nothing
+//     answered for its hydrogen.
 //   * **every projectile that is not a nucleon or a charged pion.** Geant4 throws
 //     `G4HadronicException` for one unless the environment variable
 //     `I_Am_G4BinaryCascade_Developer` is set; a kernel cannot throw, so it is
@@ -96,6 +112,7 @@
 #include "physics/hadronic/bic/bic_params.cuh"
 #include "physics/hadronic/bic/cascade_propagate.cuh"
 #include "physics/hadronic/bic/light_ion_reaction.cuh"
+#include "physics/hadronic/bic/propagate_1h1.cuh"
 #include "physics/hadronic/precompound/precompound_model.cuh"
 #include "physics/hadronic/process.cuh"
 
@@ -104,9 +121,11 @@ namespace g4gpu::bic {
 /// What `apply_yourself` could not do. `any()` is true only for the ones that make the final
 /// state meaningless; the two reports below are true on every successful precompound call.
 struct BicRefusal {
-  /// A == 1: `Propagate1H1`, which this package does not have. Named at the point it would have
-  /// been needed.
+  /// A == 1: `Propagate1H1` refused, for one of the reasons `h1` names - each a point where
+  /// Geant4 itself dereferences a null, throws, or needs storage the caller did not hand over.
+  /// Until P18 this meant the whole arm was missing.
   bool hydrogen = false;
+  H1Refusal h1;
   /// Not a proton, a neutron, a pi+ or a pi-: Geant4's `G4HadronicException`.
   bool species = false;
   /// The caller's secondary buffer, or one of the cascade's own caller-owned arrays.
@@ -153,6 +172,11 @@ struct BicReport {
   /// of 20.832 and a gamma of 1.20455. Reporting the boost is what lets the test assert the
   /// deficit EQUALS `gamma*E*` instead of excusing the event.
   deex::Vec3d precompound_boost;
+  /// The A == 1 arm: what the LAST `Propagate1H1` did - how many scatters it drew, whether its
+  /// 200 tries ran out and it returned the last elastic scatter as the answer, and how many
+  /// resonances it decayed. `h1_ran` is false on every other path.
+  bool h1_ran = false;
+  H1Report h1;
 };
 
 /// The `HadFinalState` width this model instantiates. A 1.4 GeV proton on lead makes a cascade of
@@ -173,6 +197,128 @@ struct BicStorage {
   CascadeWorkspace cascade;
   const preco::PrecoWorkspace* preco = nullptr;
 };
+
+/// `G4BinaryCascade::ApplyYourself` for a target of A == 1, from the cascade's own branch point on:
+/// the two retry loops around `Propagate1H1`, and the packaging.
+///
+/// A function of its own and behind `__noinline__` for the reason `run_arm_binary` is: inlined
+/// into `apply_yourself` its locals would share a frame with `Propagate`'s call chain, which is
+/// the largest frame in the transport (docs/RISK.md V183, V190), and the A == 1 arm needs none of
+/// it. `store` supplies everything - one `Nucleon` and the scratch for the one-nucleon
+/// `G4Fancy3DNucleus`, `cascade.pool` as `Propagate1H1`'s `secs`, `cascade.products` for its
+/// products, and `cascade.buffers`/`channels` for the scatterer - so nothing sized by the event
+/// lives on this frame.
+///
+/// The loops are the ones the cascade path runs, line for line, with `Propagate1H1` where
+/// `Propagate` was; the file header says why neither of them turns except on an empty vector.
+template <typename Rng>
+__host__ __device__ __noinline__ void apply_yourself_h1(
+    const physics::hadronic::HadProjectile<double>& projectile,
+    const physics::hadronic::HadNucleus& target, BicStorage& store, Rng& rng,
+    BicFinalState& result, BicRefusal& ref, BicReport& rep) {
+  const int pdg = projectile.pdg;
+  const bool is_nucleon = (pdg == 2212 || pdg == 2112);
+  const double mass = (pdg == 2212)   ? u::proton_mass_c2<double>()
+                    : (pdg == 2112) ? u::neutron_mass_c2<double>()
+                                    : pdg_mass_pion_charged();
+  const double e = projectile.kin_energy + mass;
+  const double p_mag = std::sqrt(projectile.kin_energy *
+                                 (projectile.kin_energy + 2.0 * mass));
+  const imr::LorentzVector initial4(Vec3<double>{0.0, 0.0, p_mag}, e);
+
+  CascadeSpecies sp;
+  sp.proton_mass = u::proton_mass_c2<double>();
+  sp.neutron_mass = u::neutron_mass_c2<double>();
+  sp.pi_plus_mass = pdg_mass_pion_charged();
+  sp.pi_zero_mass = pdg_mass_pion_zero();
+
+  Nucleus3D nucleus;
+  nucleus.nucleons = store.nucleons;
+  nucleus.capacity = store.scratch.capacity;
+  rep.h1_ran = true;
+
+  int n_products = 0;
+  // The OUTER loop: a new one-nucleon nucleus every turn, at most 100 turns.
+  int interaction_counter = 0;
+  for (;;) {
+    // `the3DNucleus->Init(massNumber, aNucleus.GetZ_asInt())`, which for A == 1 still chooses
+    // the nucleon, places it by rejection and gives it a Fermi momentum - every uniform of it
+    // Geant4's. `thePropagator->Init` is left out; see the file header.
+    NucleusReport nrep = nucleus_init(nucleus, store.scratch, target.a, target.z, rng);
+    if (nrep.fatal()) {
+      ref.nucleus = true;
+      ref.nucleus_rep = nrep;
+      return;
+    }
+    ref.nucleus_rep = nrep;
+
+    // The INNER loop, which runs once: `Propagate1H1` allocates its product vector before it
+    // does anything else, so `! products` is never true for it.
+    int collision_loop_max_count = 200;
+    bool have = false;
+    do {
+      const double radius = nucleus.outer_radius() + 3.0 * deex::fermi();
+      const Vec3<double> pos = get_sphere_point(1.1 * radius, initial4.v, rng);
+      CascadeTrack kt;
+      kt.pdg = pdg;
+      kt.pdg_mass = mass;
+      kt.charge = (pdg == 2212 || pdg == 211) ? 1 : ((pdg == -211) ? -1 : 0);
+      kt.baryon = is_nucleon ? 1 : 0;
+      kt.momentum = initial4;
+      kt.position = pos;
+      kt.formation_time = 0.0;
+      kt.state = kOutside;          ///< `kt->SetState(G4KineticTrack::outside)`
+      H1Refusal href;
+      n_products = propagate_1h1(kt, target.z, store.cascade, sp, rng, rep.h1, href);
+      ++rep.inner_tries;
+      if (n_products < 0) {
+        ref.hydrogen = true;
+        ref.h1 = href;
+        ref.refused_pdg = href.refused_pdg;
+        ref.refused_kin = projectile.kin_energy;
+        return;
+      }
+      have = true;
+    } while (!have && --collision_loop_max_count > 0);
+
+    // `if(++interactionCounter>99) break;`, then `while(products && products->size() == 0)`.
+    if (++interaction_counter > 99) { break; }
+    if (n_products > 0) { break; }
+  }
+  rep.outer_tries = interaction_counter;
+
+  if (n_products == 0) {
+    // "no interaction, return primary": a hundred turns whose 200th scatter came back empty.
+    rep.no_interaction = true;
+    result.status = physics::hadronic::HadFinalStateStatus::kIsAlive;
+    result.energy_change = projectile.kin_energy;
+    result.momentum_change = Vec3<double>{0.0, 0.0, 1.0};
+    return;
+  }
+
+  // `ApplyYourself`'s packaging - the same loop the cascade path ends in, over `Propagate1H1`'s
+  // products. The parent-resonance definition and id stay on `store.cascade.products`, where the
+  // cascade path's stay too: P5's `HadSecondary` has no field for either, and nothing QBBC
+  // scores reads them.
+  result.status = physics::hadronic::HadFinalStateStatus::kStopAndKill;
+  for (int i = 0; i < n_products; ++i) {
+    const CascadeProduct& p = store.cascade.products[i];
+    physics::hadronic::HadSecondary<double> s;
+    s.pdg = p.pdg;
+    s.z = p.nucleus_z;
+    s.a = p.nucleus_a;
+    // `G4ReactionProduct(definition)` starts with a formation time of zero and `Propagate1H1`
+    // never sets one, so `timePrimary + time` is `timePrimary` - zero here, see the file header.
+    s.time = 0.0;
+    s.weight = 1.0;
+    s.creator_model_id = p.creator_model_id;
+    capture::set_four_momentum(s, p.momentum, p.pdg_mass);
+    if (!result.add_secondary(s)) {
+      ref.capacity = true;
+      break;
+    }
+  }
+}
 
 /// `G4BinaryCascade::ApplyYourself`.
 ///
@@ -245,10 +391,9 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
   // The cascade.
   // ------------------------------------------------------------------------------------------
   if (target.a <= 1) {
-    // `products = Propagate1H1(secondaries, the3DNucleus)` - refused by name; see the header.
-    ref.hydrogen = true;
-    ref.refused_pdg = pdg;
-    ref.refused_kin = projectile.kin_energy;
+    // `if(massNumber > 1) products = Propagate(...); else products = Propagate1H1(...);` - the
+    // same two loops with the other function inside them; see `apply_yourself_h1`.
+    apply_yourself_h1(projectile, target, store, rng, result, ref, rep);
     return status;
   }
 
