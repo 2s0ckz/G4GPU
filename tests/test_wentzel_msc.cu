@@ -30,6 +30,16 @@
 // [cosThetaMin, cosTetMaxNuc], the small ones the msc model keeps, with a different production
 // cut and a different target mass. See ref/dump/dump_wentzel_msc.cc's header for all three
 // differences.
+// nvcc 12 (docs/RISK.md V203) warns #20011-D, #20013-D or #20014-D when a host-only translation
+// unit - which this test is - instantiates a __host__ __device__ template with a host callable
+// or a host function, here at em/wentzel_msc.cuh's wv_true_path, with a capturing lambda.
+// The device instantiations of the same templates are the engine's, which compiles them
+// without a word; in a test that never builds device code the warning describes a path that
+// does not exist, so it is silenced here and not in the headers, which stay honest for the
+// engine.
+#pragma nv_diag_suppress 20011
+#pragma nv_diag_suppress 20013
+#pragma nv_diag_suppress 20014
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>

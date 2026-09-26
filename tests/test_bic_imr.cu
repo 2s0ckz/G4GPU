@@ -162,6 +162,16 @@
 // where Geant4 stores them, and `millibarn`, which both derive from `1e-28*m^2` but through
 // different products. Both are last-bit effects. The buckets are set where the measurement puts
 // them and the commit message records what moves when a term is perturbed.
+// nvcc 12 (docs/RISK.md V203) warns #20011-D, #20013-D or #20014-D when a host-only translation
+// unit - which this test is - instantiates a __host__ __device__ template with a host callable
+// or a host function, here at bic/cascade_capture.cuh, cascade_propagate.cuh and cascade_step.cuh.
+// The device instantiations of the same templates are the engine's, which compiles them
+// without a word; in a test that never builds device code the warning describes a path that
+// does not exist, so it is silenced here and not in the headers, which stay honest for the
+// engine.
+#pragma nv_diag_suppress 20011
+#pragma nv_diag_suppress 20013
+#pragma nv_diag_suppress 20014
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2217,7 +2227,6 @@ int main() {
     const double m_pip = 139.5701;
     const double m_pi0 = 134.9766;
     static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
-    imr::ResonanceTableRefusal tref0;
     const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
     auto mass_of = [&](int pdg) {
       if (pdg == 2212) { return mp; }
@@ -2564,8 +2573,6 @@ int main() {
       prop.bn = dv(r, 12);
       double e_before[3];
       for (int k = 0; k < n; ++k) { e_before[k] = pool[idx[k]].momentum.e; }
-      imr::CollisionList dummy;
-      (void)dummy;
       bic::CascadeRefusal cref;
       const bic::BoundaryFailures fail =
           (dir == 0) ? bic::correct_barions_on_boundary(st, idx, n, nullptr, 0, prop, mp, mn, cref)
