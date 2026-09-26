@@ -13011,3 +13011,9 @@ the tapes and campaigns cannot see which ptxas built the engine. What CAN change
 at the level of contraction and instruction selection, which is why this switch is its own
 integration with its own gate: the dose gates, the depth-dose gate, the pool-size and replay
 checks and the sweep measure it, and the numbers are in this entry's integration note.
+
+Integration note (lead, integ/wiring4, gate ba51): the first full build under 12.9.86 compiled all
+twenty-two engine units at ptxas's default -O3 - no unit took a rung, no marker was written, zero
+`#20279-D` warnings with the flag on - and the three stepping kernels that had needed the ladder
+under 11.6 now report: GenericIon 4,080 B frame, 276/672 B spill; deuteron 4,384 B, 216/532 B;
+proton 4,240 B, 240/844 B. The interaction units' peaks were the same 15-19 GB. The gate itself (ba52: 98 tests, the B1 dose against Geant4 at a ratio of 1.0007, the proton depth-dose like for like at -0.165% contained, +0.133% plateau and R80 -0.025 mm, the pool-size, replay, mesh, hook and physics-switch checks) passed ALL OK - after one red run whose only failure was the old EM-only proton reference on disk: `run.bat tables` regenerates the tables and not the transport references, P15 had regenerated those in its own worktree, so the lead ran the full `ref\oracle\run.bat` once and the regenerated CSV was byte-identical to P15's.
