@@ -385,11 +385,11 @@ int main(int argc, char** argv) {
         // P15 wired `protonInelastic` - the Binary cascade below 1.5 GeV, Bertini 1-6 GeV,
         // FTFP from 3, chosen as `G4EnergyRangeManager` chooses - so inactivating it on the
         // Geant4 side would be switching off physics the port HAS, which is the opposite of
-        // what this list is for. What the proton's process still refuses is
-        // `G4BinaryCascade::Propagate1H1`, a nucleon or pion on a hydrogen target, measured at
-        // 0 of 93 interactions for a 210 MeV proton in water and 31 of 256 at 1 GeV
-        // (`tests/test_inelastic_transport.cu`); the run reports that fraction rather than
-        // hiding it behind the whole process.
+        // what this list is for. What the proton's process refused until P18 was
+        // `G4BinaryCascade::Propagate1H1`, a nucleon or pion on a hydrogen target - 0 of 93
+        // interactions for a 210 MeV proton in water and 31 of 256 at 1 GeV on P15's grid - and
+        // P18 answered it (docs/RISK.md V204-V206); the run still reports the refused fraction
+        // rather than hiding anything behind the whole process.
         //
         // AND THE FIVE ION INELASTIC PROCESSES CAME OFF IT IN P15'S SECOND PASS, with P9e's
         // `G4BinaryLightIonReaction::Interact`. They were here because `ApplyYourself` fuses

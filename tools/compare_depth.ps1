@@ -38,8 +38,8 @@ param(
   # How far apart the two sides' CONTAINED fractions may be. 1% against a measured 0.26% at
   # 100,000 reference events and 6,000 port events, which is what P15's wiring of
   # protonInelastic and NeutronGeneralProc leaves: both sides make neutrons and a neutron
-  # leaves a 150 mm phantom. Tightening this is the right thing to do the day the port stops
-  # refusing G4BinaryCascade::Propagate1H1 - a hydrogen target, and two atoms in three of water.
+  # leaves a 150 mm phantom. P18 answered the last hydrogen-target refusal (docs/RISK.md
+  # V204-V206); the gap a gate measures with it in is the number to tighten this to.
   [double]$ContainedLimit = 0.01
 )
 

@@ -72,11 +72,11 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 #
 # OFF THE LIST (the port does these now):
 #   protonInelastic   wired. The Binary cascade below 1.5 GeV, Bertini 1-6, FTFP from 3, chosen
-#                     as `G4EnergyRangeManager` chooses. What it still refuses is
+#                     as `G4EnergyRangeManager` chooses. What it refused until P18 was
 #                     `G4BinaryCascade::Propagate1H1` - a nucleon or pion on a HYDROGEN target -
-#                     which in water is not a corner: hydrogen is two atoms in three.
-#                     `tests/test_inelastic_transport.cu` measures it at 0 of 93 interactions
-#                     for a 210 MeV proton and 31 of 256 at 1 GeV, and the sweep's own run
+#                     which in water is not a corner: hydrogen is two atoms in three, 0 of 93
+#                     interactions for a 210 MeV proton and 31 of 256 at 1 GeV on P15's grid.
+#                     P18 answered it (docs/RISK.md V204-V206) and the sweep's own run
 #                     prints the refused fraction per beam. It is off the list because a
 #                     process that does seven eighths of its work is not "what the port lacks";
 #                     the eighth is reported instead of being hidden by switching the whole
@@ -178,8 +178,8 @@ function Get-ProcessDump([string[]]$out) {
 # THE BRIEF ASKS FOR THE REFUSED FRACTION PER BEAM BY NAME and until P15 there was nothing to
 # ask it of - the port had no inelastic process, so a hadron beam's only holes were whole
 # processes that were simply absent. Now a beam can run an interaction and refuse ONE ARM of it
-# (`G4BinaryCascade::Propagate1H1` on hydrogen, `G4BinaryLightIonReaction::Interact` at or above
-# 50 MeV/n), and the rate of that is a number the row is not interpretable without: a dose that
+# (`G4BinaryLightIonReaction::Interact`'s own refusals inside the ion cascade, and until P18
+# `G4BinaryCascade::Propagate1H1` on hydrogen), and the rate of that is a number the row is not interpretable without: a dose that
 # agrees while a third of the interactions were refused is not agreement.
 #
 # The engine prints the ledger in two groups - SIZE (one booking per lost interaction) and WHY
