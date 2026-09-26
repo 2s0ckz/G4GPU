@@ -12968,6 +12968,7 @@ unit alone on the idle machine, died at -O1 again where it had compiled two hour
 | ba49 | parallel pass, six units | died | died | died | - |
 | C, alone | idle machine, same source | died | died | died | - |
 | D, alone | idle machine, same source | died | died | **compiled** (3,952 B frame) | not reached |
+| E, the engine build, this unit alone | idle machine, same source | died | died | died | **compiled**: 4,288 B frame, 692/3,976 B spill |
 The same input to ptxas and two verdicts is a compiler that reads state it does not own, and no
 rung that depends on it is a rung. So `build_engine_unit.bat` has a fourth one, `-Xptxas -O0`,
 which V195 had already measured on this kernel - it compiles, 4,256 B frame, 700/3,968 B spill -
@@ -12976,4 +12977,4 @@ parallel pass, so that whichever rung it takes, it takes it on the idle machine 
 the 19.8 GB peaks. The `__noinline__` on the transform stays: it makes the kernel smaller and it
 changes no result, but it is no longer claimed as the fix. What -O0 costs is the ion stepping
 kernel's speed, which is the performance phase's (V193) and today sits behind the interaction
-kernel's 95% (V193) in any case; the marker beside the log records the rung the build took.
+kernel's 95% (V193) in any case; the marker beside the log records the rung the build took. In that build the deuteron's unit needed the ladder too, for the first time - it shares the ion code paths - and stopped at -O2 with a 4,304 B frame; every other unit compiled at -O3.
