@@ -504,12 +504,13 @@ __host__ __device__ __noinline__ bool run_arm_binary(
   // state. Found by reading P9e's `BicRefusal` beside this one; asserted in
   // `tests/test_inelastic_transport.cu` section 7, which fails with the flag list restored.
   if (ref.any()) {
-    // `hydrogen` is `Propagate1H1`, which P9 refused by name and which is still not written.
-    // Every other flag is `kBinaryRefused`: `species`, `preco_projectile` and `capacity`
-    // are tripwires on a projectile this wiring should never send here, and `nucleus` and
-    // `cascade` are the model's own refusals.
-    out.refusal = ref.hydrogen ? HadronicRefusal::kBinaryHydrogenTarget
-                               : HadronicRefusal::kBinaryRefused;
+    // Every flag is `kBinaryRefused`. A HYDROGEN target runs `Propagate1H1` since P18, and
+    // `hydrogen` now means that arm refused for one of `bic::H1Refusal`'s reasons - points where
+    // Geant4 itself dereferences a null or throws - so it is a model refusal like `nucleus` and
+    // `cascade`; `species`, `preco_projectile` and `capacity` are tripwires on a projectile this
+    // wiring should never send here. `kBinaryHydrogenTarget`, the name the missing arm had, is
+    // retired (wiring.cuh).
+    out.refusal = HadronicRefusal::kBinaryRefused;
     return false;
   }
   copy_final_state<real_t>(s.bic_fs, s.fs);

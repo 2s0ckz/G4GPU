@@ -116,7 +116,7 @@ enum class HadronicRefusal : int {
   ///   * `kNeutronInelastic` and `kChargedHadronInelastic` say **how much is missing**, one
   ///     booking per lost interaction with the projectile's kinetic energy on it. Summing these
   ///     two gives the size of the inelastic hole in the answer.
-  ///   * `kLightIonCascade`, `kBinaryHydrogenTarget`, `kFtfpRefused`, `kBertiniRefused`,
+  ///   * `kLightIonCascade`, `kFtfpRefused`, `kBertiniRefused`,
   ///     `kBinaryRefused`, `kNoInelasticModel`, `kInelasticSecondaryOverflow`,
   ///     `kInelasticQueueFull`, `kInteractionNoSlot` and `kInelasticReentryExhausted` say
   ///     **why**, and every one of them is booked on an event that is ALSO in the first group.
@@ -267,10 +267,11 @@ enum class HadronicRefusal : int {
   /// The five ion processes came off the inactivation list of every like-for-like column with it
   /// (docs/RISK.md V192, V198).
   kLightIonCascade,
-  /// `G4BinaryCascade::Propagate1H1` - a nucleon or charged pion on a HYDROGEN target, which P9
-  /// refused by name. Small but not zero in water: hydrogen is 2 of every 3 atoms and about
-  /// 11% of the electrons, though its inelastic cross section is the smallest of the two.
-  kBinaryHydrogenTarget,
+  // `kBinaryHydrogenTarget` - `G4BinaryCascade::Propagate1H1`, a nucleon or charged pion on a
+  // HYDROGEN target - stood here from P15 to P18 and is RETIRED, not left as a dead name: P18
+  // ported the arm (`bic/propagate_1h1.cuh`), and what it can still refuse - a resonance whose
+  // `Decay()` returns the null `Propagate1H1` dereferences, a capacity - is `kBinaryRefused`.
+  // It was 8.5% of a 1 GeV proton beam's interactions in water (docs/RISK.md V201).
   /// `ftf::entry::apply` came back `kRefused`, with a reason of its own that `entry::Report`
   /// carries. The FTFP-side refusals are P11's and are listed in docs/PORTED.md 2.1.11b.
   kFtfpRefused,
@@ -278,10 +279,11 @@ enum class HadronicRefusal : int {
   /// P10's, and listed in docs/PORTED.md 2.1.12 - `kFate`, K0S/K0L, hyper-nuclei.
   kBertiniRefused,
   /// `bic::apply_yourself` or `bic::blir_apply_yourself` refused for a reason that is not the
-  /// hydrogen target or the cascade arm: an inapplicable species, a PreCompound projectile
-  /// refusal, or one of the two capacity guards. A TRIPWIRE - this wiring sends the Binary
-  /// cascade only nucleons and charged pions and the light-ion reaction only ions, so a
-  /// species refusal here means the model table and `inelastic_models` have drifted apart.
+  /// cascade arm: an inapplicable species, a PreCompound projectile refusal, one of the capacity
+  /// guards, or - since P18 - `Propagate1H1`'s own (`bic::H1Refusal`: a null `Decay()` Geant4
+  /// dereferences, the scatterer's charge-balance FatalException). A TRIPWIRE - this wiring
+  /// sends the Binary cascade only nucleons and charged pions and the light-ion reaction only
+  /// ions, so a species refusal here means the model table and `inelastic_models` have drifted.
   kBinaryRefused,
   /// `G4EnergyRangeManager::GetHadronicInteraction` found no model covering the energy, or more
   /// than two competing, or two fully nested. Geant4 prints its model table and returns
@@ -350,12 +352,13 @@ enum class HadronicRefusal : int {
   /// second time so the report can say how much of a scored dose the refusals' disposal put in
   /// the scorer; not to be added to anything.
   ///
-  /// It exists because a dose cannot say it on its own. The B1 sweep's proton_1000 reads about
-  /// +14% against Geant4 with `Propagate1H1` - a nucleon on hydrogen, which is two atoms in three
-  /// in water and still present in bone - refused for one interaction in twelve, each carrying
-  /// ~950 MeV, and Geant4 would have sent most of that energy onward with the leading nucleon and
-  /// its pions. Whether the refusals' disposal is the whole of that excess is a question of how
-  /// much of their energy landed in the trapezoid, and this is that number. docs/RISK.md V201.
+  /// It exists because a dose cannot say it on its own. The B1 sweep's proton_1000 read about
+  /// +14% against Geant4 while `Propagate1H1` - a nucleon on hydrogen, which is two atoms in
+  /// three in water and still present in bone - was refused for one interaction in twelve, each
+  /// carrying ~950 MeV, and Geant4 would have sent most of that energy onward with the leading
+  /// nucleon and its pions. Whether the refusals' disposal was the whole of that excess is a
+  /// question of how much of their energy landed in the trapezoid, and this is that number.
+  /// docs/RISK.md V201; P18 ported the arm.
   kRefusedEnergyScored,
 
   kNumHadronicRefusals,
@@ -400,15 +403,14 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kLightIonCascade:
       return "WHY: G4BinaryLightIonReaction's cascade arm - G4BinaryCascade::Propagate "
              "refused inside Interact";
-    case HadronicRefusal::kBinaryHydrogenTarget:
-      return "WHY: G4BinaryCascade::Propagate1H1 - a nucleon or pion on hydrogen (P9)";
     case HadronicRefusal::kFtfpRefused:
       return "WHY: ftf::entry::apply refused by name (P11; see its Report)";
     case HadronicRefusal::kBertiniRefused:
       return "WHY: bert::apply_yourself refused by name (P10)";
     case HadronicRefusal::kBinaryRefused:
       return "WHY: the Binary cascade or the light-ion reaction refused for a reason that is "
-             "neither hydrogen nor the cascade arm - a tripwire on the model table";
+             "not the cascade arm - a tripwire on the model table, or Propagate1H1's null "
+             "Decay()";
     case HadronicRefusal::kNoInelasticModel:
       return "WHY: G4EnergyRangeManager found no model in range (G4Exception had005) - a "
              "tripwire on the transcribed windows";

@@ -85,8 +85,8 @@
 //   BERT        `bert::apply_yourself`, PORTED 2.1.12. Runs for nucleons, pions, kaons and
 //               hyperons.
 //   BIC         `bic::apply_yourself`, PORTED 2.1.10. Runs for nucleons and charged pions on
-//               any target with A > 1; a HYDROGEN target is `Propagate1H1` and is refused by
-//               name inside the model (`BicRefusal::hydrogen`).
+//               any target, a HYDROGEN one included: A == 1 is `Propagate1H1`, ported by P18
+//               (`bic/propagate_1h1.cuh`), inside the same model call and the same kernel.
 //   BLIR        `bic::blir_apply_yourself`, PORTED 2.1.10. Runs BOTH arms since P9e: the
 //               FUSION arm below **50 MeV per nucleon** - the `(mom.t()-mom.mag())/pA < 50*MeV`
 //               branch of `G4BinaryLightIonReaction::ApplyYourself` (line 119) - and
