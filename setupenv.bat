@@ -7,6 +7,16 @@ rem Visual Studio" - reported by nvcc, from a path it built by walking up out of
 rem install directory, with nothing pointing at the nested build script that actually caused
 rem it. Every build script here goes through this file so that nesting is safe.
 if defined VSINSTALLDIR exit /b 0
+rem ---------------------------------------------------------------- the GPU architecture
+rem
+rem Every nvcc line that builds device code says %G4GPU_ARCH% (build_all.bat, build_engine_unit.bat,
+rem the drivers, examples/B1 and the projects the model builder writes), so the card is chosen
+rem here once. The default is the RTX 3070 this tree is gated on. For two cards, or a card of
+rem another generation - the Titan V is compute capability 7.0 - set it to the -gencode pairs
+rem before calling any build script, for instance
+rem   set "G4GPU_ARCH=-gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86"
+rem and every unit is compiled for both, at twice the ptxas time.
+if not defined G4GPU_ARCH set "G4GPU_ARCH=-arch=sm_86"
 rem ---------------------------------------------------------------- the CUDA toolkit
 rem
 rem CUDA 12.9.2 (nvcc and ptxas 12.9.86), as a PORTABLE toolkit under D:\cuda129: NVIDIA's own

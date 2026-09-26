@@ -19,7 +19,7 @@ if /i "%FRESH%"=="fresh" (
   echo vis_manager.obj is up to date
   exit /b 0
 )
-nvcc -std=c++17 -O2 -arch=sm_86 -I "%~dp0src" -I "%~dp0src\g4" -c ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -c ^
   -o out\vis_manager.obj src\render\vis_manager.cu
 if errorlevel 1 (
   popd

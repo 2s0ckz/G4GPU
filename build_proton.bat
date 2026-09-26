@@ -12,13 +12,13 @@ call "%~dp0setupenv.bat" || exit /b 1
 call "%~dp0build_engine.bat" || exit /b 1
 pushd "%~dp0"
 if not exist out mkdir out
-nvcc -std=c++17 -O2 -arch=sm_86 -I "%~dp0src" -I "%~dp0src\g4" -DG4GPU_PORT ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -DG4GPU_PORT ^
   -x cu -c -o out\proton_depth.obj ref\proton\proton_depth.cc
 if errorlevel 1 (
   popd
   exit /b 1
 )
-nvcc -std=c++17 -O2 -arch=sm_86 -o proton_depth.exe ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -o proton_depth.exe ^
   out\proton_depth.obj "%G4GPU_ENGINE_OBJ%" -Xlinker /IMPLIB:out/proton_depth.lib
 if errorlevel 1 (
   popd

@@ -1253,14 +1253,14 @@ bool WriteProject(const Model& model, const std::string& dir) {
     }
     f << ") do (\n"
       << "  if exist \"%%F.cc\" (\n"
-      << "    nvcc -std=c++17 -O2 -arch=sm_86 %INC% -x cu -c -o build\\%%F.obj \"%%F.cc\""
+      << "    nvcc -std=c++17 -O2 %G4GPU_ARCH% %INC% -x cu -c -o build\\%%F.obj \"%%F.cc\""
       << " || goto :fail\n"
       << "  ) else (\n"
-      << "    nvcc -std=c++17 -O2 -arch=sm_86 %INC% -x cu -c -o build\\%%F.obj"
+      << "    nvcc -std=c++17 -O2 %G4GPU_ARCH% %INC% -x cu -c -o build\\%%F.obj"
       << " \"src\\%%F.cc\" || goto :fail\n"
       << "  )\n"
       << ")\n"
-      << "nvcc -std=c++17 -O2 -arch=sm_86 -o " << app << ".exe ^\n";
+      << "nvcc -std=c++17 -O2 %G4GPU_ARCH% -o " << app << ".exe ^\n";
     for (std::size_t i = 0; i < units.size(); ++i) {
       f << "  build\\" << units[i] << ".obj";
       f << ((i + 1 < units.size()) ? " ^\n" : " ^\n");

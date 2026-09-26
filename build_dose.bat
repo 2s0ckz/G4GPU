@@ -3,7 +3,7 @@ rem Builds g4dose: a scene run headless, with a seed and a set of process switch
 call "%~dp0setupenv.bat" || exit /b 1
 call "%~dp0build_engine.bat" || exit /b 1
 pushd "%~dp0"
-nvcc -std=c++17 -O2 -arch=sm_86 -I "%~dp0src" -I "%~dp0src\g4" -o g4dose.exe ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -o g4dose.exe ^
   src\host\g4dose.cu src\scenes\scene_b1.cu src\scenes\scene_b1mesh.cu ^
   "%G4GPU_ENGINE_OBJ%" -Xlinker /IMPLIB:out/g4dose.lib
 if errorlevel 1 (

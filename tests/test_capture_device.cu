@@ -230,8 +230,6 @@ int main() {
 
   // ---- 2. the upload itself, manager by manager.
   {
-    Case* unused = nullptr;
-    (void)unused;
     ManagerDigest* d_dig = nullptr;
     const int n = host_lt.n_managers;
     cudaMalloc(&d_dig, sizeof(ManagerDigest) * n);

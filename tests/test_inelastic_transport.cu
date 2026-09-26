@@ -571,7 +571,6 @@ int main() {
           real_t edep = 0;
           bool queued = false;
           qcursor = 0;
-          const real_t ekin_pre = p.ekin;
           alive = step_hadron(scene, p, b.t, had, rng, em, edep, rep, vis::no_capture(),
                               &queued);
           cell.expected += static_cast<double>(rep.true_length) * static_cast<double>(sigma);
@@ -768,14 +767,10 @@ int main() {
 
   // ---- A TEST THAT PASSED BECAUSE NOTHING HAPPENED IS THE FAILURE MODE THIS GUARDS.
   {
-    long long total_queued = 0;
     for (const Beam& b : beams) { (void)b; }
     // Recomputed from the ledger rather than kept: the two SIZE counters are one booking per
     // lost interaction, and `ran` is counted above. If nothing was queued at all the sigma
     // column is a column of zeros and every gate above passes.
-    total_queued =
-        ref_n[static_cast<int>(had::HadronicRefusal::kChargedHadronInelastic)]
-        + ref_n[static_cast<int>(had::HadronicRefusal::kNeutronInelastic)];
     if (worst_sigma == 0.0) {
       fail("not one interaction was drawn in any cell - the cross section is zero everywhere, "
            "which is what an unwired table looks like");
@@ -788,7 +783,6 @@ int main() {
                     had::hadronic_refusal_name(static_cast<had::HadronicRefusal>(r)));
       }
     }
-    (void)total_queued;
     std::printf("\n");
   }
 

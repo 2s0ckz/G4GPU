@@ -23,7 +23,7 @@ call "%~dp0setupenv.bat" || exit /b 1
 set UNIT=%~n1
 set OUTDIR=%~2
 if exist "%OUTDIR%\%UNIT%.rc" del /q "%OUTDIR%\%UNIT%.rc"
-nvcc -std=c++17 -O2 -arch=sm_86 -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
   -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
 
 rem ---------------------------------------------------------------- the -O1 retry, and why
@@ -68,7 +68,7 @@ if errorlevel 1 (
     copy /y "%OUTDIR%\%UNIT%.log" "%OUTDIR%\%UNIT%.O3.log" >nul
     for %%L in (2 1 0) do (
       echo   %UNIT%: ptxas died with an access violation above -O%%L; retrying at -Xptxas -O%%L ^(docs/RISK.md V63, V195^)
-      nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
+      nvcc -std=c++17 -O2 %G4GPU_ARCH% -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
         -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
       if not errorlevel 1 (
         > "%OUTDIR%\%UNIT%.o1" echo ptxas -O%%L

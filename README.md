@@ -13,8 +13,9 @@ hadronic and decay physics of Geant4's `QBBC` list is being ported in phases, to
 [`docs/HADRONIC_PLAN.md`](docs/HADRONIC_PLAN.md): Phase 1 - every hadronic cross section QBBC
 uses, the hadronic process framework and the elastic final states, decay, the complete
 de-excitation chain, and transport for eleven more species - is on main, validated class by
-class against the library, and not yet reached by a particle. Phase 2 has landed single Coulomb scattering, PreCompound and the closure of the negative-hadron
-question; decay, hadron elastic scattering, single Coulomb scattering and the **neutron general
+class against the library. Phase 2 has landed single Coulomb scattering, PreCompound and the
+closure of the negative-hadron question; decay, hadron elastic scattering, single Coulomb
+scattering and the **neutron general
 process** are wired into the transport, so a neutron interacts rather than streaming, its elastic
 and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ. Phase 3 is on main
 and, **since P15, is reached by a particle**: the Binary cascade with its whole collision tree,
@@ -292,7 +293,8 @@ validation measures how often the transport hits each refusal.
 
 Each package's report - what is `T`/`V`/`P`, what is refused by name, what it found in Geant4 -
 is in [`docs/PORTED.md`](docs/PORTED.md) sections 2.1.1-2.4 and 3, and its findings are RISK
-entries V37-V45 for Phase 1, V67-V76, V91-V94, V106-V113, V148-V157, V162-V163 and V179-V184 for the Binary cascade,
+entries V37-V45 for Phase 1, V67-V76, V91-V94, V106-V113, V148-V157, V162-V163 and V179-V184 for the
+Binary cascade,
 V85-V90, V98-V105, V114-V117, V145-V147, V158-V161, V167 and V168 for FTFP, V118-V141 for Bertini and
 V142-V144 and V164-V166 for the at-rest processes, V169-V178 for the photo- and lepto-nuclear
 processes, V185-V187 for the Gaussian every one of them draws, and V188-V202 for the inelastic
@@ -527,7 +529,8 @@ send every one of them somewhere else.
 Windows, CUDA 12.9 - the tree is built and gated with nvcc and ptxas 12.9.86, as the portable toolkit
 `setupenv.bat` looks for under `D:\cuda129` (docs/RISK.md V203: CUDA 11.6's ptxas crashed on the
 stepping kernels and could only compile one of them unoptimised) - and an NVIDIA GPU of compute
-capability 8.6 (edit `-arch` otherwise).
+capability 8.6 by default; `G4GPU_ARCH` in `setupenv.bat` picks the card, or two cards as
+-gencode pairs.
 
 ```
 setupenv.bat        # MSVC + CUDA on PATH

@@ -24,7 +24,7 @@ if not errorlevel 1 (
 )
 
 pushd "%~dp0"
-nvcc -std=c++17 -O2 -arch=sm_86 -I "%~dp0src" -I "%~dp0src\g4" -o g4builder.exe ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -o g4builder.exe ^
   src\host\g4builder.cu src\builder\write_project.cc ^
   "%G4GPU_ENGINE_OBJ%" -lopengl32 -luser32 -lgdi32 -lcomdlg32 ^
   -Xlinker /IMPLIB:out/g4builder.lib

@@ -35,13 +35,13 @@ set SRCS=exampleB1 ActionInitialization DetectorConstruction EventAction Primary
 
 for %%F in (%SRCS%) do (
   if exist "%%F.cc" (
-    nvcc -std=c++17 -O2 -arch=sm_86 %INC% -x cu -c -o "%OBJ%\%%F.obj" "%%F.cc" || goto :fail
+    nvcc -std=c++17 -O2 %G4GPU_ARCH% %INC% -x cu -c -o "%OBJ%\%%F.obj" "%%F.cc" || goto :fail
   ) else (
-    nvcc -std=c++17 -O2 -arch=sm_86 %INC% -x cu -c -o "%OBJ%\%%F.obj" "src\%%F.cc" || goto :fail
+    nvcc -std=c++17 -O2 %G4GPU_ARCH% %INC% -x cu -c -o "%OBJ%\%%F.obj" "src\%%F.cc" || goto :fail
   )
 )
 
-nvcc -std=c++17 -O2 -arch=sm_86 -o exampleB1.exe ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -o exampleB1.exe ^
   "%OBJ%\exampleB1.obj" "%OBJ%\ActionInitialization.obj" "%OBJ%\DetectorConstruction.obj" ^
   "%OBJ%\EventAction.obj" "%OBJ%\PrimaryGeneratorAction.obj" "%OBJ%\RunAction.obj" ^
   "%OBJ%\SteppingAction.obj" "%G4GPU_ENGINE_OBJ%" "%G4GPU_VIS_OBJ%" ^
