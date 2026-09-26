@@ -54,11 +54,19 @@ rem marker says which rung succeeded, and the -O3 log is kept beside it as `<uni
 rem because the retry overwrites `<unit>.log`. docs/RISK.md V195 is the measurement that found
 rem it - and the unit that found it, GenericIon's, dies on all three rungs at one source shape
 rem and compiles on the first at another, which is why the source was changed and not the rung.
+rem
+rem AND A FOURTH RUNG, -O0, since docs/RISK.md V202: on integ/wiring4 - P15's wiring plus P17's
+rem shared RandGaussQ - GenericIon's unit died on -O3 and -O2 every time, and on -O1 it compiled
+rem once alone and died once alone and twice inside the parallel pass, from the SAME source. A
+rem rung that is a coin toss is not a rung. V195 had already measured -O0 on that kernel: it
+rem compiles, 4,256 B frame, 700/3,968 B spill, and nothing in it is optimised away, so it is
+rem slow and correct - the ion stepping kernel's speed is the performance phase's (V193), and
+rem the marker file records which rung the build actually took.
 if errorlevel 1 (
   findstr /c:"ACCESS_VIOLATION" "%OUTDIR%\%UNIT%.log" >nul
   if not errorlevel 1 (
     copy /y "%OUTDIR%\%UNIT%.log" "%OUTDIR%\%UNIT%.O3.log" >nul
-    for %%L in (2 1) do (
+    for %%L in (2 1 0) do (
       echo   %UNIT%: ptxas died with an access violation above -O%%L; retrying at -Xptxas -O%%L ^(docs/RISK.md V63, V195^)
       nvcc -std=c++17 -O2 -arch=sm_86 -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
         -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1

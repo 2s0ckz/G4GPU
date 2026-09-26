@@ -82,6 +82,12 @@ for %%U in ("%~dp0src\host\transport_run_int_*.cu") do (
   echo   %%~nU
   call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
 )
+rem The GenericIon stepping unit is compiled ALONE as well, after the interaction units and before
+rem the parallel pass: its ptxas survives only the -O1 rung (V195), and MEASURED on integ/wiring4
+rem that rung died with an access violation twice in a row beside five other units while the same
+rem source compiled alone, twice in a row - docs/RISK.md V202. So it gets the idle machine too.
+echo compiling the GenericIon stepping unit alone ^(docs/RISK.md V202^)
+call "%~dp0build_engine_unit.bat" "%~dp0src\host\transport_run_generic_ion.cu" "%~dp0out"
 echo compiling the transport engine, %CAP% units at a time
 call :launch_units
 

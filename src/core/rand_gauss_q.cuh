@@ -107,12 +107,12 @@ __host__ __device__ inline double rand_gauss_q_small(double r) {
 /// runs in double and the answer does not: a port that kept the double would agree with Geant4
 /// to about seven digits and then diverge, which for a replayed stream is the same as being
 /// wrong.
-/// `__noinline__` in device code, and MEASURED to be necessary: with this transform inlined at its
-/// three sites in the GenericIon stepping kernel (the ion fluctuation and the two Urban step
-/// limits) that unit died in ptxas with an access violation at -O3, -O2 AND -O1 on the tree that
-/// joined P15's wiring to P17's Gaussian, on a quiet machine; out of line it compiles at -O1
-/// (docs/RISK.md V202, and V195 for the ladder). The call costs nothing anyone can measure and
-/// changes no bit of any result: the tapes and `test_rand_gauss_q` say so.
+/// `__noinline__` in device code, kept out of the GenericIon stepping kernel's three sites (the ion
+/// fluctuation and the two Urban step limits). With it inlined that unit died in ptxas at -O3,
+/// -O2 and -O1 on the tree that joined P15's wiring to P17's Gaussian; out of line it compiled
+/// once at -O1 and then died at -O1 twice from the same source, so the boundary is kept as the
+/// smaller kernel it makes and NOT as a proven fix - the build's -O0 rung is (docs/RISK.md V202,
+/// V195). The call changes no bit of any result: the tapes and `test_rand_gauss_q` say so.
 __host__ __device__ __noinline__ inline double rand_gauss_q_transform(double r) {
   double sign = 1.0;
   if (r > 0.5) {

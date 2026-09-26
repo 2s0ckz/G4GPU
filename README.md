@@ -296,7 +296,7 @@ entries V37-V45 for Phase 1, V67-V76, V91-V94, V106-V113, V148-V157, V162-V163 a
 V85-V90, V98-V105, V114-V117, V145-V147, V158-V161, V167 and V168 for FTFP, V118-V141 for Bertini and
 V142-V144 and V164-V166 for the at-rest processes, V169-V178 for the photo- and lepto-nuclear
 processes, V185-V187 for the Gaussian every one of them draws, and V188-V202 for the inelastic
-wiring, the like-for-like sweep and the ion kernel that compiles at -O1.
+wiring, the like-for-like sweep and the ion kernel that ptxas will only compile unoptimised.
 
 #### Tables, materials and framework
 

@@ -12958,3 +12958,22 @@ values to CLHEP's to the last bit and the Binary cascade's tapes replay through 
 `__noinline__` is on the transform in `core/rand_gauss_q.cuh` with this entry cited; the ion
 stepping kernel stays at -O1, which it already was, and which the performance phase inherits
 along with V193's and V195's reasons for it.
+
+AND THE -O1 RUNG IS A COIN TOSS ON THIS KERNEL. With the `__noinline__` in, gate ba49 died on the
+same unit at -O1 inside `build_engine.bat`'s parallel pass, and then the identical source, the
+unit alone on the idle machine, died at -O1 again where it had compiled two hours earlier:
+| run | where | -O3 | -O2 | -O1 | -O0 |
+|---|---|---|---|---|---|
+| A, alone | idle machine | died | died | **compiled** (3,952 B frame) | - |
+| ba49 | parallel pass, six units | died | died | died | - |
+| C, alone | idle machine, same source | died | died | died | - |
+| D, alone | idle machine, same source | died | died | **compiled** (3,952 B frame) | not reached |
+The same input to ptxas and two verdicts is a compiler that reads state it does not own, and no
+rung that depends on it is a rung. So `build_engine_unit.bat` has a fourth one, `-Xptxas -O0`,
+which V195 had already measured on this kernel - it compiles, 4,256 B frame, 700/3,968 B spill -
+and `build_engine.bat` compiles this unit alone, after the five interaction units and before the
+parallel pass, so that whichever rung it takes, it takes it on the idle machine P15 reserved for
+the 19.8 GB peaks. The `__noinline__` on the transform stays: it makes the kernel smaller and it
+changes no result, but it is no longer claimed as the fix. What -O0 costs is the ion stepping
+kernel's speed, which is the performance phase's (V193) and today sits behind the interaction
+kernel's 95% (V193) in any case; the marker beside the log records the rung the build took.
