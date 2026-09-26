@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include "host/device_select.cuh"
 #include <commdlg.h>
 #include <GL/gl.h>
 
@@ -1608,9 +1609,8 @@ int main(int argc, char** argv) {
   a.sync_render = (selftest_frames > 0 || bench_mesh > 0);
   if (bench_mesh > 0) { a.vis_attr.antialias = bench_aa; }
 
-  cudaDeviceProp prop{};
-  CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-  std::printf("GPU: %s, CC %d.%d\n", prop.name, prop.major, prop.minor);
+  // G4GPU_DEVICE picks the card and select_device prints it (host/device_select.cuh).
+  cudaDeviceProp prop = g4gpu::host::select_device().prop;
 
   if (!open_path.empty()) {
     if (ReadModelFile(a.model, open_path)) {

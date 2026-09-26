@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <new>  // placement new; see `run_interaction`'s note on fill_result's 18 kB return
 
+#include "host/device_select.cuh"
 #include "host/transport_run.cuh"
 
 namespace g4gpu::host {
@@ -1522,6 +1523,9 @@ void TransportEngine<real_t, StepHook>::RaiseStackForInteractions() {
 template <typename real_t, typename StepHook>
 void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int batch_size,
                                      int threads) {
+    // The card first, before any allocation binds the context: G4GPU_DEVICE chooses it once for
+    // the process (host/device_select.cuh), device 0 when unset.
+    select_device();
     batch_ = batch_size;
     threads_ = threads;
     n_scorers_ = std::max<int>(1, static_cast<int>(G4SDManager::GetSDMpointer()->Scorers().size()));

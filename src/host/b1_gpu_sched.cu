@@ -8,6 +8,7 @@
 // Compare src/host/b1_gpu.cu, the thread-per-event version: 108 registers, ~19% occupancy,
 // a private 128-deep secondary stack per thread.
 #include <cstdio>
+#include "host/device_select.cuh"
 #include <cstdlib>
 #include <cmath>
 #include <vector>
@@ -229,8 +230,7 @@ int main(int argc, char** argv) {
   const int batch_size = std::min(requested_batch, std::max(n_events, 1));
   const int threads = (argc > 3) ? std::atoi(argv[3]) : 128;
 
-  cudaDeviceProp prop{};
-  CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+  cudaDeviceProp prop = g4gpu::host::select_device().prop;  // G4GPU_DEVICE, else device 0
   // The solid engine is mutually recursive (a boolean node asks its children for distances),
   // so the stepping kernels need a real call stack. The default is 1 KB per thread, which one
   // frame of the distance routine can exhaust on its own; exceeding it shows up as an illegal

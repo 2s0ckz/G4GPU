@@ -18,6 +18,7 @@
 //   R            reset camera              G      solids on/off
 //   S            save a PNG                ESC    quit
 #include <cuda_runtime.h>
+#include "host/device_select.cuh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -57,8 +58,9 @@ int main(int argc, char** argv) {
   }
   opt.png_path = "D:\\g4gpu\\out\\g4view_selftest.png";
 
-  cudaDeviceProp prop{};
-  if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
+  const g4gpu::host::SelectedDevice& dev = g4gpu::host::select_device();  // G4GPU_DEVICE, else 0
+  cudaDeviceProp prop = dev.prop;
+  if (!dev.ok) {
     std::printf("FATAL: no CUDA device\n");
     return 2;
   }
