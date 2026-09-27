@@ -13246,6 +13246,20 @@ branch is in the general process, which only a transport exercises; and a transp
 cannot see a process that is absent from BOTH sides - the like-for-like column had it
 inactivated, and the QBBC column runs the same branch.
 
+Integration note (lead, 2026-09-27): THIS IS A GEANT4 BUG, AND IT IS FIXED UPSTREAM. The current
+Geant4 master (`source/physics_lists/constructors/electromagnetic/src/G4GammaGeneralProcess.cc`
+on github.com/Geant4/geant4) builds zone 3's table 14 as `sigM / sum`, where 11.1.1 builds it as
+`sigN / sum`; the selection code is unchanged. With table 14 holding the muon-pair share, the
+photo-nuclear test `q + table14 <= 1` gives photo-nuclear its own width and the final branch the
+muon-pair's, which is what every other zone and every table comment intends; with 11.1.1's value
+the two branches trade widths, and with no muon-pair process registered - the default in every
+reference list - photo-nuclear's width is zero and conversion takes its share. The interaction
+rate was never wrong, since the photo-nuclear cross section is in the total; only the process that
+fires is. The port reproduces 11.1.1 by design. A newer Geant4 target changes exactly that one
+line in the port's selection, and `ref/gammagp/` measures what the target release actually does.
+The user's rule for such targets (2026-09-27): read the upstream git diff against v11.1.1 over the
+classes docs/PORTED.md names, and let the hunks drive the port's updates.
+
 ### V208: the general process has no Rayleigh scattering above 2 m_e, and this port's photon does
 
 `G4GammaGeneralProcess` sums Rayleigh into zones 0 and 1 only (below 2 m_e); zones 2 and 3 are

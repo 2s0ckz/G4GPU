@@ -496,7 +496,6 @@ int main(int argc, char** argv) {
   }
 
   const g4gpu::host::SelectedDevice& dev = g4gpu::host::select_device();  // G4GPU_DEVICE, else 0
-  cudaDeviceProp prop = dev.prop;
   if (!dev.ok) {
     std::printf("\nFATAL: no CUDA device\n");
     return 2;
