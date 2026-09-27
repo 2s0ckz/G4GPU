@@ -13404,6 +13404,18 @@ data for .const". ptxas cost under 12.9, serial: the photo-nuclear unit 15,739 M
 lepto-nuclear unit 11,147 MB and 451 s (and the same build put P15's at-rest unit at 22,490 MB,
 where V189 recorded 19,770 under 11.6).
 
+**In a custom-hook project** (`tests/test_custom_hook.cu`, `tests/test_voxel_scoring.cu`) the two
+drains are instantiated in the project's own object beside P15's five interaction kernels - every
+kernel `tools/gen_hook_units.ps1` does not split into a unit of its own lands there, as V65's
+arrangement leaves it. That object took 44.8 minutes of ptxas at 20.7 GB, for either project, and
+in it the drains' frames are 18,704 and 19,856 bytes (QualityFactorScoring) and 18,736 and 19,888
+(CellTap) - past the stepping stack, so the driver raises it to 19.9 kB at the first drain launch
+(V196). Both projects pass and print exactly that: "STACK: the driver raised the device stack to
+19856 B at a photo-/lepto-nuclear drain launch". The shared module and not the hook is what grows
+the frames - the same two kernels are 11,936 and 4,112 bytes in the stock engine's own units - so
+the fix is the generator splitting `G4GPU_EMX_DRAIN` (and P15's `G4GPU_INTERACTION`) into units per
+hook, as it already splits the stepping kernels.
+
 ### V211: the photon and electron beams make hadrons now, and above 10 MeV they pay what a hadron beam pays
 
 The like-for-like doses (docs/B1_SWEEP.md, P19's section) are inside two sigma on five of six
