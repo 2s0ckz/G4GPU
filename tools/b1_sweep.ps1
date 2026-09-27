@@ -6,12 +6,12 @@
 # Three runs per beam, as tools\compare_b1_beams.ps1 does, and for the same reason:
 #
 #   port          this port's examples\B1\exampleB1.exe
-#   G4 EM-only    the real Geant4 with ONLY what the port still lacks after Phase 2 inactivated:
-#                 the inelastic processes, the hadron radiative processes hBrems/hPairProd (left
-#                 at P by P1), the photo-/electro-nuclear ones, and ionElastic/ionInelastic for
-#                 the recoil nuclei (transported since P8c, their own hadronic processes not
-#                 wired). Elastic, capture, decay and single Coulomb scattering stay active on
-#                 both sides. This is the LIKE-FOR-LIKE
+#   G4 EM-only    the real Geant4 with ONLY what the port still lacks inactivated: since P19
+#                 that is the hadron radiative processes hBrems/hPairProd (left at P by P1) and
+#                 ionElastic for the recoil nuclei - the list below says what came off and when.
+#                 Elastic, capture, decay, single Coulomb scattering, every inelastic process
+#                 and the photo-, electro- and muo-nuclear ones stay active on both sides. The
+#                 name is older than the list. This is the LIKE-FOR-LIKE
 #                 column; agreement here is the claim
 #   G4 QBBC       the real Geant4 as QBBC ships; its distance from EM-only is what the missing
 #                 physics is worth for that beam, measured rather than argued
@@ -19,12 +19,12 @@
 # WHAT IS INACTIVATED, per species, is read off ref\oracle\species_processes.csv - the dump of
 # the constructed QBBC's own process managers - and not off the source, because
 # /process/inactivate silently ignores a name the species does not carry (docs\RISK.md V43).
-# The photon needs one more step: QBBC folds phot/compt/conv/Rayl/photonNuclear into one
-# G4GammaGeneralProcess, inside which photonNuclear cannot be inactivated, so the EM-only photon
-# run switches the general process off BEFORE /run/initialize and then inactivates
-# photonNuclear. That changes the interpolation grid the reference reads its cross sections
-# from, not the physics; the QBBC column keeps the general process, so the two Geant4 photon
-# columns bracket that too.
+# Until P19 the photon needed one more step: QBBC folds phot/compt/conv/Rayl/photonNuclear into
+# one G4GammaGeneralProcess, inside which photonNuclear cannot be inactivated, so the EM-only
+# photon run switched the general process off BEFORE /run/initialize and then inactivated
+# photonNuclear. With photonNuclear wired neither is needed, and both Geant4 photon columns now
+# run the general process as QBBC ships it - which the port's default
+# (`had::GammaGeneralProcess::kOn`) reproduces, zone-3 behaviour included (docs\RISK.md V207).
 #
 # ENERGIES. B1's gun sits on the -z face of a 30 cm water envelope and the scoring volume is
 # the 6 cm bone trapezoid centred at z = +7 cm, so a charged primary has to cross about 19 cm of
@@ -106,12 +106,25 @@ if (-not (Test-Path -LiteralPath $runb1))   { Write-Output "FATAL: no $runb1"; e
 #   hBrems, hPairProd    the radiative processes of a charged hadron: both models' dE/dx is
 #                     exact and neither has a SampleSecondaries (docs/PORTED.md 1.3).
 #   ionElastic        G4NuclNuclDiffuseElastic, both halves ported and the channel not wired.
-#   photonNuclear, electronNuclear, positronNuclear   P13's, and on main since 6c62d94 - but
-#                     the WIRING is not P15's, so they stay off and the gamma and electron rows
-#                     do not move.
+#
+# P19 TOOK FOUR MORE OFF, and with them the photon's PreInit line:
+#   photonNuclear     wired inside the port's general-process step (G4LowEGammaNuclearModel to
+#                     200 MeV, Bertini's photon arm from 199 MeV to 6 GeV, the QGS string model
+#                     from 3 GeV refused by name). With the general process ON - as QBBC ships
+#                     it and as both columns now run it - it is reachable only between 2 m_e and
+#                     100 MeV: above 100 MeV 11.1.1's table 14 equals table 13 and its share
+#                     goes to conversion (docs\RISK.md V207). `/process/em/UseGeneralProcess
+#                     false` came off with
+#                     it; that switch existed only so that photonNuclear could be inactivated.
+#   electronNuclear, positronNuclear   G4ElectroVDNuclearModel: the equivalent photon to
+#                     Bertini below 10 GeV, wired; to FTF as a pi0 above it, refused by name -
+#                     unreachable from any lepton below 10 GeV, so from every beam here.
+#   muonNuclear       never on these lists, because the muons are secondaries of the hadron
+#                     beams and Geant4's always had it; the port's has it since P19 too.
+# The port reports every one of these per beam: the `photo-/lepto-nuclear:` line below.
 $emOnly = @{
-  "gamma"  = @{ PreInit = @("/process/em/UseGeneralProcess false"); Inactivate = @("photonNuclear", "ionElastic") }
-  "e-"     = @{ PreInit = @(); Inactivate = @("electronNuclear", "positronNuclear", "ionElastic") }
+  "gamma"  = @{ PreInit = @(); Inactivate = @("ionElastic") }
+  "e-"     = @{ PreInit = @(); Inactivate = @("ionElastic") }
   "proton" = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic") }
   "alpha"  = @{ PreInit = @(); Inactivate = @("hBrems", "hPairProd", "ionElastic") }
 }
@@ -196,6 +209,7 @@ function Get-PortRefusals([string[]]$out) {
     if ($l -match 'HADRONIC INTERACTIONS WITH NO FINAL STATE') { $keep += $l; continue }
     if ($l -match '^\s+\d+\s+[0-9.eE+-]+\s+MeV\s+\S') { $keep += $l; continue }
     if ($l -match '^interactions:') { $keep += $l; continue }
+    if ($l -match '^photo-/lepto-nuclear:') { $keep += $l; continue }
     if ($l -match '^stack:|^STACK:') { $keep += $l; continue }
   }
   if ($keep.Count -eq 0) { $keep = @("(no refusal ledger printed - no hadronic interaction in this beam)") }

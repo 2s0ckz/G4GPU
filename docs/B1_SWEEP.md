@@ -378,3 +378,67 @@ are all below that turn-on and come back as elastic scatters - and has no inelas
 alpha_4000 loses a quarter of its excess and stays outside three sigma on the other arm,
 `kLightIonCascade`, which still puts 16.3% of the scored energy in the trapezoid. docs/RISK.md
 V206 has the ledgers.
+
+## The photon and electron rows, after P19 (2026-09-27)
+
+P19 wired `photonNuclear`, `electronNuclear`, `positronNuclear` and `muonNuclear` (docs/PORTED.md
+2.1.16), so all four came OFF the Geant4 side's inactivation list - and with them the photon's
+`/process/em/UseGeneralProcess false`, which existed only so that `photonNuclear`, a sub-process
+of `G4GammaGeneralProcess`, could be inactivated at all. Both Geant4 photon columns now run the
+general process as QBBC ships it, and so does the port (`had::GammaGeneralProcess::kOn`, the
+default); `muonNuclear` was never on the list. The six photon and electron beams were re-run one
+at a time at the sweep's counts, `-SkipQBBC`, each side twice:
+
+- **before**: main at e99c870 built with CUDA 12.9 - the same toolkit as the P19 column, not the
+  12:49 table's 11.6 build - against the Geant4 column with the four processes inactivated. That
+  column reproduced the 12:49 table to every printed digit (Geant4 is seeded).
+- **after**: this branch against the new column.
+
+| beam | events | port, before | G4 EM-only, before | diff, sigma | port, after | G4 EM-only, after | diff, sigma |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| gamma 1 MeV | 2,000,000 | 1.27258E-08 | 1.27449E-08 | -0.15%, -0.5 | 1.27258E-08 | 1.27519E-08 | -0.20%, -0.7 |
+| gamma 6 MeV | 2,000,000 | 8.51880E-08 | 8.56154E-08 | -0.50%, -1.7 | 8.51879E-08 | 8.56463E-08 | -0.54%, -1.9 |
+| **gamma 100 MeV** | 1,000,000 | 5.45028E-07 | 5.47863E-07 | -0.52%, -1.9 | 5.46105E-07 | 5.48806E-07 | **-0.49%, -1.8** |
+| e- 20 MeV | 500,000 | 4.65685E-09 | 4.52836E-09 | +2.84%, +2.3 | 4.73191E-09 | 4.63444E-09 | +2.10%, +1.7 |
+| e- 100 MeV | 300,000 | 3.32408E-07 | 3.32673E-07 | -0.08%, -0.3 | 3.31024E-07 | 3.33225E-07 | -0.66%, -2.6 |
+| **e- 1000 MeV** | 100,000 | 2.36786E-07 | 2.40499E-07 | -1.54%, **-3.5** | 2.36520E-07 | 2.38421E-07 | **-0.80%, -1.8** |
+
+Errors are B1's printed rms: 2.6E-11, 1.7E-10, 1.1E-09, 4.1E-11, 6.0E-10 and 7.5E-10 Gy on both
+sides of every row. **Refused, by name: nothing, in any beam** - no ledger block was printed. Each
+run's own count of what reached a nucleus:
+
+| beam | photonNuclear | e-/e+/mu-nuclear | zone-3 photon hand-offs to conversion (V207) | P15 interactions (from their hadrons) |
+|---|--:|--:|--:|--:|
+| gamma 1 MeV | 0 | 0 | 0 | 0 |
+| gamma 6 MeV | 1 | 0 | 0 | 0 |
+| gamma 100 MeV | 835 | 31 | 649 | 5 |
+| e- 20 MeV | 13 | 0 | 0 | 0 |
+| e- 100 MeV | 1,177 | 46 | 0 | 7 |
+| e- 1000 MeV | 852 | 84 | 293 | 11 |
+
+**The two rows the P19 brief named land inside the band.** gamma_100 moves from -1.9 to -1.8
+sigma. e-_1000 was the one row outside three sigma, at -3.5 against a 100,000-event reference
+whose own run-to-run spread P14d measured at 0.69% (the section above); it reads -1.8 now. What
+moved is mostly the reference: the port by -0.11% (0.25 sigma of a before/after difference) and
+Geant4 by -0.86% (1.9 sigma) - a new process list on a seeded Geant4 is a new random stream, the
+same effect that moved this row's reference between the 09-19 and 12:49 runs. At this row's
+statistics neither side's nuclear processes are resolved, and the claim is only that the row is
+inside the band on the like-for-like list, as P14d's 1,000,000-event run already suggested it
+would be.
+
+**e-_100 moved the other way, from -0.3 to -2.6 sigma**: the port by -0.42% (1.6 sigma of its own
+before/after difference) and Geant4 by +0.17% (0.6 sigma). Inside the band, and not resolved as
+physics: a 1,000,000-event pair is what would say whether any of it is the 1,223 nuclear
+reactions the row now has.
+
+**gamma_1 is the bit-identity the brief asked for, measured in the sweep itself**: the port reads
+1.27258E-08 before and after, every digit, because no photon of a 1 MeV beam reaches 2 m_e. Its
+Geant4 column moved by 0.055% (0.2 sigma), which is the general process's own tables replacing
+the separate processes' - the port's does not see that switch at all.
+
+**What the rows cost the port's clock** is docs/RISK.md V211, and it is not small above 10 MeV:
+gamma_100's loop is 10.4 s against main's 1.9, because five of its photo-nuclear hadrons queue a
+P15 interaction and the stack raise that follows pages the card (V190's cost, which a hadron beam
+has always paid). e-_100 goes the other way, 15.6 s on main to 11.3 s here: main raised the stack
+at its first Coulomb recoil ion, which queues nothing, and P19 moved the raise to the first queued
+interaction (V210).

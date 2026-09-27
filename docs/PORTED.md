@@ -1784,6 +1784,53 @@ Eight perturbations on the first test and six on the second, all fourteen detect
 ones being the gate written without the species predicate (5 failures, every ion row) and the
 predicate widened to every species (2 failures, the two non-ion rows).
 
+#### 2.1.16 The photon's, electron's, positron's and muon's nuclear interactions, wired (P19)
+
+Everything in 2.1.14 is reached by a particle now. A photon between 2 m_e and 100 MeV, an
+electron or positron above its material's electro-nuclear threshold and a muon of any energy each
+carry their `G4EmExtraPhysics` process in the step; an interaction that happens goes through a
+queue of its own to a kernel that runs P13's entry point and applies the final state as
+`G4HadronicProcess::FillResult` applies it.
+
+| Geant4 | QBBC | | Where |
+|---|:--:|:--:|---|
+| `photonNuclear` inside `G4GammaGeneralProcess`: one summed total, one length uniform, one selection uniform, photonNuclear the TOP slice (zone 2, `q > P9`) | y | **T** | `step_gamma` (`physics/stepper.cuh`) with `had::photon_nuclear_xs` and `had::gamma_nuclear_slot` (`hadronic/emextra_wiring.cuh`). No uniform is added: with no photo-nuclear term the step is P1's to the bit - `tests/test_emextra_transport.cu` section 1, tolerance zero, below 2 m_e in all four B1 materials (air at 0.8 MeV, where argon is open, included) and in water below oxygen's 11.499 MeV; each photon's two uniforms replayed on the host over 12,000,000 steps, 0 on the wrong branch (section 2); the sweep's gamma_1 row identical before and after to every digit |
+| zone 3 (>= 100 MeV): table 14 = table 13 when `sigM` = 0, photonNuclear unreachable, its share a conversion | y | **T** | `GammaNuclearSlot::kConversion`, counted per run. docs/RISK.md **V207**, measured in the running Geant4 with `ref/gammagp/`: 0 of 1,000,000 at 100, 150 and 500 MeV in water and 100 and 500 MeV in bone, where the share is 1,346 to 7,407; 1,380 and 1,734 at 99.9 MeV |
+| `/process/em/UseGeneralProcess false` - photonNuclear a competitor at every energy | (off) | **T** | `had::GammaGeneralProcess::kOff`, `TransportEngine::SetGammaGeneralProcess(false)`, `G4GPU_GAMMA_GENERAL_PROCESS=0`: the study configuration in which Bertini's photon arm and the QGS refusal are reachable |
+| `electronNuclear`, `positronNuclear`: discrete competitors, LAST on the manager; `fHadNoIntegral` (`isLepton`); the target from the PRE-step energy's partial sums | y | **T** | `step_lepton` with `had::emextra_length`. One uniform if and only if the cross section is positive, so a lepton below its material's threshold keeps its stream (section 1: e- at 5 MeV and e+ at 7.2 MeV in water, 0 of 20,000 steps differ). The rate along the realised path in bone against `sum L_i sigma(E_pre,i)`: 100 of 92.5, 35 of 27.8, 90 of 91.1, 25 of 27.3 (section 3) |
+| `muonNuclear`: one process on both muons; the Kokoulin table clamped below 1 GeV, so a length every step | y | **T** | `step_hadron`'s muon branch (`is_muon` folds away in the other eleven `run_step_hadron`s); section 4 |
+| `G4HadronicProcess::PostStepDoIt` for the four: no integral rejection, `SampleZandA` from the partials at `ekin_pre`, the isotope at the post-step energy, `do { ApplyYourself } while (!CheckResult)` to 100 with the default (2%, 1 GeV) levels, K0 mixing | y | **V** | `had::run_emextra` (`hadronic/interaction_apply.cuh`); `tests/test_emextra_wiring.cu` section 6 on the host, and queued entries run through it in `tests/test_emextra_transport.cu` section 5 |
+| `FillResult` | y | **V** | `had::fill_result_into`, the in-place transcription of P5's `fill_result` (whose 20.6 kB by-value return would sit on the drain's stack): 0 of 4,000 cases differ from it |
+| the queue and the model call | - | **T** | a SECOND `InteractionQueue` (`HadronicWiring::emx_queue`, 131,072 entries = 49.0 MB) and two drain kernels that read its cursor ON THE DEVICE - `run_emextra_drain<kPhotoNuclear>` and `<kLeptoNuclear>`, `host/transport_run_int_photonuclear.cu` and `..._leptonuclear.cu`, in build_engine.bat's serial pass. No host synchronisation: a photon run pays two launches an iteration |
+| per-material and per-element thresholds | - | **T** | `host/hadronic_upload.cuh`: `G4GammaNuclearXS`'s last leading-zero node and `max(EMi, ThresholdEnergy(Z, N))`, below which every element's cross section is exactly zero - so the steppers skip the call and the uniform there, and the store skips the element. Water: 11.499 MeV (photon), 7.296 MeV (lepton) |
+
+**What is refused, by name.** Five `had::HadronicRefusal` entries, appended under P15's rule: the
+SIZE rows `kPhotoNuclear` and `kLeptoNuclear` (one booking a lost interaction, the projectile's
+kinetic energy on it) and the WHY rows `kPhotoNuclearQgs`, `kLeptoNuclearFtf` and
+`kEmExtraRefused`.
+
+| refusal | reachable in QBBC? | rate |
+|---|---|---|
+| `kPhotoNuclearQgs` - the photon's `G4QGSModel<G4GammaParticipants>`, 3 GeV - 100 TeV | **no**: photonNuclear is never selected above 100 MeV (V207) | 0 by construction; 20 of 20 at 10 GeV through `run_emextra` directly (host test) |
+| Bertini's photon arm, 199 MeV - 6 GeV | **no**, for the same reason | runs, with the general process off |
+| `kLeptoNuclearFtf` - the VD models' pi0-into-FTF arm, equivalent photon >= 10 GeV | only from a lepton above 10 GeV | 9 of 200 interactions of a 30 GeV electron (host test); unreachable in every B1 beam |
+| `kEmExtraRefused` - any other P13 refusal | yes | **0** of 835 + 31, 1,177 + 46 and 852 + 84 photo- + lepto-nuclear interactions in the sweep's gamma_100, e-_100 and e-_1000 |
+| `kInelasticQueueFull` + the SIZE row | tripwire | a four-entry queue: 8,891 refusals booked in both groups and disposed of (section 6) |
+
+**Frames** (CUDA 12.9.86, `-Xptxas -v`, every unit at -O3; docs/RISK.md V210): the two drains
+11,936 and 4,112 bytes, both under the 16,384-byte stepping stack, so a photon run never raises
+it for them; they run in P15's slot pool, which does not grow. `run_step_gamma` 3,856 bytes against
+main's 3,776 and `run_step_lepton` 4,976 against 4,928, their wiring `__grid_constant__`. The
+lepto-nuclear drain's constant bank 2 is 65,532 of 65,536 bytes.
+
+**And three things measured in the general process that this package did not change** - docs/RISK.md
+V208 (no Rayleigh scattering above 2 m_e there; the port's photon has it), V209 (the photo-nuclear
+share is a 51-node linearly interpolated table there and the cross section here: 16% apart at
+22 MeV in compact bone, with the recipe for the table) and V211 (a photon or electron beam above
+the resonance now queues P15 interactions through its hadrons and pays V190's stack raise:
+gamma_100's loop 1.9 s -> 10.4 s). The 2.2 row for `G4EmExtraPhysics` says "Not wired into a
+stepper"; this subsection retires that.
+
 
 ### 2.2 What QBBC needs and is not there
 

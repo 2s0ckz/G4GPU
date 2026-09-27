@@ -13163,3 +13163,268 @@ package's. Those 344 still deposit 132,613 MeV in the scorer, 16.3% of its energ
 port would read 6.28E-08 against Geant4's 6.70E-08, so Geant4 is inside the bracket the remaining
 refusals define, as V201 found before either arm was answered. That row stays outside three sigma
 until `kLightIonCascade` is closed.
+
+### V207: above 100 MeV QBBC's photon never reaches a nucleus - G4GammaGeneralProcess 11.1.1 gives the photo-nuclear share to conversion
+
+P19 wired `photonNuclear` into the photon's step, and the place it had to go is inside
+`G4GammaGeneralProcess` (physics_lists/constructors/electromagnetic/src/G4GammaGeneralProcess.cc).
+QBBC makes `phot`, `compt`, `conv` and `Rayl` sub-processes of one general process and
+`G4EmExtraPhysics::ConstructGammaElectroNuclear` hands it `photonNuclear` through
+`AddHadProcess`. One summed table gives one interaction length, and `PostStepDoIt` draws one
+uniform `q` and walks four energy zones. In zone 3 - `preStepKinEnergy >= minMMEnergy`,
+100 MeV, lines 627-639 - the walk is
+
+    if      (q + P11 <= 1) conv
+    else if (q + P12 <= 1) compt
+    else if (q + P13 <= 1) phot
+    else if (theGammaNuclear && q + P14 <= 1) photonNuclear
+    else if (theConversionMM) mu-pair
+    else conv
+
+and `BuildPhysicsTable` fills (lines 427-436) table 13 with `(sigN + sigM)/sum` and table 14
+with `sigN/sum`, `sigM` being `G4GammaConversionToMuons`' cross section. **QBBC builds no
+`G4GammaConversionToMuons`** (`gmumuActivated` false; `tests/test_emextra_wiring.cu` section 1
+asserts `GammaToMuPair` absent from the dumped process list), so `sigM` is exactly 0.0,
+`sigN + sigM` is `sigN` to the last bit, tables 13 and 14 hold the same numbers with the same
+spline coefficients, and the photonNuclear branch tests the complement of the condition that has
+just failed. It cannot be taken. `theConversionMM` is null and the share falls to the last line:
+a conversion.
+
+**So above 100 MeV the photo-nuclear cross section is in the photon's total - the photon
+interacts as often as it would - and that fraction of its interactions are pair conversions.**
+Measured in the running Geant4 with `ref/gammagp/` (new in P19): the process that defined the
+first interaction of 1,000,000 photons per point, in a 10 km box of the material, secondaries
+killed. "Share" is what each sub-process would take of the summed cross section -
+`G4EmCalculator::ComputeCrossSectionPerVolume` for the EM four and
+`G4HadronicProcessStore::GetInelasticCrossSectionPerVolume` for `photonNuclear`:
+
+| material | E (MeV) | zone | photonNuclear, counted | its share | conv, counted | conv + photonNuclear shares |
+|---|--:|:--:|--:|--:|--:|--:|
+| water | 99.9 | 2 | **1,380** | 1,366 | 836,065 | - |
+| water | 100 | 3 | **0** | 1,346 | 837,242 | 837,793 |
+| water | 150 | 3 | **0** | 1,943 | 886,540 | 887,792 |
+| water | 500 | 3 | **0** | 7,407 | 963,518 | 963,555 |
+| bone | 99.9 | 2 | **1,734** | 1,735 | 865,632 | - |
+| bone | 100 | 3 | **0** | 1,721 | 867,646 | 867,447 |
+| bone | 500 | 3 | **0** | 6,358 | 970,722 | 970,752 |
+
+A tenth of an MeV below the edge photonNuclear takes its share to within statistics; at the edge
+and above it takes none of five million, and conversion takes its own share plus
+photonNuclear's (the residuals in that column are the EM tables' interpolation, the same size
+in Compton's). The zone-2 rows away from the edge are V209's.
+
+**What it decides for the port.** The only photo-nuclear model QBBC's photon reaches is
+`G4LowEGammaNuclearModel` (0 - 200 MeV): Bertini's photon arm starts at 199 MeV and the QGS
+generator at 3 GeV, both above the edge, so their rates through the PHOTON process are zero by
+construction - not by statistics - and so is the rate of the QGS refusal the P19 brief asked to
+be named (`kPhotoNuclearQgs`). The giant resonance, 10 - 30 MeV, is inside zone 2. A 100 MeV
+primary is in zone 3 (`<` is strict), so in the B1 sweep's 100 MeV beam it is the shower's
+photons that react, never the primary. The two lepton models reach Bertini through their own
+`G4CascadeInterface`, which is a different road.
+
+`step_gamma` transcribes the branch as it runs. `had::gamma_nuclear_slot` answers
+`kConversion` in zone 3, and the top slice of the selection uniform - where the photo-nuclear
+share sits in zones 2 and 3 alike - becomes a conversion, counted
+(`EmxStat::kEmxZone3Conversion`, printed at the end of every run as "photon interactions
+>= 100 MeV whose photonNuclear share went to conversion"). `tests/test_emextra_transport.cu`
+section 2 replays every photon's two uniforms on the host and asserts, photon by photon, that
+the device took the top slice of the second over the summed total: 0 of 12,000,000 steps on
+the wrong branch, and the zone-3 hand-offs equal to the photons in the slice - 1,240 of
+1,000,000 at 100 MeV in water, 1,844 at 150 MeV, 6,345 at 500 MeV in bone. Moving the slice to
+the bottom of the uniform left every binomial rate in that section passing and failed the
+replay in ten of the eleven cells it had then.
+
+`/process/em/UseGeneralProcess false` is `had::GammaGeneralProcess::kOff`
+(`TransportEngine::SetGammaGeneralProcess(false)`, `G4GPU_GAMMA_GENERAL_PROCESS=0`): photonNuclear
+is then an ordinary competitor at every energy, with its own cross section from the store at
+the photon's energy - the configuration in which Bertini's photon arm and the QGS refusal are
+reachable, and the one the like-for-like photon column used before P19.
+
+**Why nobody had seen it.** Every photo-nuclear number in this project before P19 came from the
+models and cross sections directly (P13's oracles), where all of it is present and correct; the
+branch is in the general process, which only a transport exercises; and a transport comparison
+cannot see a process that is absent from BOTH sides - the like-for-like column had it
+inactivated, and the QBBC column runs the same branch.
+
+### V208: the general process has no Rayleigh scattering above 2 m_e, and this port's photon does
+
+`G4GammaGeneralProcess` sums Rayleigh into zones 0 and 1 only (below 2 m_e); zones 2 and 3 are
+`sigComp + sigConv + sigPE (+ sigN)`, so above 2 m_e a QBBC photon never Rayleigh-scatters.
+P1's photon evaluates `Rayl` at every energy, which is what Geant4 does with the general process
+OFF - the configuration the sweep's like-for-like photon column ran in until P19 (V207), so the
+difference was invisible in it. Counted with `ref/gammagp/` (1,000,000 first interactions a
+point):
+
+| material | E (MeV) | zone | Rayl, counted | its share of the five |
+|---|--:|:--:|--:|--:|
+| water | 1.0 | 1 | 757 | 789 |
+| water | 1.5 | 2 | **0** | 432 |
+| water | 6 | 2 | **0** | 57 |
+| air | 0.8 | 1 | 1,202 | 1,205 |
+| air | 6 | 2 | **0** | 61 |
+| air | 17 | 2 | **0** | 11 |
+
+So above 2 m_e the port gives Rayleigh 4.3e-4 of a 1.5 MeV photon's interactions in water and
+5.7e-5 of a 6 MeV photon's, where Geant4 gives them to the other three in proportion. A
+coherent scatter deposits nothing and turns the photon by some tens of milliradians at these
+energies, so the dose effect is far below any row's statistics; it is recorded because P19 moved the
+like-for-like photon column to the general process ON, and because it is not P19's to change: it
+would move every photon above 1.022 MeV in every run, which is the bit-identity the P19 brief
+asks to keep. The fix, when someone wants it, is one condition in `em::gamma_macroscopic_xs` -
+Rayleigh off above 2 m_e when the general process is on - and a new gamma gate.
+
+### V209: inside the general process the photo-nuclear share is a 51-node table, and across the giant resonance it is 16% off its cross section
+
+`G4GammaGeneralProcess::BuildPhysicsTable` fills zone 2 (2 m_e to 100 MeV) on
+`G4PhysicsLogVector(minEEEnergy, minMMEnergy, nHighE = 50, false)` - 51 nodes, 9.6% apart,
+**no spline** - and `PostStepDoIt` reads table 9, `(sigConv + sigComp + sigPE)/sum` (1.0 where
+`sigN` is zero), through `LogVectorValue`: the bin from the logarithm, the value LINEAR in E
+between the two nodes. A photo-nuclear cross section has the giant resonance's structure inside
+one bin, so the share the general process applies is not `sigN/sum` at the photon's energy.
+Counted in the running Geant4 (`ref/gammagp/`, 1,000,000 photons a point) against both - "table"
+being table 9 rebuilt at Geant4's own nodes from THIS port's cross sections and interpolated the
+way `LogVectorValue` interpolates:
+
+| material | E (MeV) | sigN/sum | table 9 | Geant4, counted | z against the table |
+|---|--:|--:|--:|--:|--:|
+| water | 20 | 1.4821e-2 | 1.6071e-2 | 1.5891e-2 | -1.4 |
+| water | 60 | 4.4651e-3 | 4.6757e-3 | 4.8180e-3 | +2.1 |
+| water | 99.9 | 1.3662e-3 | 1.3519e-3 | 1.3800e-3 | +0.8 |
+| bone | 22 | 4.2695e-2 | **3.5692e-2** | **3.5580e-2** | -0.6 |
+| bone | 99.9 | 1.7353e-3 | 1.7284e-3 | 1.7340e-3 | +0.1 |
+| air | 17 | 1.0415e-2 | 9.5585e-3 | 9.4840e-3 | -0.8 |
+| air | 6 | 3.2284e-6 | 3.2880e-6 | 4.0e-6 | +0.4 |
+| A-150 | 60 | 4.7101e-3 | 4.8121e-3 | 4.6810e-3 | -1.9 |
+
+Against `sigN/sum` the same counts are +8.9, +5.3, -35 and -9.2 sigma at water 20, water 60,
+bone 22 and air 17 MeV. **Geant4's photo-nuclear rate in zone 2 is the table's**, and a photon of
+22 MeV in compact bone reacts with a nucleus 16% less often in QBBC than its cross section says.
+
+**This port follows the cross section**, which is what the P19 brief specifies ("interaction
+length from P13 cross sections through P5's store"), and so differs from Geant4 by the column
+between them: locally in energy, by up to -16%/+8% across the resonance and by a percent or
+less away from it. Over a shower's spectrum the two partly average, and in a dose the whole
+photo-nuclear channel is a small term; in a neutron yield it is the term. Transcribing the
+table is the fix and it is a contained one - per material, table 9 at the 51 nodes from the four
+cross sections the step already evaluates (host, at upload), and in `step_gamma` zone 2 the
+photon's photo-nuclear probability `1 - P9(E)` in place of `sigN/(total + sigN)`, which also
+removes the per-step store evaluation. It has one Geant4 edge to carry with it: between a
+material's last all-zero node and its data threshold (11.08 - 11.50 MeV in water) the
+interpolated share is positive where the store's cross section is exactly zero, so Geant4
+selects photonNuclear there and `SampleZandA` walks all-zero partial sums - one uniform, the
+material's FIRST element. The drain would have to do the same rather than book its
+`kEmExtraRefused` tripwire. Not done here: it changes what the brief specified, and the zone-3
+tables (splined, 7 a decade to 100 TeV) would want the same treatment for the size of V207's
+conversion slice, where the difference is a fraction of 1e-3 of the conversions.
+
+### V210: the gamma gate went from 1.2 s to 13.5 s with the drains in, and three fixes bring it to +2.7%
+
+P19's engine half - two drain kernels that read the photo-/lepto-nuclear queue's cursor on the
+DEVICE, so a photon run pays two launches an iteration and no synchronisation - was measured on
+B1's 6 MeV gate (`exampleB1 -n 2000000`) before anything else, and the first number was eleven
+times main's. Three things, each measured, in the order the gate found them:
+
+**1. The queue was sized by the proof, and the proof is 743.5 MB.** A photon or an e+- is
+stepped against a reservation of four output slots, so one launch steps at most `pool/4` of
+them, plus `pool/48` muons, and each queues at most once. That is P15's kind of bound, and on
+B1's gamma batch (1,834,944 events, 4 live an event) it was 1,988,880 entries of 392 bytes; at a
+hadron beam's 32 live an event it would have been 6.2 GB. The gate has ONE photo-nuclear reaction
+in 2,000,000 events (a 6 MeV photon above A-150's 4.0 MeV or bone's 5.5 MeV threshold); its
+products are hadrons, the first hadron raised the device stack to 94,208 bytes a thread (V190),
+the raise reported "0.00 GB of 8.00 GB left", WDDM paged, and the event loop took **13,478 ms**.
+The capacity is now `pool/40 + 1024` capped at **131,072 entries, 49.0 MB**: a margin on the
+expectation - a photon's photo-nuclear probability, sigN/(total + sigN), is 4.27% at its largest
+in B1's materials (compact bone, 22 MeV) and under 5% at every giant-resonance peak, a lepton's
+about 1e-5 a step - whose Chernoff tail is below 1e-13 for a launch of 2,000 photons, with the
+floor for smaller ones. It is not a proof, so `kInelasticQueueFull` plus the SIZE row stays the
+tripwire and the run prints the deepest iteration: 1 in the gate, 81 in gamma_100, 111 in
+e-_100, 63 in e-_1000.
+
+**And the stack was raised for a hadron, not for an interaction.** P15 raised it the first time an
+iteration had a hadron alive. A photon run makes hadrons now, and one that never queues anything
+still paid the whole reservation, so the call moved to where an interaction kernel is about to
+launch - inside `n_queued > 0`, where every launch of P15's five kernels already was. Nothing
+changes for a run that interacts. A stage-1 neutron (elastic and capture, no process that
+queues) and a pi0 no longer hold P15's per-iteration read-back open either; everything else that
+reserves 48 slots still does.
+
+**2. +87 ms: a call per photon step to learn the term was zero.** Five configurations of the gate,
+interleaved round by round: main, P19, P19 with all four processes off, photo off, electro off.
+With the processes off P19 matched main; with photonNuclear on it did not. `photon_nuclear_xs` is
+`__noinline__` and tested the zone and the threshold inside, so every photon step - below 2 m_e
+included - made a call out of a 255-register kernel and saved and restored what was live around
+it. The zone and threshold tests are inline in `step_gamma` (and the threshold in `step_lepton`)
+now, before the call; and `EmExtraXsFn::element` skips each ELEMENT at its own threshold, from a
+per-element table uploaded beside the per-material one - in air at 6 MeV argon is open and
+carbon, nitrogen and oxygen are not, so three of the four vectors were being evaluated to add
+zeros. Both are identities: `tests/test_emextra_transport.cu` reproduces every count of the
+previous build to the digit, and `tests/test_emextra_wiring.cu` asserts the per-element table
+against the element functions and the skipped per-volume cross sections, partial sums included,
+against the unskipped ones.
+
+**3. +47 ms: 416 bytes of frame from taking a parameter's address.** `run_step_gamma` and
+`run_step_lepton` pass `&had` to the stepper, and a by-value kernel parameter whose address is
+taken is copied into every thread's local memory first. Both are `const __grid_constant__` now -
+nvcc requires the annotation on the explicit instantiations as well, so the `G4GPU_STEP_GAMMA`
+and `G4GPU_STEP_LEPTON` macros carry it - and `run_step_gamma`'s frame fell from 4,192 to 3,856
+bytes against main's 3,776.
+
+**Where it ends**, six interleaved runs each, the card warm:
+
+| gate, 2,000,000 events | event loop | vs main |
+|---|--:|--:|
+| main (e99c870, CUDA 12.9) | 1,175.5 +- 3.0 ms | - |
+| P19 | **1,207.6 +- 3.8 ms** | **+2.7%** |
+| P19, all four processes off | 1,190.3 +- 6.9 ms | +1.3% |
+
+The dose moves in the last printed digit, 425.940 to 425.939 pGy - that one reaction - and every
+other digit of the run is main's. Of the remaining 32 ms, about half is the stepping kernels' new
+code and frames (the processes-off row) and about half is that reaction: its products kept a
+hadron alive in 11 of the run's 172 iterations, each of which pays P15's synchronising read-back
+of its queue cursor. Removing that half is P15's drain without a host read-back, which is what
+`run_emextra_drain` does for its own queue and which P15's five kernels could do the same way.
+
+**The frames**, against main, CUDA 12.9.86 at ptxas's -O3 (no unit needed a lower rung):
+
+| kernel | main | P19 | spill st/ld (P19) | cmem[0] | cmem[2] |
+|---|--:|--:|--:|--:|--:|
+| `run_step_gamma` | 3,776 B | 3,856 B | 536 / 1,584 | 1,472 -> 1,808 | 3,368 -> 5,168 |
+| `run_step_lepton` (e-, e+) | 4,928 B | 4,976 B | 80 / 44 | 1,472 -> 1,808 | 4,488 -> 6,056 |
+| `run_step_hadron`, `run_step_neutral`, four of the five `run_interaction` | | +48 to +112 B | | +88 | |
+| `run_emextra_drain<kPhotoNuclear>` | - | **11,936 B** | 564 / 1,044 | 1,624 | 62,944 |
+| `run_emextra_drain<kLeptoNuclear>` | - | **4,112 B** | 552 / 1,036 | 1,624 | **65,532** |
+
+The hadron kernels copy the wiring struct, which grew by 96 bytes; `run_interaction<kLightIon>`,
+88,960 bytes, still sets a 94,208-byte reservation. Both drains are under the 16,384-byte
+stepping stack, so a photon run never raises it for them - Upload reads their `localSizeBytes`
+and prints them against the limit - and neither carries its own slot: they run in P15's pool
+(128 slots, unchanged) after P15's drain on the same stream. **The lepto-nuclear drain's constant
+bank 2 is 65,532 of 65,536 bytes** - V170's hazard, four bytes from "entry function uses too much
+data for .const". ptxas cost under 12.9, serial: the photo-nuclear unit 15,739 MB and 508 s, the
+lepto-nuclear unit 11,147 MB and 451 s (and the same build put P15's at-rest unit at 22,490 MB,
+where V189 recorded 19,770 under 11.6).
+
+### V211: the photon and electron beams make hadrons now, and above 10 MeV they pay what a hadron beam pays
+
+The like-for-like doses (docs/B1_SWEEP.md, P19's section) are inside two sigma on five of six
+beams and -2.6 on the sixth; the port's loop times are not all where they were:
+
+| beam | port loop, main | port loop, P19 | P15 interactions queued | iterations with a hadron |
+|---|--:|--:|--:|--:|
+| gamma 1 MeV | 934 ms | 945 ms | 0 | 0 of 146 |
+| gamma 6 MeV | 1,171 ms | 1,199 ms | 0 | 11 of 172 |
+| gamma 100 MeV | 1,883 ms | **10,444 ms** | 5 | 60 of 113 |
+| e- 20 MeV | 747 ms | 868 ms | 0 | 8 of 78 |
+| e- 100 MeV | **15,566 ms** | 11,271 ms | 7 | 265 of 269 |
+| e- 1000 MeV | 9,181 ms | **17,015 ms** | 11 | 65 of 703 |
+
+A 100 MeV photon beam now has 835 photo-nuclear reactions in 1,000,000 events; five of their
+hadrons queue a P15 interaction, the first of those raises the device stack under 3.25 GB of
+track buffers, and the raise leaves 0.00 GB - V190's cost, which a hadron beam has always paid and
+a photon beam now reaches the same way. Halving the pool (`G4GPU_LIVE_PER_EVENT=2`) takes the same
+run to 4,917 ms with the same dose, which is the memory's share. e-_1000 adds a tail: its
+photo-nuclear neutrons stretch a batch from 96 iterations to 703, each stepped under the raised
+stack. **e-_100 goes the other way**, 15.6 s to 11.3 s: on main its first G4CoulombScattering
+recoil ion - which queues nothing - raised the stack, and since V210 only a queued interaction
+does. The fix for the rest is P15's and not this package's: a reservation the batch is sized
+against, or interaction kernels whose frames fit the stepping stack.
