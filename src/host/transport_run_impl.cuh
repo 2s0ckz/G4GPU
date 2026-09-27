@@ -266,11 +266,24 @@ __global__ void scatter_interactions(const had::PendingInteraction<real_t>* item
   list[off.base[b] + atomicAdd(&cursors[b], 1)] = i;
 }
 
+/// One step of one photon.
+///
+/// @param had P19: the hadronic wiring, for `photonNuclear` - the photon's first hadronic
+///        process, and why this kernel takes the struct `run_step_hadron` has always taken. A
+///        photon whose step ends in a photo-nuclear interaction leaves through
+///        `had.emx_queue` rather than through `out`; see `run_step_hadron`'s `queued`.
+///
+///        `__grid_constant__`, AND THAT IS MEASURED: `step_gamma` takes the struct's address, and
+///        an ordinary by-value kernel parameter whose address is taken is copied into every
+///        thread's local memory first - 416 bytes of frame on this kernel, which is the one B1's
+///        6 MeV gate spends its time in. With the qualifier the address is the parameter
+///        bank's own and nothing is copied (docs/RISK.md V210 has the gate before and after).
 template <typename real_t, typename StepHook>
 __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, const int* idx,
                                TrackBuffer<real_t> out, int n, int batch, double* score,
-                               double* voxel_score,
-                               int n_step, vis::TrajectoryBuffer traj, int* status_warn,
+                               double* voxel_score, int n_step,
+                               const __grid_constant__ had::HadronicWiring<real_t> had,
+                               vis::TrajectoryBuffer traj, int* status_warn,
                                SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
@@ -333,7 +346,11 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  const bool alive = step_gamma(scene, p, rng, em, edep, srep, traj);
+  // `queued`: P19's exit, the same as `run_step_hadron`'s - a photo-nuclear interaction's
+  // photon is the queue entry, and `run_emextra_drain` finishes its step, hook call included.
+  bool queued = false;
+  const bool alive = step_gamma(scene, p, rng, em, edep, srep, traj, &had, &queued);
+  if (queued) { return; }
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
   // G4Transportation::AlongStepDoIt. Done before the hook so a stepping action reads the
@@ -395,11 +412,14 @@ __global__ void run_step_gamma(Scene<real_t> scene, TrackBuffer<real_t> in, cons
   if (requeue) { out.append(p); }
 }
 
+/// One step of one electron or positron. `had` is P19's, for `electronNuclear` and
+/// `positronNuclear`, and `__grid_constant__` for the reason `run_step_gamma` gives.
 template <typename real_t, bool kIsPositron, typename StepHook>
 __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, const int* idx,
                                 TrackBuffer<real_t> out, int n, int batch, double* score,
-                                double* voxel_score,
-                                int n_step, vis::TrajectoryBuffer traj, int* status_warn,
+                                double* voxel_score, int n_step,
+                                const __grid_constant__ had::HadronicWiring<real_t> had,
+                                vis::TrajectoryBuffer traj, int* status_warn,
                                 SecondaryArena sec, EmitterBooks books, StepHook hook) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
@@ -447,7 +467,12 @@ __global__ void run_step_lepton(Scene<real_t> scene, TrackBuffer<real_t> in, con
   const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
 
   real_t edep = 0;
-  const bool alive = step_lepton(scene, p, kIsPositron, rng, em, edep, srep, traj);
+  // `queued`: see `run_step_gamma`. A lepto-nuclear interaction's lepton comes back alive from
+  // `run_emextra_drain`, which writes it into the pool itself.
+  bool queued = false;
+  const bool alive =
+      step_lepton(scene, p, kIsPositron, rng, em, edep, srep, traj, &had, &queued);
+  if (queued) { return; }
   ++p.step;
   // The clocks, from the PRE-step energy: see TrackState::advance, transcribed from
   // G4Transportation::AlongStepDoIt. Done before the hook so a stepping action reads the
@@ -1068,6 +1093,211 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
   if (requeue) { out.append(p); }
 }
 
+// ---------------------------------------------------------------- P19: the EM-extra drain
+//
+/// One counter past `had::EmxStat`'s, owned by the engine rather than the steppers: the deepest
+/// the queue's cursor got in any iteration of the run - pushes the capacity refused included -
+/// recorded by the drain's thread 0, so that the capacity `Upload` chose is printed against a
+/// measurement rather than an argument.
+inline constexpr int kEmxQueueDepth = had::kNumEmxStats;
+inline constexpr int kEmxCounters = had::kNumEmxStats + 1;
+
+/// Every queued photo- or lepto-nuclear interaction of ONE bucket, drained by a fixed grid that
+/// reads the queue's cursor on the device.
+///
+/// WHY THIS IS NOT `run_interaction` BEHIND P15's HOST DRAIN. That drain reads the queue's
+/// cursor back to the host - a full device synchronisation - and only runs on an iteration with
+/// a hadron alive, because running it unconditionally cost B1's 2,000,000-event photon gate 66%
+/// of its event loop (`BeamOn`'s own measurement: 1,172 ms to 1,947 ms). A photon run can queue
+/// a photo-nuclear interaction on any iteration it has a photon above 2 m_e, so it would pay
+/// that on every one. This kernel is launched on every iteration with a photon (or an e+-, or a
+/// muon) alive, as `n_slots` threads that each read `*cursor` and walk the queue in strides;
+/// with nothing queued every thread returns at once and the launch costs its launch - no copy
+/// back, no host wait. `tests/test_emextra_transport.cu` and the gate's own clock are the
+/// measurement.
+///
+/// THREAD i TAKES SLOT i FOR EVERY ENTRY IT RUNS, one after another, which is P15's chunked drain
+/// done inside one launch: the slot count is still a capacity whose shortage costs time and not
+/// interactions. P15's drain runs BEFORE this one on the same stream, so the two never hold a
+/// slot at once.
+///
+/// @param cursor   `HadronicWiring::emx_queue.cursor`, read here and never written: the engine
+///                 rewinds it at the top of each iteration.
+/// @param capacity the queue's; a cursor past it counts refused pushes, which the stepper has
+///                 already booked as `kInelasticQueueFull`.
+template <typename real_t, had::InteractionBucket kBucket, typename StepHook>
+__global__ void run_emextra_drain(Scene<real_t> scene, const had::PendingInteraction<real_t>* items,
+                                  const int* cursor, int capacity, TrackBuffer<real_t> out,
+                                  int batch, double* score, double* voxel_score,
+                                  had::HadronicWiring<real_t> had,
+                                  had::InteractionPool<real_t> pool,
+                                  vis::TrajectoryBuffer traj, int* status_warn,
+                                  SecondaryArena sec, EmitterBooks books, StepHook hook) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (items == nullptr || cursor == nullptr) { return; }
+  const int n_queued = (*cursor < capacity) ? *cursor : capacity;
+  if (tid == 0 && had.emx_stats != nullptr) {
+    atomicMax(&had.emx_stats[kEmxQueueDepth], static_cast<unsigned long long>(*cursor));
+  }
+  const int stride = gridDim.x * blockDim.x;
+  (void)traj;  // the stepper recorded the step's segment before it enqueued; see run_interaction
+  for (int k = tid; k < n_queued; k += stride) {
+    const had::PendingInteraction<real_t>& q = items[k];
+    if (q.bucket != kBucket) { continue; }
+    TrackState<real_t> p = q.track;
+    if (had.emx_stats != nullptr) {
+      atomicAdd(&had.emx_stats[(kBucket == had::InteractionBucket::kPhotoNuclear)
+                                   ? had::kEmxPhotoDrained
+                                   : had::kEmxLeptoDrained],
+                1ull);
+    }
+
+    // The voxel cell the step STARTED in - `run_interaction`'s block, for the same reason.
+    int vcell = -1;
+    if (q.score_slot >= 0 && q.volume_pre >= 0 && voxel_score != nullptr) {
+      const auto& vv = scene.geometry.volumes[q.volume_pre];
+      if (vv.score_per_voxel) {
+        const auto grid = geom::voxel_grid_of(vv.solid);
+        const auto qp = geom::to_local(vv.xform, q.pos_pre);
+        int ijk[3];
+        geom::voxel_cell_of(grid, qp, ijk);
+        vcell = grid.index(ijk[0], ijk[1], ijk[2]);
+      }
+    }
+
+    // `had::kInteractionRngPurpose`, keyed by the step as `run_interaction` keys it. The two
+    // drains never see the same (key, step): a track queues at most one interaction per step.
+    Philox<real_t> rng(p.rng_key, p.step, had::kInteractionRngPurpose);
+
+    const had::EmExtraProcess process = had::emextra_process_of(q.species);
+    StepReport<real_t> srep{};
+    srep.true_length = q.true_length;
+    srep.safety = q.safety;
+    srep.non_ionizing = q.non_ionizing;
+    srep.material = q.material;
+    srep.status = q.status;
+    srep.process = had::emextra_process_id(process);
+
+    const real_t track_mass = particle_def<real_t>(q.species).mass;
+    BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step, q.child_count,
+                             q.track.global_time, p.weight,
+                             TrackState<real_t>::pre_step_velocity(q.ekin_pre, track_mass),
+                             sec, q.sec_last, &srep, books};
+
+    real_t edep = q.edep;
+    bool alive = false;
+    had::InteractionSlot<real_t>* slot = pool.slot(tid);
+    had::InteractionOutcome outc;
+    if (slot == nullptr) {
+      // The grid is `n_slots` wide, so this cannot happen; kept for the reason P15 keeps its
+      // own: the alternative to refusing is two threads in one workspace.
+      outc.refusal = had::HadronicRefusal::kInteractionNoSlot;
+    } else {
+      physics::hadronic::HadProjectile<real_t> proj;
+      proj.pdg = pdg_code(q.species);
+      proj.charge = particle_def<real_t>(q.species).charge;
+      proj.mass = track_mass;
+      proj.kin_energy = p.ekin;
+      proj.baryon_number = 0;
+      outc = had::run_emextra<real_t, kBucket>(proj, q.species, scene.materials[q.material],
+                                               q.material, had.emextra, q.ekin_pre, *slot,
+                                               had.level_data, pool.fermi, rng, nullptr);
+    }
+    if (outc.ran && slot != nullptr) {
+      had::fill_result_into<real_t, had::kInteractionSecondaryCap, had::kInteractionSecondaryCap>(
+          slot->fs, p.dir, p.global_time, p.weight, had::emextra_has_at_rest(q.species),
+          slot->pdg_mass, slot->filled);
+      edep += slot->filled.local_energy_deposit;
+      srep.non_ionizing += slot->filled.non_ionizing_energy_deposit;
+      em.pos = p.pos;
+      em.volume = p.volume;
+      em.event = p.event;
+      had::emit_interaction_result<real_t>(slot->filled, em, had.books);
+      // The primary goes back into the pool whenever `FillResult` did not kill it, at any
+      // energy: a lepton below its tracking cut is the STEPPER's to finish - the electron
+      // deposits the rest and the positron annihilates at rest - and a stopped mu- is captured
+      // from `step_hadron`'s dying branch. Deciding that here, with a hadron's cut, would have
+      // lost a positron's two photons.
+      if (slot->filled.status == physics::hadronic::TrackStatusChange::kAlive) {
+        p.ekin = slot->filled.energy;
+        p.dir = slot->filled.momentum_direction;
+        alive = (p.volume != geom::kOutsideWorld);
+      } else if (slot->filled.status == physics::hadronic::TrackStatusChange::kStopButAlive) {
+        p.ekin = real_t(0);
+        alive = (p.volume != geom::kOutsideWorld);
+      } else {
+        p.ekin = real_t(0);
+      }
+    }
+    // The two ledger groups, on the conditions `run_interaction` books them on.
+    if (outc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
+      had::book_refusal<real_t>(had.books, outc.refusal, q.track.ekin);
+    }
+    if (!outc.ran) {
+      had::book_refusal<real_t>(had.books,
+                                (process == had::EmExtraProcess::kPhotonNuclear)
+                                    ? had::HadronicRefusal::kPhotoNuclear
+                                    : had::HadronicRefusal::kLeptoNuclear,
+                                q.track.ekin);
+      // The conservative disposal every refused interaction in this engine gets, and NOT what
+      // Geant4 does: the energy stays where the interaction was. A positron keeps its rest mass
+      // out of the answer this way, which the WHERE row below says nothing about - it is booked
+      // under the SIZE row's energy, which is the kinetic energy only.
+      if (q.score_slot >= 0) {
+        edep += p.ekin;
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kRefusedEnergyScored, p.ekin);
+      }
+      p.ekin = real_t(0);
+      srep.status = StepStatus::fStopAndKill;
+    }
+
+    ++p.step;
+    p.advance(srep.true_length, q.ekin_pre, track_mass);
+    p.flags &= ~kFirstStepInVolume;
+    if (edep != real_t(0) && q.score_slot >= 0) {
+      atomicAdd(&score[static_cast<size_t>(q.score_slot) * batch + p.event],
+                static_cast<double>(edep));
+      if (vcell >= 0 && voxel_score != nullptr) {
+        atomicAdd(&voxel_score[vcell], static_cast<double>(edep));
+      }
+    }
+
+    DeviceStep<real_t> ds{};
+    ds.species = q.species;
+    p.species = q.species;
+    ds.ekin_pre = q.ekin_pre;
+    ds.ekin_post = alive ? p.ekin : real_t(0);
+    ds.edep = edep;
+    ds.length = srep.true_length;
+    ds.pos_pre = q.pos_pre;
+    ds.pos_post = p.pos;
+    ds.dir_pre = q.dir_pre;
+    ds.dir_post = p.dir;
+    ds.volume_pre = q.volume_pre;
+    ds.volume_post = p.volume;
+    ds.score_slot = q.score_slot;
+    ds.event = p.event;
+    ds.alive = alive;
+    ds.track_ptr = &p;
+    ds.first_in_volume = q.first_in_volume;
+    ds.material = srep.material;
+    ds.safety = srep.safety;
+    ds.non_ionizing = srep.non_ionizing;
+    ds.n_secondaries = static_cast<int>(em.child_count);
+    ds.sec_arena = sec;
+    ds.sec_pool = &out;
+    ds.sec_last = em.last_secondary;
+    ds.status = srep.status;
+    ds.process = srep.process;
+    hook(ds);
+    const bool requeue = resolve_track_status<real_t>(alive, p.status);
+    if (status_warn != nullptr && is_unsupported_track_status(p.status)) {
+      atomicAdd(status_warn, 1);
+    }
+    if (requeue) { out.append(p); }
+  }
+}
+
 
 // ---------------------------------------------------------------- where the stock kernels live
 //
@@ -1127,14 +1357,18 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
 // parameter added to a kernel cannot leave a declaration and a definition disagreeing - which
 // would not be a compile error, only a specialisation that stopped matching and quietly went
 // back to being instantiated wherever it was launched.
+// The gamma and lepton kernels' wiring is `const __grid_constant__` (see `run_step_gamma`), and
+// nvcc requires the annotation on every instantiation directive as well as the definition.
 #define G4GPU_STEP_GAMMA(HOOK)                                                               \
   __global__ void run_step_gamma<double, HOOK>(                                              \
       Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
-      double*, int, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+      double*, int, const __grid_constant__ had::HadronicWiring<double>,                     \
+      vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
 #define G4GPU_STEP_LEPTON(POSITRON, HOOK)                                                    \
   __global__ void run_step_lepton<double, POSITRON, HOOK>(                                   \
       Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
-      double*, int, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+      double*, int, const __grid_constant__ had::HadronicWiring<double>,                     \
+      vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
 #define G4GPU_STEP_HADRON(TYPE, HOOK)                                                        \
   __global__ void run_step_hadron<double, TYPE, HOOK>(                                       \
       Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
@@ -1152,6 +1386,14 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
 #define G4GPU_INTERACTION(BUCKET, HOOK)                                                      \
   __global__ void run_interaction<double, BUCKET, HOOK>(                                     \
       Scene<double>, const had::PendingInteraction<double>*, const int*, int, int,           \
+      TrackBuffer<double>, int, double*, double*, had::HadronicWiring<double>,               \
+      had::InteractionPool<double>, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks,\
+      HOOK)
+// P19's two drains (`host/transport_run_int_photonuclear.cu`, `..._leptonuclear.cu`): the only
+// objects carrying P13's models, one model family each for V189's reason.
+#define G4GPU_EMX_DRAIN(BUCKET, HOOK)                                                        \
+  __global__ void run_emextra_drain<double, BUCKET, HOOK>(                                   \
+      Scene<double>, const had::PendingInteraction<double>*, const int*, int,                \
       TrackBuffer<double>, int, double*, double*, had::HadronicWiring<double>,               \
       had::InteractionPool<double>, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks,\
       HOOK)
@@ -1179,12 +1421,15 @@ extern template G4GPU_INTERACTION(had::InteractionBucket::kBertini, StepTap<doub
 extern template G4GPU_INTERACTION(had::InteractionBucket::kBinary, StepTap<double>);
 extern template G4GPU_INTERACTION(had::InteractionBucket::kLightIon, StepTap<double>);
 extern template G4GPU_INTERACTION(had::InteractionBucket::kAtRest, StepTap<double>);
+extern template G4GPU_EMX_DRAIN(had::InteractionBucket::kPhotoNuclear, StepTap<double>);
+extern template G4GPU_EMX_DRAIN(had::InteractionBucket::kLeptoNuclear, StepTap<double>);
 
 
 // ---------------------------------------------------------------- method bodies
 
 /// Raises the per-thread device stack to what the interaction kernels need, once, the first
-/// time an iteration has a hadron in it.
+/// time an iteration QUEUES an interaction (since P19: the first time it had a hadron in it
+/// before that - which a photon run's photo-nuclear neutron now satisfies with nothing queued).
 ///
 /// WHY IT IS DEFERRED AT ALL is in `Upload`'s own comment and in docs/RISK.md V190: 86,016
 /// bytes a thread reserves five of an 8 GB card's gigabytes and costs B1's 6 MeV gamma gate
@@ -1502,6 +1747,13 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // them before the first primary is seeded, and the engine cannot know what the generator
     // will produce until it has produced one.
     inelastic_tables_ = upload_inelastic_tables<real_t>();
+
+    // P19: G4EmExtraPhysics' tables - the photon's G4GammaNuclearXS, the muon's Kokoulin
+    // vectors and G4MuonVDNuclearModel's sampling table - and the per-material thresholds below
+    // which the photo- and electro-nuclear cross sections are exactly zero. Unconditional for
+    // the reason the inelastic ones are: a photon beam's shower can reach the giant resonance,
+    // and `Upload` cannot know whether it will. See host/hadronic_upload.cuh.
+    emextra_tables_ = upload_emextra_tables<real_t>(h_mats_.data(), n_materials_);
 
     // P3's nuclear level data, which the capture sub-process walks. Unconditional by default
     // since P8d - `SetNuclearLevelData` has the reason, and it is Geant4's own answer
@@ -1904,6 +2156,72 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                   sizeof(had::PendingInteraction<real_t>), double(q_bytes) / 1048576.0);
     }
 
+    // ---- P19: the photo- and lepto-nuclear queue, and its bound.
+    //
+    // A SECOND QUEUE AND NOT THE FIRST ONE ENLARGED: it is drained by `run_emextra_drain`, which
+    // reads its cursor on the device, so a photon run pays no host synchronisation for it (see
+    // that kernel's header).
+    //
+    // ITS CAPACITY IS A MARGIN, NOT P15's KIND OF BOUND, AND THE PROOF WAS MEASURED OUT OF IT.
+    // The proof exists: a photon or an e+- is stepped against a reservation of FOUR
+    // (`max_secondaries_per_step`), so one launch steps at most `pool_/4` of them, plus
+    // `pool_/48` muons, and each queues at most once. The first version allocated exactly that,
+    // and on B1's gamma batch (1,834,944 events, 4 live) it was 1,988,880 entries - 743.5 MB -
+    // and on a hadron beam's 32 live an event it would have been 6.2 GB. With it, the 6 MeV
+    // gate's one photo-nuclear reaction raised the device stack into a card with 0.00 GB left
+    // and the event loop went from 1.2 s to 13.5 s (docs/RISK.md V210).
+    //
+    // What a launch actually queues is a Bernoulli sum: a photon's photo-nuclear probability is
+    // sigN/(total + sigN), 4.27% at its largest in B1's four materials (compact bone, 22 MeV)
+    // and under 5% at every giant-resonance peak of the periodic table, and a lepton's is
+    // about 1e-5 a step. So a tenth of the EM budget bounds the expectation twice over, the
+    // Chernoff tail past it is exp(-0.017 N) for a launch of N photons - below 1e-13 from
+    // N = 2,000 - and the 1,024-entry floor covers smaller launches. It is capped at 131,072
+    // entries (51.4 MB), which a launch reaches only by stepping three million photons at the
+    // resonance peak at once. `kInelasticQueueFull` + the SIZE row is still the tripwire, with the
+    // conservative disposal, and the run prints how deep the queue got.
+    {
+      constexpr long long kEmxQueueCap = 131072;
+      const long long e_bound = pool_ / (10 * max_secondaries_per_step(kSpeciesGamma)) + 1024;
+      long long e_cap = (e_bound < kEmxQueueCap) ? e_bound : kEmxQueueCap;
+      if (e_cap > pool_) { e_cap = pool_; }
+      emx_queue_capacity_ = static_cast<int>(e_cap);
+      const std::size_t e_bytes =
+          sizeof(had::PendingInteraction<real_t>) * static_cast<std::size_t>(emx_queue_capacity_);
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_emx_queue_, e_bytes));
+      G4GPU_CUDA_CHECK(cudaMalloc(&d_emx_cursor_, sizeof(int)));
+      G4GPU_CUDA_CHECK(cudaMemset(d_emx_cursor_, 0, sizeof(int)));
+      G4GPU_CUDA_CHECK(
+          cudaMalloc(&d_emx_stats_, sizeof(unsigned long long) * kEmxCounters));
+      G4GPU_CUDA_CHECK(
+          cudaMemset(d_emx_stats_, 0, sizeof(unsigned long long) * kEmxCounters));
+      interaction_bytes_ += e_bytes + sizeof(int);
+      // THE TWO DRAIN KERNELS' FRAMES, READ OFF THE KERNELS AT UPLOAD. They launch on photon and
+      // electron runs that never raise the device stack (`RaiseStackForInteractions` waits for a
+      // queued interaction), so a frame past the stepping kernels' limit would make the driver
+      // raise it for
+      // the whole card at the first launch - silently, V196 - and cost the gamma gate what V190
+      // measured. The line says which, and by how much, if it ever does.
+      cudaFuncAttributes fa_photo{}, fa_lepto{};
+      G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+          &fa_photo,
+          run_emextra_drain<real_t, had::InteractionBucket::kPhotoNuclear, StepHook>));
+      G4GPU_CUDA_CHECK(cudaFuncGetAttributes(
+          &fa_lepto,
+          run_emextra_drain<real_t, had::InteractionBucket::kLeptoNuclear, StepHook>));
+      emx_frame_photo_ = fa_photo.localSizeBytes;
+      emx_frame_lepto_ = fa_lepto.localSizeBytes;
+      const std::size_t limit = stepping_stack_bytes();
+      std::printf("photo-/lepto-nuclear queue: %d entries = %.1f MB; drain frames %zu B "
+                  "(photonNuclear) and %zu B (lepto-nuclear) against the %zu B stack%s\n",
+                  emx_queue_capacity_, double(e_bytes) / 1048576.0, emx_frame_photo_,
+                  emx_frame_lepto_, limit,
+                  (emx_frame_photo_ > limit || emx_frame_lepto_ > limit)
+                      ? " - ABOVE IT: the driver will raise the device stack at the first "
+                        "drain launch (docs/RISK.md V196, V210)"
+                      : "");
+    }
+
     // Per-cell scoring, allocated only when a volume actually asks for it. One double per
     // cell in the whole pool - the cell index is already global across voxel volumes, so no
     // per-volume offsets are needed here beyond the ones the store already carries.
@@ -1971,6 +2289,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       G4GPU_CUDA_CHECK(cudaMemset(d_killed_energy_, 0, sizeof(double)));
     }
     if (d_killed_n_ != nullptr) { G4GPU_CUDA_CHECK(cudaMemset(d_killed_n_, 0, sizeof(int))); }
+    // P19's counters, per run like the ledgers beside them.
+    if (d_emx_stats_ != nullptr) {
+      G4GPU_CUDA_CHECK(
+          cudaMemset(d_emx_stats_, 0, sizeof(unsigned long long) * kEmxCounters));
+    }
+    iterations_run_ = 0;
+    hadron_iterations_ = 0;
     if (primaries == nullptr || n_events <= 0) { return st; }
 
     // Every primary is checked against what a kernel can step. A primary with no kernel used
@@ -2273,16 +2598,52 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         //
         // `nsp[]` is the species histogram the counting sort already read back, so this costs
         // nothing: it is a sum over the hadronic rows of a `kNumTrackSpecies` array on the host.
+        //
+        // NOT EVERY HADRON CAN QUEUE, and since P19 the difference is on the gamma gate's clock:
+        // a photo-nuclear reaction makes a neutron, and in `kStage1` - every gate's stage - a
+        // neutron has elastic scattering and capture and NO process that queues (`step_neutral`'s
+        // `has_stage1_elastic` / `has_stage1_capture` have no inelastic sibling), and a pi0
+        // decays in every stage. So neither holds this read-back open. Everything else that is
+        // a hadron here can queue something - an inelastic interaction or an at-rest capture.
+        const bool neutron_can_queue = [&] {
+          had::HadronicStage stage = had_stage_;
+          if (const char* env = std::getenv("G4GPU_HADRONIC_STAGE")) {
+            if (env[0] == 'f') { stage = had::HadronicStage::kFinal; }
+            else if (env[0] == 's') { stage = had::HadronicStage::kStage1; }
+          }
+          return stage == had::HadronicStage::kFinal;
+        }();
         bool any_hadron = false;
         for (int sp = 0; sp < kNumTrackSpecies && !any_hadron; ++sp) {
-          if (nsp[sp] > 0 && max_secondaries_per_step(sp) > 4) { any_hadron = true; }
+          if (nsp[sp] <= 0 || max_secondaries_per_step(sp) <= 4) { continue; }
+          if (sp == kSpeciesPiZero) { continue; }
+          if (sp == kSpeciesNeutron && !neutron_can_queue) { continue; }
+          any_hadron = true;
         }
-        if (any_hadron) { RaiseStackForInteractions(); }
+        // THE STACK IS NOT RAISED HERE ANY MORE, but where an interaction kernel is about to
+        // launch (the drain below, once the read-back says something was queued). P19 is why:
+        // a photon run makes hadrons now - B1's 6 MeV gamma gate has about one photo-nuclear
+        // reaction in 2,000,000 events, and its neutron or recoil nucleus made this line
+        // reserve 94,208 bytes a thread for kernels that never launched. Measured on that run:
+        // the raise left 0.00 GB of the card, WDDM paged, and the event loop went from about
+        // 1.2 s to 13.5 s (docs/RISK.md V210). Every launch of the five kernels is inside
+        // `n_queued > 0`, so moving the call there changes nothing for a run that interacts.
+        ++iterations_run_;
+        if (any_hadron) { ++hadron_iterations_; }
         if (any_hadron && d_queue_cursor_ != nullptr) {
           // The interaction queue holds ONE iteration's interactions and is drained at the end
           // of it, so its cursor is rewound here beside the arena's and for the same reason:
           // the bound that says it cannot overflow is "one launch's tracks", not "one run's".
           G4GPU_CUDA_CHECK(cudaMemsetAsync(d_queue_cursor_, 0, sizeof(int)));
+        }
+        // P19's queue, rewound on EVERY iteration and asynchronously - it is drained on the
+        // device at the end of the same iteration, so no host read ever waits on it, and an
+        // iteration that queues nothing costs this memset and two empty launches.
+        const bool any_emx = (nsp[kSpeciesGamma] > 0 || nsp[kSpeciesElectron] > 0
+                              || nsp[kSpeciesPositron] > 0 || nsp[kSpeciesMuonMinus] > 0
+                              || nsp[kSpeciesMuonPlus] > 0);
+        if (any_emx && d_emx_cursor_ != nullptr) {
+          G4GPU_CUDA_CHECK(cudaMemsetAsync(d_emx_cursor_, 0, sizeof(int)));
         }
         // One launch per species, each over its own range of the one index list, each into the
         // one output pool.
@@ -2364,6 +2725,30 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         had_wiring.queue.capacity = queue_capacity_;
         had_wiring.books.count = d_had_refused_n_;
         had_wiring.books.energy = d_had_refused_e_;
+        // P19: G4EmExtraPhysics' four processes. `G4GPU_PHOTON_NUCLEAR=0`,
+        // `G4GPU_ELECTRO_NUCLEAR=0`, `G4GPU_MUON_NUCLEAR=0` hold each off without rebuilding B1,
+        // the way `G4GPU_ION_INELASTIC` does; `G4GPU_GAMMA_GENERAL_PROCESS=0` is
+        // `/process/em/UseGeneralProcess false`. Read here, per launch, for the same reason.
+        auto env_on = [](const char* name, bool dflt) {
+          const char* v = std::getenv(name);
+          if (v == nullptr || v[0] == '\0') { return dflt; }
+          return !(v[0] == '0' && v[1] == '\0');
+        };
+        had_wiring.photon_nuclear = env_on("G4GPU_PHOTON_NUCLEAR", had_photon_nuclear_);
+        had_wiring.electro_nuclear = env_on("G4GPU_ELECTRO_NUCLEAR", had_electro_nuclear_);
+        had_wiring.muon_nuclear = env_on("G4GPU_MUON_NUCLEAR", had_muon_nuclear_);
+        had_wiring.gamma_general =
+            env_on("G4GPU_GAMMA_GENERAL_PROCESS", gamma_general_on_) ? had::GammaGeneralProcess::kOn
+                                                                     : had::GammaGeneralProcess::kOff;
+        emx_config_used_[0] = had_wiring.photon_nuclear;
+        emx_config_used_[1] = had_wiring.electro_nuclear;
+        emx_config_used_[2] = had_wiring.muon_nuclear;
+        emx_config_used_[3] = (had_wiring.gamma_general == had::GammaGeneralProcess::kOn);
+        had_wiring.emextra = emextra_tables_.view;
+        had_wiring.emx_queue.items = d_emx_queue_;
+        had_wiring.emx_queue.cursor = d_emx_cursor_;
+        had_wiring.emx_queue.capacity = emx_queue_capacity_;
+        had_wiring.emx_stats = d_emx_stats_;
 
         // The pool the interaction kernel runs in, built once per launch out of what Upload
         // allocated - the same relationship `had_wiring` has to the tables, and for the same
@@ -2391,20 +2776,25 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       d_voxel_score_, step_n[sp], d_neutron_xs_, had_wiring, d_killed_energy_, d_killed_n_,   \
       traj, d_status_warn_, sec_, books, hook_)
           switch (sp) {
+            // The photon and the two leptons take `had_wiring` since P19, for `photonNuclear`,
+            // `electronNuclear` and `positronNuclear`.
             case kSpeciesGamma:
               run_step_gamma<real_t><<<blocks, threads_>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
-                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+                  d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
+                  hook_);
               break;
             case kSpeciesElectron:
               run_step_lepton<real_t, false><<<blocks, threads_>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
-                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+                  d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
+                  hook_);
               break;
             case kSpeciesPositron:
               run_step_lepton<real_t, true><<<blocks, threads_>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
-                  d_voxel_score_, step_n[sp], traj, d_status_warn_, sec_, books, hook_);
+                  d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
+                  hook_);
               break;
             case kSpeciesProton:     G4GPU_LAUNCH_HADRON(ParticleType::kProton); break;
             case kSpeciesAlpha:      G4GPU_LAUNCH_HADRON(ParticleType::kAlpha); break;
@@ -2455,6 +2845,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                                       cudaMemcpyDeviceToHost));
           if (n_queued > queue_capacity_) { n_queued = queue_capacity_; }
           if (n_queued > 0) {
+            RaiseStackForInteractions();  // once per run; see the note above `any_hadron`'s use
             interactions_queued_ += n_queued;
             if (n_queued > max_queued_per_launch_) { max_queued_per_launch_ = n_queued; }
 
@@ -2506,6 +2897,42 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                 nb[static_cast<int>(had::InteractionBucket::kNone)];
             G4GPU_CUDA_CHECK(cudaGetLastError());
           }
+        }
+
+        // ---- P19: drain the photo- and lepto-nuclear queue, ON THE DEVICE.
+        //
+        // After P15's drain, on the same stream, so the two never hold a slot at once and a
+        // cascade's secondaries and a photon's land in the same `tracks_[nxt]` to be stepped next
+        // iteration. Each launch is `n_slots` threads that read the cursor themselves: nothing
+        // is copied back and the host does not wait (see `run_emextra_drain`), which is why this
+        // runs on every iteration a photon, an e+- or a muon was stepped and is not gated on a
+        // host-side count it could only get by synchronising. A launch whose species could not
+        // have queued anything - no photon, or the process off - is skipped outright.
+        if (any_emx && d_emx_queue_ != nullptr && d_slots_ != nullptr) {
+          constexpr int kEth = 32;
+          const int eblocks = (n_interaction_slots_ + kEth - 1) / kEth;
+          if (nsp[kSpeciesGamma] > 0 && had_wiring.photon_nuclear) {
+            run_emextra_drain<real_t, had::InteractionBucket::kPhotoNuclear>
+                <<<eblocks, kEth>>>(scene_, d_emx_queue_, d_emx_cursor_, emx_queue_capacity_,
+                                    tracks_[nxt].view, batch_, d_score_, d_voxel_score_,
+                                    had_wiring, pool_view, traj, d_status_warn_, sec_, books,
+                                    hook_);
+            ++emx_drain_launches_;
+          }
+          const bool lepto_live =
+              ((nsp[kSpeciesElectron] > 0 || nsp[kSpeciesPositron] > 0)
+               && had_wiring.electro_nuclear)
+              || ((nsp[kSpeciesMuonMinus] > 0 || nsp[kSpeciesMuonPlus] > 0)
+                  && had_wiring.muon_nuclear);
+          if (lepto_live) {
+            run_emextra_drain<real_t, had::InteractionBucket::kLeptoNuclear>
+                <<<eblocks, kEth>>>(scene_, d_emx_queue_, d_emx_cursor_, emx_queue_capacity_,
+                                    tracks_[nxt].view, batch_, d_score_, d_voxel_score_,
+                                    had_wiring, pool_view, traj, d_status_warn_, sec_, books,
+                                    hook_);
+            ++emx_drain_launches_;
+          }
+          G4GPU_CUDA_CHECK(cudaGetLastError());
         }
 
         cur ^= 1;
@@ -2765,6 +3192,43 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                     "kernel (kNoInelasticModel above)\n", interactions_no_model_);
       }
     }
+    // ---- P19: the photo- and lepto-nuclear queue, read back ONCE, here.
+    //
+    // Printed whenever the run could have queued anything, zero included: a photon beam that
+    // reports "0 photonNuclear" has said something - that its shower never reached a nucleus -
+    // and one that prints nothing has said nothing. The third number is RISK V207's finding,
+    // counted on this run's photons.
+    if (d_emx_stats_ != nullptr && emx_drain_launches_ > 0) {
+      unsigned long long es[kEmxCounters] = {};
+      G4GPU_CUDA_CHECK(cudaMemcpy(es, d_emx_stats_, sizeof(es), cudaMemcpyDeviceToHost));
+      st.photo_nuclear = static_cast<long long>(es[had::kEmxPhotoDrained]);
+      st.lepto_nuclear = static_cast<long long>(es[had::kEmxLeptoDrained]);
+      st.photo_nuclear_to_conversion = static_cast<long long>(es[had::kEmxZone3Conversion]);
+      st.emx_max_queued = static_cast<long long>(es[kEmxQueueDepth]);
+      std::printf("photo-/lepto-nuclear: %llu photonNuclear and %llu electron-/positron-/"
+                  "muonNuclear interactions drained on the device in %lld launches; %llu "
+                  "photon interactions >= 100 MeV whose photonNuclear share went to conversion "
+                  "(G4GammaGeneralProcess 11.1.1, docs/RISK.md V207)%s; the deepest iteration "
+                  "queued %llu of the %d-entry queue; a hadron was alive - P15's read-back - in "
+                  "%lld of %lld iterations\n",
+                  es[had::kEmxPhotoDrained], es[had::kEmxLeptoDrained], emx_drain_launches_,
+                  es[had::kEmxZone3Conversion],
+                  emx_config_used_[3] ? "" : " [general process OFF]", es[kEmxQueueDepth],
+                  emx_queue_capacity_, hadron_iterations_, iterations_run_);
+      // THE STACK THE DRAINS RAN UNDER. They never raise it themselves; if the driver had to,
+      // the limit says so - the same tripwire as P15's below, for a kernel that launches on
+      // photon runs where nothing else would ever have raised it.
+      if (!stack_raised_) {
+        std::size_t lim = 0;
+        G4GPU_CUDA_CHECK(cudaDeviceGetLimit(&lim, cudaLimitStackSize));
+        if (lim > stepping_stack_bytes()) {
+          std::printf("STACK: the driver raised the device stack to %zu B at a photo-/lepto-"
+                      "nuclear drain launch (frames %zu and %zu B) - docs/RISK.md V196, V210.\n",
+                      lim, emx_frame_photo_, emx_frame_lepto_);
+        }
+      }
+    }
+    emx_drain_launches_ = 0;
     // THE TRIPWIRE ON THE STACK RESERVATION. If the driver found the limit short at an
     // interaction launch it raised it itself (V196) - no fault, no error code, and 270 MB of an
     // 8 GB card per 4 kB spent after the pools were sized against the free memory printed at
@@ -2881,6 +3345,7 @@ void TransportEngine<real_t, StepHook>::Free() {
     free_neutron_tables<real_t>(neutron_tables_);
     free_elastic_tables<real_t>(elastic_tables_);
     free_inelastic_tables<real_t>(inelastic_tables_);
+    free_emextra_tables<real_t>(emextra_tables_);
     free_level_data(level_tables_);
     // P15's pool and queue. `ftf::entry::free` is FTFP's own, for the allocations its contract
     // made; the rest is this file's.
@@ -2892,12 +3357,18 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_queue_cursor_);
     cudaFree(d_qidx_);
     cudaFree(d_qcount_);
+    cudaFree(d_emx_queue_);
+    cudaFree(d_emx_cursor_);
+    cudaFree(d_emx_stats_);
+    d_emx_stats_ = nullptr;
     d_slots_ = nullptr;
     d_bic_channels_ = nullptr;
     d_queue_ = nullptr;
     d_queue_cursor_ = nullptr;
     d_qidx_ = nullptr;
     d_qcount_ = nullptr;
+    d_emx_queue_ = nullptr;
+    d_emx_cursor_ = nullptr;
     cudaFree(d_vols_);
     cudaFree(d_mats_);
     cudaFree(d_rt_);

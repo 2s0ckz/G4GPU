@@ -359,10 +359,22 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   // selection is P1's own `select_gamma_process` on the same uniform. No uniform is added
   // anywhere. `tests/test_emextra_transport.cu` asserts it on the device for photons below
   // 2 m_e and in water below oxygen's 11.5 MeV threshold.
-  const real_t sig_n = (had != nullptr && had->photon_nuclear)
-                           ? had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general,
-                                                            mat, s.materials[mat], p.ekin)
-                           : real_t(0);
+  //
+  // THE ZONE AND THE MATERIAL'S THRESHOLD ARE TESTED HERE, INLINE, and `photon_nuclear_xs`
+  // tests them again. That is not redundancy: the function is `__noinline__` (its reason is
+  // its own), and a call out of this 255-register kernel saves and restores what is live
+  // around it - which the first version paid on EVERY photon step, below 2 m_e included, for a
+  // function that returned zero without evaluating anything. B1's 6 MeV gate measured it
+  // (docs/RISK.md V210); the two comparisons below cost two loads and no call.
+  const real_t sig_n =
+      (had != nullptr && had->photon_nuclear
+       && had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
+              != had::GammaNuclearSlot::kAbsent
+       && p.ekin > had::emextra_threshold<real_t>(had->emextra, had::kGammaNuclearThreshold,
+                                                  mat))
+          ? had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general, mat,
+                                           s.materials[mat], p.ekin)
+          : real_t(0);
   const real_t xs_total = (sig_n > real_t(0)) ? xs.total + sig_n : xs.total;
 
   const real_t s_int =
@@ -667,9 +679,13 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // conditional inside `emextra_length` for the reason `d_coul`'s is above. Below it every
     // lepton keeps the stream it had before P19 - in B1 that is every electron in water under
     // 7.296 MeV - and with the wiring null (the reference driver) nothing here is even built.
+    // The threshold is tested inline first, for the reason `step_gamma` gives for its own: no
+    // call out of this kernel below it.
     real_t enuc_xs = real_t(0);
     const real_t d_enuc =
-        (had != nullptr && had->electro_nuclear)
+        (had != nullptr && had->electro_nuclear
+         && p.ekin > had::emextra_threshold<real_t>(had->emextra, had::kElectroNuclearThreshold,
+                                                    mat))
             ? had::emextra_length<real_t>(
                   had->emextra,
                   is_positron ? had::EmExtraProcess::kPositronNuclear

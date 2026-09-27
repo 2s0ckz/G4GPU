@@ -320,7 +320,18 @@ struct EmExtraTables {
   /// cross section for process kind `k`. See the file header for how each is derived.
   const real_t* threshold = nullptr;
   int n_materials = 0;
+  /// `kNumEmExtraThresholds * kEmExtraMaxZ` energies, MeV: the same two thresholds per ELEMENT,
+  /// which `EmExtraXsFn::element` tests before it evaluates anything. The material's threshold
+  /// is the smallest of its elements', so above it the others can still be exactly zero - in
+  /// air at 6 MeV argon is open and carbon, nitrogen and oxygen are not - and the store would
+  /// otherwise evaluate all four vectors at every photon step to add three zeros (docs/RISK.md
+  /// V210 has what that cost the gamma gate). Zero for an element means "evaluate".
+  const real_t* element_threshold = nullptr;
 };
+
+/// The Z range `EmExtraTables::element_threshold` covers: every Z either CHIPS class answers
+/// (`IsElementApplicable` is 0 < Z < 120 for the electro-nuclear one).
+inline constexpr int kEmExtraMaxZ = 120;
 
 /// The threshold for one (kind, material), or zero when none was uploaded - zero meaning
 /// "evaluate at every energy", which is the answer that cannot be wrong.
@@ -329,6 +340,15 @@ __host__ __device__ inline real_t emextra_threshold(const EmExtraTables<real_t>&
                                                     int mat) {
   if (t.threshold == nullptr || mat < 0 || mat >= t.n_materials) { return real_t(0); }
   return t.threshold[kind * t.n_materials + mat];
+}
+
+/// The threshold for one (kind, element), or zero - "evaluate" - when none was uploaded or Z is
+/// outside the table.
+template <typename real_t>
+__host__ __device__ inline real_t emextra_element_threshold(const EmExtraTables<real_t>& t,
+                                                            int kind, int Z) {
+  if (t.element_threshold == nullptr || Z <= 0 || Z >= kEmExtraMaxZ) { return real_t(0); }
+  return t.element_threshold[kind * kEmExtraMaxZ + Z];
 }
 
 // =============================================================================================
@@ -361,12 +381,24 @@ struct EmExtraXsFn {
   mutable hxs::chips::ElnState eln{};
 
   __host__ __device__ hxs::XsValue<real_t> element(int Z) const {
+    // At or below the ELEMENT's threshold its cross section is exactly zero - the same identity
+    // the material thresholds rest on, element by element - so nothing is evaluated. For the
+    // electro-nuclear class this also leaves `eln`, its per-Z cache, as it was, which is what
+    // `GetElementCrossSection` itself does below `EMi`; above `EMi` and at or below the nucleus'
+    // `TH` Geant4 updates the cache and returns zero, and the cache's only reader is the next
+    // call of this same function, which rebuilds it for its own Z.
     switch (process) {
       case EmExtraProcess::kPhotonNuclear:
         if (tables->gamma == nullptr) { return {real_t(0), hxs::XsRefusal::kNone}; }
+        if (!(ekin > emextra_element_threshold<real_t>(*tables, kGammaNuclearThreshold, Z))) {
+          return {real_t(0), hxs::XsRefusal::kNone};
+        }
         return hxs::pxs_element_xs<real_t>(*tables->gamma, ekin, loge, Z);
       case EmExtraProcess::kElectronNuclear:
       case EmExtraProcess::kPositronNuclear:
+        if (!(ekin > emextra_element_threshold<real_t>(*tables, kElectroNuclearThreshold, Z))) {
+          return {real_t(0), hxs::XsRefusal::kNone};
+        }
         return hxs::chips::eln_element_xs<real_t>(eln, ekin, Z);
       case EmExtraProcess::kMuonNuclear:
         if (tables->kokoulin == nullptr) { return {real_t(0), hxs::XsRefusal::kNone}; }

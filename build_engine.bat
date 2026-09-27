@@ -66,6 +66,13 @@ rem     transport_run_int_bertini    9,319 MB   210 s
 rem     transport_run_int_binary     9,838 MB   365 s
 rem     transport_run_int_atrest    19,770 MB   660 s   (Bertini AND FTFP - see below)
 rem
+rem and P19 added two more, which the glob below picks up with the same rule. Measured under
+rem CUDA 12.9.86, where the same serial build put the at-rest unit at 22,490 MB and 774 s:
+rem
+rem     transport_run_int_leptonuclear   11,147 MB   451 s   (both VD models, Bertini)
+rem     transport_run_int_photonuclear   15,739 MB   508 s   (the gamma chain: PreCompound,
+rem                                                          Bertini, the light-target collider)
+rem
 rem Six of those at once is 60+ GB on a 64 GB machine that usually has three or four other
 rem worktrees building, so they are compiled ONE AT A TIME and BEFORE the stepping units, which
 rem puts the 19.8 GB peak on an otherwise idle machine. The at-rest one is two models because
@@ -77,7 +84,7 @@ set CAP=6
 for %%U in ("%~dp0src\host\transport_run*.cu") do (
   if exist "%~dp0out\%%~nU.rc" del /q "%~dp0out\%%~nU.rc"
 )
-echo compiling P15's five interaction units, one at a time ^(they carry the hadronic models^)
+echo compiling the seven interaction units, one at a time ^(they carry the hadronic models^)
 for %%U in ("%~dp0src\host\transport_run_int_*.cu") do (
   echo   %%~nU
   call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
@@ -150,8 +157,10 @@ rem `run_interaction` is in the pattern since P15 and matters MORE than `run_ste
 rem the five interaction kernels are the only ones carrying a hadronic model, so one of them
 rem implicitly instantiated into the engine's own unit would put Bertini or FTFP in an object
 rem that is meant to hold host code and three utility kernels - and would cost the ptxas peak
-rem that unit's `.log` records rather than failing.
-for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run.obj" ^| findstr /c:"run_step_" /c:"run_interaction"`) do (
+rem that unit's `.log` records rather than failing. `run_emextra` since P19, for the same reason:
+rem the two drains carry P13's models, and one of them in this object would be the photon's gamma
+rem chain or the leptons' Bertini compiled where no model belongs.
+for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run.obj" ^| findstr /c:"run_step_" /c:"run_interaction" /c:"run_emextra"`) do (
   echo FATAL: out\transport_run.obj carries a stepping or interaction kernel:
   echo        %%N
   echo        A launch was added without a matching `extern template` in

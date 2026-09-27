@@ -392,6 +392,8 @@ struct EmExtraHostTables {
   physics::hadronic::emextra::MuVdTable* mu_vd = nullptr;
   /// `had::kNumEmExtraThresholds * n_mat` energies, row-major by kind - `had::EmExtraTables`'s.
   std::vector<real_t> threshold;
+  /// `had::kNumEmExtraThresholds * had::kEmExtraMaxZ` energies, the same per element.
+  std::vector<real_t> element_threshold;
   int n_mat = 0;
   bool gamma_ok = false;
 
@@ -403,6 +405,7 @@ struct EmExtraHostTables {
     v.mu_vd = mu_vd;
     v.threshold = threshold.empty() ? nullptr : threshold.data();
     v.n_materials = n_mat;
+    v.element_threshold = element_threshold.empty() ? nullptr : element_threshold.data();
     return v;
   }
   EmExtraHostTables() = default;
@@ -466,6 +469,17 @@ inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
     h.threshold[static_cast<std::size_t>(had::kGammaNuclearThreshold) * n_mat + m] = tg;
     h.threshold[static_cast<std::size_t>(had::kElectroNuclearThreshold) * n_mat + m] = te;
   }
+  // And per element, for every Z either class answers - the same two functions, so the material
+  // row above is exactly the smallest of its elements' entries here.
+  h.element_threshold.assign(
+      static_cast<std::size_t>(had::kNumEmExtraThresholds) * had::kEmExtraMaxZ, real_t(0));
+  for (int z = 1; z < had::kEmExtraMaxZ; ++z) {
+    h.element_threshold[static_cast<std::size_t>(had::kGammaNuclearThreshold) * had::kEmExtraMaxZ
+                        + z] = h.gamma_ok ? emextra_gamma_element_threshold<real_t>(h.gamma, z)
+                                          : real_t(0);
+    h.element_threshold[static_cast<std::size_t>(had::kElectroNuclearThreshold) * had::kEmExtraMaxZ
+                        + z] = emextra_electro_element_threshold<real_t>(z);
+  }
 }
 
 /// Everything `upload_emextra_tables` allocated.
@@ -512,6 +526,10 @@ inline EmExtraTableOwner<real_t> upload_emextra_tables(const data::Material<real
         static_cast<const real_t*>(up(h.threshold.data(), h.threshold.size() * sizeof(real_t)));
   }
   own.view.n_materials = n_mat;
+  if (!h.element_threshold.empty()) {
+    own.view.element_threshold = static_cast<const real_t*>(
+        up(h.element_threshold.data(), h.element_threshold.size() * sizeof(real_t)));
+  }
 
   if (verbose) {
     std::printf("photo-/lepto-nuclear tables: %.2f MB - G4GammaNuclearXS %s, "

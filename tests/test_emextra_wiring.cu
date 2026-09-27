@@ -453,18 +453,57 @@ int main() {
       if (min_g != tg || min_e != te) {
         fail(std::string(kMatName[m]) + ": the uploaded threshold is not the minimum over its elements");
       }
+      // The per-ELEMENT table `EmExtraXsFn::element` skips below: the same two functions, entry
+      // for entry, for every element of the material.
+      for (int i = 0; i < mats[m].n_elements; ++i) {
+        const int z = static_cast<int>(mats[m].z[i] + 0.5);
+        if (had::emextra_element_threshold<real_t>(tables, had::kGammaNuclearThreshold, z)
+                != host::emextra_gamma_element_threshold<real_t>(ht.gamma, z)
+            || had::emextra_element_threshold<real_t>(tables, had::kElectroNuclearThreshold, z)
+                   != host::emextra_electro_element_threshold<real_t>(z)) {
+          fail(std::string(kMatName[m]) + " Z=" + std::to_string(z)
+               + ": the per-element threshold table is not the element functions'");
+        }
+      }
       // The per-volume function below, at and above the threshold against the full element sum
-      // with the threshold switched off (a null view of it): identical doubles everywhere.
+      // with BOTH skips switched off (null views of the material and the element tables):
+      // identical doubles everywhere - at the material's threshold, around every element's own,
+      // and across a grid above them, where the element skip is what is being tested.
       had::EmExtraTables<real_t> nothr = tables;
       nothr.threshold = nullptr;
+      nothr.element_threshold = nullptr;
       for (const had::EmExtraProcess p : {had::EmExtraProcess::kPhotonNuclear, had::EmExtraProcess::kElectronNuclear}) {
+        const int kind = (p == had::EmExtraProcess::kPhotonNuclear) ? had::kGammaNuclearThreshold
+                                                                    : had::kElectroNuclearThreshold;
         const real_t t = (p == had::EmExtraProcess::kPhotonNuclear) ? tg : te;
-        for (real_t f : {0.5, 0.999999, 1.0, 1.000001, 1.5, 3.0}) {
-          const real_t e = t * f;
+        std::vector<real_t> es_chk;
+        for (real_t f : {0.5, 0.999999, 1.0, 1.000001, 1.5, 3.0}) { es_chk.push_back(t * f); }
+        for (int i = 0; i < mats[m].n_elements; ++i) {
+          const int z = static_cast<int>(mats[m].z[i] + 0.5);
+          const real_t tz = had::emextra_element_threshold<real_t>(tables, kind, z);
+          for (real_t f : {0.999999, 1.0, 1.000001, 1.01}) { es_chk.push_back(tz * f); }
+        }
+        for (int k = 0; k <= 60; ++k) { es_chk.push_back(t * std::pow(10.0, k / 30.0)); }
+        for (const real_t e : es_chk) {
+          const real_t f = (t > 0) ? e / t : 0;
           if (!(e > 0)) { continue; }
           hxs::MaterialXs<real_t> a{}, b{};
           const real_t xa = had::emextra_xs_per_volume<real_t>(tables, p, m, mats[m], e, a);
           const real_t xb = had::emextra_xs_per_volume<real_t>(nothr, p, m, mats[m], e, b);
+          // The partial sums the target is drawn from as well, wherever the skipped call built
+          // them at all (below the material's threshold it builds none, and the drain then has
+          // no target to draw - which the evaluated call's all-zero sums would not give it either).
+          bool partials_differ = false;
+          if (xa > 0) {
+            partials_differ = (a.n_elements != b.n_elements);
+            for (int i = 0; i < a.n_elements && !partials_differ; ++i) {
+              partials_differ = (a.cumulative[i] != b.cumulative[i]);
+            }
+          }
+          if (partials_differ) {
+            fail(std::string(kMatName[m]) + " " + had::emextra_process_name(p)
+                 + ": the element skip changed the partial sums the target is drawn from");
+          }
           if (xa != xb) {
             // %.17g and not std::to_string, whose %f prints a 1e-8 /mm cross section as zero.
             char msg[256];

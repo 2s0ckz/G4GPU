@@ -594,13 +594,17 @@ int main() {
       if (positive < np / 2) { fail("too few positive cross sections for (a) to test anything"); }
     }
 
-    struct Cell { int m; real_t e; bool general_on; };
-    const Cell cells[] = {{data::kWater, 20.0, true},        {data::kBoneCompact, 22.0, true},
-                          {data::kAir, 17.0, true},          {data::kA150Tissue, 60.0, true},
-                          {data::kWater, 100.0, true},       {data::kWater, 150.0, true},
-                          {data::kBoneCompact, 500.0, true}, {data::kWater, 100.0, false},
-                          {data::kWater, 150.0, false},      {data::kBoneCompact, 500.0, false},
-                          {data::kAir, 0.8, true}};
+    // `edge` marks a cell a hair above its material's threshold, where the photo-nuclear share
+    // is far too small for its rate to be counted and the per-photon replay is the whole test:
+    // water at 11.55 MeV, half a per cent above oxygen's 11.499, catches a stepper that skips
+    // the term a little too eagerly - its lengths then lack a sigN the host replay has.
+    struct Cell { int m; real_t e; bool general_on; bool edge; };
+    const Cell cells[] = {{data::kWater, 20.0, true, false},        {data::kBoneCompact, 22.0, true, false},
+                          {data::kAir, 17.0, true, false},          {data::kA150Tissue, 60.0, true, false},
+                          {data::kWater, 100.0, true, false},       {data::kWater, 150.0, true, false},
+                          {data::kBoneCompact, 500.0, true, false}, {data::kWater, 100.0, false, false},
+                          {data::kWater, 150.0, false, false},      {data::kBoneCompact, 500.0, false, false},
+                          {data::kAir, 0.8, true, false},           {data::kWater, 11.55, true, true}};
     // A million photons a cell, in five launches of 200,000 with their own keys.
     constexpr int kN2 = 200000;
     constexpr int kBatches2 = 5;
@@ -648,12 +652,12 @@ int main() {
       cudaMemcpy(st, d_stats, sizeof(st), cudaMemcpyDeviceToHost);
       const double tot = double(xs_total);
       const double pn = double(sn) / tot;
-      std::printf("   %-6s %6.1f MeV general %-3s replayed: %lld in the top slice, %lld steps on "
+      std::printf("   %-6s %7.2f MeV general %-3s replayed: %lld in the top slice, %lld steps on "
                   "the wrong branch, %lld with a length not drawn from the summed total\n",
                   mat_name(c.m), c.e, c.general_on ? "on" : "off", in_slice, wrong_branch,
                   wrong_length);
       if (wrong_branch != 0 || wrong_length != 0) {
-        fail("%s %.1f MeV: the device's selection is not the top slice of the second uniform "
+        fail("%s %.2f MeV: the device's selection is not the top slice of the second uniform "
              "over the summed total", mat_name(c.m), c.e);
       }
       if (zone3_on && static_cast<long long>(st[had::kEmxZone3Conversion]) != in_slice) {
@@ -671,7 +675,7 @@ int main() {
       const double z_h = zscore(double(st[had::kEmxZone3Conversion]), zone3_on ? pn : 0.0);
       const double p_conv = (double(xs.pair) + (zone3_on ? double(sn) : 0.0)) / tot;
       const double z_c = zscore(conv, p_conv);
-      std::printf("   %-6s %6.1f MeV general %-3s sigN/tot %.4e | queued %5d (z %+5.2f) | "
+      std::printf("   %-6s %7.2f MeV general %-3s sigN/tot %.4e | queued %5d (z %+5.2f) | "
                   "zone-3 hand-offs %5llu (z %+5.2f) | conversions %6d (z %+5.2f)\n",
                   mat_name(c.m), c.e, c.general_on ? "on" : "off", pn, q, z_q,
                   st[had::kEmxZone3Conversion], z_h, conv, z_c);
@@ -679,16 +683,20 @@ int main() {
         fail("%d first steps reached the boundary; the box is meant to hold them", boundary);
       }
       if (std::fabs(z_q) > 5 || std::fabs(z_h) > 5 || std::fabs(z_c) > 5) {
-        fail("the photo-nuclear slice is not at its rate at %.1f MeV in %s (general %s)", c.e,
+        fail("the photo-nuclear slice is not at its rate at %.2f MeV in %s (general %s)", c.e,
              mat_name(c.m), c.general_on ? "on" : "off");
       }
       if (zone3_on && q != 0) { fail("zone 3 queued %d photo-nuclear interactions", q); }
       if (c.e < 1.022 && (q != 0 || sn != 0)) {
         fail("a photon below 2 m_e has a photo-nuclear term");
       }
-      if (c.e > 1.022 && !(pn > 1e-4)) {
+      if (c.e > 1.022 && !c.edge && !(pn > 1e-4)) {
         fail("%s %.1f MeV: sigN/tot %.3g is too small for this cell to test anything",
              mat_name(c.m), c.e, pn);
+      }
+      if (c.edge && !(sn > 0)) {
+        fail("%s %.2f MeV: the edge cell is not above the threshold, so it tests no skip",
+             mat_name(c.m), c.e);
       }
     }
   }

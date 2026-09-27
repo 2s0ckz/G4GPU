@@ -208,6 +208,15 @@ struct RunStats {
   int max_queued_per_launch = 0;
   int interaction_slots = 0;
   std::size_t interaction_bytes = 0;
+  /// P19: photo- and lepto-nuclear interactions the device drains ran, and how many photon
+  /// interactions at or above 100 MeV had their photo-nuclear share turned into conversions by
+  /// `G4GammaGeneralProcess` 11.1.1 (docs/RISK.md V207). Read back once at the end of the run.
+  long long photo_nuclear = 0;
+  long long lepto_nuclear = 0;
+  long long photo_nuclear_to_conversion = 0;
+  /// The deepest the photo-/lepto-nuclear queue got in any iteration, refused pushes included -
+  /// what `Upload`'s capacity (a margin, not a proof: docs/RISK.md V210) is measured against.
+  long long emx_max_queued = 0;
   /// Energy discarded by the neutron time cut, MeV, and how many neutrons it killed.
   ///
   /// Separate from `carried_away` because it is a different kind of loss and conflating them
@@ -415,6 +424,22 @@ class TransportEngine {
   /// exampleB1.exe through macros, and there is no UI command that reaches a setter.
   void SetIonInelastic(bool on) { had_ion_inelastic_ = on; }
   bool GetIonInelastic() const { return had_ion_inelastic_; }
+
+  /// P19: `G4EmExtraPhysics`' processes - `photonNuclear`, `electronNuclear` with
+  /// `positronNuclear`, and `muonNuclear` - three switches for Geant4's three sets of UI names.
+  /// All on is QBBC. `G4GPU_PHOTON_NUCLEAR=0`, `G4GPU_ELECTRO_NUCLEAR=0` and
+  /// `G4GPU_MUON_NUCLEAR=0` override them per launch, for the stock exampleB1 the sweep drives.
+  void SetEmExtraProcesses(bool photon, bool electro, bool muon) {
+    had_photon_nuclear_ = photon;
+    had_electro_nuclear_ = electro;
+    had_muon_nuclear_ = muon;
+  }
+  /// `/process/em/UseGeneralProcess`, which decides where `photonNuclear` can act at all: ON
+  /// (QBBC, the default) confines it to 2 m_e - 100 MeV and hands its share above to conversion
+  /// (docs/RISK.md V207); OFF makes it a competitor at every energy. `G4GPU_GAMMA_GENERAL_PROCESS
+  /// =0` overrides it per launch.
+  void SetGammaGeneralProcess(bool on) { gamma_general_on_ = on; }
+  bool GetGammaGeneralProcess() const { return gamma_general_on_; }
 
   /// How many interactions may run AT ONCE, which is the number of workspace slots the run
   /// allocates. Set before Upload; 0 asks for the default.
@@ -671,9 +696,9 @@ class TransportEngine {
   FermiPoolOwner fermi_pool_{};
   /// Has the device stack been raised to what the interaction kernels need?
   ///
-  /// FALSE UNTIL A HADRON IS LIVE. `Upload` sets 16,384 - what the stepping kernels and the
-  /// solid engine need - and `RaiseStackForInteractions` sets 86,016 on the first iteration
-  /// that could queue anything. A photon or electron run never calls it and keeps 28% of its
+  /// FALSE UNTIL AN INTERACTION IS QUEUED (until P19, until a hadron was live - docs/RISK.md
+  /// V210). `Upload` sets 16,384 - what the stepping kernels and the solid engine need - and
+  /// `RaiseStackForInteractions` sets 86,016 on the first iteration that queued anything. A photon or electron run never calls it and keeps 28% of its
   /// throughput: measured on B1's 2,000,000-event gamma gate, 1.72e6 events/s at 16,384
   /// against 1.24e6 at 86,016, with the dose identical to every printed digit. docs/RISK.md
   /// V190 has the whole table.
@@ -711,6 +736,36 @@ class TransportEngine {
   long long interactions_queued_ = 0;
   long long interaction_chunks_ = 0;
   int max_queued_per_launch_ = 0;
+  /// Stepping iterations this run, and how many of them had a hadron alive - each of those pays
+  /// P15's read-back of its queue cursor, a device synchronisation. Printed since P19, because a
+  /// photon run makes hadrons now and this is the number its clock moves with (docs/RISK.md
+  /// V210).
+  long long iterations_run_ = 0;
+  long long hadron_iterations_ = 0;
+
+  // ---- P19: G4EmExtraPhysics' four processes.
+  /// P13's tables on the device and the per-material thresholds; see
+  /// `host/hadronic_upload.cuh`'s `upload_emextra_tables`.
+  EmExtraTableOwner<real_t> emextra_tables_{};
+  bool had_photon_nuclear_ = true;
+  bool had_electro_nuclear_ = true;
+  bool had_muon_nuclear_ = true;
+  bool gamma_general_on_ = true;
+  /// What the last launch actually ran with, env overrides applied: photon, electro, muon,
+  /// general process. The report prints the last.
+  bool emx_config_used_[4] = {true, true, true, true};
+  /// The photo- and lepto-nuclear queue - `had::HadronicWiring::emx_queue` - and its cursor.
+  /// A BOUND, sized by the EM rows' throttle at Upload; see the allocation's comment.
+  had::PendingInteraction<real_t>* d_emx_queue_ = nullptr;
+  int* d_emx_cursor_ = nullptr;
+  int emx_queue_capacity_ = 0;
+  /// `had::kNumEmxStats` device counters, read back once per run.
+  unsigned long long* d_emx_stats_ = nullptr;
+  /// How many drain launches the run made - the report's condition, and its cost in launches.
+  long long emx_drain_launches_ = 0;
+  /// The two drain kernels' `localSizeBytes`, read at Upload (docs/RISK.md V210).
+  std::size_t emx_frame_photo_ = 0;
+  std::size_t emx_frame_lepto_ = 0;
 };
 
 
