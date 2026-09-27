@@ -32,6 +32,7 @@
 #include "data/level_data.cuh"
 #include "physics/decay/decay.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
+#include "physics/hadronic/emextra_wiring.cuh"
 #include "physics/hadronic/interaction_queue.cuh"
 #include "physics/hadronic/neutron_wiring.cuh"
 
@@ -125,6 +126,10 @@ enum class HadronicRefusal : int {
   /// dose comparison wants the first and a package triage wants the second, and a single
   /// counter that tried to be both would have to be read with a key. The run's report prints
   /// them under separate headings for exactly that reason.
+  ///
+  /// P19 adds `kPhotoNuclear` and `kLeptoNuclear` to the first group and `kPhotoNuclearQgs`,
+  /// `kLeptoNuclearFtf` and `kEmExtraRefused` to the second, at the END of the enum; the rule
+  /// is the same, and so is the report.
   ///
   /// REACHED IN BOTH STAGES SINCE P15, and it used to be reached only in `kFinal`.
   /// `G4NeutronGeneralProcess::BuildPhysicsTable` sums elastic + inelastic + capture
@@ -361,6 +366,42 @@ enum class HadronicRefusal : int {
   /// docs/RISK.md V201; P18 ported the arm.
   kRefusedEnergyScored,
 
+  // -------------------------------------------------------------------------------------------
+  // P19: the photon's, electron's, positron's and muon's nuclear interactions. Two more SIZE
+  // entries and three more WHY entries, in the same two groups and under the same rule: a WHY
+  // booking is a second booking on an event that is also in a SIZE row, and the two are not
+  // added. They are appended rather than slotted beside their P15 siblings so that no existing
+  // entry changes its index - `tests/test_inelastic_transport.cu` and the sweep's saved ledgers
+  // read these by position.
+  // -------------------------------------------------------------------------------------------
+
+  /// [SIZE] A photon's `photonNuclear` interaction that produced no final state. P19 wired the
+  /// process; this counts what is still missing from it, with the photon's energy on it.
+  kPhotoNuclear,
+  /// [SIZE] An `electronNuclear`, `positronNuclear` or `muonNuclear` interaction that produced no
+  /// final state, with the lepton's kinetic energy on it.
+  kLeptoNuclear,
+  /// WHY: `photonNuclear`'s range manager chose `G4TheoFSGenerator` with
+  /// `G4QGSModel<G4GammaParticipants>` - the photon's high-energy generator, 3 GeV to 100 TeV,
+  /// which is QGS and not FTF and is not ported (docs/RISK.md V169).
+  ///
+  /// STRUCTURALLY ZERO IN QBBC AS IT SHIPS, and that is P19's finding rather than a rate:
+  /// inside `G4GammaGeneralProcess` photonNuclear is never selected above 100 MeV (table 14 is
+  /// table 13 when QBBC builds no gamma-to-muon conversion - `emextra_wiring.cuh`'s header), so
+  /// no photon reaches the 3 GeV arm. It fires only with the general process off, which is a
+  /// study configuration (`GammaGeneralProcess::kOff`).
+  kPhotoNuclearQgs,
+  /// WHY: an equivalent photon of 10 GeV or more, which `G4ElectroVDNuclearModel` and
+  /// `G4MuonVDNuclearModel` convert to a pi0 and hand to their OWN `G4FTFModel` - refused by name
+  /// in P13's `lepton_hadronic_vertex` (`used_ftf`), unreachable below a 10 GeV lepton.
+  kLeptoNuclearFtf,
+  /// WHY: a photo- or lepto-nuclear model refused for any other reason P13 names - Bertini's own
+  /// refusal inside the photon arm or a lepton model's gamma chain, PreCompound's inside
+  /// `G4LowEGammaNuclearModel`, the equivalent-photon sampler, a capacity, a hyper-nuclear
+  /// target or no model in range. `emextra::EmExtraRefusal` says which; the report counts the
+  /// class, and `tests/test_emextra_wiring.cu` section 6 prints the breakdown per case.
+  kEmExtraRefused,
+
   kNumHadronicRefusals,
 };
 
@@ -436,6 +477,21 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kRefusedEnergyScored:
       return "WHERE: of the refused in-flight interactions above, the kinetic energy deposited "
              "INSIDE a scoring volume by the disposal - part of the scored dose; do not add";
+    case HadronicRefusal::kPhotoNuclear:
+      return "a photon's photonNuclear interaction with no final state [SIZE - do not add to "
+             "the WHY group]";
+    case HadronicRefusal::kLeptoNuclear:
+      return "an e-/e+/mu electronNuclear, positronNuclear or muonNuclear interaction with no "
+             "final state [SIZE - do not add to the WHY group]";
+    case HadronicRefusal::kPhotoNuclearQgs:
+      return "WHY: photonNuclear chose G4QGSModel<G4GammaParticipants> above 3 GeV (P13) - "
+             "zero with the gamma general process on (QBBC), see RISK V207";
+    case HadronicRefusal::kLeptoNuclearFtf:
+      return "WHY: a lepto-nuclear equivalent photon of 10 GeV or more went to the VD model's "
+             "FTF arm as a pi0 - refused by name (P13)";
+    case HadronicRefusal::kEmExtraRefused:
+      return "WHY: a photo- or lepto-nuclear model refused by name for another reason (P13's "
+             "EmExtraRefusal: a Bertini/PreCompound/sampler refusal, a capacity, a hypernucleus)";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";
@@ -588,6 +644,40 @@ struct HadronicWiring {
   /// kernel does the rest.
   InteractionQueue<real_t> queue{};
   HadronicRefusalBooks books{};
+
+  // ---- P19: `G4EmExtraPhysics`' four processes. See `emextra_wiring.cuh`.
+  //
+  // Three switches because Geant4 has three sets of UI names - `photonNuclear`,
+  // `electronNuclear`/`positronNuclear` and `muonNuclear` - and a like-for-like column has to be
+  // able to hold each off on this side exactly as it holds it off on that one. All on is QBBC.
+  /// `photonNuclear`. It CANNOT be inactivated on the Geant4 side with the gamma general
+  /// process on (a sub-process has no process-manager entry for `/process/inactivate` to find),
+  /// which is why the sweep's photon column switched the general process off until P19.
+  bool photon_nuclear = true;
+  /// `electronNuclear` and `positronNuclear`: one data set, one model object, two process names.
+  bool electro_nuclear = true;
+  /// `muonNuclear`, one process object registered on both muons.
+  bool muon_nuclear = true;
+  /// `/process/em/UseGeneralProcess`. ON is QBBC as it ships - `photonNuclear` a sub-process of
+  /// `G4GammaGeneralProcess`, reachable only between 2 m_e and 100 MeV (docs/RISK.md V207);
+  /// OFF makes it an ordinary competitor at every energy, which is the study configuration in
+  /// which Bertini's photon arm and the QGS refusal are reachable at all.
+  GammaGeneralProcess gamma_general = GammaGeneralProcess::kOn;
+  /// P13's cross-section tables and the muon model's sampling table, on the device.
+  /// `host/hadronic_upload.cuh`'s `upload_emextra_tables` fills them.
+  EmExtraTables<real_t> emextra{};
+  /// The queue the four processes' interactions go through - SEPARATE from `queue`, and the
+  /// reason is the gamma gate's clock rather than tidiness. P15's queue is drained by a host
+  /// loop that reads its cursor back, a full device synchronisation, gated on a hadron being
+  /// alive; B1's photon gate paid 66% of its event loop when that drain ran unconditionally
+  /// (`BeamOn`'s own comment). A photon run can queue a photo-nuclear interaction on any
+  /// iteration, so this queue is drained by kernels that read their own cursor on the device
+  /// and exit at once when it is zero - `run_emextra_drain` in `host/transport_run_impl.cuh` -
+  /// and its bound is the EM rows' throttle (four slots a stepped track), not the hadron rows'.
+  InteractionQueue<real_t> emx_queue{};
+  /// `kNumEmxStats` counters (`emextra_wiring.cuh`'s `EmxStat`), or null. Read back once, at the
+  /// end of the run, for the report - never per iteration.
+  unsigned long long* emx_stats = nullptr;
 };
 
 // =============================================================================================

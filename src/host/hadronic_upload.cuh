@@ -49,6 +49,11 @@
 // and no device code - the property docs/RISK.md V188 is about.
 #include "physics/hadronic/deexcitation/fermi_breakup.cuh"
 #include "physics/hadronic/elastic_wiring.cuh"
+// P19: the muon model's sampling table is built by P13's host function beside its type, so the
+// upload needs the model header. It instantiates no kernel - `mu_vd_make_sampling_table` is
+// `__host__` - which is the property the Fermi pool's include above relies on too.
+#include "physics/hadronic/emextra/lepton_vd.cuh"
+#include "physics/hadronic/emextra_wiring.cuh"
 #include "physics/hadronic/inelastic_wiring.cuh"
 
 namespace g4gpu::host {
@@ -315,6 +320,212 @@ template <typename real_t>
 inline void free_inelastic_tables(InelasticTableOwner<real_t>& own) {
   for (void* p : own.allocs) { cudaFree(p); }
   own = InelasticTableOwner<real_t>{};
+}
+
+// =============================================================================================
+// P19: G4EmExtraPhysics' tables - the photon's, the leptons' and the muon's nuclear processes
+// =============================================================================================
+//
+// Three tables, each built once exactly where Geant4 builds it once, and the per-material
+// thresholds `had::emextra_xs_per_volume` skips below:
+//
+//   G4GammaNuclearXS          G4PARTICLEXS4.0/gamma, 94 element and ~190 isotope vectors -
+//                             `G4GammaNuclearXS::Initialise`. P2's reader, P13's CHIPS above it.
+//   G4KokoulinMuonNuclearXS   the 61-node log vector per Z from 1 GeV to 1 PeV -
+//                             `BuildCrossSectionTable`, P13's eight-point Gauss-Legendre.
+//   G4MuonVDNuclearModel      its 5 x 73 x 800 cumulative sampling table - `MakeSamplingTable`,
+//                             in the model's constructor. 2.3 MB, read-only, one copy.
+//
+// The two CHIPS parameterisations (photo- and electro-nuclear) are function-scope constant
+// tables compiled into the device code and need nothing here.
+//
+// BUILT UNCONDITIONALLY, like the inelastic tables above, because `Upload` cannot know whether
+// a photon beam will ever make a photon above 2 m_e - and a gamma run with no photo-nuclear table
+// would be a photon with no nuclear process rather than a failure anyone would see. The cost is
+// printed. A run whose G4PARTICLEXSDATA cannot be resolved gets no photo-nuclear table and says
+// so; the two lepton processes need no data set at all.
+
+/// The last leading-zero node of one element's `G4GammaNuclearXS` vector: at and below it the
+/// element's cross section is EXACTLY zero, because `G4PhysicsVector::Value` interpolates a
+/// straight line (no spline - `xs/physics_vector.cuh`'s header) between two zeros and clamps to
+/// the first value below the first node. Zero when the first value is not zero, or when the
+/// element has no vector (then the cross section is CHIPS's or a refusal, and every energy is
+/// evaluated).
+template <typename real_t>
+inline real_t emextra_gamma_element_threshold(const hadronic::xs::PxsDataSet<real_t>& ds, int z) {
+  namespace hxs = g4gpu::hadronic::xs;
+  const int zz = (z >= hxs::pxs_maxz(ds.kind)) ? hxs::pxs_maxz(ds.kind) - 1 : z;
+  const hxs::PhysVec<real_t> pv = hxs::pxs_view<real_t>(*ds.data, ds.data->element[zz]);
+  if (pv.empty()) { return real_t(0); }
+  int last0 = -1;
+  for (int i = 0; i < pv.n; ++i) {
+    if (pv.value_at(i) == real_t(0)) {
+      last0 = i;
+    } else {
+      break;
+    }
+  }
+  return (last0 >= 0) ? pv.energy(last0) : real_t(0);
+}
+
+/// `G4ElectroNuclearCrossSection::GetElementCrossSection`'s two zero returns, as one energy:
+/// `Energy <= EMi` (2.0612 MeV) and `Energy <= ThresholdEnergy(Z, N)`, with N = int(A) - Z off
+/// the NIST mean atomic mass exactly as the class computes it. An element the class refuses
+/// (Z outside 1..98) gets zero, i.e. "evaluate", so its refusal is reached rather than skipped.
+template <typename real_t>
+inline real_t emextra_electro_element_threshold(int z) {
+  namespace chips = g4gpu::hadronic::xs::chips;
+  bool refused = false;
+  const chips::ElnNucleus n = chips::eln_nucleus(z, refused);
+  if (refused) { return real_t(0); }
+  const double th = (n.TH > chips::eln_EMi()) ? n.TH : chips::eln_EMi();
+  return static_cast<real_t>(th);
+}
+
+/// P13's tables on the HOST, owned: what `upload_emextra_tables` copies to the device, and what
+/// the host tests hand the transport's own functions directly.
+template <typename real_t>
+struct EmExtraHostTables {
+  data::ParticleXsTable<real_t>* gamma_table = nullptr;
+  hadronic::xs::PxsDataSet<real_t> gamma{};
+  hadronic::xs::kokoulin::KokoulinTable<real_t>* kokoulin = nullptr;
+  physics::hadronic::emextra::MuVdTable* mu_vd = nullptr;
+  /// `had::kNumEmExtraThresholds * n_mat` energies, row-major by kind - `had::EmExtraTables`'s.
+  std::vector<real_t> threshold;
+  int n_mat = 0;
+  bool gamma_ok = false;
+
+  /// A view whose pointers are HOST pointers, for host callers of the transport's functions.
+  had::EmExtraTables<real_t> view() const {
+    had::EmExtraTables<real_t> v;
+    v.gamma = gamma_ok ? &gamma : nullptr;
+    v.kokoulin = kokoulin;
+    v.mu_vd = mu_vd;
+    v.threshold = threshold.empty() ? nullptr : threshold.data();
+    v.n_materials = n_mat;
+    return v;
+  }
+  EmExtraHostTables() = default;
+  EmExtraHostTables(const EmExtraHostTables&) = delete;
+  EmExtraHostTables& operator=(const EmExtraHostTables&) = delete;
+  ~EmExtraHostTables() {
+    delete gamma_table;
+    delete kokoulin;
+    delete mu_vd;
+  }
+};
+
+/// Builds P13's three tables on the host and the thresholds of @p n_mat materials.
+///
+/// The muon's two tables are built with the mu- mass for both charges: `G4KokoulinMuonNuclearXS`
+/// reads `G4MuonMinus::MuonMinus()->GetPDGMass()` unconditionally (P13's note in
+/// `xs/kokoulin_muon_xs.cuh`), and one `G4MuonVDNuclearModel` serves both muons.
+template <typename real_t>
+inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
+                                      const data::Material<real_t>* mats, int n_mat,
+                                      bool verbose = true) {
+  namespace hxs = g4gpu::hadronic::xs;
+  namespace ee = g4gpu::physics::hadronic::emextra;
+  const std::string gdir = g4particlexs_subdir("gamma");
+  if (!gdir.empty()) {
+    h.gamma_table = new data::ParticleXsTable<real_t>();
+    if (!hxs::pxs_load<real_t>(hxs::PxsKind::kGammaNuclear, hxs::gamma<real_t>(), gdir,
+                               *h.gamma_table, h.gamma)) {
+      std::printf("\nFATAL: G4PARTICLEXS4.0/gamma is incomplete - an element file is missing.\n"
+                  "  A missing dataset is fatal here as everywhere (src/host/g4data.cuh): a\n"
+                  "  photon with a partial photo-nuclear cross section is quietly wrong in one\n"
+                  "  element.\n");
+      std::exit(1);
+    }
+    h.gamma_ok = true;
+  } else if (verbose) {
+    std::printf("photo-nuclear table: G4PARTICLEXSDATA could not be resolved - the photon has "
+                "no nuclear process\n");
+  }
+  const real_t mu_mass = particle_def<real_t>(ParticleType::kMuonMinus).mass;
+  h.kokoulin = new hxs::kokoulin::KokoulinTable<real_t>();
+  hxs::kokoulin::build_table<real_t>(*h.kokoulin, mu_mass);
+  h.mu_vd = new ee::MuVdTable();
+  ee::mu_vd_make_sampling_table(*h.mu_vd, static_cast<double>(mu_mass), ee::g_per_mole());
+
+  // The thresholds: the smallest over a material's elements, because the material's cross
+  // section is zero only where EVERY element's is.
+  h.n_mat = n_mat;
+  h.threshold.assign(static_cast<std::size_t>(had::kNumEmExtraThresholds) * n_mat, real_t(0));
+  for (int m = 0; m < n_mat; ++m) {
+    real_t tg = real_t(1e30), te = real_t(1e30);
+    for (int i = 0; i < mats[m].n_elements; ++i) {
+      const int z = static_cast<int>(mats[m].z[i] + real_t(0.5));
+      const real_t g = h.gamma_ok ? emextra_gamma_element_threshold<real_t>(h.gamma, z)
+                                  : real_t(0);
+      const real_t e = emextra_electro_element_threshold<real_t>(z);
+      if (g < tg) { tg = g; }
+      if (e < te) { te = e; }
+    }
+    if (mats[m].n_elements <= 0) { tg = te = real_t(0); }
+    h.threshold[static_cast<std::size_t>(had::kGammaNuclearThreshold) * n_mat + m] = tg;
+    h.threshold[static_cast<std::size_t>(had::kElectroNuclearThreshold) * n_mat + m] = te;
+  }
+}
+
+/// Everything `upload_emextra_tables` allocated.
+template <typename real_t>
+struct EmExtraTableOwner {
+  had::EmExtraTables<real_t> view{};
+  std::vector<void*> allocs;
+  std::size_t bytes = 0;
+  bool gamma_ok = false;
+};
+
+/// Builds P13's tables on the host and uploads them, with the thresholds of the scene's
+/// materials. The view it returns travels in `had::HadronicWiring::emextra`.
+template <typename real_t>
+inline EmExtraTableOwner<real_t> upload_emextra_tables(const data::Material<real_t>* mats,
+                                                        int n_mat, bool verbose = true) {
+  namespace hxs = g4gpu::hadronic::xs;
+  namespace ee = g4gpu::physics::hadronic::emextra;
+  EmExtraTableOwner<real_t> own;
+  EmExtraHostTables<real_t> h;
+  build_emextra_host_tables<real_t>(h, mats, n_mat, verbose);
+
+  auto up = [&own](const void* src, std::size_t n) -> void* {
+    void* p = nullptr;
+    if (cudaMalloc(&p, n) != cudaSuccess || cudaMemcpy(p, src, n, cudaMemcpyHostToDevice)
+                                                 != cudaSuccess) {
+      std::printf("\nFATAL: could not upload %zu bytes of a G4EmExtraPhysics table\n", n);
+      std::exit(1);
+    }
+    own.allocs.push_back(p);
+    own.bytes += n;
+    return p;
+  };
+
+  if (h.gamma_ok) {
+    own.view.gamma = detail::upload_pxs<real_t>(*h.gamma_table, h.gamma, own);
+    own.gamma_ok = true;
+  }
+  own.view.kokoulin = static_cast<const hxs::kokoulin::KokoulinTable<real_t>*>(
+      up(h.kokoulin, sizeof(*h.kokoulin)));
+  own.view.mu_vd = static_cast<const ee::MuVdTable*>(up(h.mu_vd, sizeof(ee::MuVdTable)));
+  if (!h.threshold.empty()) {
+    own.view.threshold =
+        static_cast<const real_t*>(up(h.threshold.data(), h.threshold.size() * sizeof(real_t)));
+  }
+  own.view.n_materials = n_mat;
+
+  if (verbose) {
+    std::printf("photo-/lepto-nuclear tables: %.2f MB - G4GammaNuclearXS %s, "
+                "G4KokoulinMuonNuclearXS %zu B, G4MuonVDNuclearModel sampling table %zu B\n",
+                double(own.bytes) / 1048576.0, h.gamma_ok ? "loaded" : "ABSENT",
+                sizeof(hxs::kokoulin::KokoulinTable<real_t>), sizeof(ee::MuVdTable));
+  }
+  return own;
+}
+
+template <typename real_t>
+inline void free_emextra_tables(EmExtraTableOwner<real_t>& own) {
+  for (void* p : own.allocs) { cudaFree(p); }
+  own = EmExtraTableOwner<real_t>{};
 }
 
 // =============================================================================================

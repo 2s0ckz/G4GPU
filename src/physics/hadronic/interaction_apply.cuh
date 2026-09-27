@@ -58,6 +58,9 @@
 #include "physics/hadronic/bertini/cascade_interface.cuh"
 #include "physics/hadronic/bic/binary_cascade.cuh"
 #include "physics/hadronic/bic/light_ion_reaction.cuh"
+#include "physics/hadronic/emextra/lepton_nuclear.cuh"
+#include "physics/hadronic/emextra/photon_nuclear.cuh"
+#include "physics/hadronic/emextra_wiring.cuh"
 #include "physics/hadronic/ftf/ftf_entry.cuh"
 #include "physics/hadronic/interaction_queue.cuh"
 #include "physics/hadronic/stopping/stopping_process.cuh"
@@ -870,6 +873,300 @@ __host__ __device__ inline int emit_interaction_result(
     book_refusal<real_t>(books, HadronicRefusal::kInelasticSecondaryOverflow, real_t(0));
   }
   return emitted;
+}
+
+// =============================================================================================
+// P19: G4EmExtraPhysics' four processes - photonNuclear, electronNuclear, positronNuclear,
+// muonNuclear - from the queue entry to the final state
+// =============================================================================================
+
+namespace ee = g4gpu::physics::hadronic::emextra;
+
+/// `emextra::GammaWorkspace` pointed at one slot's Bertini buffers and PreCompound arrays.
+///
+/// THE SLOT ALREADY HOLDS EVERYTHING P13's ENTRY POINTS ASK FOR, and that is why the four
+/// processes need no pool of their own. `GammaWorkspace` is Bertini's seven buffers plus a
+/// `PrecoWorkspace`, which are `InteractionSlot`'s Bertini block and its de-excitation block
+/// field for field - P15 sized them for the nucleon cascade and the at-rest captures, and a
+/// photon's cascade is the smaller of the three.
+template <typename real_t>
+__host__ __device__ inline ee::GammaWorkspace gamma_workspace_of(InteractionSlot<real_t>& s,
+                                                                  const preco::PrecoWorkspace& pws) {
+  ee::GammaWorkspace ws;
+  ws.model = &s.bert_model;
+  ws.global_out = &s.co_global;
+  ws.out = &s.co_out;
+  ws.dex_out = &s.co_dex;
+  ws.tmp = &s.co_tmp;
+  ws.epo = &s.epo;
+  ws.bert_ws = &s.bert_ws;
+  ws.preco = pws;
+  return ws;
+}
+
+/// `G4HadronicProcess::FillResult` written INTO the caller's result, where P5's `fill_result`
+/// returns one by value.
+///
+/// A SECOND TRANSCRIPTION, AND THE REASON IS A STACK RESERVATION THAT WOULD COST THE GAMMA GATE.
+/// `fill_result` builds a `HadronicStepResult<real_t, 256>` - 256 secondaries of 80 bytes,
+/// 20.6 kB - and returns it; P15's kernels placement-new it into the slot and ptxas still lays
+/// the object out in the callee's frame, which is most of the 22 kB every P15 interaction
+/// kernel carries above its model (`run_interaction<kFtfp>` is 23,392 bytes of frame against
+/// FTFP's own 1,376). A P19 drain kernel launches on every iteration of a PHOTON run, and a
+/// kernel whose frame passes the stepping kernels' 16,384 makes the driver raise the device
+/// stack for the whole card at its first launch (docs/RISK.md V196) - the reservation V190
+/// measured at 28% of the gamma gate's throughput when it was made for nothing. Written in
+/// place, the 20 kB is the slot's and not the stack's.
+///
+/// `tests/test_emextra_wiring.cu` asserts this and P5's function give the same answer, field for
+/// field, over thousands of final states - so the second copy is bounded by a test rather than
+/// by care, the arrangement `had::at_rest_bucket` already has against `stopping::stopping_arm`.
+template <typename real_t, int kCap, int kSecCap>
+__host__ __device__ inline void fill_result_into(
+    const physics::hadronic::HadFinalState<real_t, kCap>& r, const Vec3<real_t>& track_direction,
+    real_t track_global_time, real_t track_weight, bool has_at_rest_processes,
+    const real_t* pdg_mass_of_secondary,
+    physics::hadronic::HadronicStepResult<real_t, kSecCap>& out) {
+  namespace hp = physics::hadronic;
+  out.status = hp::TrackStatusChange::kAlive;
+  out.energy = real_t(0);
+  out.momentum_direction = Vec3<real_t>{real_t(0), real_t(0), real_t(1)};
+  out.local_energy_deposit = r.local_energy_deposit;
+  out.non_ionizing_energy_deposit = real_t(0);
+  out.weight = track_weight;
+  out.n_secondaries = 0;
+  out.secondary_overflow = 0;
+  out.n_ic_electrons = 0;
+  out.kaon0_seen = 0;
+  out.off_shell_fixed = 0;
+
+  // `G4double efinal = std::max(aR->GetEnergyChange(), 0.0);` and the three primary branches,
+  // in Geant4's order: stopAndKill first, then a zero final energy, then alive and rotated.
+  const real_t efinal = (r.energy_change > real_t(0)) ? r.energy_change : real_t(0);
+  if (r.status == hp::HadFinalStateStatus::kStopAndKill) {
+    out.status = hp::TrackStatusChange::kStopAndKill;
+    out.energy = real_t(0);
+  } else if (efinal == real_t(0)) {
+    out.energy = real_t(0);
+    out.status = has_at_rest_processes ? hp::TrackStatusChange::kStopButAlive
+                                       : hp::TrackStatusChange::kStopAndKill;
+  } else {
+    out.status = hp::TrackStatusChange::kAlive;
+    out.momentum_direction = rotate_uz(r.momentum_change, track_direction);
+    out.energy = efinal;
+  }
+
+  // The secondaries: rotated into the lab, put back on the mass shell past 1 keV with the new
+  // kinetic energy floored at 0.001 eV, timed from the track's global time, weighted.
+  constexpr real_t kDeltaMassLim = real_t(1e-3);  // 1 keV
+  constexpr real_t kDeltaEkin = real_t(1e-9);     // 0.001 eV
+  for (int i = 0; i < r.n_secondaries; ++i) {
+    hp::HadSecondary<real_t> s = r.secondaries[i];
+    s.direction = rotate_uz(s.direction, track_direction);
+    const real_t pdg_mass = pdg_mass_of_secondary ? pdg_mass_of_secondary[i] : s.mass;
+    const real_t dm = s.mass - pdg_mass;
+    if ((dm > kDeltaMassLim) || (-dm > kDeltaMassLim)) {
+      const real_t e = s.kin_energy + dm;
+      s.kin_energy = (e > kDeltaEkin) ? e : kDeltaEkin;
+      s.mass = pdg_mass;
+      ++out.off_shell_fixed;
+    }
+    if (s.pdg == 11) { ++out.n_ic_electrons; }
+    if (s.pdg == 311 || s.pdg == -311) { ++out.kaon0_seen; }
+    s.time = ((s.time > real_t(0)) ? s.time : real_t(0)) + track_global_time;
+    s.weight = track_weight * s.weight;
+    if (out.n_secondaries < kSecCap) {
+      out.secondaries[out.n_secondaries++] = s;
+    } else {
+      ++out.secondary_overflow;
+    }
+  }
+  out.secondary_overflow += r.secondary_overflow;
+}
+
+/// Does `aT.GetParticleDefinition()->GetProcessManager()->GetAtRestProcessVector()->size() > 0`
+/// hold for this lepton or photon - the question `FillResult` asks when a model leaves the
+/// primary alive with zero energy?
+///
+/// The positron has `annihil`'s at-rest half, the mu- `muMinusCaptureAtRest` and `Decay`'s
+/// at-rest half, the mu+ `Decay`'s; the photon and the electron have none. (`had::has_at_rest_arm`
+/// answers only about `G4HadronStoppingProcess` and would say no for the mu+ and the positron,
+/// which is the wrong question here.) Unreachable in QBBC for all four - no model here leaves a
+/// lepton alive at exactly zero, since the virtual photon is always below the lepton's own
+/// kinetic energy - and written out so that the day one does, the stopped positron annihilates.
+__host__ __device__ inline bool emextra_has_at_rest(ParticleType t) {
+  return t == ParticleType::kPositron || t == ParticleType::kMuonMinus
+         || t == ParticleType::kMuonPlus;
+}
+
+/// What a photo- or lepto-nuclear interaction said beyond `InteractionOutcome`: P13's own
+/// refusal, the model its range manager chose, and the lepton model's "no photon" gates.
+/// Filled for the tests' breakdowns; the kernel passes null.
+struct EmExtraDiag {
+  int emextra_refusal = 0;  ///< ee::EmExtraRefusal
+  int model = 0;            ///< ee::Model
+  int no_photon = 0;        ///< ee::NoPhotonReason
+  bool used_ftf = false;
+  bool used_bertini = false;
+  /// The last attempt `CheckResult` threw away, if any: its verdict and its energy imbalance.
+  int rejected_verdict = 0;  ///< hp::CheckResultVerdict
+  double rejected_delta_e = 0.0;
+};
+
+/// One photo- or lepto-nuclear model call through P13's PROCESS entry point, into `s.fs`.
+///
+/// `__noinline__` for the reason P15's four arms each are: one call boundary per model tree is
+/// what lets ptxas finish (interaction_apply.cuh's note above `run_arm_ftfp`).
+///
+/// THE RANGE MANAGER IS INSIDE THE ENTRY POINT, so a re-entry of the CheckResult loop re-runs
+/// it, where `G4HadronicProcess::PostStepDoIt` chooses the model once before the loop. It draws
+/// a uniform only across an overlap - 199 to 200 MeV and 3 to 6 GeV for the photon, never for
+/// the leptons, whose one model takes the range manager's shortcut - and a photon only reaches
+/// those windows with the general process OFF (emextra_wiring.cuh). So in QBBC the two orders
+/// consume the same uniforms; `InteractionOutcome::attempts` is on the report so a re-entry is
+/// visible if it ever happens where it would matter.
+template <typename real_t, InteractionBucket kBucket, typename Rng>
+__host__ __device__ __noinline__ ee::EmExtraRefusal run_arm_emextra(
+    const physics::hadronic::HadProjectile<real_t>& proj,
+    const physics::hadronic::HadNucleus& tgt, EmExtraProcess process,
+    const EmExtraTables<real_t>& tables, InteractionSlot<real_t>& s,
+    const data::LevelTable& lt, const deex::FermiPool& fpool, Rng& rng, EmExtraDiag& d) {
+  const preco::PrecoWorkspace pws = preco_workspace_of<real_t>(s);
+  const ee::GammaWorkspace ws = gamma_workspace_of<real_t>(s, pws);
+  if constexpr (kBucket == InteractionBucket::kPhotoNuclear) {
+    (void)process;
+    (void)tables;
+    const ee::PhotonNuclearResult r = ee::photon_nuclear(proj, tgt, s.fs, ws, lt, fpool, rng);
+    d.model = static_cast<int>(r.model);
+    d.used_bertini = (r.model == ee::Model::kBertiniCascade);
+    return r.refusal;
+  } else {
+    ee::LeptonNuclearResult r;
+    if (process == EmExtraProcess::kMuonNuclear) {
+      if (tables.mu_vd == nullptr) {
+        // The sampling table was not uploaded: a capacity of the run, named, and never a model
+        // run on an uninitialised table.
+        return ee::EmExtraRefusal::kCapacity;
+      }
+      r = ee::muon_nuclear(proj, tgt, s.fs, *tables.mu_vd, ws, lt, fpool, rng);
+    } else {
+      r = ee::electron_nuclear(proj, tgt, s.fs, ws, lt, fpool, rng);
+    }
+    d.model = static_cast<int>(r.model);
+    d.no_photon = static_cast<int>(r.vd.no_photon);
+    d.used_ftf = r.vd.used_ftf;
+    d.used_bertini = r.vd.used_bertini;
+    return r.refusal;
+  }
+}
+
+/// `G4HadronicProcess::PostStepDoIt` for `photonNuclear`, `electronNuclear`, `positronNuclear`
+/// and `muonNuclear` - the arm `run_emextra_drain` runs, and the one P15's `run_inelastic` is
+/// the hadron sibling of.
+///
+/// In Geant4's order, against G4HadronicProcess.cc:324-482, with what differs from the hadrons
+/// said where it differs:
+///
+///   2. NO integral rejection and no recompute - `fXSType == fHadNoIntegral` for all four, the
+///      photon because it is neutral and the leptons because `BuildPhysicsTable` excludes
+///      `isLepton` (emextra_wiring.cuh's header). So no uniform is drawn here.
+///   3. `SampleZandA` from the partial sums the data store last computed: at the photon's energy
+///      (`G4GammaGeneralProcess::SelectHadProcess` calls `ComputeCrossSection` just before
+///      delegating) and at the lepton's PRE-step energy (`PostStepGetPhysicalInteractionLength`'s
+///      `DefineXSandMFP` is the last call). `ekin_partials` is that energy; the isotope draw
+///      reads the dynamic particle's own, which is `proj.kin_energy` - the post-step one - and
+///      only the photon's data set looks at it.
+///   5-6. The model through P13's entry point, `do { ApplyYourself } while(!CheckResult)`
+///      bounded at 100, with `G4HadronicInteraction`'s default (2%, 1 GeV) levels - neither VD
+///      model, `G4LowEGammaNuclearModel` nor `G4CascadeInterface` overrides
+///      `GetFatalEnergyCheckLevels`.
+///   7. K0 / anti-K0 mixing, one uniform each - Bertini's photon arm can make kaons.
+///   8. FillResult is the caller's, with the track's own direction.
+template <typename real_t, InteractionBucket kBucket, typename Rng>
+__host__ __device__ __noinline__ InteractionOutcome run_emextra(
+    const physics::hadronic::HadProjectile<real_t>& proj, ParticleType species,
+    const data::Material<real_t>& mat, int mat_index, const EmExtraTables<real_t>& tables,
+    real_t ekin_partials, InteractionSlot<real_t>& s, const data::LevelTable& lt,
+    const deex::FermiPool& fpool, Rng& rng, EmExtraDiag* diag) {
+  InteractionOutcome out;
+  EmExtraDiag d{};
+  const EmExtraProcess process = emextra_process_of(species);
+
+  // ---- 3. the target, off the partial sums at `ekin_partials`.
+  hxs::MaterialXs<real_t> mxs{};
+  const real_t xs =
+      emextra_xs_per_volume<real_t>(tables, process, mat_index, mat, ekin_partials, mxs);
+  if (!(xs > real_t(0)) || mxs.n_elements <= 0) {
+    // The stepper drew this interaction from a positive cross section at the same energy and in
+    // the same material, so an empty store here means the two disagree - a tripwire, booked as
+    // the model's refusal rather than applied as a phantom target.
+    out.refusal = HadronicRefusal::kEmExtraRefused;
+    if (diag != nullptr) { *diag = d; }
+    return out;
+  }
+  const EmExtraXsFn<real_t> fn = emextra_xs_fn<real_t>(tables, process, proj.kin_energy);
+  const hxs::TargetZA tgt =
+      hxs::store_sample_za_rng<real_t>(fn, mat, hxs::nist_isotopes_of<real_t>(mat), mxs, rng);
+  out.target_z = tgt.z;
+  out.target_a = tgt.a;
+  const physics::hadronic::HadNucleus nucleus{tgt.z, tgt.a, 0};
+
+  // ---- 5-6. the model, re-entered while CheckResult rejects, at most 100 times.
+  constexpr int kMaxReentry = 100;
+  const physics::hadronic::FatalEnergyCheckLevels<real_t> levels{};
+  const real_t target_mass = static_cast<real_t>(deex::nuclear_mass(tgt.a, tgt.z));
+  bool accepted = false;
+  for (out.attempts = 0; out.attempts < kMaxReentry; ++out.attempts) {
+    const ee::EmExtraRefusal r =
+        run_arm_emextra<real_t, kBucket>(proj, nucleus, process, tables, s, lt, fpool, rng, d);
+    d.emextra_refusal = static_cast<int>(r);
+    if (r != ee::EmExtraRefusal::kNone) {
+      // THREE NAMES FOR P13's REFUSALS, and the split is by what a reader of the ledger needs:
+      // the QGS generator and the lepton models' FTF arm are named packages that do not exist
+      // in this port (V169, and P13's `used_ftf`), everything else is P13's own chain.
+      if (r == ee::EmExtraRefusal::kQgsGammaString) {
+        out.refusal = HadronicRefusal::kPhotoNuclearQgs;
+      } else if (d.used_ftf) {
+        out.refusal = HadronicRefusal::kLeptoNuclearFtf;
+      } else {
+        out.refusal = HadronicRefusal::kEmExtraRefused;
+      }
+      if (diag != nullptr) { *diag = d; }
+      return out;
+    }
+    for (int i = 0; i < s.fs.n_secondaries; ++i) {
+      s.pdg_mass[i] = definition_mass_of<real_t>(s.fs.secondaries[i]);
+    }
+    real_t delta_e = real_t(0);
+    const physics::hadronic::CheckResultVerdict v =
+        physics::hadronic::check_result<real_t, kInteractionSecondaryCap>(
+            proj, target_mass, s.fs, levels, s.pdg_mass, &delta_e);
+    if (v == physics::hadronic::CheckResultVerdict::kAccept) {
+      accepted = true;
+      break;
+    }
+    d.rejected_verdict = static_cast<int>(v);
+    d.rejected_delta_e = static_cast<double>(delta_e);
+  }
+  if (!accepted) {
+    out.refusal = HadronicRefusal::kInelasticReentryExhausted;
+    if (diag != nullptr) { *diag = d; }
+    return out;
+  }
+
+  // ---- 7. K0 and anti-K0 to K0S / K0L, one uniform each, exactly as `run_inelastic` does.
+  for (int i = 0; i < s.fs.n_secondaries; ++i) {
+    const int pdg = s.fs.secondaries[i].pdg;
+    if (pdg == 311 || pdg == -311) {
+      s.fs.secondaries[i].pdg = (rng.uniform() > real_t(0.5)) ? 310 : 130;
+    }
+  }
+
+  out.model = InelasticModel::kNone;
+  out.n_secondaries = s.fs.n_secondaries;
+  out.ran = true;
+  if (diag != nullptr) { *diag = d; }
+  return out;
 }
 
 }  // namespace g4gpu::had

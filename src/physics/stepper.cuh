@@ -304,14 +304,24 @@ __host__ __device__ __noinline__ Vec3<real_t> urban_hadron_scatter(
 /// @param rep what the step did, beyond depositing energy: the true path length, the process
 ///        that ended it, the material, the safety. See core/step_report.cuh. Every field on it
 ///        is a value this function already computes; nothing here is calculated for its sake.
+/// @param had P19: the hadronic wiring, for `photonNuclear`. Null - the default, and what
+///        `src/host/b1_gpu_sched.cu` passes - is a photon with no nuclear process, which is
+///        this function exactly as it was before P19.
+/// @param queued set true when the step ended in a photo-nuclear interaction, which goes to
+///        `HadronicWiring::emx_queue` and is applied by `run_emextra_drain`. The caller must
+///        then neither append the photon nor call the step hook - see `step_hadron`'s own
+///        `queued`, which this is the same contract as.
 /// @return true if the photon is still alive and should be requeued
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p, Rng& rng,
                                   Emitter& em, real_t& edep, StepReport<real_t>& rep,
-                                  vis::TrajectoryBuffer traj = vis::no_capture()) {
+                                  vis::TrajectoryBuffer traj = vis::no_capture(),
+                                  const had::HadronicWiring<real_t>* had = nullptr,
+                                  bool* queued = nullptr) {
   edep = real_t(0);
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
+  if (queued != nullptr) { *queued = false; }
   if (p.volume == geom::kOutsideWorld) { return false; }
 
   if (p.ekin < em::kPhotonAbsorbCut<real_t>()) {
@@ -334,8 +344,29 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   const real_t d_boundary =
       geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
+  // ---- `photonNuclear`: the fifth term of `G4GammaGeneralProcess`'s total (P19).
+  //
+  // NOT A FIFTH COMPETITOR WITH A LENGTH OF ITS OWN. Inside the general process there is one
+  // summed cross section, one interaction length and one selection uniform, and this photon's
+  // step already has exactly that shape - so the photo-nuclear term is added to the total the
+  // length is drawn from and given the TOP slice of the selection uniform, which is where
+  // `G4GammaGeneralProcess::PostStepDoIt` puts it in zone 2 (`q > P9`). `had::photon_nuclear_xs`
+  // returns zero, having evaluated nothing, below 2 m_e (zones 0 and 1 sum no photo-nuclear
+  // term), at or below the material's threshold, and with the process off.
+  //
+  // AND WHEN IT IS ZERO THIS STEP IS THE STEP IT WAS BEFORE P19, TO THE BIT. The total is the
+  // same double (`xs.total`, not `xs.total + 0`), the length uniform is the same draw, and the
+  // selection is P1's own `select_gamma_process` on the same uniform. No uniform is added
+  // anywhere. `tests/test_emextra_transport.cu` asserts it on the device for photons below
+  // 2 m_e and in water below oxygen's 11.5 MeV threshold.
+  const real_t sig_n = (had != nullptr && had->photon_nuclear)
+                           ? had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general,
+                                                            mat, s.materials[mat], p.ekin)
+                           : real_t(0);
+  const real_t xs_total = (sig_n > real_t(0)) ? xs.total + sig_n : xs.total;
+
   const real_t s_int =
-      (xs.total > real_t(0)) ? -log(rng.uniform()) / xs.total : geom::kInfinity<real_t>();
+      (xs_total > real_t(0)) ? -log(rng.uniform()) / xs_total : geom::kInfinity<real_t>();
 
   // Streaming to the boundary counts as one step; the photon is requeued.
   if (s_int >= d_boundary) {
@@ -360,7 +391,61 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   em.volume = p.volume;
   em.event = p.event;
 
-  const auto proc = em::select_gamma_process(xs, rng.uniform());
+  // THE SELECTION UNIFORM, drawn here exactly where P1 drew it. With no photo-nuclear term the
+  // walk is P1's function on it, unchanged; with one, the product is formed against the larger
+  // total and the EM walk is entered with it only if it falls below the EM share.
+  const real_t q_sel = rng.uniform();
+  em::GammaProcess proc;
+  if (sig_n > real_t(0)) {
+    const real_t r_sel = q_sel * xs_total;
+    if (r_sel >= xs.total) {
+      if (had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
+          == had::GammaNuclearSlot::kConversion) {
+        // ZONE 3: THE PHOTO-NUCLEAR SLICE BELONGS TO CONVERSION. Table 14 is table 13 in QBBC,
+        // the photonNuclear branch tests the complement of the one that just failed, and the
+        // `else` gives the share to `theConversionEE` (emextra_wiring.cuh's header; docs/RISK.md
+        // V207). The pair block below draws its own target atom and sampling, exactly as for a
+        // conversion selected from the EM share.
+        proc = em::GammaProcess::kPair;
+        // Counted, because it is the finding: every one of these is a photon QBBC would have
+        // put on a nucleus had table 14 been `sigM/sum`. One atomic on a rare branch.
+        if (had->emx_stats != nullptr) {
+          atomicAdd(&had->emx_stats[had::kEmxZone3Conversion], 1ull);
+        }
+      } else {
+        // `G4GammaGeneralProcess::SelectHadProcess` - `photonNuclear`'s PostStepDoIt, which is
+        // `G4HadronicProcess`'s and runs in `run_emextra_drain` with the models (docs/RISK.md
+        // V188). The photon leaves this kernel through the queue; its energy and direction are
+        // unchanged, because a photon has no along-step physics.
+        rep.process = ProcessId::fPhotoNuclear;
+        const int slot = s.geometry.volumes[p.volume].score_index;
+        if (had->emx_queue.items != nullptr
+            && had::enqueue_interaction<real_t>(
+                   had->emx_queue, p, had::InteractionKind::kInelastic, ParticleType::kGamma,
+                   rep, edep, p.ekin, pos_before, p.dir, p.volume, slot,
+                   static_cast<unsigned int>(em.child_count), had::emitter_last_secondary(em),
+                   rep.status, sig_n, had::InteractionBucket::kPhotoNuclear,
+                   had::InelasticModel::kNone)) {
+          if (queued != nullptr) { *queued = true; }
+          return false;
+        }
+        // A full (or absent) queue - a tripwire, see `emx_queue`'s bound. The conservative
+        // disposal every P15 refusal uses: the photon is killed with its energy deposited here,
+        // and both halves of the ledger say so.
+        had::book_refusal<real_t>(had->books, had::HadronicRefusal::kInelasticQueueFull,
+                                  p.ekin);
+        had::book_refusal<real_t>(had->books, had::HadronicRefusal::kPhotoNuclear, p.ekin);
+        rep.status = StepStatus::fStopAndKill;
+        if (slot >= 0) { edep = p.ekin; }
+        p.ekin = real_t(0);
+        return false;
+      }
+    } else {
+      proc = had::select_gamma_process_at<real_t>(xs, r_sel);
+    }
+  } else {
+    proc = em::select_gamma_process(xs, q_sel);
+  }
 
   if (proc == em::GammaProcess::kCompton) {
     rep.process = ProcessId::fCompton;
@@ -454,13 +539,27 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 /// relativistic bremsstrahlung split at 1 GeV, which is why `use_rel` below is also a strict
 /// `>`. The model is chosen once per step from the PRE-step energy and both halves of the step
 /// - the limit and the sampling - belong to it, which is what `wv_msc` is.
+///
+/// @param had P19: the hadronic wiring, for `electronNuclear` / `positronNuclear`. Null - the
+///        default, and what `src/host/b1_gpu_sched.cu` passes - is a lepton with no nuclear
+///        process, which is this function exactly as it was before P19.
+/// @param queued set true when the step ended in a lepto-nuclear interaction; see
+///        `step_gamma`'s and `step_hadron`'s, which are the same contract.
 template <typename real_t, typename Rng, typename Emitter>
 __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p, bool is_positron,
                                    Rng& rng, Emitter& em, real_t& edep, StepReport<real_t>& rep,
-                                   vis::TrajectoryBuffer traj = vis::no_capture()) {
+                                   vis::TrajectoryBuffer traj = vis::no_capture(),
+                                   const had::HadronicWiring<real_t>* had = nullptr,
+                                   bool* queued = nullptr) {
   edep = real_t(0);
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
+  // The pre-step state a lepto-nuclear queue entry carries: `ekin_pre` is ALSO the energy the
+  // target is drawn at, because the process is fHadNoIntegral (emextra_wiring.cuh's header).
+  const real_t ekin_pre_step = p.ekin;
+  const Vec3<real_t> dir_pre_step = p.dir;
+  const int volume_pre_step = p.volume;
+  if (queued != nullptr) { *queued = false; }
   if (p.volume == geom::kOutsideWorld) { return false; }
 
   const ParticleType lepton_type =
@@ -558,6 +657,25 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
             : real_t(0);
     const real_t d_coul = (coul_xs > real_t(0)) ? -log(rng.uniform()) / coul_xs
                                                 : geom::kInfinity<real_t>();
+    // ---- `electronNuclear` / `positronNuclear`, a sixth discrete competitor (P19).
+    //
+    // LAST ON THE PROCESS MANAGER - `ref/oracle/species_processes.csv` lists it after
+    // CoulombScat for both leptons, because `G4EmExtraPhysics` is constructed after
+    // `G4EmStandardPhysics` - so it is drawn last here and loses every tie below.
+    //
+    // AND ONLY ABOVE THE MATERIAL'S THRESHOLD, WHERE THE CROSS SECTION IS NOT ZERO: the draw is
+    // conditional inside `emextra_length` for the reason `d_coul`'s is above. Below it every
+    // lepton keeps the stream it had before P19 - in B1 that is every electron in water under
+    // 7.296 MeV - and with the wiring null (the reference driver) nothing here is even built.
+    real_t enuc_xs = real_t(0);
+    const real_t d_enuc =
+        (had != nullptr && had->electro_nuclear)
+            ? had::emextra_length<real_t>(
+                  had->emextra,
+                  is_positron ? had::EmExtraProcess::kPositronNuclear
+                              : had::EmExtraProcess::kElectronNuclear,
+                  mat, s.materials[mat], p.ekin, rng, enuc_xs)
+            : geom::kInfinity<real_t>();
 
     // Continuous-loss step limit, verbatim from
     // G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with the G4EmParameters
@@ -604,7 +722,11 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // lengths only - not the continuous-loss limit. It cannot change `t_step`, which is the
     // minimum of everything below regardless, but it is what `wv_step_limit`'s two early
     // returns test and those decide whether lateral displacement happens at all.
-    [[maybe_unused]] const real_t d_post = fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul));
+    // P19's `d_enuc` is in it because the manager's post-step loop includes `electronNuclear`;
+    // below the threshold it is `geom::kInfinity`'s 1e30 and `fmin` returns the other operand
+    // unchanged, so the value - and every step it decides - is the pre-P19 one.
+    [[maybe_unused]] const real_t d_post =
+        fmin(fmin(fmin(d_delta, d_brem), fmin(d_annih, d_coul)), d_enuc);
 
     const ParticleDef<real_t> lpd = particle_def<real_t>(lepton_type);
     // `[[maybe_unused]]` on this and the six below, and it is KEPT with
@@ -651,7 +773,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc_eff), fmin(fmin(d_delta, d_brem), d_annih));
-    t_step = fmin(fmin(t_step, d_coul), range);
+    t_step = fmin(fmin(fmin(t_step, d_coul), d_enuc), range);
 
     // The energy left after the whole true step, and the transport mfp that goes with it -
     // both models need one and they ask for different ones. Urban's `ComputeGeomPathLength`
@@ -715,6 +837,16 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // fire two processes on one step.
     const bool coulomb_scatters = !hits_boundary && !annihilates && !emits_brem && !emits_delta
                                   && (d_coul <= t_step);
+    // And the lepto-nuclear process after all of them, for the order the manager holds them in
+    // (see `d_enuc`). The same tie rule, and the same measure-zero event it guards.
+    //
+    // `enuc_xs > 0` IS NOT REDUNDANT. `d_enuc` is 1e30 with no process, and a lepton in a
+    // near-vacuum at a high enough energy has a range - and so a `t_step` - of that order
+    // (G4_Galactic's 20 MeV electron range is 6.6e26 mm, docs/RISK.md V84), so the length test
+    // alone could name a process that does not exist and dereference a null wiring.
+    const bool electro_nuclear = !hits_boundary && !annihilates && !emits_brem && !emits_delta
+                                 && !coulomb_scatters && (enuc_xs > real_t(0))
+                                 && (d_enuc <= t_step);
 
     // The same competition, read back out as G4StepPoint::GetProcessDefinedStep would report
     // it. When nothing discrete won, the step was defined along its length by whichever limit
@@ -735,6 +867,9 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     } else if (coulomb_scatters) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fCoulombScattering;
+    } else if (electro_nuclear) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fElectroNuclear;
     } else {
       rep.status = StepStatus::fAlongStepDoItProc;
       rep.process = (t_msc_eff < max_step && t_msc_eff < range) ? ProcessId::fMultipleScattering
@@ -970,6 +1105,41 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     traj.add(pos_before, p.pos,
              is_positron ? ParticleType::kPositron : ParticleType::kElectron, p.event,
              p.rng_key);
+
+    // ---- `electronNuclear` / `positronNuclear`: the step ENDS HERE and the final state is
+    // `run_emextra_drain`'s (P19).
+    //
+    // On the POST-step state, like every other discrete process in this function: the
+    // continuous loss, the multiple scattering and the displacement have been applied, which is
+    // `G4Step::UpdateTrack` before the one PostStepDoIt that won. The queue entry IS the lepton;
+    // `G4ElectroVDNuclearModel` scatters it and hands it back alive (`isAlive`, the energy
+    // less the virtual photon's), so it is the interaction kernel that writes it into the pool
+    // again, with the hadrons the equivalent photon made - and that calls the step hook, once.
+    if (electro_nuclear && p.ekin > real_t(0)) {
+      em.pos = p.pos;
+      em.volume = p.volume;
+      em.event = p.event;
+      const int eslot = s.geometry.volumes[p.volume].score_index;
+      if (had->emx_queue.items != nullptr
+          && had::enqueue_interaction<real_t>(
+                 had->emx_queue, p, had::InteractionKind::kInelastic, lepton_type, rep, edep,
+                 ekin_pre_step, pos_before, dir_pre_step, volume_pre_step, eslot,
+                 static_cast<unsigned int>(em.child_count), had::emitter_last_secondary(em),
+                 rep.status, enuc_xs, had::InteractionBucket::kLeptoNuclear,
+                 had::InelasticModel::kNone)) {
+        if (queued != nullptr) { *queued = true; }
+        return false;
+      }
+      // A full (or absent) queue: the tripwire and the conservative disposal, as in
+      // `step_gamma`. A positron disposed of this way still annihilates - it drops into the
+      // dying branch below with its energy deposited - because a nucleus that was never hit
+      // leaves the positron's rest mass where it was.
+      had::book_refusal<real_t>(had->books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+      had::book_refusal<real_t>(had->books, had::HadronicRefusal::kLeptoNuclear, p.ekin);
+      rep.status = StepStatus::fStopAndKill;
+      if (eslot >= 0) { edep += p.ekin; }
+      p.ekin = real_t(0);
+    }
 
     // In-flight annihilation consumes the positron: two photons, no track survives.
     if (annihilates) {
@@ -1441,6 +1611,29 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
                                             inel_xs)
             : geom::kInfinity<real_t>();
 
+    // ---- `muonNuclear`, for mu- and mu+ only (P19).
+    //
+    // `G4MuonNuclearProcess` with `G4KokoulinMuonNuclearXS` and `G4MuonVDNuclearModel`, one
+    // process object registered on both muons. A compile-time branch in effect: `type` is
+    // `run_step_hadron`'s template parameter, so `is_muon` folds to false in the other eleven
+    // instantiations and they draw nothing and carry nothing here - which is the property
+    // P8d measured for `step_neutral`'s neutron-only branches and the reason the muon's
+    // process is written here rather than routed through `inelastic_channel`, whose data sets
+    // and model list are the hadrons'.
+    //
+    // DRAWN ON EVERY MUON STEP, because the cross section is never zero: the Kokoulin table
+    // clamps below its 1 GeV node (docs/RISK.md V178), so a 50 MeV muon has the 1 GeV muon's
+    // cross section - 7.7e-8 /mm in water, a 13 km mean free path. It is Geant4's number and it
+    // moves every muon's random stream by one uniform a step; what it almost never does in a
+    // phantom is fire.
+    const bool is_muon = (type == ParticleType::kMuonMinus || type == ParticleType::kMuonPlus);
+    real_t munuc_xs = real_t(0);
+    const real_t d_munuc =
+        (is_muon && had.muon_nuclear)
+            ? had::emextra_length<real_t>(had.emextra, had::EmExtraProcess::kMuonNuclear, mat,
+                                          mm, p.ekin, rng, munuc_xs)
+            : geom::kInfinity<real_t>();
+
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
     const real_t finR = em::kHadronFinalRange<real_t>();
@@ -1530,6 +1723,10 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // The true path length this step would take if geometry did not interrupt it.
     real_t t_step = fmin(fmin(max_step, t_msc), fmin(d_delta, d_decay));
     t_step = fmin(fmin(t_step, fmin(d_coul, d_elastic)), fmin(d_inelastic, range));
+    // Behind `is_muon` and not merely an `fmin` with 1e30, because a hadron crossing a
+    // near-vacuum can have a range past 1e30 mm and an unconditional `fmin` would then clip its
+    // step; for the eleven other species the line does not exist after `is_muon` folds.
+    if (is_muon) { t_step = fmin(t_step, d_munuc); }
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
     // are inputs to WentzelVI's true/geometric conversion, so both are computed from the
@@ -1630,6 +1827,16 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     const bool interacts_inelastic = !hits_boundary && !decays && !emits_delta
                                      && !coulomb_scatters && !scatters_elastic
                                      && (d_inelastic <= t_step);
+    // `muonNuclear` after everything else here (P19). The manager's dump puts it BEFORE `Decay`
+    // for the muons (`G4EmExtraPhysics` registers ahead of `G4DecayPhysics`' manager entry),
+    // which would make it win a tie with the decay; `decays` is tested first above for every
+    // species and reordering that test is not worth a measure-zero event, so a tie with a
+    // decay goes to the decay here. `munuc_xs > 0` for the reason `step_lepton` gives for its
+    // `enuc_xs`: a length of 1e30 is not a process.
+    const bool interacts_muon_nuclear = is_muon && !hits_boundary && !decays && !emits_delta
+                                        && !coulomb_scatters && !scatters_elastic
+                                        && !interacts_inelastic && (munuc_xs > real_t(0))
+                                        && (d_munuc <= t_step);
 
     // Read back out as G4StepPoint::GetProcessDefinedStep would report it. See the same block
     // in step_lepton.
@@ -1651,6 +1858,9 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     } else if (interacts_inelastic) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fHadronInelastic;
+    } else if (interacts_muon_nuclear) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fMuonNuclear;
     } else {
       rep.status = StepStatus::fAlongStepDoItProc;
       rep.process = ProcessId::fIonisation;
@@ -1955,6 +2165,34 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         return false;
       }
       if (queued != nullptr) { *queued = true; }
+      return false;
+    }
+
+    // ---- `muonNuclear`: the step ends here too, into P19's queue (see `step_lepton`'s
+    // lepto-nuclear block, which this is the muon's copy of). The muon comes back ALIVE from
+    // `G4MuonVDNuclearModel` - unchanged below 563.5 MeV, scattered above - so the interaction
+    // kernel writes it back into the pool; a stopped mu- is not this branch's business, its
+    // at-rest capture is queued from the dying branch below as P15 wired it.
+    if (interacts_muon_nuclear && p.ekin > real_t(0)) {
+      const int mslot = (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1;
+      if (had.emx_queue.items != nullptr
+          && had::enqueue_interaction<real_t>(
+                 had.emx_queue, p, had::InteractionKind::kInelastic, type, rep, edep,
+                 ekin_pre_step, pos_before, dir_pre_step, volume_pre_step, mslot,
+                 static_cast<unsigned int>(em.child_count), had::emitter_last_secondary(em),
+                 rep.status, munuc_xs, had::InteractionBucket::kLeptoNuclear,
+                 had::InelasticModel::kNone)) {
+        if (queued != nullptr) { *queued = true; }
+        return false;
+      }
+      // The tripwire and the conservative disposal, as for every other refused interaction in
+      // this function; see the queue-full branch of the inelastic block above for why the
+      // energy is zeroed as well as deposited.
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kLeptoNuclear, p.ekin);
+      rep.status = StepStatus::fStopAndKill;
+      if (mslot >= 0) { edep += p.ekin; }
+      p.ekin = real_t(0);
       return false;
     }
 

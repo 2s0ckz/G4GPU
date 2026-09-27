@@ -126,6 +126,25 @@ enum class InteractionBucket : int {
   /// seconds**, against 9,319 MB for Bertini alone and 8,377 MB for FTFP alone. docs/RISK.md
   /// V189.
   kAtRest,
+  /// P19: `photonNuclear` - `emextra::photon_nuclear`, which is `G4LowEGammaNuclearModel`
+  /// into PreCompound below 200 MeV, Bertini's photon arm with `G4LightTargetCollider` from 199,
+  /// and the QGS refusal from 3 GeV, behind one range manager.
+  ///
+  /// ITS OWN KERNEL, AND NEVER IN `HadronicWiring::queue`. Its entries go through
+  /// `HadronicWiring::emx_queue` and are drained by `run_emextra_drain`, which reads its cursor
+  /// on the device; P15's host drain never sees this bucket. See that queue's own comment for
+  /// why a photon run cannot afford P15's.
+  kPhotoNuclear,
+  /// P19: `electronNuclear`, `positronNuclear` and `muonNuclear` - `emextra::electron_nuclear`
+  /// and `emextra::muon_nuclear`, the two VD models with their own Bertini instances.
+  ///
+  /// ONE KERNEL FOR THE THREE, and it is the arrangement P13's own probe measured: the two
+  /// entry points share the gamma chain (`lepton_hadronic_vertex`, Bertini with the cascade's
+  /// own de-excitation), and instantiated together they are 255 registers and a 2,544-byte
+  /// frame with no PreCompound in them at all, because `qbbc_gamma_deexcite_choice()` is a
+  /// constant and ptxas folds the PreCompound arm away (docs/RISK.md V170). Splitting them
+  /// would compile Bertini twice for nothing.
+  kLeptoNuclear,
   /// The species has a process and no model this port can run. Booked by name without a
   /// kernel launch, which is what keeps a refusal from costing a 1.6 MB slot.
   kNone,
@@ -139,6 +158,9 @@ __host__ __device__ inline const char* interaction_bucket_name(InteractionBucket
     case InteractionBucket::kBinary:         return "BinaryCascade";
     case InteractionBucket::kLightIon:       return "BinaryLightIonReaction";
     case InteractionBucket::kAtRest:         return "at rest (G4HadronStoppingProcess)";
+    case InteractionBucket::kPhotoNuclear:   return "photonNuclear (G4EmExtraPhysics)";
+    case InteractionBucket::kLeptoNuclear:
+      return "electronNuclear/positronNuclear/muonNuclear (G4EmExtraPhysics)";
     case InteractionBucket::kNone:           return "(no model)";
     case InteractionBucket::kNumInteractionBuckets: break;
   }
