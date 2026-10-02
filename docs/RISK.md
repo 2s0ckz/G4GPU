@@ -13440,3 +13440,249 @@ stack. **e-_100 goes the other way**, 15.6 s to 11.3 s: on main its first G4Coul
 recoil ion - which queues nothing - raised the stack, and since V210 only a queued interaction
 does. The fix for the rest is P15's and not this package's: a reservation the batch is sized
 against, or interaction kernels whose frames fit the stepping stack.
+
+### V212: every refusal the ion cascade still made inside `Interact` carried one name, `FillVoidNucleusProducts`
+
+P18 left the Binary cascade answering nucleons, pions and ions on every target, and one name in
+the transport's ledger for what it still refused: `kLightIonCascade`, "`Propagate` refused inside
+`Interact`" - 344 of the 4 GeV alpha beam's 14,488 queued interactions, and 16.3% of the scorer's
+energy (V206). `BlirRefusal::cascade_ref` carried which of `Propagate`'s refusals each was, and
+nothing read it, so this package's scope was a question before it was a number.
+
+THE INSTRUMENT, committed on its own and before any physics changed (20795e5): five BY-NAME rows
+appended to `had::HadronicRefusal` after P19's, one per `bic::CascadeRefusal` flag, booked by the
+interaction kernel beside `kLightIonCascade` or `kBinaryRefused` - a third booking on an event
+already in a SIZE row and a WHY row, read and never added. `tests/test_inelastic_transport.cu`
+section 10 books each flag alone and all five together and asserts each lands in its own row.
+
+THE MEASUREMENT, three populations, all before the branch was touched.
+
+**P9e's ion campaign and P9d's nucleon campaign**, `tests/test_bic_apply.cu` built at the fork
+point (d7f6015) against main's oracle: **every refused event of both carries the one name.** The
+ion campaign refused 2,416 of 800,000 reactions and the tally inside the cascade reads
+FillVoidNucleusProducts 2,416, capacity 0, unknown species 0, invalid (A,Z) 0, high-energy
+primary 0; the nucleon campaign refused 103 of 1.96 million, all FillVoidNucleusProducts (its one
+other unanswered event is an overflow of the secondary buffer on camp_n1400_Pb208, not a
+refusal). Per case, every case that refused anything:
+
+| ion case (MeV/u) | refused | rate | | nucleon case | refused | rate |
+|---|--:|--:|---|---|--:|--:|
+| C12 + C12, 1000 | 1,173 | **5.87%** | | p 1400 on C12 | 39 | 0.195% |
+| C12 + C12, 200 | 436 | **2.18%** | | n 1400 on C12 | 21 | 0.105% |
+| alpha + C12, 1000 | 221 | **1.10%** | | pi- 800 on C12 | 17 | 0.085% |
+| C12 + O16, 1000 | 187 | 0.935% | | pi+ 800 on C12 | 9 | 0.045% |
+| Fe56 + Fe56, 1000 | 133 | 0.665% | | n 800 on C12 | 7 | 0.035% |
+| C12 + C12, 50 | 77 | 0.385% | | p 800 on C12 | 3 | 0.015% |
+| d + C12, 1000 | 61 | 0.305% | | pi- 200 on C12 | 2 | 0.010% |
+| C12 + O16, 200 | 32 | 0.160% | | p 400, pi+ 200 on C12; p 800, n 1400, pi- 800 on O16 | 1 each | 0.005% |
+| alpha + C12, 200 | 24 | 0.120% | | | | |
+| C12 + Al27, 1000 | 21 | 0.105% | | | | |
+| Fe56 + Al27, 1000 | 12 | 0.060% | | | | |
+| alpha + O16, 1000 | 10 | 0.050% | | | | |
+| Fe56 + Fe56, 200 | 10 | 0.050% | | | | |
+| C12 + O16, 50 | 7 | 0.035% | | | | |
+| d + O16, 1000 | 5 | 0.025% | | | | |
+| d + C12, 200 | 4 | 0.020% | | | | |
+| C12 + Al27, 200; alpha + O16, 200 | 2; 1 | | | | | |
+
+The rate follows the target's proton count - a destroyed nucleus is a target list with no
+proton left, so carbon's six go first and iron's twenty-six almost never - and the energy. On
+hydrogen, which neither campaign had, the "nucleus" is the ion itself (V215): Geant4 sends 66% of
+deuterons at 1 GeV/nucleon through the branch.
+
+**The B1 sweep's alpha beams**, `tools/b1_sweep.ps1 -Only alpha_840,alpha_4000 -Scale 0.1
+-SkipQBBC` on the instrument commit built from a clean archive with the CUDA 12.9 toolkit (V206's
+method): the BY-NAME row reads the WHY row's count exactly on both beams.
+
+| beam | queued interactions | `kLightIonCascade` | energy | of it inside the scorer | `FillVoidNucleusProducts` |
+|---|--:|--:|--:|--:|--:|
+| alpha 840 MeV, 30,000 events | 28,958 | 309 (1.07%) | 145,864 MeV | 35 events, 9,694 MeV | **309** |
+| alpha 4000 MeV, 10,000 events | 14,489 | 344 (2.37%) | 1.146e6 MeV | 42 events, 132,613 MeV | **344** |
+
+So what P18 left of `kLightIonCascade` was one branch of `Propagate`, and P20 is that branch.
+The doses the same builds gave, against the like-for-like Geant4 column (seeded, and the same to
+every digit as V206's): alpha_840 4.83462E-07 ± 2.90E-09 against 4.91874E-07 ± 2.90E-09,
+-1.71% (-2.1 sigma); alpha_4000 7.50791E-08 ± 2.05E-09 against 6.69757E-08 ± 7.11E-10, +12.10%
+(+3.7 sigma) - V206's +12.13% again, from a second build of the same physics.
+
+### V213: `FillVoidNucleusProducts` balances the energy by hand, and past a 20% correction it keeps the imbalance - transcribed, taped on both entry points, and asserted
+
+`G4BinaryCascade::FillVoidNucleusProducts` (G4BinaryCascade.cc:2885-3068) is what `Propagate`
+returns when the collision loop ends with no proton left in the target list: no fragment, no
+precompound model, no excitation energy. P20 transcribed it into `bic/cascade_void.cuh`, called
+from `propagate` where `Propagate` calls it, and the reading has four things in it that a port
+gets wrong by default.
+
+**1. The energy is shared out by hand, and one of its three outcomes does not conserve it.**
+`Ekinetic = theProjectile4Momentum.e() + initial_nuclear_mass - Esecondaries - SumMassNucleons` is
+what is left once every product but the remaining target nucleons is counted. Positive, with
+nucleons left: each nucleon gets an equal share and the event is exact. Otherwise the branch
+draws `Ekineticrdm = (0.1 + 5U) MeV` for the nucleons ("leave some Energy for Nucleons") and
+rescales every other product's KINETIC energy by `1 + (Ekinetic - Ekineticrdm)/TotalEkin` - exact
+again - but only `if ( std::abs(Ekinetic) < 20*perCent * TotalEkin )`. Past twenty per cent it
+scales nothing and the event keeps `Ekinetic - Ekineticrdm`: an EXCESS of energy whenever
+`Ekinetic` is negative, which is the usual reason for being in this branch. `VoidReport` carries
+the branch and the numbers, and on every void event of the nucleon path the event's signed
+deficit is asserted to EQUAL that residue - on the tape (`VoidEnergyResidue`, 90 events, 5.5e-12
+MeV) and over the campaign (`VoidResidualDeficit`, 101 events, 5.5e-12 MeV). Like V182's
+one-nucleon residual and V184's corrector, a place Geant4 does not conserve energy, asserted
+rather than excused. The tape's 191 events took the three outcomes 1, 170 and 20 times.
+
+**2. The collisions still scheduled are drained, and a decay among them is drawn and thrown
+away.** Every collision on the manager is taken off in time order, and one with no target is
+asked for its final state; for a `G4BCDecay` that is `aProjectile->Decay()`, kept only
+`if ( lates->size() == 1 )` - and a decay has two or more daughters, so the resonance DRAWS its
+whole decay, channel, masses and angles, and the products are leaked; the same resonance is then
+decayed for real by `decayKTV.Decay(&theSecondaryList)` two statements later. The draws are on
+the stream, so the port makes them. It is RARE, and measured with a counter in the dump (a
+`G4BCDecay` of its own in place of `theDecay`, which asks the collision manager whether the decay
+it is asked for is the drain's): a decay is still scheduled when the nucleus is destroyed only if
+a resonance inside outlives the last charge, and there are none in 2,000,000 protons at 1400 MeV
+on C12 (about 2,400 through the branch), 2,000,000 pi- at 800 MeV (2,560) or 40,000 C12 on C12 at
+1000 MeV/nucleon (2,460). Where the "nucleus" is a deuteron or an alpha - an ion on HYDROGEN,
+swapped by `SetLighterAsProjectile` - the charges leave in about a resonance's lifetime: 7 of
+108,378 deuterons at 1 GeV/nucleon through the branch and 4 of 20,466 alphas. Two DRAIN cases
+keep those eleven, and the port draws exactly Geant4's decays on each.
+
+**3. theCapturedList is in the order nucleons were caught, and the port's was in the order they
+were made.** The port keeps every track in one pool and a list is a tag; the target and
+secondary lists are in pool order and so is Geant4's vector, but theCapturedList is filled by
+`Capture()` and by `DoTimeStep`'s boundary corrections one step after another, so a nucleon made
+early and caught late comes BEFORE one made late and caught early in the pool and after it in
+Geant4. `CascadeTrack::captured_seq` (in four bytes of padding, so no slot grows) carries the order
+now, as `final_seq` carries theFinalState's. It decides where the captured products come out of
+this branch and, through step 6's reverse walk, what their momenta are; it also decides which
+Kopylov momentum `DecayVoidNucleus` hands which nucleon, which had the same defect. It is rarer
+than the drain: two captured nucleons on a destroyed nucleus is 10 of 780 such events in 606,555
+neutrons at 1400 MeV on C12, and of those ten ONE is out of order. Two CAPTURED cases keep twenty,
+and on that one event walking the list in pool order puts a proton where Geant4 has a neutron.
+
+**4. On this branch every final-state track is `NewlyAdded`.** `ProductsAddFinalState` sets
+`SetNewlyAdded(IsParticipant())`; this branch sets `true` for theFinalState and `IsParticipant()`
+only for theSecondaryList. So a projectile nucleon of an ion that flew through untouched and LEFT
+before the nucleus was destroyed is a cascader of `SortResult` here and a spectator everywhere
+else.
+
+**THE TAPE** (`tests/test_bic_void.cu`). The branch is private and reached only once a cascade has
+destroyed the nucleus, so there is nothing to call it with: `ref/dump/dump_bic.cc`'s
+`write_bic_void` runs whole events of both public entry points under a recording HepJamesRandom
+and keeps the ones whose successful `Propagate` went out through it. Which ones did is read off
+two private members through an explicit instantiation (`VoidPeek`): `thePrimaryEscape` is
+written true only by the normal end of `Propagate` and read by nothing, and `theOuterRadius` is
+set by `Propagate`'s third statement, so an event that ended `stopAndKill` with the first still
+false and the second off its sentinel went through the branch. Twenty events each of {p, n} at
+1400 MeV and {pi+, pi-} at 800 MeV on C12 through `G4BinaryCascade::ApplyYourself`, and of C12 on
+C12 at 1000 and 200 MeV/nucleon, alpha on C12 at 1000 and alpha on H1 at 1000 through
+`G4BinaryLightIonReaction::ApplyYourself`; the eleven drain events; the twenty captured ones. The
+dump also reads what `Propagate` RETURNED on the ion path, before the reaction sorted, boosted and
+corrected it (`VoidRecordingCascade`, a `G4BinaryCascade` whose virtual `Propagate` is Geant4's
+and keeps a copy). Both hooks run Geant4's code on Geant4's stream: the eight cases' tapes,
+secondaries and list reads are byte-identical with and without them.
+
+| bucket | points | worst | tolerance |
+|---|--:|--:|--:|
+| `VoidTapeStructure` - uniforms consumed, the exit, the secondary count, every secondary's PDG and creator id, the drain's decays | 7,536 | exact | 0 |
+| `VoidTapeLists` - the four list sizes and (currentA, currentZ) Geant4 was left with | 1,146 | exact | 0 |
+| `VoidTapeListMomenta` - `theMomentumTransfer`, the projectile four-momentum, the initial mass | 1,528 | 8.6e-15 | 1e-12 |
+| `VoidTapeMomenta(nucleon)` | 5,000 | 8.5e-14 | 1e-9 |
+| `VoidTapeMomenta(ion)` | 6,212 | 4.3e-14 | 1e-9 |
+| `VoidBranchOutput(ion)` - `Propagate`'s own products | 6,520 | 4.4e-14 | 1e-9 |
+| `VoidBranchOutputStructure` - their order, PDG, `NewlyAdded`, creator | 4,991 | exact | 0 |
+| `VoidEnergyResidue(MeV)` | 90 | 5.5e-12 | 1e-6 |
+
+The ion rows are what V214 needed: before its fix `VoidTapeMomenta(ion)` read 1.9e-5 while
+`VoidBranchOutput(ion)` read 4.4e-14.
+
+**THE CAMPAIGN** (`tests/test_bic_apply.cu`, 147 cases): P9e's three cases that refused more than
+1 in 100 - C12 on C12 at 1000 and 200 and alpha on C12 at 1000 MeV/nucleon - are compared like
+the rest, and nine ion-on-hydrogen cases are new ({d, alpha, C12} at {50, 200, 1000} MeV/nucleon;
+49 ion cases, 980,000 reactions). **Nothing is refused, by any name, in either campaign.** The
+branch's RATE per case is compared with Geant4's own count of the same events
+(`bic_void_rates.csv`, read with `VoidPeek` beside the species rows): 35,566 events through it
+in the port against 35,702 in Geant4 over 127 cases, worst 2.98 sigma - p at 800 MeV on C12,
+3 against 16, where three of the four 800 MeV cases on C12 sit low (p, n, pi+: 3, 7, 9 against
+16, 15, 22; pi- 18 against 14) and the two nucleons at 1400 high (35 and 22 against 28 and 20):
+a pattern at this statistics, not a resolved difference. Species yields worst 4.12 sigma over 17,473 (alpha on H1
+at 200 MeV/nucleon, the surviving alpha: 2,280 against 2,025), kinetic energies 3.65,
+multiplicities 4.29; per-event balance 1.000 of its bound over 977,978 ion events. What is left
+unanswered is 40 overflows of a secondary buffer, and 39 of them are this branch's: Fe56 on Fe56
+at 1000 MeV/nucleon, 0.195%, every one a destroyed-nucleus event - each nucleon of the iron
+target becomes its own product - that overflows a buffer of the light-ion reaction (its final
+state holds `kBlirMaxSecondaries`, 128) and is refused as `capacity`, which the transport books as
+`kBinaryRefused`. Counted where Geant4 counts them, the branch's rate on that case is 147 against
+152 (0.29 sigma); counted after the overflow, as the first version of the test did, it read 108,
+2.74 sigma.
+
+### V214: `DeExciteSpectatorNucleus` boosts the projectile fragment by what the CASCADERS left over, not by the spectators' own sum - P9e passed the sum, and only a cascade that does not conserve momentum can tell
+
+`G4BinaryLightIonReaction::ApplyYourself` sorts `Propagate`'s products into cascaders and
+spectators (`SortResult`, whose return value is `pspectators`), sets
+`momentum = pInitialState - pFinalState`, runs its E/p loop while
+`|momentum.e() - pspectators.e()| > 10 MeV`, and then calls
+`DeExciteSpectatorNucleus(spectators, cascaders, theStatisticalExEnergy, momentum)`
+(G4BinaryLightIonReaction.cc:234). The fourth parameter is NAMED `pSpectators` in the callee, and
+the fragment's de-excitation products are boosted by `G4LorentzRotation(pSpectators.boostVector())`
+- so what they are boosted by is `momentum`, the four-momentum the cascaders did not carry away,
+and not `pspectators`. P9e's `blir_cascade_arm` passed `p_spectators`, the sum.
+
+**Why nothing saw it for two packages.** The two are the same four-vector to rounding whenever
+`Propagate` conserved four-momentum, which its normal end does but for V182's one-nucleon
+residual, and P9e's twenty-event tape passed at 1.4e-11 and its campaign inside four sigma with
+the defect in; both still do, and to the same digits, with it out (`IonTapeMomenta` 1.442e-11).
+
+**What does not conserve it is the branch P20 transcribed.** `FillVoidNucleusProducts` ends with
+up to ten reverse passes that rotate each product's momentum at fixed magnitude and STOP once less
+than 0.1 MeV/c is missing, and its third energy branch keeps MeV outright (V213). P20's ion tape
+measured the consequence before the fix:
+
+| | before | after |
+|---|--:|--:|
+| `VoidTapeMomenta(ion)` - every secondary of 80 ion events, relative to its own energy | **1.94e-5** (24 of 40 C12 + C12 events out of 1e-9) | **4.3e-14** |
+| `VoidBranchOutput(ion)` - `Propagate`'s own products, read where `Interact` receives them | 4.4e-14 | 4.4e-14 |
+
+The second row is how it was found rather than argued: the branch's output matched to 4.4e-14
+while the reaction's products were out by 1.9e-5, so the difference was after `Propagate`, in
+the reaction. On C12 + C12 at 1000 MeV/nucleon event 10 the spectator fragment's four products
+(a He3 and three protons from the six-nucleon, Z = 5 spectator) summed to the same invariant mass
+as Geant4's, 5686.33 MeV, and to a velocity 3.9e-6 lower along the beam - the fragment's
+excitation energy was right and its boost was not - and the cascaders absorbed the 0.164 MeV the
+fragments were short through the corrector that follows, which is why every product moved and
+the event's total did not. `blir_cascade_arm` passes `momentum` now, and
+`BlirReport::spectator_gamma` is that boost's gamma.
+
+### V215: an ion on hydrogen that destroys its own nucleus can leave 300 MeV/c of momentum behind - Geant4's, measured on Geant4's events, and asserted
+
+For a hydrogen target `SetLighterAsProjectile` swaps the reaction: the PROTON becomes the
+projectile of `Interact` and the ion the nucleus it is propagated through, in the ion's rest
+frame, and the products are boosted back. A deuteron has one proton and an alpha two, so a GeV
+proton destroys them often - Geant4 sends 32%, 51% and 66% of deuterons on hydrogen at 50, 200
+and 1000 MeV/nucleon through `FillVoidNucleusProducts`, and 0.6%, 4.3% and 11% of alphas (P20's
+campaign, Geant4's own counts) - and the branch's last step, up to ten passes that rotate each
+product's momentum at FIXED magnitude towards what is missing, does not always get there. Its
+energy is exact; its momentum is what the passes left. `G4BinaryLightIonReaction::ApplyYourself`
+then tests only energy - `while (std::abs(momentum.e()-pspectators.e()) > 10*MeV)` - so the event
+goes out with the momentum missing, and the boost to the lab turns it into energy.
+
+MEASURED ON GEANT4 (a scratch probe on the campaign's own seed, so these are the oracle's own
+events): of 20,000 deuterons at 1 GeV/nucleon on H1, six are out by 124 to 574 MeV in the lab,
+every one through the branch with four products, and in the deuteron's rest frame every one has
+its energy exact to 0.000 MeV and 68 to 318 MeV/c missing along the beam. The port, on its own
+stream, has four such events, 105 to 291 MeV, each through the branch with four products, the E/p
+loop never entered, and 58 to 161 MeV/c left after all ten passes. Over the case the two sides'
+mean imbalances, which those events dominate, are 1.698 and 1.769 MeV in energy and 1.453 and
+1.532 MeV/c in momentum.
+
+So the two ion-campaign assertions that assumed every event balances were wrong for these cases,
+and are replaced, not widened. The per-event `IonBalance` is measured where it holds: the lab
+imbalance is boosted into the ion's rest frame and its ENERGY is what the bound bounds (worst
+9.999 MeV against the E/p loop's 10 on the deuteron case); its MOMENTUM, on a swapped event only
+the branch touched, is asserted to be no more than the branch's own `VoidReport::momentum_left`
+(`SwappedVoidMomentum`, 25,438 events, worst 1.1e-10 MeV/c over it). And the mean balances of the
+nine hydrogen cases are compared in standard errors from both sides' per-event variances, which
+`bic_blirapply_status.csv` now carries (`var_e_MeV2`, `var_pz_MeV2`): worst 2.68 sigma in energy
+and 2.29 in momentum, where the residue tolerances they had read 0.079 MeV against 5e-3.
+
+The same run measured a floor the bound never had: the destroyed-nucleus branch hands the
+corrector events that already balance, which then exit on their first attempt with |Scale| at
+1e-16 - ic_C121000_C12 ev 7501, 29 products, a bound of 3.8e-12 MeV against a deficit of 1.5e-11,
+two ulps of 34 GeV - so the bound now adds four ulps of the event's energy per product.
