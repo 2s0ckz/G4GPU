@@ -998,6 +998,9 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
   // writing up.
   if (outc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
     had::book_refusal<real_t>(had.books, outc.refusal, q.track.ekin);
+    // P20: and, for a cascade refusal, WHICH of `bic::CascadeRefusal`'s names it carried - a
+    // third booking on the same event, read beside the WHY row and never added to it.
+    had::book_cascade_refusal_names<real_t>(had.books, outc.cascade_ref, q.track.ekin);
   }
   if (!outc.ran && !outc.rejected_by_integral_xs) {
     // The `HOW MUCH`: one booking per lost interaction. Which counter depends on WHICH PROCESS

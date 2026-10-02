@@ -402,6 +402,36 @@ enum class HadronicRefusal : int {
   /// class, and `tests/test_emextra_wiring.cu` section 6 prints the breakdown per case.
   kEmExtraRefused,
 
+  // -------------------------------------------------------------------------------------------
+  // P20: WHICH of the Binary cascade's own refusals it was, by the name `bic::CascadeRefusal`
+  // gives it. `kLightIonCascade` says that `G4BinaryCascade::Propagate` refused inside
+  // `G4BinaryLightIonReaction::Interact`, and `kBinaryRefused` that the nucleon arm refused; what
+  // neither says is WHICH of the cascade's refusals it was, and that is the number a package
+  // closing one of them has to start from. These rows are what P20's measurement of the B1
+  // sweep's alpha beams reads (docs/RISK.md V212).
+  //
+  // A THIRD booking, and the rule is the one above one level down: every entry here is on an
+  // event that is already in a SIZE row and in `kLightIonCascade` or `kBinaryRefused`, so they
+  // are read and never added. A refusal that carries two names books both, so these can sum to
+  // more than the WHY row they break down.
+  // -------------------------------------------------------------------------------------------
+
+  /// BY NAME: `G4BinaryCascade::FillVoidNucleusProducts`, the branch for a target list with no
+  /// proton left in it (`CascadeRefusal::void_nucleus`).
+  kCascadeVoidNucleus,
+  /// BY NAME: one of the cascade's caller-owned lists was full (`CascadeRefusal::capacity`).
+  kCascadeCapacity,
+  /// BY NAME: a species the decay engine or a channel's final state does not carry
+  /// (`CascadeRefusal::unknown_species`).
+  kCascadeUnknownSpecies,
+  /// BY NAME: an (A, Z) Geant4 throws on, a hyper-nucleus, or `DeExcite`'s A <= 1 exception
+  /// (`CascadeRefusal::invalid_nucleus`).
+  kCascadeInvalidNucleus,
+  /// BY NAME: a secondary in the `undefined` state - the late-particle arm only a high-energy
+  /// generator reaches (`CascadeRefusal::high_energy_primary`). A tripwire: QBBC's cascade is
+  /// standalone.
+  kCascadeHighEnergyPrimary,
+
   kNumHadronicRefusals,
 };
 
@@ -492,6 +522,20 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kEmExtraRefused:
       return "WHY: a photo- or lepto-nuclear model refused by name for another reason (P13's "
              "EmExtraRefusal: a Bertini/PreCompound/sampler refusal, a capacity, a hypernucleus)";
+    case HadronicRefusal::kCascadeVoidNucleus:
+      return "BY NAME, of the two cascade WHY rows: G4BinaryCascade::FillVoidNucleusProducts - "
+             "the target list has no proton left";
+    case HadronicRefusal::kCascadeCapacity:
+      return "BY NAME, of the two cascade WHY rows: a Binary-cascade list at capacity";
+    case HadronicRefusal::kCascadeUnknownSpecies:
+      return "BY NAME, of the two cascade WHY rows: a species the cascade's decay engine or a "
+             "channel does not carry";
+    case HadronicRefusal::kCascadeInvalidNucleus:
+      return "BY NAME, of the two cascade WHY rows: an (A, Z) Geant4 throws on, or a "
+             "hyper-nucleus";
+    case HadronicRefusal::kCascadeHighEnergyPrimary:
+      return "BY NAME, of the two cascade WHY rows: the late-particle arm of a high-energy "
+             "generator - a tripwire";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";

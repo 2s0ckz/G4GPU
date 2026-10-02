@@ -400,7 +400,34 @@ struct InteractionOutcome {
   int n_emitted = 0;
   int attempts = 0;             ///< the `do { } while(!result)` re-entry count
   int target_z = 0, target_a = 0;
+  /// WHICH of the Binary cascade's refusals, when `refusal` is `kLightIonCascade` or a
+  /// `kBinaryRefused` that came from `Propagate` - P20's by-name rows, booked beside `refusal`
+  /// by `book_cascade_refusal_names`. Default-constructed (nothing set) for every other outcome.
+  bic::CascadeRefusal cascade_ref;
 };
+
+/// Books P20's BY-NAME rows for a cascade refusal: one booking per flag `ref` carries, each with
+/// the projectile's kinetic energy, so the rows break `kLightIonCascade` and `kBinaryRefused`
+/// down by `bic::CascadeRefusal`'s own names. Nothing for a refusal that set none of them. See
+/// the note above `HadronicRefusal::kCascadeVoidNucleus` for why these are never added.
+template <typename real_t>
+__host__ __device__ inline void book_cascade_refusal_names(const HadronicRefusalBooks& books,
+                                                           const bic::CascadeRefusal& ref,
+                                                           real_t energy) {
+  if (ref.void_nucleus) {
+    book_refusal<real_t>(books, HadronicRefusal::kCascadeVoidNucleus, energy);
+  }
+  if (ref.capacity) { book_refusal<real_t>(books, HadronicRefusal::kCascadeCapacity, energy); }
+  if (ref.unknown_species) {
+    book_refusal<real_t>(books, HadronicRefusal::kCascadeUnknownSpecies, energy);
+  }
+  if (ref.invalid_nucleus) {
+    book_refusal<real_t>(books, HadronicRefusal::kCascadeInvalidNucleus, energy);
+  }
+  if (ref.high_energy_primary) {
+    book_refusal<real_t>(books, HadronicRefusal::kCascadeHighEnergyPrimary, energy);
+  }
+}
 
 // =============================================================================================
 // The four arms
@@ -514,6 +541,8 @@ __host__ __device__ __noinline__ bool run_arm_binary(
     // wiring should never send here. `kBinaryHydrogenTarget`, the name the missing arm had, is
     // retired (wiring.cuh).
     out.refusal = HadronicRefusal::kBinaryRefused;
+    // And which of `Propagate`'s own refusals it was, when it was one (P20's by-name rows).
+    if (ref.cascade) { out.cascade_ref = ref.cascade_ref; }
     return false;
   }
   copy_final_state<real_t>(s.bic_fs, s.fs);
@@ -559,8 +588,9 @@ __host__ __device__ __noinline__ bool run_arm_light_ion(
     // `G4BinaryCascade::Propagate` refused inside `Interact` - `ref.cascade_ref` says which of
     // its refusals. The name is the one this hole had while `Interact` was missing, because a
     // ledger read across the two builds should show the rate falling rather than a name
-    // disappearing.
+    // disappearing. `cascade_ref` travels out with it, so the ledger can say WHICH (P20).
     out.refusal = HadronicRefusal::kLightIonCascade;
+    out.cascade_ref = ref.cascade_ref;
     return false;
   }
   const bool would_throw = ref.momentum_not_conserved && rep.correction_gave_up;
