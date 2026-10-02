@@ -13674,8 +13674,10 @@ mean imbalances, which those events dominate, are 1.698 and 1.769 MeV in energy 
 
 So the two ion-campaign assertions that assumed every event balances were wrong for these cases,
 and are replaced, not widened. The per-event `IonBalance` is measured where it holds: the lab
-imbalance is boosted into the ion's rest frame and its ENERGY is what the bound bounds (worst
-9.999 MeV against the E/p loop's 10 on the deuteron case); its MOMENTUM, on a swapped event only
+imbalance is boosted into the ion's rest frame and its ENERGY is what the bound bounds - on the
+nine hydrogen cases the worst is half of it, 9.999 MeV on a deuteron at 1 GeV/nucleon against the
+E/p loop's 10 plus the excitation a one-nucleon residual loses (V182), and over all 977,978 ion
+events it is still 1.000, on an O16 target; its MOMENTUM, on a swapped event only
 the branch touched, is asserted to be no more than the branch's own `VoidReport::momentum_left`
 (`SwappedVoidMomentum`, 25,438 events, worst 1.1e-10 MeV/c over it). And the mean balances of the
 nine hydrogen cases are compared in standard errors from both sides' per-event variances, which
@@ -13686,3 +13688,228 @@ The same run measured a floor the bound never had: the destroyed-nucleus branch 
 corrector events that already balance, which then exit on their first attempt with |Scale| at
 1e-16 - ic_C121000_C12 ev 7501, 29 products, a bound of 3.8e-12 MeV against a deficit of 1.5e-11,
 two ulps of 34 GeV - so the bound now adds four ulps of the event's energy per product.
+
+### V216: one ulp in the swapped projectile's momentum decided whether a deuteron on hydrogen came out whole - P9e's `toBreit * (m1, 0)` written as `(gamma*m1*beta, gamma*m1)`
+
+The ion-on-hydrogen cases P20 added to the campaign compared inside five sigma, and one sat near
+the edge: ic_d200_H1's mean multiplicity at 4.29 sigma (port 2.99405, Geant4 2.99735), the worst
+of the 146 multiplicities the test compares. At 200,000 events a side it was not near the edge.
+Event topologies - each event's products as a sorted list - from a scratch Geant4 probe running
+the campaign's own case and from `tests/test_bic_apply.cu` under `P20_H1_DIAG`:
+
+| d + p at 200 MeV/nucleon, 200,000 events | Geant4 | port, before | port, after |
+|---|--:|--:|--:|
+| n p p | 195,880 | 195,333 | 195,832 |
+| gamma p d | 3,623 | 3,632 | 3,655 |
+| **p d** | **497** | **1,035** | **513** |
+
+**Where: by replaying 4,000 of Geant4's own d + p events on their tapes** (the void-tape format,
+every event kept), 39 differed. In each structural one Geant4's `Interact` called `Propagate`
+more often than the port did, and the try where they parted had a remnant `CorrectFinalPandE`
+had put ON ITS GROUND-STATE MASS: excitation -4.5e-13 MeV in Geant4 and 0 in the port on ev 238,
+read off `G4BinaryCascade` after each `Propagate` through the dump's `VoidPeek` (the private
+`GetExcitationEnergy`, `GetFinal4Momentum` and the four lists). `Propagate` returns an empty
+vector for a negative excitation and `Interact` tries another impact parameter; a remnant at
+zero goes on to a ground-state deuteron and a bare "p d". So the sign of two ulps of 1875.6 MeV
+decides the event - and over those 4,000 events Geant4 kept 36 of its 71 such remnants and the
+port 61 of 71.
+
+**Why the port's sign leaned positive: its first input was one ulp high on every event.**
+`SetLighterAsProjectile` rebuilds the projectile of a swapped reaction as
+`toBreit * G4LorentzVector(m1, G4ThreeVector(0,0,0))`, and CLHEP's `vectorMultiplication` makes
+each component `m[i][3]*m1` with `m[i][3] = gamma*b[i]`, i.e. `(gamma*b)*m1`. P9e wrote
+`(gamma*m1*beta, gamma*m1)` - `(gamma*m1)*b`, the same in exact arithmetic and 644.61990620720815
+MeV/c against Geant4's 644.61990620720803 for the proton of a 200 MeV/nucleon deuteron: one ulp,
+in the four-momentum every projectile nucleon starts from, on every event of the beam. A system
+one ulp heavier leaves its corrected remnant one ulp heavier, and an excitation that is noise
+around zero becomes noise around +1 ulp.
+
+`blir_set_lighter_as_projectile` evaluates the product as CLHEP does now
+(`imr::LorentzRotation::from_boost`, the transcribed `set(bx, by, bz)`, times the at-rest
+vector), and `tests/test_bic_void.cu`'s `BlirSwapFrame` compares the frame and the boost bitwise
+against the dump's own evaluation of the source's two statements (`write_blir_swap`,
+bic_blir_swap.csv) for twelve cases - the nine ion-on-hydrogen campaign cases, Fe56 on Al27 at
+200 and 1000 MeV/nucleon, and one that does not swap: 96 components exact, and with P9e's form
+back swap_d50_H1's pz reads 310.44525805354834 against 310.44525805354829. The topology table's
+third column is after the fix; the deuteron yield went from 5.90 sigma to 0.53, its energy flow
+from +12.8% to +1.1% (0.5 sigma), the campaign's worst multiplicity from 4.29 to 3.01.
+
+**What is left is the cascade's own last place, and it is not biased.** Replayed after the fix
+the same 4,000 events differ on 17, not 39, and the port keeps 45 of the 71 ground-state
+remnants: the final-state four-momenta still differ from Geant4's by about 1e-12 MeV before the
+correction - the level P9d's and P9e's tapes measured their products at (8.7e-14 and 1.4e-11 of
+their energy) and accepted - so on those events the sign is the port's own rounding. At 200,000
+events that is a rate Geant4 has (513 against 497); event by event it is not. Bitwise agreement
+of those events would need every operation of the cascade before the correction to be Geant4's
+to the last place, which nothing in P9d, P9e or P20 claims.
+
+### V217: with the destroyed nucleus answered the 4 GeV alpha lands in the band at a tenth of its counts, and what the full counts still miss is not the ion cascade's
+
+The brief's beams are the sweep's two alpha rows at a tenth of their counts, as since P9e
+(`-SkipQBBC`, both ports built with the same CUDA 12.9 toolkit and linking the same sixteen
+stepping objects, main's d7f6015): "before" is the instrument commit 20795e5 from a clean `git
+archive` with the three units it changes compiled; "after" is this branch at e35ce20, V216's fix
+included. The Geant4 column is seeded and reads the same to every digit both times.
+
+| beam | events | port, before | port, after | Geant4 | before | after |
+|---|--:|--:|--:|--:|--:|--:|
+| alpha 840 MeV | 30,000 | 4.83462E-07 ± 2.90E-09 | 4.83622E-07 ± 2.89E-09 | 4.91874E-07 ± 2.90E-09 | -1.71%, -2.1 σ | -1.68%, -2.0 σ |
+| alpha 4000 MeV | 10,000 | 7.50791E-08 ± 2.05E-09 | **6.44201E-08 ± 6.83E-10** | 6.69757E-08 ± 7.11E-10 | +12.10%, +3.7 σ | **-3.82%, -2.6 σ** |
+
+REFUSED, BY NAME, of the interactions each run queued. Before: `kLightIonCascade` 309 of
+alpha_840's 28,958 (1.07%, 145,864 MeV, 9,694 of it inside the trapezoid) and 344 of
+alpha_4000's 14,489 (2.37%, 1.15e6 MeV, 132,613 inside), every one `FillVoidNucleusProducts`
+(V212). After: **none** of alpha_840's 29,117, and of alpha_4000's 14,861 the eight rows the
+cascade does not own - 7 inelastic secondaries of a species `core/particle.cuh` has no row for
+(648 MeV: hyperons and K0S/K0L, P1's species set) and 1 GenericIon outside AME2012 (10 MeV) -
+**0.054%**, under the brief's 0.1%. Both "before" runs book the same eight, and alpha_840 books
+2 steps of `kIonDeltaRay` on both builds (V200's per-step count, 15.5 MeV). At the full counts
+the same rows read 0.058% (77 and 9 of 148,687) and none of 290,298.
+
+**At a tenth of the counts the 4 GeV alpha is inside the band, and its rms is Geant4's** - 1.06%
+of the dose against Geant4's 1.06%, where the refusals left it at 2.73%: what V206 left of the
+excess (+12.1%) was those 344 interactions, each dumping a GeV where it was refused. alpha_840
+moves by +0.03%, because its 309 put 9,694 MeV of their 145,864 inside the trapezoid.
+
+**At the full counts neither row is**, and the A/B V192's switch was kept for says where not to
+look. The same build at the sweep's own counts, and with the five ion inelastic processes held
+off on BOTH sides (`G4GPU_ION_INELASTIC=0`; `alphaInelastic`, `dInelastic`, `tInelastic`,
+`He3Inelastic` and `ionInelastic` inactivated in Geant4):
+
+| beam | events | port | Geant4 | diff |
+|---|--:|--:|--:|--:|
+| alpha 840 MeV | 300,000 | 4.87999E-06 ± 9.15E-09 | 4.93621E-06 ± 9.17E-09 | **-1.14%, -4.3 σ** |
+| alpha 4000 MeV | 100,000 | 6.46782E-07 ± 2.16E-09 | 6.64032E-07 ± 2.21E-09 | **-2.60%, -5.6 σ** |
+| alpha 840 MeV, the five ion processes off | 300,000 | 7.38301E-06 ± 1.01E-08 | 7.38942E-06 ± 1.01E-08 | -0.09%, -0.5 σ |
+| alpha 4000 MeV, the five ion processes off | 100,000 | 5.12479E-07 ± 1.21E-09 | 5.13060E-07 ± 1.21E-09 | -0.11%, -0.3 σ |
+
+(The two "off" rows ran on the build before V216's fix, which with the ion processes off is
+never called.) So the alpha's own ionisation, multiple scattering, hadronic elastic and transport
+agree, and what parts the rows is what the ion-inelastic interactions put in the trapezoid: at
+4 GeV Geant4's chain ADDS 1.510E-07 Gy over the 100,000 events and the port's 1.343E-07, 11%
+less; at 840 MeV the chain REMOVES dose - the Bragg peaks of the alphas that interact upstream -
+and the port's removes 2.0% more.
+
+**Not the reaction.** Under `P20_CASE_DIAG` the energy each class of product carries out of an
+alpha reaction agrees at 100,000 to 200,000 events a side: alpha on O16 at 1000 MeV/nucleon -
+the beam's commonest target at its full energy - neutrons +0.24%, protons +0.00%, Z = 1 ions
+-0.36%, helium -0.11%, Z >= 3 +0.09%, gammas -0.67%, pions +0.26%, every class inside 0.9
+sigma; on H1 at 1000, every class carrying more than 1 MeV an event inside 1.1% and 2.3 sigma;
+at 200 MeV/nucleon on both targets inside 0.9% and 1.4 sigma. A reaction whose products carry
+Geant4's energy class by class to under 1% cannot take 11% out of what they deposit. The ion
+cross sections are P2's, validated against Geant4's own (docs/PORTED.md 2.1.1).
+
+**It is the neutrons, and it is Geant4's bookkeeping: V219.** The same deficit is on a deuteron
+and an He3 beam at the alpha's 1 GeV/nucleon and goes with their ion processes - d_2000 -3.34%
+(-4.8 sigma) on, -0.54% off; He3_3000 -1.38% (-3.0) on, -0.01% off - and a 1 GeV NEUTRON beam
+reads -36.7%. With Geant4's `G4NeutronGeneralProcess` switched off (ref/b1neutron), or with one
+ordering inside it reversed (ref/b1ngp), Geant4 comes down onto the port on every one of these
+beams: alpha_4000 -0.17% (-0.35 sigma) against the reordered process. Geant4 charges a neutron's
+step that ends on a boundary at the next material's mean free path, so a neutron reaching the bone
+trapezoid through water arrives with too many of its interaction lengths used up - and the
+projectile fragments of an alpha or a deuteron at 1 GeV/nucleon are half neutrons.
+
+### V218: the destroyed-nucleus branch moved the device stack reservation one page up, to 98,304 bytes a thread, and the Binary kernel sets it now
+
+The reservation has been read off the interaction kernels' `localSizeBytes` since V196, so P20
+changed it without an edit, and the `stack:` line every hadron run prints says so - "98304 B a
+thread reserved off run_interaction<kBinary>, and no launch needed more" on both alpha beams at
+both counts. `-Xptxas -v` on the two units P20 compiles, against main's d7f6015 built with the
+same CUDA 12.9 toolkit:
+
+| kernel | d7f6015 | P20 |
+|---|--:|--:|
+| `run_interaction<kBinary>` | 82,496 B | **90,576 B** |
+| `run_interaction<kLightIon>` | 88,976 B | 82,416 B |
+| the reservation | 94,208 B, off `kLightIon` | **98,304 B, off `kBinary`** |
+
+The Binary kernel's tree gained `bic::fill_void_nucleus_products` where `propagate` calls it,
+and with it 8,080 bytes of frame; the light-ion kernel, which reaches the same branch through the
+same `propagate`, came out 6,560 bytes SMALLER - ptxas lays the frame out as the maximum over the
+tree's overlays, and that maximum is not additive in what a change adds. 90,576 rounds up to
+94,208 and the engine adds its page of margin, so the reservation is one 4 kB page above main's.
+V190 measured what a page costs on this RTX 3070 - about 270 MB of the card's 8 GB, before
+anything is allocated, because the reservation is for every thread the device can hold resident
+and not for the 128 a launch runs - and V196 that the card oversubscribes rather than refuses on
+this WDDM driver, which is a few percent of throughput and not a failure. The interaction pool is
+the 128 slots it was (758.1 MB on both builds), and the frame was not reduced: that is a
+performance package's lever (V190's list), not this one's.
+
+### V219: Geant4's neutron general process charges a step that ends on a boundary at the NEXT material's mean free path, and this transport draws every length afresh - 41% of a 100 MeV neutron's B1 dose, 37% of a 1 GeV one's, and all that the alpha rows still miss
+
+V217 left the alpha rows 1.1% and 2.6% low at their full counts with the ion cascade cleared.
+Three more beams and two more Geant4 configurations put the rest on one line of Geant4. Every
+row at the sweep's like-for-like settings (`$emOnly`'s list, `kFinal`, 32 live tracks an event);
+"general process off" is ref/b1neutron, Geant4's B1 with `SetEnableNeutronGeneralProcess(false)`
+before `/run/initialize`, and "reordered" is ref/b1ngp, below; the 100 MeV rows run P15's own
+macro, which inactivates `ionElastic` alone. B1 doses in nGy (µGy for alpha_840):
+
+| beam | events | port | Geant4 as QBBC ships it | Geant4, general process off | Geant4, reordered |
+|---|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 500,000 | 133.066 ± 0.754 | 224.945 ± 0.985: **-40.8%, -74.1 σ** | 132.135 (P15's row): +0.70% | 133.458 ± 0.757: -0.29%, -0.4 σ |
+| neutron 1000 MeV | 100,000 | 78.435 ± 0.837 | 123.873 ± 1.079: **-36.7%, -33.3 σ** | 78.053 ± 0.835: +0.49%, +0.3 σ | 76.996 ± 0.830: +1.87%, +1.2 σ |
+| deuteron 2000 MeV | 100,000 | 269.699 ± 1.36 | 279.007 ± 1.40: -3.34%, -4.8 σ | 272.586 ± 1.39: -1.06%, -1.5 σ | 272.207 ± 1.38: -0.92%, -1.3 σ |
+| alpha 4000 MeV | 100,000 | 646.782 ± 2.16 | 664.032 ± 2.21: -2.60%, -5.6 σ | 650.008 ± 2.17: -0.50%, -1.1 σ | 647.871 ± 2.18: **-0.17%, -0.4 σ** |
+| He3 3000 MeV | 100,000 | 592.169 ± 1.95 | 600.455 ± 1.95: -1.38%, -3.0 σ | 592.855 ± 1.94: -0.12%, -0.2 σ | - |
+| alpha 840 MeV | 300,000 | 4.87999 ± 0.00915 | 4.93621 ± 0.00917: -1.14%, -4.3 σ | 4.90857 ± 0.00918: -0.58%, -2.2 σ | - |
+
+And with the neutron's inelastic switched off on both sides - Geant4 with the general process
+off and `neutronInelastic` and the three at-rest captures inactivated, the port in `kStage1` -
+the 1 GeV neutron reads 4.023 against 4.102 nGy (-1.9%, -0.4 sigma): the elastic half agrees,
+and so does everything when the process is not the general one.
+
+**THE LINE.** `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` (11.1.1; 11.5.0's
+is the same):
+
+    CurrentCrossSection(track);      // sets currentInteractionLength = 1/fLambda for the
+                                     // material the track is in NOW
+    ...
+    theNumberOfInteractionLengthLeft -= previousStepSize/currentInteractionLength;
+
+The step being charged was taken in the PREVIOUS material. `G4HadronicProcess` charges it at the
+previous call's `currentInteractionLength` and only then sets `currentInteractionLength = theMFP`;
+`G4GammaGeneralProcess`, by the same author, subtracts first and then sets "new mean free path
+and step limit for the next step". A neutron has no continuous process and no step limit but
+the geometry and its own interaction, so every step it survives ends on a boundary, and in B1
+every boundary changes material. The water ahead of the bone trapezoid is charged at bone's mean
+free path, about 0.55 of water's, so a neutron that reaches the trapezoid through 19 cm of water
+is charged nearly twice the interaction lengths it used, and the ones that would have interacted
+beyond the trapezoid's far side interact at its surface or inside it. On straight
+lines that is about twice as many interactions inside the trapezoid among the neutrons that reach
+it - an estimate, against a measured excess of 59% in its dose; the measurement is below.
+
+**THE PROOF IS GEANT4's OWN.** ref/b1ngp (new) is Geant4's B1 on QBBC's constructor list line for
+line, behind one constructor that puts the neutron's general process on its manager first, so
+every QBBC constructor finds it through `G4PhysListUtil::FindNeutronGeneralProcess` instead of
+creating one. With the stock class it reads 123.873 nGy and 664.032 nGy - exampleB1's own two
+numbers, to every digit, because it is the same random stream. With
+`PostStepGetPhysicalInteractionLength` overridden to charge each step at the mean free path it
+was taken with (the base called with `previousStepSize = 0`, then the decrement at the previous
+call's length) Geant4 lands on the port: 76.996 against 78.435, 647.871 against 646.782, 133.458
+against 133.066. 340,124, 463,082 and 1,385,053 lengths were carried in those three runs, every
+one across a change of material.
+
+**WHY THE PORT CANNOT SEE IT.** This transport re-draws every interaction length on every step,
+and `had::decay_in_flight_length`'s header (wiring.cuh) argues that is the same distribution as
+Geant4's carried count because "Geant4 evaluates it at the PRE-step energy too, and
+`currentInteractionLength` is that value". For every other process here that premise holds and the
+memoryless draw is exact; for this one it does not, so the port is exactly the "reordered" column
+and not 11.1.1. And the neutron row of the sweep was never compared
+against the general process: ref/b1neutron turns it off for both of its macros, on the argument
+in `p15_neutron.mac` that "the sub-processes it splits into are the same code". They are, and the
+interaction length around them is not. P15's +0.7% is against that reference; against QBBC as it
+ships the same port reads -40.8%.
+
+**WHAT IT MEANS FOR P20's ROWS.** The alpha rows' full-count residual is this and nothing of the
+ion cascade's: against the reordered process alpha_4000 reads -0.17%, and against the process
+switched off every ion beam is inside 2.2 sigma. The fragments of an alpha and of a deuteron at
+1 GeV/nucleon are half neutrons and of an He3 a third, which is the order of the three rows'
+deficits (-3.3%, -2.6%, -1.4%).
+
+**WHO OWES IT, AND IT IS NOT DONE HERE.** Reproducing 11.1.1 means carrying
+`theNumberOfInteractionLengthLeft` on the neutron's track across steps and charging it in
+Geant4's order - refresh first, then `previousStepSize/currentInteractionLength` - in
+`step_neutral`'s final stage (P8d, P15); no track in this transport carries an interaction length
+today (wiring.cuh's note), so it is a `TrackState` field and a re-measurement of every neutron
+row. It is named here and in docs/PORTED.md 2.1.8's row, which is P since P20: the port's
+neutron is Geant4's with the general process OFF, at every energy measured.

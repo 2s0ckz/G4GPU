@@ -1,0 +1,18 @@
+# docs/RISK.md V219: the sweep's alpha_4000 row at its full count, on ref\b1ngp\run.bat with 0
+# (664.032 nGy, the sweep's own Geant4 column to every digit) and 1 (647.871 nGy). The port reads
+# 646.782. The inactivation list is the sweep's (`$emOnly`).
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate ionElastic
+
+/particle/select neutron
+/particle/process/dump
+
+/gun/particle alpha
+/gun/energy 4000 MeV
+/run/printProgress 10000
+/run/beamOn 100000

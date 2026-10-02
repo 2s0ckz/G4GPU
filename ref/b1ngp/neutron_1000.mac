@@ -1,0 +1,19 @@
+# docs/RISK.md V219: a 1 GeV neutron in B1, on ref\b1ngp\run.bat with 0 (the stock general
+# process - 123.873 nGy, exampleB1's own number) and 1 (each step charged at the mean free path it
+# was taken with - 76.996 nGy). The port's answer, `tools\b1_sweep.ps1`'s like-for-like settings
+# with a neutron gun, is 78.435. The inactivation list is the sweep's (`$emOnly`).
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/process/inactivate hBrems
+/process/inactivate hPairProd
+/process/inactivate ionElastic
+
+/particle/select neutron
+/particle/process/dump
+
+/gun/particle neutron
+/gun/energy 1000 MeV
+/run/printProgress 10000
+/run/beamOn 100000

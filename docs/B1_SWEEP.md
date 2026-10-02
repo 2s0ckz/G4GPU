@@ -442,3 +442,85 @@ P15 interaction and the stack raise that follows pages the card (V190's cost, wh
 has always paid). e-_100 goes the other way, 15.6 s on main to 11.3 s here: main raised the stack
 at its first Coulomb recoil ion, which queues nothing, and P19 moved the raise to the first queued
 interaction (V210).
+
+## The destroyed nucleus, after P20 (2026-09-27; beams measured 2026-10-02)
+
+P20 transcribed `G4BinaryCascade::FillVoidNucleusProducts`, the branch `Propagate` leaves by when
+the collision loop has knocked every proton out of the target (docs/PORTED.md 2.1.10), and found
+two of P9e's own on the way: `DeExciteSpectatorNucleus` handed the wrong four-vector (docs/RISK.md
+V214), and the swapped frame of an ion on hydrogen one ulp off on every event (V216). Before any
+of it the ledger named what was left of `kLightIonCascade` on the two alpha beams (V212): **every
+one of its refusals was that branch** - 309 of alpha_840's 28,958 queued interactions and 344 of
+alpha_4000's 14,489.
+
+The two alpha rows at a tenth of the counts, as since P9e, `-SkipQBBC`, both ports built with the
+same CUDA 12.9 toolkit and linking the same sixteen stepping objects (main's d7f6015): "before" is
+the instrument commit 20795e5 from a clean `git archive` with the three units it changes
+compiled, "after" this branch at e35ce20. The Geant4 column is seeded and reads the same to
+every digit.
+
+| beam | events | port, before | port, P20 | Geant4 | diff before | diff after | refused, by name: before / after |
+|---|--:|--:|--:|--:|--:|--:|---|
+| alpha 840 MeV | 30,000 | 4.83462E-07 ± 2.90E-09 | 4.83622E-07 ± 2.89E-09 | 4.91874E-07 ± 2.90E-09 | -1.71%, -2.1 σ | -1.68%, -2.0 σ | 1.07%: `kLightIonCascade` 309 of 28,958, all `FillVoidNucleusProducts` / **none** of 29,117 |
+| **alpha 4000 MeV** | 10,000 | 7.50791E-08 ± 2.05E-09 | **6.44201E-08 ± 6.83E-10** | 6.69757E-08 ± 7.11E-10 | +12.10%, +3.7 σ | **-3.82%, -2.6 σ** | 2.37%: `kLightIonCascade` 344 of 14,489 (1.15e6 MeV, 132,613 of it in the scorer), all `FillVoidNucleusProducts` / 0.054%: 7 secondaries of a species `core/particle.cuh` has no row for (648 MeV) and 1 GenericIon outside AME2012, of 14,861 |
+
+Both builds also book, on both beams, what is not the cascade's: the same eight rows on
+alpha_4000, and 2 steps of an ion's delta-ray channel on alpha_840 (V200's per-step count).
+
+**At a tenth of the counts the 4 GeV alpha lands inside the band, and its rms is Geant4's.** The
+excess V206 left (+12.1%) is gone with the refusals that made it, and the port's rms falls from
+2.73% of its dose to 1.06% against Geant4's 1.06%: the few interactions that each dumped a GeV
+where they were refused are answered. Neither alpha beam has an interaction without a final state
+any more. alpha_840 hardly moves (+0.03%), because its 309 destroyed nuclei put 9,694 MeV of
+their 145,864 inside the trapezoid.
+
+**At the full counts neither row is inside it, and the difference is the ion-inelastic chain.**
+The same build at the sweep's own counts, and with the five ion inelastic processes held off on
+BOTH sides (`G4GPU_ION_INELASTIC=0`; `alphaInelastic`, `dInelastic`, `tInelastic`,
+`He3Inelastic`, `ionInelastic` inactivated in Geant4) - docs/RISK.md V217:
+
+| beam | events | port, P20 | Geant4 | diff |
+|---|--:|--:|--:|--:|
+| alpha 840 MeV | 300,000 | 4.87999E-06 ± 9.15E-09 | 4.93621E-06 ± 9.17E-09 | **-1.14%, -4.3 σ** |
+| alpha 4000 MeV | 100,000 | 6.46782E-07 ± 2.16E-09 | 6.64032E-07 ± 2.21E-09 | **-2.60%, -5.6 σ** |
+| alpha 840 MeV, the five ion processes OFF on both sides | 300,000 | 7.38301E-06 ± 1.01E-08 | 7.38942E-06 ± 1.01E-08 | -0.09%, -0.5 σ |
+| alpha 4000 MeV, the five ion processes OFF on both sides | 100,000 | 5.12479E-07 ± 1.21E-09 | 5.13060E-07 ± 1.21E-09 | -0.11%, -0.3 σ |
+
+The full-count ledgers: alpha_840 290,298 interactions queued, none refused (5 GenericIons
+outside AME2012, 87.7 MeV; 11 delta-ray steps); alpha_4000 148,687 queued, 77 unsupported-species
+secondaries (8,913 MeV) and 9 GenericIons (322 MeV) - 0.058% - and 25 delta-ray steps.
+
+With the ion processes off the two agree to 0.1% at both energies, and the energy every class
+of product carries out of an alpha reaction agrees with Geant4's to under 1% (V217) - so what
+parts the rows is downstream of the reaction. **It is the neutron, and the difference is in
+Geant4** (docs/RISK.md V219). Three more beams at the same settings - a deuteron and an He3 at the
+alpha's 1 GeV per nucleon, and a 1 GeV neutron - and two more Geant4 configurations: the neutron's
+general process switched off (ref/b1neutron), and switched on with one ordering inside
+`G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` reversed (ref/b1ngp, new):
+
+| beam | events | port | Geant4 as QBBC ships it | general process off | reordered |
+|---|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 500,000 | 133.066 nGy | 224.945: **-40.8%, -74.1 σ** | 132.135: +0.7% | 133.458: -0.3%, -0.4 σ |
+| neutron 1000 MeV | 100,000 | 78.435 nGy | 123.873: **-36.7%, -33.3 σ** | 78.053: +0.5%, +0.3 σ | 76.996: +1.9%, +1.2 σ |
+| deuteron 2000 MeV | 100,000 | 269.699 nGy | 279.007: -3.34%, -4.8 σ | 272.586: -1.1%, -1.5 σ | 272.207: -0.9%, -1.3 σ |
+| alpha 4000 MeV | 100,000 | 646.782 nGy | 664.032: -2.60%, -5.6 σ | 650.008: -0.5%, -1.1 σ | **647.871: -0.2%, -0.4 σ** |
+| He3 3000 MeV | 100,000 | 592.169 nGy | 600.455: -1.38%, -3.0 σ | 592.855: -0.1%, -0.2 σ | - |
+| alpha 840 MeV | 300,000 | 4.87999 µGy | 4.93621: -1.14%, -4.3 σ | 4.90857: -0.6%, -2.2 σ | - |
+
+With their ion processes off, the deuteron and He3 rows read -0.54% (-1.6 σ) and -0.01%; with
+the neutron's inelastic off on both sides (Geant4's general process off and `neutronInelastic`
+inactivated, the port in `kStage1`) the 1 GeV neutron reads 4.023 against 4.102 nGy (-0.4 σ).
+
+`G4NeutronGeneralProcess` refreshes its cross section for the material the track is NOW in
+before it charges the step just taken, so a step that ended on a boundary is charged at the next
+material's mean free path; `G4HadronicProcess` and `G4GammaGeneralProcess` charge it at the one
+it was taken with. A neutron's every surviving step ends on a boundary, and water charged at
+bone's mean free path sends neutrons into the trapezoid with their interaction lengths used up.
+The port draws every length afresh each step, which is the reordered column exactly. ref/b1ngp
+with the stock class reads exampleB1's own 123.873 and 664.032 to every digit; reordered, it
+lands on the port.
+
+**So the alpha rows' full-count residual is not the ion cascade's, and the neutron row has never
+been compared against QBBC as it ships**: ref/b1neutron, the P15 and P18 reference, is Geant4
+with the general process off. Reproducing 11.1.1's order means carrying the interaction length on
+the neutron's track (`step_neutral`, a `TrackState` field); P20 does not, and names it.
