@@ -172,6 +172,11 @@ struct BicReport {
   /// of 20.832 and a gamma of 1.20455. Reporting the boost is what lets the test assert the
   /// deficit EQUALS `gamma*E*` instead of excusing the event.
   deex::Vec3d precompound_boost;
+  /// What `FillVoidNucleusProducts` did, when the last `Propagate` went out through it
+  /// (`propagate_outcome == kPropagateVoidNucleus`): its energy branch and the imbalance that
+  /// branch leaves, which is Geant4's, and which `tests/test_bic_apply.cu` asserts the event's
+  /// deficit equals.
+  VoidReport void_report;
   /// The A == 1 arm: what the LAST `Propagate1H1` did - how many scatters it drew, whether its
   /// 200 tries ran out and it returned the last elastic scatter as the answer, and how many
   /// resonances it decayed. `h1_ran` is false on every other path.
@@ -461,13 +466,13 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
                      coulomb_barrier_mev(target.a, target.z), de, rng, cref);
       ref.cascade_ref = cref;
       ++rep.inner_tries;
-      // A VOID NUCLEUS is a refusal too, and not an empty result. `Propagate` reaches it when
-      // the cascade has destroyed the nucleus and `FillVoidNucleusProducts` would have had to
-      // run; that branch is refused by name, so the event cannot be completed. Letting it fall
-      // through as an empty product vector would send the OUTER loop off to rebuild the
-      // nucleus a hundred times and then return the primary alive - an event that looks like a
-      // miss and is really a hole in the port.
-      if (pr.outcome == kPropagateRefused || pr.outcome == kPropagateVoidNucleus) {
+      // A VOID NUCLEUS is an answer since P20 - `FillVoidNucleusProducts` made the products -
+      // and it goes through both loops exactly as Geant4's does: a non-empty vector ends them,
+      // an empty one (possible, if the cascade left nothing at all) is `products->size() == 0`
+      // and sends the outer loop round again. Until P20 it was refused here, rather than let
+      // through as an empty vector, because the empty vector would have rebuilt the nucleus a
+      // hundred times and returned the primary alive: a miss that was really a hole.
+      if (pr.outcome == kPropagateRefused) {
         ref.cascade = true;
         ref.refused_pdg = cref.refused_pdg;
         return status;
@@ -489,6 +494,7 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
   rep.fragment_a = pr.fragment_a;
   rep.fragment_z = pr.fragment_z;
   rep.precompound_boost = pr.precompound_boost;
+  rep.void_report = pr.void_report;
 
   if (!have || pr.n_products == 0) {
     // "no interaction, return primary" - `isAlive`, with the primary's own energy and direction.

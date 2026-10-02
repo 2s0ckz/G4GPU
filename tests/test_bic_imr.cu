@@ -3069,10 +3069,11 @@ int main() {
                             bic::coulomb_barrier_mev(a, z), de, tape, cref);
         have = (pr.outcome != bic::kPropagateNoCollision);
         if (cref.any()) {
-          std::printf("REFUSED propagate %s: he=%d cap=%d nuc=%d unk=%d void=%d pdg=%d\n",
+          std::printf("REFUSED propagate %s: he=%d cap=%d nuc=%d unk=%d void_decay_null=%d "
+                      "pdg=%d\n",
                       where.c_str(), cref.high_energy_primary ? 1 : 0, cref.capacity ? 1 : 0,
                       cref.invalid_nucleus ? 1 : 0, cref.unknown_species ? 1 : 0,
-                      cref.void_nucleus ? 1 : 0, cref.refused_pdg);
+                      cref.void_decay_null ? 1 : 0, cref.refused_pdg);
           ++fails;
           break;
         }

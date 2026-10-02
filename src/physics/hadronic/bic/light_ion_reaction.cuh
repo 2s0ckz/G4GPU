@@ -89,13 +89,13 @@
 //
 // ## REFUSED, by name
 //
-//   * `Interact` and everything it reaches - `G4BinaryCascade::Propagate`, the two
-//     `G4Fancy3DNucleus`-to-`G4KineticTrack` conversions, the 150-try loop, the impact
-//     parameter. `BlirRefusal::cascade`.
-//   * `GetProjectileExcitation`, `SortResult` and `DeExciteSpectatorNucleus`, which take
-//     `Interact`'s output and have no input without it. Their arithmetic is recorded in the
-//     comments on `blir_projectile_excitation_term` below so that the next agent transcribing
-//     them has the reading; none of it runs.
+// The two paragraphs above and the list below are P9's, written while the cascade arm was
+// missing; P9e wrote `Interact`, `GetProjectileExcitation`, `SortResult` and
+// `DeExciteSpectatorNucleus` (the cascade arm, further down this file), and P20 the one branch of
+// `Propagate` they still could not reach, `FillVoidNucleusProducts` (`cascade_void.cuh`). What
+// this model refuses now is `Propagate`'s own refusals, carried out in `BlirRefusal::cascade_ref`,
+// and:
+//
 //   * the anti-nucleus and hyper-nucleus cases, which reach P3's and P6's own refusals.
 #ifndef G4GPU_BIC_LIGHT_ION_REACTION_CUH
 #define G4GPU_BIC_LIGHT_ION_REACTION_CUH
@@ -677,6 +677,20 @@ __host__ __device__ inline imr::LorentzVector blir_sort_result(
 /// Then the cascaders are corrected twice: once against `pInitialState - pFragments`, and again
 /// against `pInitialState` if the first did not converge. The de-excitation products are appended
 /// AFTER the first correction and are not themselves corrected.
+///
+/// **`p_spectators` is the parameter Geant4 calls `pSpectators`, and what `ApplyYourself` passes
+/// it is NOT the spectators' sum.** The call is `DeExciteSpectatorNucleus(spectators, cascaders,
+/// theStatisticalExEnergy, momentum)` (G4BinaryLightIonReaction.cc:234), and `momentum` is
+/// `pInitialState - pFinalState` - what the CASCADERS left over, after the correction loop - while
+/// `SortResult`'s `pspectators` is only the 10 MeV test's reference. The two are the same four-
+/// vector to rounding whenever the cascade conserved four-momentum, which the normal end of
+/// `Propagate` does but for docs/RISK.md V182's one-nucleon residual, so P9e's tape and campaign
+/// passed with the sum in. `FillVoidNucleusProducts` does NOT conserve it: its last step stops
+/// correcting the momentum once less than 0.1 MeV is missing, and its third energy branch keeps a
+/// surplus. P20's tape of that branch on the ion path found the difference - every product of a
+/// C12 on C12 event out by up to 1.9e-5 of its own energy, the branch's own output exact to
+/// 4e-14 - and the spectator fragment's products had the right invariant mass and the wrong
+/// velocity (docs/RISK.md V214).
 template <typename Rng>
 __host__ __device__ inline void blir_deexcite_spectator(
     BlirProduct* spectators, int n_spectators, BlirProduct* cascaders, int& n_cascaders,
@@ -967,10 +981,6 @@ __host__ __device__ inline preco::PrecoStatus blir_cascade_arm(
       store.cascaders, store.cascader_capacity, n_spectators, n_cascaders, spectator_a,
       spectator_z, p_final_state, ref);
   rep.spectator_a = spectator_a;
-  {
-    const double m_spec = p_spectators.mag();
-    rep.spectator_gamma = (m_spec > 0.0) ? (p_spectators.e / m_spec) : 1.0;
-  }
   rep.spectator_z = spectator_z;
   rep.n_spectators = n_spectators;
   if (ref.any()) { return status; }
@@ -1004,9 +1014,16 @@ __host__ __device__ inline preco::PrecoStatus blir_cascade_arm(
     if (std::sqrt(g4gpu::mag2(momentum.v)) - momentum.e < 10.0 * u::keV<double>()) {
       deex::DeexStatus dstatus;
       BlirCorrectorReport last;
+      // `DeExciteSpectatorNucleus(spectators, cascaders, theStatisticalExEnergy, momentum)`:
+      // `momentum`, what the cascaders left over, and not `pspectators` - see the note on
+      // `blir_deexcite_spectator`. The gamma reported is that of the boost it becomes.
+      {
+        const double m_mom = momentum.mag();
+        rep.spectator_gamma = (m_mom > 0.0) ? (momentum.e / m_mom) : 1.0;
+      }
       blir_deexcite_spectator(store.spectators, n_spectators, store.cascaders, n_cascaders,
                               store.cascader_capacity, spectator_a, spectator_z, f.pa,
-                              ir.projectile_excitation, p_spectators, p_initial_state,
+                              ir.projectile_excitation, momentum, p_initial_state,
                               p_final_state, lt, pool, ws.deex, rng, dstatus, ref, last);
       rep.last_correction_ran = true;
       rep.last_correction_converged = last.converged;

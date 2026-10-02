@@ -100,6 +100,11 @@ struct CascadeTrack {
   /// its own `G4Nucleon` - and the whole of `SortResult` is that the projectile nucleons NOTHING
   /// hit come back with `IsParticipant()` false and become the spectator fragment.
   int nucleon_owner = 0;
+  /// Position in theCapturedList; see `push_captured`. HERE, between an int and a double,
+  /// because these are four bytes of padding the struct already had: 1,280 of these sit in
+  /// every interaction slot, and a field anywhere else would grow the slot by 10,240 bytes past
+  /// the size `tests/test_inelastic_transport.cu` pins (docs/RISK.md V167's rule).
+  int captured_seq = -1;
   double projectile_potential = 0.0;
   int creator_model_id = -1;
   int parent_resonance_pdg = 0;
@@ -115,15 +120,27 @@ struct CascadeTrack {
 };
 
 /// What the cascade could not do.
+///
+/// `void_nucleus` - `G4BinaryCascade::FillVoidNucleusProducts`, the destroyed-nucleus branch -
+/// stood here from P9d to P20 and is RETIRED, not left as a name nothing sets: P20 transcribed the
+/// branch (`cascade_void.cuh`). It was every refusal of P9e's ion campaign (2,416 of 800,000
+/// reactions, 5.87% of C12 on C12 at 1 GeV per nucleon) and of P9d's nucleon campaign (103 of 1.96
+/// million). What the branch can still refuse is `void_decay_null`.
 struct CascadeRefusal {
   bool high_energy_primary = false;  ///< the dead BuildLateParticleCollisions branch; see above
   bool capacity = false;             ///< one of the four lists is full
   bool invalid_nucleus = false;      ///< BuildTargetList's (A,Z) throw
   bool unknown_species = false;
-  bool void_nucleus = false;         ///< FillVoidNucleusProducts; see cascade_propagate.cuh
+  /// Inside `FillVoidNucleusProducts`: a scheduled DECAY whose `G4KineticTrack::Decay()` returns
+  /// 0 - a zero total actual width, or a phase space that gave up. The branch's late-particle loop
+  /// is `G4KineticTrackVector * lates = collision->GetFinalState(); if ( lates->size() == 1 )`
+  /// (G4BinaryCascade.cc:2917-2918), so Geant4 dereferences the null and there is no Geant4 answer
+  /// to port. `bic::H1Refusal::decay_null` is the same hole in `Propagate1H1` (docs/RISK.md V204).
+  bool void_decay_null = false;
   int refused_pdg = 0;
   __host__ __device__ bool any() const {
-    return high_energy_primary || capacity || invalid_nucleus || unknown_species || void_nucleus;
+    return high_energy_primary || capacity || invalid_nucleus || unknown_species ||
+           void_decay_null;
   }
 };
 
@@ -193,6 +210,7 @@ struct BicCascadeState {
   deex::Vec3d momentum_transfer{0.0, 0.0, 0.0};
   deex::Vec3d precompound_boost{0.0, 0.0, 0.0};  ///< precompoundLorentzboost, set by the below
   int n_final_pushed = 0;    ///< the next sequence number `push_final` will hand out
+  int n_captured_pushed = 0; ///< the next sequence number `push_captured` will hand out
 };
 
 /// `G4KineticTrack::Hit()` - the flag goes on the NUCLEON when there is one, and on the track
@@ -239,6 +257,28 @@ __host__ __device__ inline bool is_participant(const BicCascadeState& st,
 __host__ __device__ inline void push_final(BicCascadeState& st, int pool_index) {
   st.lists.pool[pool_index].list = kListFinal;
   st.lists.pool[pool_index].final_seq = st.n_final_pushed++;
+}
+
+/// Move a track into theCapturedList, keeping the ORDER it was captured in - `push_final`'s twin.
+///
+/// theCapturedList is a vector filled by `Capture()` and by `DoTimeStep`'s boundary corrections,
+/// one step after another, so its order is the order nucleons were CAUGHT and not the order they
+/// were made. Two places read it in that order: `DecayVoidNucleus`, which hands the Kopylov
+/// momenta out target list first and then captured list, and `FillVoidNucleusProducts`, whose
+/// products come out in it and whose momentum correction walks them backwards. Every capture
+/// goes through here - `Capture()`, `DoTimeStep` and `StepParticlesOut`'s `Capture(false)`.
+__host__ __device__ inline void push_captured(BicCascadeState& st, int pool_index) {
+  st.lists.pool[pool_index].list = kListCaptured;
+  st.lists.pool[pool_index].captured_seq = st.n_captured_pushed++;
+}
+
+/// The pool index of the `seq`-th track of theCapturedList, or -1.
+__host__ __device__ inline int captured_at(const BicCascadeState& st, int seq) {
+  for (int i = 0; i < st.lists.n_pool; ++i) {
+    const CascadeTrack& t = st.lists.pool[i];
+    if (t.list == kListCaptured && t.captured_seq == seq) { return i; }
+  }
+  return -1;
 }
 
 /// `G4BinaryCascade::GetIonMass(Z, A)` and its three fallbacks.

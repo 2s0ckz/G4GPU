@@ -41,6 +41,7 @@
 // does. The DEVICE half below is the machinery P15 adds that is not a model - the queue and its
 // bucket sort - run as a kernel and compared against the host. The models' own device path is
 // exercised by the engine build and by every beam of `tools/b1_sweep.ps1`.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -621,6 +622,8 @@ int main() {
             // cascade's gammas, so `ran` and a real refusal arrive together.
             if (oc.refusal != had::HadronicRefusal::kNumHadronicRefusals) {
               had::book_refusal<real_t>(had.books, oc.refusal, q.track.ekin);
+              // P20's by-name rows, as `run_interaction` books them.
+              had::book_cascade_refusal_names<real_t>(had.books, oc.cascade_ref, q.track.ekin);
             }
             if (!oc.ran && !oc.rejected_by_integral_xs) {
               had::book_refusal<real_t>(
@@ -1341,10 +1344,16 @@ int main() {
       const char* name;
       int n;
     };
+    // P20 adds the fourth: a 4 GeV alpha on HYDROGEN, the B1 sweep's beam on water's other
+    // element. `SetLighterAsProjectile` makes the proton the projectile of `Interact` and the
+    // alpha the nucleus, and a GeV proton knocks both of its protons out often enough that
+    // `FillVoidNucleusProducts` - refused until P20 - is the answer to a large share of them
+    // (docs/RISK.md V212). It must run, and balance, like the O16 case.
     const Case cases[] = {
         {840, 8, 16, "alpha 840 MeV on O16", 20},
         {840, 120, 300, "alpha 840 MeV on A=300", 10},
         {1, 82, 208, "alpha 1 MeV on Pb208", 10},
+        {4000, 1, 1, "alpha 4000 MeV on H1", 40},
     };
     for (const Case& c : cases) {
       proj.kin_energy = c.e;
@@ -1394,7 +1403,7 @@ int main() {
       }
       std::printf("   %-24s ran %2d (balanced %2d, alive whole %2d)   refused %2d\n", c.name, ran,
                   balanced, alive_whole, refused);
-      if (c.a == 16) {
+      if (c.a == 16 || c.a == 1) {
         if (ran < c.n - 2) {
           fail(std::string(c.name) + ": only " + std::to_string(ran) + " of "
                + std::to_string(c.n) + " ran - the cascade arm should run all but the rare "
@@ -1419,6 +1428,75 @@ int main() {
                  "answer, not a refusal");
         }
       }
+    }
+  }
+
+  // ============================================================================================
+  // 10. P20's by-name rows: one booking per name a cascade refusal carries, in its own row
+  // ============================================================================================
+  //
+  // `kLightIonCascade` and `kBinaryRefused` say THAT the Binary cascade refused and the rows
+  // after `kEmExtraRefused` say WHICH of `bic::CascadeRefusal`'s names it carried - which is how
+  // P20 measured the B1 sweep's alpha beams (docs/RISK.md V212). What can go wrong is a row
+  // booked under the wrong name, or not at all, and every flag is tried alone and then all at
+  // once, with an energy that says which booking is which.
+  std::printf("== 10. the cascade refusal's names reach their own rows ==\n");
+  {
+    const int nr = static_cast<int>(had::HadronicRefusal::kNumHadronicRefusals);
+    struct Flag {
+      bool bic::CascadeRefusal::*member;
+      had::HadronicRefusal row;
+      const char* name;
+    };
+    const Flag flags[] = {
+        {&bic::CascadeRefusal::void_decay_null, had::HadronicRefusal::kCascadeVoidDecayNull,
+         "void_decay_null"},
+        {&bic::CascadeRefusal::capacity, had::HadronicRefusal::kCascadeCapacity, "capacity"},
+        {&bic::CascadeRefusal::unknown_species, had::HadronicRefusal::kCascadeUnknownSpecies,
+         "unknown_species"},
+        {&bic::CascadeRefusal::invalid_nucleus, had::HadronicRefusal::kCascadeInvalidNucleus,
+         "invalid_nucleus"},
+        {&bic::CascadeRefusal::high_energy_primary,
+         had::HadronicRefusal::kCascadeHighEnergyPrimary, "high_energy_primary"},
+    };
+    std::vector<int> n(static_cast<std::size_t>(nr), 0);
+    std::vector<double> e(static_cast<std::size_t>(nr), 0.0);
+    had::HadronicRefusalBooks books;
+    books.count = n.data();
+    books.energy = e.data();
+    // Alone: flag k books ONLY its row, with its energy.
+    for (std::size_t k = 0; k < sizeof(flags) / sizeof(flags[0]); ++k) {
+      std::fill(n.begin(), n.end(), 0);
+      std::fill(e.begin(), e.end(), 0.0);
+      bic::CascadeRefusal ref;
+      ref.*(flags[k].member) = true;
+      had::book_cascade_refusal_names<real_t>(books, ref, real_t(100.0 * (k + 1)));
+      for (int r = 0; r < nr; ++r) {
+        const bool mine = (r == static_cast<int>(flags[k].row));
+        if (n[static_cast<std::size_t>(r)] != (mine ? 1 : 0) ||
+            e[static_cast<std::size_t>(r)] != (mine ? 100.0 * (k + 1) : 0.0)) {
+          fail(std::string("cascade refusal ") + flags[k].name + " booked row " +
+               std::to_string(r) + " count " + std::to_string(n[static_cast<std::size_t>(r)]));
+        }
+      }
+    }
+    // All at once: five rows of one each, and a refusal with no name books nothing.
+    {
+      std::fill(n.begin(), n.end(), 0);
+      bic::CascadeRefusal all;
+      for (const Flag& f : flags) { all.*(f.member) = true; }
+      had::book_cascade_refusal_names<real_t>(books, all, real_t(1));
+      had::book_cascade_refusal_names<real_t>(books, bic::CascadeRefusal{}, real_t(1));
+      int total = 0;
+      for (int r = 0; r < nr; ++r) { total += n[static_cast<std::size_t>(r)]; }
+      for (const Flag& f : flags) {
+        if (n[static_cast<std::size_t>(static_cast<int>(f.row))] != 1) {
+          fail(std::string("all flags: ") + f.name + " row not booked once");
+        }
+      }
+      if (total != 5) { fail("all flags plus none booked " + std::to_string(total) + ", not 5"); }
+      std::printf("   5 names, 5 rows, each alone and all together: %s\n",
+                  (total == 5) ? "ok" : "WRONG");
     }
   }
 

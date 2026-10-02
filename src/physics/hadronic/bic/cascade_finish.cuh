@@ -136,7 +136,7 @@ __host__ __device__ inline StepOutReport step_particles_out(
         CascadeTrack& t = st.lists.pool[i];
         if (t.list != kListSecondary || t.state != kInside) { continue; }
         if (t.pdg != imr::kPdgProton && t.pdg != imr::kPdgNeutron) { continue; }
-        t.list = kListCaptured;
+        push_captured(st, i);
         mark_hit(st, i);
         captured[n_cap++] = i;
       }

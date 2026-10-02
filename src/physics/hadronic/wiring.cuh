@@ -271,6 +271,14 @@ enum class HadronicRefusal : int {
   /// falling instead of a line disappearing: the same grid books 49 here with `Interact` wired.
   /// The five ion processes came off the inactivation list of every like-for-like column with it
   /// (docs/RISK.md V192, V198).
+  ///
+  /// **AND UNTIL P20 IT WAS ONE BRANCH OF `Propagate`.** Every one of the 344 interactions of the
+  /// 4 GeV alpha beam P18 left here, and of the 309 of the 840 MeV beam, was
+  /// `FillVoidNucleusProducts` - the nucleus destroyed, which at a GeV per nucleon is percents of
+  /// the reactions on carbon and, on hydrogen, where the ion is the nucleus, 11% of an alpha's and
+  /// 66% of a deuteron's (docs/RISK.md V212, V215) - and P20 transcribed it (V213). What can still be booked here is `Propagate`'s own refusals, which the BY-NAME rows
+  /// below say: a scheduled decay whose `Decay()` returns the null that branch dereferences, a
+  /// caller-owned list at capacity, a species or an (A, Z) the cascade cannot carry.
   kLightIonCascade,
   // `kBinaryHydrogenTarget` - `G4BinaryCascade::Propagate1H1`, a nucleon or charged pion on a
   // HYDROGEN target - stood here from P15 to P18 and is RETIRED, not left as a dead name: P18
@@ -289,6 +297,13 @@ enum class HadronicRefusal : int {
   /// dereferences, the scatterer's charge-balance FatalException). A TRIPWIRE - this wiring
   /// sends the Binary cascade only nucleons and charged pions and the light-ion reaction only
   /// ions, so a species refusal here means the model table and `inelastic_models` have drifted.
+  ///
+  /// NOT a tripwire for the light-ion reaction's final-state capacity since P20: the
+  /// destroyed-nucleus branch it now answers gives every nucleon of a destroyed target its own
+  /// product, and MEASURED on P9e's campaign 39 of 20,000 Fe56 on Fe56 at 1 GeV per nucleon
+  /// (0.195%) overflow the reaction's buffers - its final state holds `kBlirMaxSecondaries`, 128
+  /// - which are events Geant4 answers and this port refuses as `capacity`, landing here
+  /// (docs/RISK.md V213).
   kBinaryRefused,
   /// `G4EnergyRangeManager::GetHadronicInteraction` found no model covering the energy, or more
   /// than two competing, or two fully nested. Geant4 prints its model table and returns
@@ -416,9 +431,15 @@ enum class HadronicRefusal : int {
   // more than the WHY row they break down.
   // -------------------------------------------------------------------------------------------
 
-  /// BY NAME: `G4BinaryCascade::FillVoidNucleusProducts`, the branch for a target list with no
-  /// proton left in it (`CascadeRefusal::void_nucleus`).
-  kCascadeVoidNucleus,
+  /// BY NAME: inside `G4BinaryCascade::FillVoidNucleusProducts`, a scheduled decay whose
+  /// `G4KineticTrack::Decay()` returns 0 - Geant4 dereferences it, so there is no answer to port
+  /// (`CascadeRefusal::void_decay_null`).
+  ///
+  /// This row was `kCascadeVoidNucleus` - the whole branch, refused - in the commit that measured
+  /// the B1 sweep's alpha beams with it (docs/RISK.md V212). P20 transcribed the branch after
+  /// that, so what can still be booked at this position is the one thing the branch itself
+  /// cannot answer.
+  kCascadeVoidDecayNull,
   /// BY NAME: one of the cascade's caller-owned lists was full (`CascadeRefusal::capacity`).
   kCascadeCapacity,
   /// BY NAME: a species the decay engine or a channel's final state does not carry
@@ -473,14 +494,16 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
              "not per interaction";
     case HadronicRefusal::kLightIonCascade:
       return "WHY: G4BinaryLightIonReaction's cascade arm - G4BinaryCascade::Propagate "
-             "refused inside Interact";
+             "refused inside Interact (since P20: a null Decay(), a capacity, a species or an "
+             "(A,Z) it cannot carry - the BY NAME rows say which)";
     case HadronicRefusal::kFtfpRefused:
       return "WHY: ftf::entry::apply refused by name (P11; see its Report)";
     case HadronicRefusal::kBertiniRefused:
       return "WHY: bert::apply_yourself refused by name (P10)";
     case HadronicRefusal::kBinaryRefused:
       return "WHY: the Binary cascade or the light-ion reaction refused for a reason that is "
-             "not the cascade arm - a tripwire on the model table, or Propagate1H1's null "
+             "not the cascade arm - a tripwire on the model table, a final state past its "
+             "capacity (since P20, 0.2% of Fe56 on Fe56 at 1 GeV/n), or Propagate1H1's null "
              "Decay()";
     case HadronicRefusal::kNoInelasticModel:
       return "WHY: G4EnergyRangeManager found no model in range (G4Exception had005) - a "
@@ -522,9 +545,9 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kEmExtraRefused:
       return "WHY: a photo- or lepto-nuclear model refused by name for another reason (P13's "
              "EmExtraRefusal: a Bertini/PreCompound/sampler refusal, a capacity, a hypernucleus)";
-    case HadronicRefusal::kCascadeVoidNucleus:
-      return "BY NAME, of the two cascade WHY rows: G4BinaryCascade::FillVoidNucleusProducts - "
-             "the target list has no proton left";
+    case HadronicRefusal::kCascadeVoidDecayNull:
+      return "BY NAME, of the two cascade WHY rows: inside FillVoidNucleusProducts, a scheduled "
+             "decay whose Decay() returns null, which Geant4 dereferences";
     case HadronicRefusal::kCascadeCapacity:
       return "BY NAME, of the two cascade WHY rows: a Binary-cascade list at capacity";
     case HadronicRefusal::kCascadeUnknownSpecies:

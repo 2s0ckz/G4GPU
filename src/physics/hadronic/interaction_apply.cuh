@@ -409,13 +409,13 @@ struct InteractionOutcome {
 /// Books P20's BY-NAME rows for a cascade refusal: one booking per flag `ref` carries, each with
 /// the projectile's kinetic energy, so the rows break `kLightIonCascade` and `kBinaryRefused`
 /// down by `bic::CascadeRefusal`'s own names. Nothing for a refusal that set none of them. See
-/// the note above `HadronicRefusal::kCascadeVoidNucleus` for why these are never added.
+/// the note above `HadronicRefusal::kCascadeVoidDecayNull` for why these are never added.
 template <typename real_t>
 __host__ __device__ inline void book_cascade_refusal_names(const HadronicRefusalBooks& books,
                                                            const bic::CascadeRefusal& ref,
                                                            real_t energy) {
-  if (ref.void_nucleus) {
-    book_refusal<real_t>(books, HadronicRefusal::kCascadeVoidNucleus, energy);
+  if (ref.void_decay_null) {
+    book_refusal<real_t>(books, HadronicRefusal::kCascadeVoidDecayNull, energy);
   }
   if (ref.capacity) { book_refusal<real_t>(books, HadronicRefusal::kCascadeCapacity, energy); }
   if (ref.unknown_species) {
@@ -529,9 +529,9 @@ __host__ __device__ __noinline__ bool run_arm_binary(
   // `preco_projectile` and `capacity` from P15's first commit, and `BicRefusal` has two more
   // that its own `any()` counts as making the final state meaningless: `nucleus` - 
   // `G4Fancy3DNucleus::Init` could not place the nucleons - and `cascade`, which is whatever
-  // `Propagate` refused, `FillVoidNucleusProducts` included. Both return early with `bic_fs`
-  // holding nothing a caller may apply, and this arm copied it into `s.fs` and reported a final
-  // state. Found by reading P9e's `BicRefusal` beside this one; asserted in
+  // `Propagate` refused (`FillVoidNucleusProducts` included, until P20 ported it). Both return
+  // early with `bic_fs` holding nothing a caller may apply, and this arm copied it into `s.fs`
+  // and reported a final state. Found by reading P9e's `BicRefusal` beside this one; asserted in
   // `tests/test_inelastic_transport.cu` section 7, which fails with the flag list restored.
   if (ref.any()) {
     // Every flag is `kBinaryRefused`. A HYDROGEN target runs `Propagate1H1` since P18, and

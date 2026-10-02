@@ -76,6 +76,7 @@
 // (Z, A) and not on the PDG code for the reason test_precompound.cu's `pdg_to_za` gives: the
 // isomer digit of `10LZZZAAAI` is a property of the run's ion table and P3 refuses to invent it.
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -143,11 +144,11 @@ double tally_var(const Tally& t, long long n) {
 /// A species yield compared between two runs of DIFFERENT length, as a per-event MEAN.
 ///
 /// This file used to compare two COUNTS over the same number of events, which was right
-/// while the port answered every event. It does not any more: the ion cascade
-/// refuses `FillVoidNucleusProducts` by name, and on a light target at high energy that is
-/// percents of the events - 5.87% of C12 on C12 at 1000 MeV/nucleon. Comparing the port's
-/// count over the events it answered against Geant4's over all 20,000 then measures the
-/// refusal rate and calls it physics.
+/// while the port answered every event. It stopped being right when the ion cascade
+/// refused `FillVoidNucleusProducts` by name, which on a light target at high energy was
+/// percents of the events - 5.87% of C12 on C12 at 1000 MeV/nucleon, until P20 ported it.
+/// Comparing the port's count over the events it answered against Geant4's over all 20,000
+/// then measures the refusal rate and calls it physics, for whatever is refused next.
 ///
 /// So the comparison is per event on both sides, with each side's own denominator, and the
 /// variance is the per-event multiplicity's - `mean_mult2` is dumped for exactly this.
@@ -342,6 +343,10 @@ struct OracleCase {
   long long n_secondaries = 0;
   long long sum_z = 0, sum_a = 0;
   double mean_e = 0.0, mean_pz = 0.0, mean_mult = 0.0;
+  /// The per-event variance of the event's total energy and z-momentum (P20; the ion campaign
+  /// only, zero elsewhere) - what comparing a MEAN balance needs where the events do not
+  /// conserve four-momentum one by one. See `SwappedEnergyBalance`.
+  double var_e = 0.0, var_pz = 0.0;
 };
 
 }  // namespace
@@ -401,6 +406,8 @@ int main() {
       c.mean_e = dv(row, 11);
       c.mean_pz = dv(row, 12);
       c.mean_mult = dv(row, 13);
+      c.var_e = dv(row, 14);
+      c.var_pz = dv(row, 15);
       cases.push_back(c);
     }
   }
@@ -540,6 +547,14 @@ int main() {
   double blir_tape_worst = 0.0, blir_mom_worst = 0.0;
   std::string blir_tape_at, blir_mom_at;
   double worst_ce = 0.0, worst_cpz = 0.0, worst_cev = 0.0;
+  double worst_swap_e = 0.0, worst_swap_pz = 0.0;   ///< see `swapped`, in standard errors
+  std::string worst_swap_e_at, worst_swap_pz_at;
+  long long n_swapped = 0;
+  /// A swapped event that only the destroyed-nucleus branch touched: how much more momentum is
+  /// missing in the ion's frame than the branch itself left. See the IonBalance bound.
+  double worst_swap_void = -1e300;
+  std::string worst_swap_void_at;
+  long long n_swap_void = 0;
   std::string worst_ce_at, worst_cpz_at, worst_cev_at;
   /// THE ONE EVENT IN A MILLION WHERE GEANT4 ITSELF DOES NOT CONSERVE ENERGY.
   ///
@@ -558,12 +573,51 @@ int main() {
   double worst_a1 = 0.0;
   std::string worst_a1_at;
   long long n_a1 = 0;
+  /// THE DESTROYED NUCLEUS, the other place the nucleon arm does not conserve energy - and the
+  /// port says by exactly how much. `FillVoidNucleusProducts` balances the energy by hand
+  /// (cascade_void.cuh, step 5): exactly, when it shares what is left among the remaining
+  /// nucleons or scales the products by less than 20%, and not at all when the scaling would be
+  /// 20% or more - the event then keeps `Ekinetic - Ekineticrdm` of imbalance, which
+  /// `VoidReport::energy_residue` carries. The assertion is that the event's signed deficit
+  /// EQUALS that residue, on every void event of the nucleon campaign.
+  double worst_void = 0.0;
+  std::string worst_void_at;
+  long long n_void_ev = 0;
+  long long void_branch[3] = {0, 0, 0};
+  /// THE BRANCH'S RATE, per case, against Geant4's own count of the same thing. The dump reads
+  /// two private members of G4BinaryCascade after every campaign event to say which went out
+  /// through `FillVoidNucleusProducts` (ref/dump/dump_bic.cc, `void_fired`), and
+  /// bic_void_rates.csv has the count; the port's is `went_void` below. A binomial comparison of
+  /// two rates over the same N, and EXACT where either model never reaches the branch - the
+  /// sub-threshold nucleons and the fusion arm, where Geant4 must report 0 of 0 propagated.
+  double worst_void_rate = 0.0;
+  std::string worst_void_rate_at;
+  long long n_void_rate = 0;
+  long long g4_void_total = 0, port_void_total = 0;
+  long long void_late_decay_total = 0, void_late_total = 0;
+  std::map<std::string, std::vector<long long>> g4_void;   // case -> N, n_kill, n_void, n_prop
+  for (const auto& vrow : read_csv("bic_void_rates.csv")) {
+    g4_void[sv(vrow, 1)] = {lv(vrow, 2), lv(vrow, 3), lv(vrow, 4), lv(vrow, 5)};
+  }
 
   for (const OracleCase& c : cases) {
     // Both ion files go through `blir_apply_yourself`; which ARM it takes is the gate's to
     // decide and the status column's to record, not this line's.
     const bool is_ion = (c.model == "bic_blir" || c.model == "bic_blirapply");
-    const long long void_before = is_ion ? i_ref_void : n_ref_void;
+    /// This case's refusals BY NAME, and the events the port sent out through
+    /// `FillVoidNucleusProducts` - the count `VoidRate` compares with Geant4's own.
+    std::map<std::string, long long> case_refused_by;
+    long long case_refused_unnamed = 0;
+    long long port_void = 0;
+    long long port_propagated = 0;   ///< events whose cascade ran at all - see `VoidRate`
+    /// Of `port_void`: events whose branch drew a scheduled decay and threw it away, and events
+    /// it took a late particle's copy from - the two steps of its collision drain, counted
+    /// because only a tape can verify a draw and a tape verifies only what its events reach.
+    long long port_void_late_decay = 0, port_void_late = 0;
+    long long port_void_overflow = 0;   ///< of `port_void`: events that overflowed a buffer
+    /// P20 diagnostic (P20_H1_DIAG): the lab-frame balance of an ion on hydrogen, per event.
+    long long h1_n = 0, h1_n1 = 0, h1_n10 = 0, h1_n10v = 0, h1_n100 = 0;
+    double h1_sum_de = 0.0, h1_sum_dpz = 0.0, h1_worst = 0.0;
     physics::hadronic::HadProjectile<double> proj;
     proj.baryon_number = c.pa;
     proj.charge = static_cast<double>(c.pz);
@@ -604,6 +658,9 @@ int main() {
     long long sum_z = -1, sum_a = -1;
     bool za_varies = false;
     double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+    /// The spread of the event totals about the projectile's own energy and momentum, as the
+    /// dump accumulates it for `var_e_MeV2` and `var_pz_MeV2`.
+    double sft_e = 0.0, sft_e2 = 0.0, sft_pz = 0.0, sft_pz2 = 0.0;
     double worst_ev_e = 0.0, worst_ev_e_ic = 0.0, worst_per_electron = 0.0;
     std::string worst_ev_e_ic_at;
     /// The conversion-electron surplus, per event: `n_e * m_e` in energy and the same rest mass
@@ -713,10 +770,38 @@ int main() {
       } else {
         st = bic::apply_yourself(proj, tgt, lt, pool, ws, store, rng, result, nref, nrep);
       }
+      // Did the event reach `Propagate`? The ion arm's cascade branch always does; the nucleon
+      // arm does whenever its inner loop ran, which is every event at or above `theBCminP`.
+      if (is_ion ? brep.cascade_arm : (nrep.inner_tries > 0)) { ++port_propagated; }
       const bool cascade = is_ion ? bref.cascade : nref.cascade;
       const bool other = is_ion ? bref.anti_or_hyper : (nref.species || nref.preco_projectile);
       if (cascade || other) {
         ++n_refused;
+        // Per case, by the name the refusal carries - the same names as the totals below.
+        {
+          const bic::CascadeRefusal& cr = is_ion ? bref.cascade_ref : nref.cascade_ref;
+          int names = 0;
+          auto name = [&](bool on, const char* what) {
+            if (on) { ++case_refused_by[what]; ++names; }
+          };
+          name(cr.void_decay_null, "FillVoidNucleusProducts:decay_null");
+          name(cr.capacity, "cascade capacity");
+          name(cr.unknown_species, "cascade unknown species");
+          name(cr.invalid_nucleus, "cascade invalid (A,Z)");
+          name(cr.high_energy_primary, "cascade high-energy primary");
+          if (is_ion) {
+            name(bref.anti_or_hyper, "anti/hyper-nucleus");
+            name(bref.capacity, "capacity");
+            name(bref.nucleus, "nucleus");
+          } else {
+            name(nref.hydrogen, "Propagate1H1");
+            name(nref.species, "species");
+            name(nref.nucleus, "nucleus");
+            name(nref.preco_projectile, "precompound projectile");
+            name(nref.capacity, "capacity");
+          }
+          if (names == 0) { ++case_refused_unnamed; }
+        }
         // WHICH refusal, by name. A count on its own says only that something was refused, and
         // the whole point of refusing by name is that the name travels.
         if (is_ion) {
@@ -727,7 +812,7 @@ int main() {
           if (bref.nucleus) { ++i_ref_nucleus; }
           if (bref.no_final_state) { ++i_ref_nofs; }
           if (bref.momentum_not_conserved) { ++i_ref_mom; }
-          if (bref.cascade_ref.void_nucleus) { ++i_ref_void; }
+          if (bref.cascade_ref.void_decay_null) { ++i_ref_void; }
           if (bref.cascade_ref.capacity) { ++i_ref_ccap; }
           if (bref.cascade_ref.unknown_species) { ++i_ref_unknown; }
           if (bref.cascade_ref.invalid_nucleus) { ++i_ref_invalid; }
@@ -738,7 +823,7 @@ int main() {
           if (nref.species) { ++n_ref_species; }
           if (nref.nucleus) { ++n_ref_nucleus; }
           if (nref.preco_projectile) { ++n_ref_preco; }
-          if (nref.cascade_ref.void_nucleus) { ++n_ref_void; }
+          if (nref.cascade_ref.void_decay_null) { ++n_ref_void; }
           if (nref.cascade_ref.capacity) { ++n_ref_capacity; }
           if (nref.cascade_ref.unknown_species) { ++n_ref_unknown; }
           if (nref.cascade_ref.invalid_nucleus) { ++n_ref_invalid; }
@@ -746,8 +831,24 @@ int main() {
         }
         continue;
       }
+      // Did the successful `Propagate` go out through `FillVoidNucleusProducts`? On the ion arm
+      // only if the CASCADE arm ran - the fusion arm has no `Propagate` at all. Counted BEFORE
+      // the overflow below, because Geant4 has no buffer to overflow and counts every event
+      // that went through the branch: MEASURED on ic_Fe56_1000_Fe56, where all 39 events that
+      // overflow a buffer of the light-ion reaction are destroyed-nucleus events, counting
+      // after it read 108 against Geant4's 152, 2.74 sigma, and counting before it 147.
+      const bool went_void =
+          is_ion ? (brep.cascade_arm && brep.propagate.outcome == bic::kPropagateVoidNucleus)
+                 : (nrep.propagate_outcome == bic::kPropagateVoidNucleus);
+      if (went_void) {
+        ++port_void;
+        const bic::VoidReport& vq = is_ion ? brep.propagate.void_report : nrep.void_report;
+        if (vq.n_late_decays > 0) { ++port_void_late_decay; }
+        if (vq.n_lates > 0) { ++port_void_late; }
+      }
       if ((is_ion ? bref.capacity : nref.capacity) || result.secondary_overflow > 0) {
         ++n_overflow;
+        if (went_void) { ++port_void_overflow; }
         // An event that overflowed the secondary buffer is MISSING products, so it cannot be in
         // the energy balance - and it is not a small effect: four such events out of 1.96
         // million put `BalanceNoIC` 55.9 GeV out on camp_n1400_Pb208, where every other case in
@@ -810,6 +911,16 @@ int main() {
       // `beta` to the precision this needs, and dropping the gamma is what leaves the 1e-7
       // residue the tolerance below is set from.
       sum_tot_pz += tot_pz - n_ev_electrons * kMe * (c.mean_pz / c.mean_e);
+      {
+        const double p_beam =
+            std::sqrt(proj.kin_energy * (proj.kin_energy + 2.0 * proj.mass));
+        const double d_e = tot_e - (proj.kin_energy + proj.mass);
+        const double d_pz = tot_pz - p_beam;
+        sft_e += d_e;
+        sft_e2 += d_e * d_e;
+        sft_pz += d_pz;
+        sft_pz2 += d_pz * d_pz;
+      }
       // Per event, and against the port's OWN compound rather than the oracle's mean: this is
       // the strongest form of the statement and it needs no oracle at all. Everything the
       // de-excitation emitted, minus the rest mass it created for each conversion electron,
@@ -855,7 +966,31 @@ int main() {
         // cascaders so that the total matches `pInitialState - pFragments`. The surplus is
         // ABSORBED. So the ion event's books balance against `want_e` with no electron term at
         // all, and putting one in creates the discrepancy rather than removing it.
-        const double de_ion = std::fabs(tot_e - want_e);
+        double de_ion = std::fabs(tot_e - want_e);   // in the ion's frame when SWAPPED, below
+        if (c.ta == 1 && std::getenv("P20_H1_DIAG") != nullptr) {
+          const double p_beam = std::sqrt(proj.kin_energy * (proj.kin_energy + 2.0 * proj.mass));
+          const double sde = want_e - tot_e;
+          const double sdpz = p_beam - tot_pz;
+          h1_sum_de += sde;
+          h1_sum_dpz += sdpz;
+          ++h1_n;
+          if (std::fabs(sde) > 1.0) { ++h1_n1; }
+          if (std::fabs(sde) > 10.0) { ++h1_n10; if (went_void) { ++h1_n10v; } }
+          if (std::fabs(sde) > 100.0) {
+            ++h1_n100;
+            const bic::VoidReport& vq = brep.propagate.void_report;
+            std::printf("   H1DIAG %s ev %d dE %.3f dpz %.3f void %d branch %d residue %.3f "
+                        "ekin_avail %.3f tgt %d loops %d gave_up %d spec %d/%d casc %d nsec %d "
+                        "last_ran %d momentum_left %.3f passes %d\n",
+                        c.name.c_str(), ev, sde, sdpz, went_void ? 1 : 0, vq.branch,
+                        vq.energy_residue, vq.ekinetic_available, vq.n_targets,
+                        brep.correction_loops, brep.correction_gave_up ? 1 : 0,
+                        brep.spectator_a, brep.spectator_z, brep.n_cascaders,
+                        result.n_secondaries, brep.last_correction_ran ? 1 : 0,
+                        vq.momentum_left, vq.momentum_loops);
+          }
+          if (std::fabs(sde) > h1_worst) { h1_worst = std::fabs(sde); }
+        }
         double bound = brep.last_correction_ran
                            ? std::fabs(brep.last_correction_scale) * want_e
                            : 10.0;
@@ -869,6 +1004,47 @@ int main() {
           const double gamma = (b2 < 1.0) ? 1.0 / std::sqrt(1.0 - b2) : 0.0;
           bound += gamma * brep.propagate.excitation_energy;
         }
+        // And the arithmetic's own floor: `tot_e` is a sum of the event's secondaries, each
+        // rebuilt from its kinetic energy and mass, so it carries a few ulps of the total per
+        // product whatever the physics did. It never mattered while every corrected event kept
+        // a |Scale| of 1e-7 or so; the destroyed-nucleus branch hands the corrector events that
+        // already balance, and MEASURED on ic_C121000_C12 ev 7501 - 29 products through the
+        // branch - the corrector exits on its first attempt with |Scale| = 1.1e-16, a bound of
+        // 3.8e-12 MeV, against a deficit of 1.5e-11: two ulps of 34 GeV.
+        double floor = 4.0 * DBL_EPSILON * want_e * static_cast<double>(result.n_secondaries);
+        // SWAPPED - `SetLighterAsProjectile`, an ion on a lighter target - and everything above
+        // is a statement in the ION's rest frame, where `Interact` ran, while the event is
+        // measured in the lab. So the event is measured THERE: the lab imbalance (dE, dpz) is
+        // boosted into the ion's rest frame, dE' = gamma*(dE - beta*dpz), and it is dE' that the
+        // bound above bounds - energy is what the E/p loop and the correctors act on. The
+        // MOMENTUM is a second statement, made where only the destroyed-nucleus branch touched
+        // the event (neither the E/p loop nor the last corrector ran): its missing momentum
+        // along the beam, dp'_z = gamma*(dpz - beta*dE), is at most what the branch's own passes
+        // left, `VoidReport::momentum_left` - Geant4's, measured on its own events, docs/RISK.md
+        // V215 - and `SwappedVoidMomentum` asserts nothing else is missing.
+        if (c.ta < c.pa) {
+          const double e_ion = proj.kin_energy + proj.mass;
+          const double g = e_ion / proj.mass;
+          const double p_beam = std::sqrt(proj.kin_energy * (proj.kin_energy + 2.0 * proj.mass));
+          const double b = p_beam / e_ion;
+          const double d_e = want_e - tot_e;
+          const double d_pz = p_beam - tot_pz;
+          de_ion = std::fabs(g * (d_e - b * d_pz));
+          floor *= g * (1.0 + b);
+          if (went_void && brep.correction_loops == 0 && !brep.last_correction_ran) {
+            const double dpz_f = std::fabs(g * (d_pz - b * d_e));
+            const double excess = dpz_f - brep.propagate.void_report.momentum_left;
+            ++n_swap_void;
+            if (excess > worst_swap_void) {
+              worst_swap_void = excess;
+              char buf[160];
+              std::snprintf(buf, sizeof buf, " ev %d missing %.6g MeV/c, the branch left %.6g",
+                            ev, dpz_f, brep.propagate.void_report.momentum_left);
+              worst_swap_void_at = c.name + buf;
+            }
+          }
+        }
+        bound += floor;
         if (n_ev_electrons > 0) {
           // **THE CONVERSION ELECTRON IS A DIFFERENT STATEMENT AND GETS A DIFFERENT BUCKET**,
           // for the reason this file already gives about the nucleon arm: lumping an exact
@@ -901,10 +1077,30 @@ int main() {
               (bound > 0.0) ? (de_ion / bound) : ((de_ion > 1e-6) ? 1e9 : 0.0);
           if (ratio > worst_ion_ratio) {
             worst_ion_ratio = ratio;
-            worst_ion_ratio_at = c.name + " ev " + std::to_string(ev) + " deficit " +
-                                 std::to_string(de_ion) + " bound " + std::to_string(bound) +
-                                 " scale " + std::to_string(brep.last_correction_scale);
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          " ev %d deficit %.4g bound %.4g scale %.4g attempts %d void %d "
+                          "nsec %d",
+                          ev, de_ion, bound, brep.last_correction_scale,
+                          brep.last_correction_attempts, went_void ? 1 : 0,
+                          result.n_secondaries);
+            worst_ion_ratio_at = c.name + buf;
           }
+        }
+      } else if (went_void) {
+        // THE DESTROYED NUCLEUS, asserted rather than excused - see `worst_void`. No
+        // de-excitation runs on this branch, so there is no conversion electron to pay for,
+        // and the signed deficit must EQUAL the branch's own residue.
+        ++n_void_ev;
+        const double deficit = want_e - tot_e;
+        const bic::VoidReport& vr = nrep.void_report;
+        const double miss = std::fabs(deficit - vr.energy_residue);
+        if (vr.branch >= 0 && vr.branch < 3) { ++void_branch[vr.branch]; }
+        if (miss > worst_void) {
+          worst_void = miss;
+          worst_void_at = c.name + " ev " + std::to_string(ev) + " branch " +
+                          std::to_string(vr.branch) + " deficit " + std::to_string(deficit) +
+                          " residue " + std::to_string(vr.energy_residue);
         }
       } else if (n_ev_electrons == 0 && res_a == 1) {
         // See `worst_a1`. The deficit is signed: the event is always SHORT, never long, so
@@ -950,12 +1146,12 @@ int main() {
     // assertion said so.
     //
     // The test is `n_refused == c.n` and not "any event was refused", because the two are
-    // different statements. A handful of events per case DO get refused and the reason is named
-    // and counted: `FillVoidNucleusProducts` fires 109 times in 1.96 million events, 0.006%, on
-    // cascades that destroyed the nucleus outright. That is a hole in the port and it is meant
-    // to be visible, which the per-case line below and the by-name tally at the end make it;
-    // failing the whole comparison on it would hide the 19,997 events that were right behind
-    // the three that were not.
+    // different statements. A handful of events per case COULD be refused and the reason would
+    // be named and counted - until P20 that was `FillVoidNucleusProducts`, 103 times in 1.96
+    // million events on cascades that destroyed the nucleus outright - and a hole is meant to
+    // be visible, which the per-case line below and the by-name tally at the end make it;
+    // failing the whole comparison on it would hide the events that were right behind the few
+    // that were not.
     // THE EVENTS THE PORT DID NOT ANSWER, which is not the same as `n_refused`.
     //
     // `n_refused` counts two different things and has since this file was written: a BIC or
@@ -1106,7 +1302,47 @@ int main() {
     // the cascade buckets and not in the compound ones.
     const bool cascade_path =
         (c.model == "bic_blirapply") || (!is_ion && (c.pa == 0 || c.ekin_per_a >= 45.0));
-    if (cascade_path) {
+    // **AN ION ON HYDROGEN IS SWAPPED, AND ITS EVENTS DO NOT CONSERVE MOMENTUM ONE BY ONE.**
+    // `SetLighterAsProjectile` makes the proton the projectile of `Interact` and the ion the
+    // nucleus, so the reaction runs in the ION's rest frame and is boosted back; and there the
+    // destroyed-nucleus branch can leave hundreds of MeV/c of momentum missing - its last step
+    // rotates at fixed magnitudes, and four products cannot always add up to the total - which
+    // the reaction's energy-only test lets through and the lab sees as ENERGY. MEASURED on
+    // Geant4's own events (docs/RISK.md V215): d on H1 at 1 GeV/nucleon, six events out by
+    // 124-574 MeV, each with its energy exact to 0.000 MeV in the ion's frame and 68-318 MeV/c
+    // missing along the beam. So the mean of these cases is a MEAN OF A SPREAD, and the two sides
+    // are compared as means - `SwappedEnergyBalance` and `SwappedMomentumBalance`, in standard
+    // errors from both sides' per-event variances - and not against a residue tolerance that
+    // assumes every event balances. Fe56 on Al27 is swapped too, and stays in the residue
+    // buckets: its nucleus is iron, the branch fires in 6 events of 20,000, and its events
+    // balance one by one - Geant4's per-event spread there is 0.0055 MeV^2.
+    const bool swapped = is_ion && c.model == "bic_blirapply" && c.ta == 1;
+    if (swapped) {
+      const double np = nk;
+      const double ng = static_cast<double>(c.n);
+      const double var_pe = sft_e2 / np - (sft_e / np) * (sft_e / np);
+      const double var_ppz = sft_pz2 / np - (sft_pz / np) * (sft_pz / np);
+      const double se = std::sqrt(std::max(0.0, var_pe) / np + std::max(0.0, c.var_e) / ng);
+      const double sp = std::sqrt(std::max(0.0, var_ppz) / np + std::max(0.0, c.var_pz) / ng);
+      const double ze = (se > 0.0) ? de / se : ((de > 1e-6) ? 1e9 : 0.0);
+      const double zp = (sp > 0.0) ? dp / sp : ((dp > 1e-6) ? 1e9 : 0.0);
+      ++n_swapped;
+      if (ze > worst_swap_e) {
+        worst_swap_e = ze;
+        worst_swap_e_at = c.name + " port-g4 " + std::to_string(sum_tot_e / nk - o_mean_e) +
+                          " MeV, se " + std::to_string(se);
+      }
+      if (zp > worst_swap_pz) {
+        worst_swap_pz = zp;
+        worst_swap_pz_at = c.name + " port-g4 " + std::to_string(sum_tot_pz / nk - o_mean_pz) +
+                           " MeV, se " + std::to_string(sp);
+      }
+      if (c.var_e <= 0.0 && c.var_pz <= 0.0) {
+        std::printf("SWAPPED %s: the oracle has no var_e_MeV2/var_pz_MeV2 columns\n",
+                    c.name.c_str());
+        ++fails;
+      }
+    } else if (cascade_path) {
       if (de > worst_ce) { worst_ce = de; worst_ce_at = c.name; }
       if (dp > worst_cpz) { worst_cpz = dp; worst_cpz_at = c.name; }
       if (worst_ev_e > worst_cev) { worst_cev = worst_ev_e; worst_cev_at = c.name; }
@@ -1136,9 +1372,9 @@ int main() {
     // **A CASE THE PORT DID NOT FULLY ANSWER IS NOT COMPARED, AND SAYING SO IS THE POINT.**
     //
     // The refused events are not a random subset. `FillVoidNucleusProducts` - the branch the
-    // port refuses by name, 180 lines of ad-hoc corrections with a `G4UniformRand()` in them -
-    // fires precisely when the cascade DESTROYED the nucleus, which is the most violent and
-    // the highest-multiplicity end of the distribution. MEASURED on C12 + C12 at
+    // port refused by name until P20, 180 lines of ad-hoc corrections with a `G4UniformRand()`
+    // in them - fires precisely when the cascade DESTROYED the nucleus, which is the most
+    // violent and the highest-multiplicity end of the distribution. MEASURED on C12 + C12 at
     // 1000 MeV/nucleon: 1,173 of 20,000 events refused, every one of them `void_nucleus`, and
     // the port's mean multiplicity over the 18,827 it answered is 13.82 against Geant4's 14.59
     // over all 20,000. Per-event normalisation does NOT remove that: the events are missing
@@ -1147,24 +1383,90 @@ int main() {
     // Comparing anyway would put a 20-sigma number on a bucket whose tolerance is 5 and call a
     // KNOWN, NAMED hole a physics disagreement. Widening the tolerance to swallow it would be
     // worse - it would swallow real disagreements with it. So a case that refuses more than
-    // 1 in 100 events is listed, with its rate and the name of the refusal, and left out of the
-    // three statistical buckets; what IS asserted about it is that every one of its refusals
-    // carries that single name, which is the statement that the hole is the one already
-    // documented and not a new one.
+    // 1 in 100 events is listed, with its rate and the names of its refusals, and left out of
+    // the three statistical buckets; what IS asserted about it is that every one of its
+    // refusals carries a name, which is the statement that the hole is a documented one.
+    //
+    // P20: `FillVoidNucleusProducts` is transcribed, and the three cases this left out - C12 on
+    // C12 at 1000 and 200 MeV/nucleon and the alpha on C12 at 1000 - are compared like the rest.
+    // The rule stays, for whatever refuses more than 1 in 100 next, and so does the requirement
+    // that every refusal carry a name; the names are now listed per case rather than assumed to
+    // be the one it used to be.
     const double refuse_rate =
         (c.n > 0) ? static_cast<double>(case_missing) / static_cast<double>(c.n) : 0.0;
     const bool comparable = (refuse_rate <= 0.01);
     if (!comparable) {
-      const long long named = is_ion ? (i_ref_void - void_before) : (n_ref_void - void_before);
-      std::printf("NOT COMPARED %s: %lld of %lld events refused (%.3g%%), %lld of them "
-                  "FillVoidNucleusProducts - species and multiplicity left out of the "
-                  "statistical buckets, see the comment above this line\n",
-                  c.name.c_str(), case_missing, c.n, 100.0 * refuse_rate, named);
+      std::string names;
+      for (const auto& kv : case_refused_by) {
+        names += " " + kv.first + " " + std::to_string(kv.second);
+      }
+      std::printf("NOT COMPARED %s: %lld of %lld events refused (%.3g%%), by name:%s - species "
+                  "and multiplicity left out of the statistical buckets, see the comment above "
+                  "this line\n",
+                  c.name.c_str(), case_missing, c.n, 100.0 * refuse_rate,
+                  names.empty() ? " none" : names.c_str());
       ++n_not_compared;
-      if (named != case_missing) {
-        std::printf("UNNAMED REFUSALS in %s: %lld of %lld are not FillVoidNucleusProducts\n",
-                    c.name.c_str(), case_missing - named, case_missing);
+    }
+    if (case_refused_unnamed > 0) {
+      std::printf("UNNAMED REFUSALS in %s: %lld refused events carry no name\n", c.name.c_str(),
+                  case_refused_unnamed);
+      ++fails;
+    }
+
+    // ---- the destroyed-nucleus branch's RATE, against Geant4's own count (see `g4_void`).
+    {
+      const auto it = g4_void.find(c.name);
+      if (c.model != "bic_blir" && it == g4_void.end()) {
+        std::printf("VOID RATE %s: no row in bic_void_rates.csv\n", c.name.c_str());
         ++fails;
+      } else if (it != g4_void.end()) {
+        const long long g4n = it->second[0];
+        const long long g4v = it->second[2];
+        const long long g4p = it->second[3];
+        g4_void_total += g4v;
+        port_void_total += port_void;
+        // Which arm each event took is the gate's, and it is deterministic: Geant4's count of
+        // events that reached `Propagate` at all must be the port's, exactly - all of them for a
+        // cascade case, none for a nucleon under `theBCminP`.
+        if (g4n != c.n || g4p != port_propagated) {
+          std::printf("VOID RATE %s: Geant4 row has N %lld and %lld propagated, the port %lld "
+                      "and %lld\n",
+                      c.name.c_str(), g4n, g4p, c.n, port_propagated);
+          ++fails;
+        }
+        ++n_void_rate;
+        double z = 0.0;
+        if (g4v + port_void > 0) {
+          const double pool_p = static_cast<double>(g4v + port_void) /
+                                static_cast<double>(g4n + c.n);
+          const double s2 = pool_p * (1.0 - pool_p) *
+                            (1.0 / static_cast<double>(g4n) + 1.0 / static_cast<double>(c.n));
+          z = (s2 > 0.0) ? std::fabs(static_cast<double>(port_void) / c.n -
+                                     static_cast<double>(g4v) / g4n) / std::sqrt(s2)
+                         : 0.0;
+        }
+        if (z > worst_void_rate) {
+          worst_void_rate = z;
+          worst_void_rate_at = c.name + " port " + std::to_string(port_void) + " g4 " +
+                               std::to_string(g4v) + " of " + std::to_string(c.n);
+        }
+        if (g4v > 0 || port_void > 0) {
+          std::printf("  void %-22s port %6lld  Geant4 %6lld  of %lld  (%.3g%% / %.3g%%, "
+                      "%.2f sigma); drained a decay %lld, a late particle %lld; overflowed "
+                      "%lld\n",
+                      c.name.c_str(), port_void, g4v, c.n, 100.0 * port_void / c.n,
+                      100.0 * static_cast<double>(g4v) / static_cast<double>(g4n), z,
+                      port_void_late_decay, port_void_late, port_void_overflow);
+        }
+        void_late_decay_total += port_void_late_decay;
+        void_late_total += port_void_late;
+        if (h1_n > 0) {
+          std::printf("   H1DIAG %s: %lld killed, %lld void; |dE| > 1: %lld, > 10: %lld (%lld "
+                      "void), > 100: %lld; worst %.3f; mean dE %.6f mean dpz %.6f\n",
+                      c.name.c_str(), h1_n, port_void, h1_n1, h1_n10, h1_n10v, h1_n100,
+                      h1_worst, h1_sum_de / static_cast<double>(h1_n),
+                      h1_sum_dpz / static_cast<double>(h1_n));
+        }
       }
     }
     std::map<int, Tally>& go = g4[c.name];
@@ -1475,6 +1777,14 @@ int main() {
      worst_ce_at},
     {"CascadeMomentumBalance(MeV)", static_cast<long long>(cases.size()), worst_cpz, 5e-3,
      worst_cpz_at},
+    // The ions on hydrogen, whose events do not balance one by one in Geant4 either - see
+    // `swapped`. Means compared in standard errors from both sides' spreads.
+    {"SwappedEnergyBalance(sigma)", n_swapped, worst_swap_e, 5.0, worst_swap_e_at},
+    {"SwappedMomentumBalance(sigma)", n_swapped, worst_swap_pz, 5.0, worst_swap_pz_at},
+    // Missing momentum beyond what the branch left, MeV/c: zero up to the lab sums' rounding,
+    // boosted into the ion's frame, which is under 1e-9 on these events.
+    {"SwappedVoidMomentum(MeV)", n_swap_void, (n_swap_void > 0) ? worst_swap_void : 0.0, 1e-6,
+     worst_swap_void_at},
     // 5e-2 and not 2e-2, and the three hundredths are ONE EVENT IN 1.96 MILLION:
     // camp_n800_Al27 ev 1290, an 800 MeV neutron on Al27 whose cascade left an A = 22, Z = 13
     // residual at E* = 2.0171 MeV and whose de-excitation came out 0.0471717 MeV light - with
@@ -1490,6 +1800,11 @@ int main() {
     // The A == 1 residual, asserted rather than excused - see `worst_a1`. The bound is the
     // 2.7e-12 MeV measured on the one event the campaign contains, rounded up four decades.
     {"A1ResidualDeficit(MeV/event)", n_a1, worst_a1, 1e-8, worst_a1_at},
+    // The destroyed nucleus, likewise - see `worst_void`: the deficit minus the branch's own
+    // residue, per event, which is the rounding of a sum of a few GeV.
+    {"VoidResidualDeficit(MeV/event)", n_void_ev, worst_void, 1e-8, worst_void_at},
+    // And how often the branch runs, against Geant4's own count - see `g4_void`.
+    {"VoidRate(sigma)", n_void_rate, worst_void_rate, 5.0, worst_void_rate_at},
     // The ion cascade against a recorded stream. Exact by construction: the structural bucket
     // counts mismatches, so its tolerance is zero.
     // The ion arm's per-event balance, as a RATIO to the bound the corrector's own ErrLimit
@@ -1523,8 +1838,8 @@ int main() {
               "electron\n", worst_pe);
   if (n_refused > 0) {
     std::printf("  refusals by name: Propagate1H1 %lld, species %lld, nucleus %lld, preco %lld, "
-                "FillVoidNucleusProducts %lld, capacity %lld, unknown species %lld, invalid "
-                "(A,Z) %lld, high-energy primary %lld\n",
+                "FillVoidNucleusProducts:decay_null %lld, capacity %lld, unknown species %lld, "
+                "invalid (A,Z) %lld, high-energy primary %lld\n",
                 n_ref_hydrogen, n_ref_species, n_ref_nucleus, n_ref_preco, n_ref_void,
                 n_ref_capacity, n_ref_unknown, n_ref_invalid, n_ref_he);
   }
@@ -1535,12 +1850,18 @@ int main() {
               n_not_compared, static_cast<long long>(cases.size()));
   std::printf("  ion refusals by name: cascade %lld, no_fusion %lld, capacity %lld, "
               "anti/hyperon %lld, nucleus %lld, no_final_state %lld, momentum %lld; inside the "
-              "cascade: FillVoidNucleusProducts %lld, capacity %lld, unknown species %lld, "
-              "invalid (A,Z) %lld, high-energy primary %lld\n",
+              "cascade: FillVoidNucleusProducts:decay_null %lld, capacity %lld, unknown species "
+              "%lld, invalid (A,Z) %lld, high-energy primary %lld\n",
               i_ref_cascade, i_ref_nofusion, i_ref_capacity, i_ref_anti, i_ref_nucleus,
               i_ref_nofs, i_ref_mom, i_ref_void, i_ref_ccap, i_ref_unknown, i_ref_invalid,
               i_ref_he);
   std::printf("  A == 1 residuals (Geant4 discards their excitation): %lld events\n", n_a1);
+  std::printf("  destroyed nucleus (FillVoidNucleusProducts): %lld events in the port against "
+              "%lld in Geant4 over the campaigns; nucleon-arm events by energy branch: shared "
+              "%lld, corrected %lld, correction refused %lld; events whose collision drain "
+              "drew a decay and threw it away %lld, took a late particle %lld\n",
+              port_void_total, g4_void_total, void_branch[0], void_branch[1], void_branch[2],
+              void_late_decay_total, void_late_total);
   auto by_sigma = [](const std::pair<double, std::string>& a,
                      const std::pair<double, std::string>& b) { return a.first > b.first; };
   std::sort(top_count.begin(), top_count.end(), by_sigma);

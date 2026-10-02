@@ -13,7 +13,7 @@
 //     while (Entries() && currentZ && --collisionLoopMaxCount>0):
 //         Absorb(); Capture();
 //         if (Entries()) { DoTimeStep(next time - now); ApplyCollision(next) or Remove(next); }
-//     no target list, or no proton in it   ->  FillVoidNucleusProducts
+//     no target list, or no proton in it   ->  FillVoidNucleusProducts, and return
 //     Absorb(); Capture();
 //     !haveProducts             ->  return an EMPTY vector
 //     StepParticlesOut()
@@ -45,15 +45,15 @@
 // guard against a cycle, and it is carried at its own size because a smaller one would change
 // which events complete.
 //
+// ## THE DESTROYED NUCLEUS IS `cascade_void.cuh`'s
+//
+// `G4BinaryCascade::FillVoidNucleusProducts`, the branch for a nucleus whose target list is
+// empty or which has no proton left in it, is transcribed there (P20) and returns from here with
+// `kPropagateVoidNucleus` and its products - no fragment, no precompound model. P9d refused it by
+// name, and it was every refusal of P9d's nucleon campaign and of P9e's ion campaign.
+//
 // ## REFUSED, by name
 //
-//   * **G4BinaryCascade::FillVoidNucleusProducts**, the branch for a nucleus whose target list is
-//     empty or which has no proton left in it. It is 180 lines of ad-hoc corrections - including
-//     a `G4UniformRand()`-drawn kinetic energy handed to the leftover nucleons when the balance
-//     comes out negative - and it is reached only once the cascade has destroyed the nucleus
-//     outright. `CascadeRefusal::void_nucleus` is set at the point it would have been needed and
-//     the product list is left as it stands, so that a caller sees an incomplete event rather
-//     than a plausible one.
 //   * **G4BinaryCascade::HighEnergyModelFSProducts**, and the late-particle arm with it. Both are
 //     reachable only when a high-energy generator owns this cascade and hands it secondaries
 //     whose state is `undefined` plus a `GetPrimaryProjectile()`;
@@ -69,6 +69,7 @@
 #include <cmath>
 
 #include "physics/hadronic/bic/cascade_deexcite.cuh"
+#include "physics/hadronic/bic/cascade_void.cuh"
 
 namespace g4gpu::bic {
 
@@ -84,7 +85,10 @@ enum PropagateOutcome : int {
   kPropagateNoCollision = 1,          ///< Geant4's `return 0`: resample the impact parameter
   kPropagateNoProducts = 2,           ///< `!haveProducts`: rebuild the nucleus and try again
   kPropagateNegativeExcitation = 3,   ///< five rounds of CorrectFinalPandE were not enough
-  kPropagateVoidNucleus = 4,          ///< FillVoidNucleusProducts, refused; see the file header
+  /// The nucleus was destroyed and `FillVoidNucleusProducts` made the products (P20; it was a
+  /// refusal until then). An ANSWER, like `kPropagateOk`, and it can be an empty one - which
+  /// both callers treat as Geant4 treats an empty vector.
+  kPropagateVoidNucleus = 4,
   kPropagateRefused = 5               ///< see `CascadeRefusal`
 };
 
@@ -138,6 +142,8 @@ struct PropagateResult {
   int captures = 0;
   int capture_count = 0;
   double capture_energy = 0.0;
+  /// What `FillVoidNucleusProducts` did, when the outcome is `kPropagateVoidNucleus`.
+  VoidReport void_report;
 };
 
 /// `G4BinaryCascade::GetSpherePoint(G4double r, const G4LorentzVector& mom4)`.
@@ -212,7 +218,8 @@ __host__ __device__ inline bool capture_secondaries(BicCascadeState& st,
       ref.capacity = true;
       break;
     }
-    t.list = kListCaptured;
+    // `captured.push_back(kt); kt->Hit(); theCapturedList.push_back(kt);`
+    push_captured(st, i);
     mark_hit(st, i);
     captured[n_cap++] = i;
   }
@@ -255,6 +262,12 @@ __host__ __device__ inline PropagateResult propagate(
   st.nucleons = nucleus.nucleons;
   st.lists.capacity = ws.pool_capacity;
   st.lists.n_pool = 0;
+  // The two order counters start again with the lists they order. Carrying them over from a
+  // previous call - `ApplyYourself` calls this up to 20,000 times on one state - changed no
+  // number, because every track that carried an old sequence number went with the old pool, but
+  // a counter that only grows is a scan that only lengthens.
+  st.n_final_pushed = 0;
+  st.n_captured_pushed = 0;
   st.outer_radius = nucleus.outer_radius();
   st.current_time = 0.0;
   st.projectile_4mom = imr::LorentzVector(deex::Vec3d{0.0, 0.0, 0.0}, 0.0);
@@ -380,8 +393,17 @@ __host__ __device__ inline PropagateResult propagate(
       if (st.lists.pool[i].pdg == imr::kPdgProton) { ++n_protons; }
     }
     if (n_target == 0 || n_protons == 0) {
-      ref.void_nucleus = true;
+      // "nucleus completely destroyed, fill in ReactionProductVector" - and return, with no
+      // Absorb, no Capture, no StepParticlesOut and no fragment: `cascade_void.cuh`.
+      const int n = fill_void_nucleus_products(st, colls, ws.products, ws.product_capacity,
+                                               bic_model_id(), rng, ref, out.void_report);
+      if (n < 0) {
+        out.outcome = kPropagateRefused;
+        return out;
+      }
       out.outcome = kPropagateVoidNucleus;
+      out.n_products = n;
+      out.n_final_state = n;
       return out;
     }
   }

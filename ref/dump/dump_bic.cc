@@ -63,6 +63,7 @@
 #include "G4AngularDistributionNP.hh"
 #include "G4AngularDistributionPP.hh"
 #include "G4BinaryCascade.hh"
+#include "G4BCDecay.hh"
 #include "G4BinaryLightIonReaction.hh"
 #include "G4CollisionManager.hh"
 #include "G4MesonAbsorption.hh"
@@ -179,6 +180,286 @@ const double kRadiiFermi[] = {0.0,  0.15, 0.3,  0.45, 0.6,  0.9,  1.2,  1.8,  2.
 /// uses and 0.001 is what `ChoosePositions` uses; 0 and 1 are the two ends of the guard, and
 /// 1.5 is outside it, where both classes return DBL_MAX.
 const double kRelDens[] = {1.5, 1.0, 0.999, 0.5, 0.1, 0.01, 0.001, 1e-6, 0.0, -0.1};
+
+// ---------------------------------------------------------------------------------------------
+// Which exit `G4BinaryCascade::Propagate` took - read off two PRIVATE members, legally (P20)
+// ---------------------------------------------------------------------------------------------
+//
+// `FillVoidNucleusProducts` is private and non-virtual, and nothing public says an event went
+// through it. Two private data members do, between them:
+//
+//   * `thePrimaryEscape` is WRITTEN by `ApplyYourself` (false, before its loops) and by the
+//     normal end of `Propagate` (true, after `ProductsAddPrecompound`), and READ BY NOTHING
+//     (G4BinaryCascade.cc:154, 291, 671 are its only appearances). Every other exit of
+//     `Propagate` - the NULL of no collision, the empty vector of no products or of a negative
+//     excitation, and `FillVoidNucleusProducts` - leaves it as it was. So an event that ended
+//     stopAndKill with it still false went out through the destroyed-nucleus branch.
+//   * `theOuterRadius` is set by `Propagate`'s third statement and read only inside it, so a
+//     sentinel written before the event says whether `Propagate` ran at all - which the
+//     light-ion reaction's FUSION arm, below 50 MeV per nucleon, never calls.
+//
+// Both are written before an event and read after it, and neither write can change the
+// physics: one is never read and the other is overwritten before it is. MEASURED against the
+// oracle main's g4dump wrote without them: bic_apply.csv and bic_apply_status.csv byte-identical,
+// and the forty ion cases' rows of bic_blirapply_status.csv identical in every column they had.
+// bic_blirapply.csv matches in every count and differs in 18 of its 5,485 rows, by at most 4.5e-13
+// of a mean kinetic energy - four cases, each of which makes an excited Si25 whose own mean
+// energy moves by 1e-10. That the writes cannot cause (above), and the dumping process's history
+// can: P20 measured it with a driver that runs only these sections, and `G4IonTable` fixes an
+// excited ion's mass when that ion is first created.
+//
+// The members are reached through an EXPLICIT INSTANTIATION, which is the one place C++ lets a
+// name be used without access checking (C++17 [temp.explicit]: "The usual access checking rules
+// do not apply to names used to specify explicit instantiations"). `#define private public`
+// would work too, is undefined behaviour, and on MSVC changes the decorated names of member
+// functions; this is neither.
+template <typename Tag, typename Tag::type Member>
+struct VoidPeek {
+  friend typename Tag::type void_peek(Tag) { return Member; }
+};
+struct BicEscapeTag {
+  using type = G4bool G4BinaryCascade::*;
+  friend type void_peek(BicEscapeTag);
+};
+template struct VoidPeek<BicEscapeTag, &G4BinaryCascade::thePrimaryEscape>;
+struct BicOuterRadiusTag {
+  using type = G4double G4BinaryCascade::*;
+  friend type void_peek(BicOuterRadiusTag);
+};
+template struct VoidPeek<BicOuterRadiusTag, &G4BinaryCascade::theOuterRadius>;
+struct BicTargetsTag {
+  using type = G4KineticTrackVector G4BinaryCascade::*;
+  friend type void_peek(BicTargetsTag);
+};
+template struct VoidPeek<BicTargetsTag, &G4BinaryCascade::theTargetList>;
+struct BicSecondariesTag {
+  using type = G4KineticTrackVector G4BinaryCascade::*;
+  friend type void_peek(BicSecondariesTag);
+};
+template struct VoidPeek<BicSecondariesTag, &G4BinaryCascade::theSecondaryList>;
+struct BicCapturedTag {
+  using type = G4KineticTrackVector G4BinaryCascade::*;
+  friend type void_peek(BicCapturedTag);
+};
+template struct VoidPeek<BicCapturedTag, &G4BinaryCascade::theCapturedList>;
+struct BicFinalTag {
+  using type = G4KineticTrackVector G4BinaryCascade::*;
+  friend type void_peek(BicFinalTag);
+};
+template struct VoidPeek<BicFinalTag, &G4BinaryCascade::theFinalState>;
+struct BicTransferTag {
+  using type = G4ThreeVector G4BinaryCascade::*;
+  friend type void_peek(BicTransferTag);
+};
+template struct VoidPeek<BicTransferTag, &G4BinaryCascade::theMomentumTransfer>;
+struct BicProjectile4Tag {
+  using type = G4LorentzVector G4BinaryCascade::*;
+  friend type void_peek(BicProjectile4Tag);
+};
+template struct VoidPeek<BicProjectile4Tag, &G4BinaryCascade::theProjectile4Momentum>;
+struct BicInitialMassTag {
+  using type = G4double G4BinaryCascade::*;
+  friend type void_peek(BicInitialMassTag);
+};
+template struct VoidPeek<BicInitialMassTag, &G4BinaryCascade::initial_nuclear_mass>;
+struct BicCurrentATag {
+  using type = G4int G4BinaryCascade::*;
+  friend type void_peek(BicCurrentATag);
+};
+template struct VoidPeek<BicCurrentATag, &G4BinaryCascade::currentA>;
+struct BicCurrentZTag {
+  using type = G4int G4BinaryCascade::*;
+  friend type void_peek(BicCurrentZTag);
+};
+template struct VoidPeek<BicCurrentZTag, &G4BinaryCascade::currentZ>;
+struct BlirModelTag {
+  using type = G4BinaryCascade* G4BinaryLightIonReaction::*;
+  friend type void_peek(BlirModelTag);
+};
+template struct VoidPeek<BlirModelTag, &G4BinaryLightIonReaction::theModel>;
+struct BicDecayTag {
+  using type = G4BCDecay* G4BinaryCascade::*;
+  friend type void_peek(BicDecayTag);
+};
+template struct VoidPeek<BicDecayTag, &G4BinaryCascade::theDecay>;
+struct BicImRTag {
+  using type = std::vector<G4BCAction*> G4BinaryCascade::*;
+  friend type void_peek(BicImRTag);
+};
+template struct VoidPeek<BicImRTag, &G4BinaryCascade::theImR>;
+struct BicCollisionMgrTag {
+  using type = G4CollisionManager* G4BinaryCascade::*;
+  friend type void_peek(BicCollisionMgrTag);
+};
+template struct VoidPeek<BicCollisionMgrTag, &G4BinaryCascade::theCollisionMgr>;
+struct BicCurrentTimeTag {
+  using type = G4double G4BinaryCascade::*;
+  friend type void_peek(BicCurrentTimeTag);
+};
+template struct VoidPeek<BicCurrentTimeTag, &G4BinaryCascade::theCurrentTime>;
+
+/// The sentinel, written before an event: `Propagate` has not run and the normal exit has not
+/// been taken.
+void void_arm(G4BinaryCascade* bic) {
+  bic->*void_peek(BicEscapeTag{}) = false;
+  bic->*void_peek(BicOuterRadiusTag{}) = -1.0;
+}
+
+/// After the event: did its successful `Propagate` leave through `FillVoidNucleusProducts`?
+bool void_fired(G4BinaryCascade* bic, const G4HadFinalState* r) {
+  if (r == nullptr || r->GetStatusChange() != stopAndKill) { return false; }
+  const bool propagated = (bic->*void_peek(BicOuterRadiusTag{})) != -1.0;
+  return propagated && !(bic->*void_peek(BicEscapeTag{}));
+}
+
+/// What the cascade's lists hold once `FillVoidNucleusProducts` has returned - its two decay
+/// passes applied, its collisions drained - which is where a port that diverges on this branch
+/// can be told where: a different target count is the collision loop, a different secondary
+/// count is the decay pass, a different transfer is the propagation.
+struct VoidLists {
+  int n_tgt = 0, n_sec = 0, n_cap = 0, n_fin = 0, cur_a = 0, cur_z = 0;
+  G4ThreeVector transfer;
+  G4LorentzVector proj4;
+  double initial_mass = 0.0;
+};
+VoidLists void_lists(G4BinaryCascade* bic) {
+  VoidLists v;
+  v.n_tgt = static_cast<int>((bic->*void_peek(BicTargetsTag{})).size());
+  v.n_sec = static_cast<int>((bic->*void_peek(BicSecondariesTag{})).size());
+  v.n_cap = static_cast<int>((bic->*void_peek(BicCapturedTag{})).size());
+  v.n_fin = static_cast<int>((bic->*void_peek(BicFinalTag{})).size());
+  v.cur_a = bic->*void_peek(BicCurrentATag{});
+  v.cur_z = bic->*void_peek(BicCurrentZTag{});
+  v.transfer = bic->*void_peek(BicTransferTag{});
+  v.proj4 = bic->*void_peek(BicProjectile4Tag{});
+  v.initial_mass = bic->*void_peek(BicInitialMassTag{});
+  return v;
+}
+
+/// A `G4BCDecay` that COUNTS the decays the destroyed-nucleus branch's collision drain draws and
+/// throws away, which nothing else can see: `FillVoidNucleusProducts` asks every scheduled decay
+/// still on the manager for its final state and keeps it only if it has one track, and the
+/// resonance is decayed again two statements later, so all a tape shows of it is a longer
+/// stream. `VoidRecordingCascade` puts one in place of the cascade's own - `theDecay`, and the
+/// same pointer in `theImR` - and its `GetFinalState` is G4BCDecay's after asking the collision
+/// manager for the next collision: during the drain that is the decay being asked, not yet
+/// reached (its time is past `theCurrentTime`); inside `ApplyCollision` it is the decay being
+/// applied, which `DoTimeStep` has just stepped the clock to. Asking draws nothing and changes
+/// nothing - `GetNextCollision` is a search - and `G4BCDecay::GetCollisions`, inherited, schedules
+/// the decays with `this` as their action, so every one of them reaches this `GetFinalState`.
+class VoidDrainCountingDecay : public G4BCDecay {
+ public:
+  explicit VoidDrainCountingDecay(G4BinaryCascade* owner) : owner_(owner) {}
+  G4KineticTrackVector* GetFinalState(G4KineticTrack* primary,
+                                      std::vector<G4KineticTrack*>& targets) override {
+    G4CollisionManager* mgr = owner_->*void_peek(BicCollisionMgrTag{});
+    G4CollisionInitialState* next = (mgr != nullptr) ? mgr->GetNextCollision() : nullptr;
+    const double now = owner_->*void_peek(BicCurrentTimeTag{});
+    const bool drained = next != nullptr && next->GetPrimary() == primary &&
+                         next->GetTargetCollection().empty() &&
+                         next->GetCollisionTime() - now >
+                             1e-12 * std::fabs(next->GetCollisionTime());
+    G4KineticTrackVector* r = G4BCDecay::GetFinalState(primary, targets);
+    ++calls_total;
+    if (drained) {
+      ++drains;
+      ++drains_total;
+      if (r != nullptr && r->size() == 1) { ++drain_kept; }
+    }
+    return r;
+  }
+  int drains = 0;      ///< decays the drain asked for, this `Propagate`
+  int drain_kept = 0;  ///< of those, the ones with exactly one track, which the branch keeps
+  /// Over the object's life, every decay asked for and the drained ones - printed per case, so
+  /// that a count of zero drains is read beside the decays the cascades did apply.
+  long long calls_total = 0, drains_total = 0;
+
+ private:
+  G4BinaryCascade* owner_;
+};
+
+/// What `Propagate` RETURNED, before the entry point that called it touched it - and, through
+/// `counter`, how many decays the branch's drain drew.
+///
+/// On the nucleon path the destroyed-nucleus branch's products are the reaction's products, and
+/// the tape compares them there. On the ion path they are not: `ApplyYourself` sorts them into
+/// cascaders and spectators, boosts the spectator fragment's de-excitation by
+/// `pInitialState - pFinalState`, and pulls every cascader through `EnergyAndMomentumCorrector`
+/// - so a product of the branch that is off by an ulp and one that is off by a tenth of an MeV
+/// come out of the reaction looking alike, every product moved. This is the branch's own output,
+/// read where `Interact` receives it: a `G4BinaryCascade` whose `Propagate` is G4BinaryCascade's
+/// and which keeps a copy of the vector it returns, put in place of the light-ion reaction's own
+/// `theModel` (the member `BlirModelTag` reaches). `Propagate` is virtual and `Interact` calls it
+/// through the pointer, so every statement that runs is Geant4's, on the same stream: the
+/// recorded tapes are byte-identical with and without it. The nucleon path's cascade is one too,
+/// for the count.
+class VoidRecordingCascade : public G4BinaryCascade {
+ public:
+  struct Out {
+    int pdg = 0;
+    G4ThreeVector p;
+    double e = 0.0;
+    bool newly_added = false;
+    int creator = 0;
+  };
+  explicit VoidRecordingCascade(G4VPreCompoundModel* ptr) : G4BinaryCascade(ptr) {
+    G4BCDecay*& decay = this->*void_peek(BicDecayTag{});
+    std::vector<G4BCAction*>& actions = this->*void_peek(BicImRTag{});
+    counter = new VoidDrainCountingDecay(this);
+    for (G4BCAction*& a : actions) {
+      if (a == decay) { a = counter; }
+    }
+    decay = counter;   // the constructor's own is leaked, like every model in this file
+  }
+  G4ReactionProductVector* Propagate(G4KineticTrackVector* secondaries,
+                                     G4V3DNucleus* nucleus) override {
+    counter->drains = 0;
+    counter->drain_kept = 0;
+    G4ReactionProductVector* r = G4BinaryCascade::Propagate(secondaries, nucleus);
+    // `Interact` calls again whenever the vector is NULL or empty, so the last call is the one
+    // whose products the reaction goes on with.
+    last.clear();
+    if (r != nullptr) {
+      for (const G4ReactionProduct* q : *r) {
+        Out o;
+        o.pdg = q->GetDefinition()->GetPDGEncoding();
+        o.p = q->GetMomentum();
+        o.e = q->GetTotalEnergy();
+        o.newly_added = q->GetNewlyAdded();
+        o.creator = q->GetCreatorModelID();
+        last.push_back(o);
+      }
+    }
+    return r;
+  }
+  std::vector<Out> last;
+  VoidDrainCountingDecay* counter = nullptr;
+};
+
+/// Per case, how many of the campaign's events went out through the destroyed-nucleus branch,
+/// Geant4's own count - the number the port's rate is compared with (`tests/test_bic_apply.cu`,
+/// `VoidRate`). Written by `write_bic_apply` and `write_blir_apply` from the SAME events their
+/// species rows come from; opened once, by whichever runs first, and closed by `dump_bic` before
+/// it returns, because g4dump.cc checks every promised file's size the moment it does.
+FILE*& void_rates_handle() {
+  static FILE* f = nullptr;
+  return f;
+}
+FILE* void_rates_file() {
+  FILE*& f = void_rates_handle();
+  if (f == nullptr) {
+    f = std::fopen("bic_void_rates.csv", "w");
+    std::fprintf(f, "model,case,N,n_kill,n_void,n_propagated\n");
+  }
+  return f;
+}
+void void_rates_close() {
+  FILE*& f = void_rates_handle();
+  if (f != nullptr) {
+    std::fclose(f);
+    f = nullptr;
+  }
+}
 
 void write_limits() {
   FILE* f = std::fopen("bic_limits.csv", "w");
@@ -798,12 +1079,16 @@ void write_bic_apply() {
     long long sum_z = -1, sum_a = -1;
     bool za_varies = false;
     double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+    long long n_void = 0, n_propagated = 0;   // P20: see `void_fired`
 
     for (int n = 0; n < kN; ++n) {
       G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
       G4HadProjectile proj(dp);
       G4Nucleus nucleus(c.ta, c.tz);
+      void_arm(bic);
       G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+      if ((bic->*void_peek(BicOuterRadiusTag{})) != -1.0) { ++n_propagated; }
+      if (void_fired(bic, r)) { ++n_void; }
       if (r == nullptr) { continue; }
       if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
       ++n_kill;
@@ -845,6 +1130,8 @@ void write_bic_apply() {
                  (n_alive == kN) ? "isAlive" : ((n_kill == kN) ? "stopAndKill" : "MIXED"),
                  n_sec, za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
                  sum_tot_pz / nk, double(n_sec) / nk);
+    std::fprintf(void_rates_file(), "bic_apply,%s,%d,%lld,%lld,%lld\n", c.name, kN, n_kill,
+                 n_void, n_propagated);
     for (const auto& kv : count) {
       std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, pa,
                    c.ekin, c.tz, c.ta, kN, kv.first, kv.second,
@@ -4024,15 +4311,39 @@ void write_blir_apply() {
     cases.push_back({26, 56, 1000.0, 13, 27, "ic_Fe56_1000_Al27"});
     cases.push_back({26, 56,  200.0, 26, 56, "ic_Fe56_200_Fe56"});
     cases.push_back({26, 56, 1000.0, 26, 56, "ic_Fe56_1000_Fe56"});
+    // P20: the same three projectiles at the same three energies on HYDROGEN, appended so that
+    // no earlier case's seed or rows move. Water is two atoms of hydrogen in three, and an ion
+    // on a proton above the gate is the one cascade this campaign did not have: A = 1 < pA, so
+    // `SetLighterAsProjectile` makes the PROTON the projectile of `Interact` - a one-nucleon
+    // `G4Fancy3DNucleus` - and the ion the nucleus it is propagated through, whose protons a
+    // GeV proton can knock out entirely. At 50 MeV per nucleon the swapped gate reads
+    // `(gamma-1)*m_proton` - 50.03 MeV for the deuteron, 50.34 for the alpha, 50.38 for C12 -
+    // so all nine are cascades.
+    const int kIonH[3][2] = {{1, 2}, {2, 4}, {6, 12}};
+    const char* kIonHName[3] = {"d", "a", "C12"};
+    const double kIonHE[3] = {50.0, 200.0, 1000.0};
+    for (int p = 0; p < 3; ++p) {
+      for (int e = 0; e < 3; ++e) {
+        char* nm = new char[64];   // leaked on purpose, as above
+        std::snprintf(nm, 64, "ic_%s%d_H1", kIonHName[p], int(kIonHE[e]));
+        cases.push_back({kIonH[p][0], kIonH[p][1], kIonHE[e], 1, 1, nm});
+      }
+    }
   }
   const int kN = 20000;
 
   FILE* f = std::fopen("bic_blirapply.csv", "w");
   std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,pdg,count,mean_ekin_MeV,mean_ekin2_MeV2,"
                   "mean_mult2\n");
+  // P20 appends `var_e_MeV2` and `var_pz_MeV2`: the per-event VARIANCE of the event's total
+  // energy and z-momentum. On every target but hydrogen both are a few ulps, because the reaction
+  // conserves the four-momentum it corrects; with the ion SWAPPED to be the nucleus of a
+  // hydrogen target they are not - the destroyed-nucleus branch can leave hundreds of MeV/c of
+  // momentum that the reaction's energy-only test lets through, and the lab frame sees it as
+  // energy (docs/RISK.md V215) - so comparing the two sides' MEANS needs their spread.
   FILE* g = std::fopen("bic_blirapply_status.csv", "w");
   std::fprintf(g, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,status,n_secondaries,sum_z,sum_a,"
-                  "mean_e_MeV,mean_pz_MeV,mean_mult\n");
+                  "mean_e_MeV,mean_pz_MeV,mean_mult,var_e_MeV2,var_pz_MeV2\n");
 
   for (const ACase& c : cases) {
     const G4ParticleDefinition* part = ions->GetIon(c.pz, c.pa, 0.0);
@@ -4050,12 +4361,21 @@ void write_blir_apply() {
     long long sum_z = -1, sum_a = -1;
     bool za_varies = false;
     double sum_tot_e = 0.0, sum_tot_pz = 0.0;
+    long long n_void = 0, n_propagated = 0;   // P20: see `void_fired`
+    G4BinaryCascade* model = blir->*void_peek(BlirModelTag{});
+    // P20: the spread of the event totals, accumulated about the PROJECTILE's own energy and
+    // momentum - a constant per case - so that the variance is a sum of small numbers and not
+    // the difference of two large ones.
+    double sft_e = 0.0, sft_e2 = 0.0, sft_pz = 0.0, sft_pz2 = 0.0;
 
     for (int n = 0; n < kN; ++n) {
       G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin_per_a * c.pa * MeV);
       G4HadProjectile proj(dp);
       G4Nucleus nucleus(c.ta, c.tz);
+      void_arm(model);
       G4HadFinalState* r = blir->ApplyYourself(proj, nucleus);
+      if ((model->*void_peek(BicOuterRadiusTag{})) != -1.0) { ++n_propagated; }
+      if (void_fired(model, r)) { ++n_void; }
       if (r == nullptr) { ++n_null; continue; }
       if (r->GetStatusChange() == isAlive) { ++n_alive; continue; }
       ++n_kill;
@@ -4092,15 +4412,26 @@ void write_blir_apply() {
       else if (ez != sum_z || ea != sum_a) { za_varies = true; }
       sum_tot_e += tot.e() / MeV;
       sum_tot_pz += tot.z() / MeV;
+      const double d_e = tot.e() / MeV - dp.GetTotalEnergy() / MeV;
+      const double d_pz = tot.z() / MeV - dp.GetTotalMomentum() / MeV;
+      sft_e += d_e;
+      sft_e2 += d_e * d_e;
+      sft_pz += d_pz;
+      sft_pz2 += d_pz * d_pz;
     }
 
     const double nk = (n_kill > 0) ? double(n_kill) : 1.0;
     const char* status = (n_alive == kN) ? "isAlive"
                                          : ((n_kill == kN) ? "stopAndKill" : "MIXED");
-    std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g\n", c.name,
-                 c.pz, c.pa, c.ekin_per_a, c.tz, c.ta, kN, status, n_sec,
+    const double var_e = sft_e2 / nk - (sft_e / nk) * (sft_e / nk);
+    const double var_pz = sft_pz2 / nk - (sft_pz / nk) * (sft_pz / nk);
+    std::fprintf(g, "%s,%d,%d,%.17g,%d,%d,%d,%s,%lld,%lld,%lld,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                 c.name, c.pz, c.pa, c.ekin_per_a, c.tz, c.ta, kN, status, n_sec,
                  za_varies ? -1 : sum_z, za_varies ? -1 : sum_a, sum_tot_e / nk,
-                 sum_tot_pz / nk, double(n_sec) / nk);
+                 sum_tot_pz / nk, double(n_sec) / nk, var_e, var_pz);
+    std::fprintf(void_rates_file(), "bic_blirapply,%s,%d,%lld,%lld,%lld\n", c.name, kN, n_kill,
+                 n_void, n_propagated);
+    std::fflush(void_rates_file());
     for (const auto& kv : count) {
       std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, c.pz,
                    c.pa, c.ekin_per_a, c.tz, c.ta, kN, kv.first, kv.second,
@@ -4481,6 +4812,214 @@ void write_bic_1h1() {
   std::fclose(cs);
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4BinaryCascade::FillVoidNucleusProducts - the destroyed-nucleus branch, on a RECORDED stream
+// (P20)
+// ---------------------------------------------------------------------------------------------
+//
+// The branch is private and is reached only once a cascade has knocked every proton out of the
+// target list, so there is nothing to call it with: the only way to watch it is to run whole
+// events and keep the ones that went through it. `void_fired` says which did - see the block
+// above `VoidPeek` - and each case here runs event after event, each on its own seed, until
+// twenty of them have, keeping the tape of exactly those twenty. Two DRAIN cases keep a rarer
+// kind: events whose branch drew a scheduled decay in its collision drain and threw it away,
+// which `VoidDrainCountingDecay` counts and none of the other 160 events does - eleven events,
+// all there are in the first 200,000 of each (see the cases). Two CAPTURED cases keep ten each
+// of events that left two or more nucleons in theCapturedList, whose order is the next thing
+// only a rare event can test.
+//
+// BOTH ENTRY POINTS, because both reach the branch through the same `Propagate` and P9d refused
+// it on both: the NUCLEON path through the public `G4BinaryCascade::ApplyYourself`, and the ION
+// path through `G4BinaryLightIonReaction::ApplyYourself` above 50 MeV per nucleon. The cases are
+// the ones P9d's and P9e's campaigns measured the branch firing most often in (docs/RISK.md
+// V212), plus the ion-on-hydrogen reactions of a beam in water, which neither campaign had: for
+// a target of A = 1, `SetLighterAsProjectile` makes the PROTON the projectile of `Interact` and
+// the ion the nucleus it is propagated through.
+//
+// Five files:
+//
+//   bic_void_tape.csv      one row per kept event: the draw count, the status, the secondary
+//                          count, how many events the case had run to reach it, and what
+//                          `void_lists` read off the cascade afterwards - the four list sizes,
+//                          `theMomentumTransfer`, `theProjectile4Momentum`,
+//                          `initial_nuclear_mass` and (currentA, currentZ). Those are the places
+//                          a port that diverges on this branch can be told where. Then the
+//                          decays the drain drew, and how many of them it kept.
+//   bic_void_tapeval.csv   the tapes.
+//   bic_void_tapefs.csv    every secondary of every kept event.
+//   bic_void_tapecases.csv per case: the events run, the events kept and the events wanted, so
+//                          the test can assert them and print the rate the selection saw.
+//   bic_void_tapepr.csv    ION PATH ONLY: what `Propagate` returned to `Interact` - the branch's
+//                          own products, in its order, with `GetNewlyAdded()`, before the
+//                          light-ion reaction sorted, boosted and corrected them. See
+//                          `VoidRecordingCascade`.
+//
+// The precompound model is the REAL one, as it is for P9e's ion tape: the nucleon path never
+// reaches it on this branch, and the ion path reaches it for the projectile's spectators.
+void write_bic_void() {
+  auto* handler = new G4ExcitationHandler();
+  auto* preco = new G4PreCompoundModel(handler);
+  // Never deleted, for the reason `write_bic_1h1` gives (docs/RISK.md V155).
+  auto* bic = new VoidRecordingCascade(preco);
+  bic->SetMaxEnergy(1.5 * CLHEP::GeV);
+  auto* handler_ion = new G4ExcitationHandler();
+  auto* preco_ion = new G4PreCompoundModel(handler_ion);
+  auto* blir = new G4BinaryLightIonReaction(preco_ion);
+  blir->SetMinEnergy(0.0);
+  blir->SetMaxEnergy(6.0 * CLHEP::GeV);
+  // The light-ion reaction's own cascade is replaced by one that records what `Propagate`
+  // returns, built the way the constructor built the original - `new G4BinaryCascade(
+  // theProjectileFragmentation)` - so the reaction runs the same model on the same stream. The
+  // original is leaked, like every model in this file.
+  auto* recorder = new VoidRecordingCascade(preco_ion);
+  blir->*void_peek(BlirModelTag{}) = recorder;
+  G4BinaryCascade* blir_model = recorder;
+  G4IonTable* ions = G4IonTable::GetIonTable();
+
+  /// `ion` false: a nucleon or pion of `ekin` MeV into `G4BinaryCascade`, `pdg` its code. `ion`
+  /// true: a (pz, pa) nucleus of `ekin` MeV PER NUCLEON into `G4BinaryLightIonReaction`.
+  /// `drain_only`: keep only events whose branch drew a scheduled decay and threw it away (see
+  /// `VoidDrainCountingDecay`), `keep` of them.
+  struct VCase { bool ion; int pdg, pz, pa; double ekin; int tz, ta; const char* name;
+                 int max_tries; bool drain_only; int keep; int min_captured = 0; };
+  const VCase kCases[] = {
+    {false, 2212,  1,  1, 1400.0, 6, 12, "void_p1400_C12",   200000, false, 20},
+    {false, 2112,  0,  1, 1400.0, 6, 12, "void_n1400_C12",   200000, false, 20},
+    {false, -211, -1,  0,  800.0, 6, 12, "void_pim800_C12",  200000, false, 20},
+    {false,  211,  1,  0,  800.0, 6, 12, "void_pip800_C12",  200000, false, 20},
+    {true,      0,  6, 12, 1000.0, 6, 12, "void_C121000_C12", 20000,  false, 20},
+    {true,      0,  6, 12,  200.0, 6, 12, "void_C12200_C12",  20000,  false, 20},
+    {true,      0,  2,  4, 1000.0, 6, 12, "void_a1000_C12",   20000,  false, 20},
+    {true,      0,  2,  4, 1000.0, 1,  1, "void_a1000_H1",    20000,  false, 20},
+    // THE DRAIN, selected for: none of the 160 events above reaches it, and it is RARE -
+    // MEASURED, no event in 2,000,000 of p at 1400 MeV on C12 (about 2,400 through the branch),
+    // 2,000,000 of pi- at 800 MeV on C12 (2,560) or 40,000 of C12 on C12 at 1000 MeV/nucleon
+    // (2,460). A decay is still scheduled when the nucleus is destroyed only if a resonance
+    // outlives the last charge inside it, and in a nucleus of two or four nucleons - the ion on
+    // HYDROGEN, swapped so that the alpha or the deuteron is the nucleus - the charges leave in
+    // about a resonance's lifetime: 7 of the first 200,000 deuterons (130,987 through the branch)
+    // and 4 of the first 200,000 alphas (22,693), and these keep exactly those.
+    {true,      0,  1,  2, 1000.0, 1,  1, "void_drain_d1000_H1",  200000, true, 7},
+    {true,      0,  2,  4, 1000.0, 1,  1, "void_drain_a1000_H1",  200000, true, 4},
+    // THE CAPTURED LIST, selected for. Its ORDER - capture order, not the order the tracks
+    // were made in - changes an answer only when the two differ, and that needs two captured
+    // nucleons on an event that destroyed the nucleus: 4 of the 160 events above have two,
+    // and none of them is out of order. MEASURED: 10 of 780 events through the branch in
+    // 606,555 neutrons at 1400 MeV on C12 leave two or more, and ONE of those ten is out of
+    // order; 10 of 1,232 in 11,258 alphas on H1, none out of order (and 10 of 572 pi- at 800 MeV
+    // in 508,939 events, none, which is why that case is not here).
+    {false, 2112,  0,  1, 1400.0, 6, 12, "void_captured_n1400_C12", 1000000, false, 10, 2},
+    {true,      0,  2,  4, 1000.0, 1,  1, "void_captured_a1000_H1",  200000, false, 10, 2},
+  };
+
+  FILE* f = std::fopen("bic_void_tape.csv", "w");
+  std::fprintf(f, "path,case,ev,try,pdg,pz,pa,ekin,tz,ta,ndraws,status,nsec,n_tgt,n_sec,n_cap,"
+                  "n_fin,mtx,mty,mtz,p4x,p4y,p4z,p4e,initial_mass,cur_a,cur_z,drains,"
+                  "drain_kept\n");
+  FILE* g = std::fopen("bic_void_tapeval.csv", "w");
+  std::fprintf(g, "case,ev,i,u\n");
+  FILE* h = std::fopen("bic_void_tapefs.csv", "w");
+  std::fprintf(h, "case,ev,i,pdg,px,py,pz,e,time,creatorid,parentpdg,parentid\n");
+  FILE* q = std::fopen("bic_void_tapecases.csv", "w");
+  std::fprintf(q, "path,case,tries,kept,wanted\n");
+  FILE* w = std::fopen("bic_void_tapepr.csv", "w");
+  std::fprintf(w, "case,ev,i,pdg,px,py,pz,e,newly,creatorid\n");
+
+  auto* eng = new ImrTapeEngine(20260927L);
+  CLHEP::HepRandomEngine* saved = CLHEP::HepRandom::getTheEngine();
+  int icase = 0;
+  for (const VCase& c : kCases) {
+    const G4ParticleDefinition* part = nullptr;
+    if (c.ion) {
+      part = ions->GetIon(c.pz, c.pa, 0.0);
+    } else {
+      switch (c.pdg) {
+        case 2212: part = G4Proton::Proton(); break;
+        case 2112: part = G4Neutron::Neutron(); break;
+        case 211:  part = G4PionPlus::PionPlus(); break;
+        default:   part = G4PionMinus::PionMinus(); break;
+      }
+    }
+    if (part == nullptr) { ++icase; continue; }
+    const int pdg = part->GetPDGEncoding();
+    G4BinaryCascade* model = c.ion ? blir_model : bic;
+    VoidRecordingCascade* rec = c.ion ? recorder : bic;
+    const double ekin_total = c.ion ? c.ekin * c.pa : c.ekin;
+    int kept = 0;
+    int tries = 0;
+    long long n_fired = 0;
+    const long long calls0 = rec->counter->calls_total;
+    const long long drains0 = rec->counter->drains_total;
+    for (; tries < c.max_tries && kept < c.keep; ++tries) {
+      const long seed = 20260927L + 1009L * tries + 100003L * icase;
+      G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), ekin_total * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      eng->restart(seed);
+      CLHEP::HepRandom::setTheEngine(eng);
+      void_arm(model);
+      G4HadFinalState* r = c.ion ? blir->ApplyYourself(proj, nucleus)
+                                 : bic->ApplyYourself(proj, nucleus);
+      CLHEP::HepRandom::setTheEngine(saved);
+      const bool fired = void_fired(model, r);
+      if (fired) { ++n_fired; }
+      bool keep_it = fired && !(c.drain_only && rec->counter->drains == 0);
+      if (keep_it && c.min_captured > 0) { keep_it = void_lists(model).n_cap >= c.min_captured; }
+      if (!keep_it) {
+        if (r != nullptr) { r->Clear(); }
+        continue;
+      }
+      const VoidLists vl = void_lists(model);
+      const int ns = static_cast<int>(r->GetNumberOfSecondaries());
+      std::fprintf(f, "%s,%s,%d,%d,%d,%d,%d,%.17g,%d,%d,%d,stopAndKill,%d,%d,%d,%d,%d,%.17g,"
+                      "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d,%d\n",
+                   c.ion ? "ion" : "nucleon", c.name, kept, tries, pdg, c.pz, c.pa, c.ekin,
+                   c.tz, c.ta, static_cast<int>(eng->tape().size()), ns, vl.n_tgt, vl.n_sec,
+                   vl.n_cap, vl.n_fin, vl.transfer.x(), vl.transfer.y(), vl.transfer.z(),
+                   vl.proj4.x(), vl.proj4.y(), vl.proj4.z(), vl.proj4.e(), vl.initial_mass,
+                   vl.cur_a, vl.cur_z, rec->counter->drains, rec->counter->drain_kept);
+      const std::vector<double>& tape = eng->tape();
+      for (size_t k = 0; k < tape.size(); ++k) {
+        std::fprintf(g, "%s,%d,%d,%.17g\n", c.name, kept, static_cast<int>(k), tape[k]);
+      }
+      for (int k = 0; k < ns; ++k) {
+        const G4HadSecondary* sec = r->GetSecondary(k);
+        const G4DynamicParticle* p = sec->GetParticle();
+        const G4LorentzVector p4 = p->Get4Momentum();
+        const G4ParticleDefinition* parent = sec->GetParentResonanceDef();
+        std::fprintf(h, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,%d\n", c.name, kept, k,
+                     p->GetDefinition()->GetPDGEncoding(), p4.x(), p4.y(), p4.z(), p4.t(),
+                     sec->GetTime(), sec->GetCreatorModelID(),
+                     (parent != nullptr) ? parent->GetPDGEncoding() : 0,
+                     sec->GetParentResonanceID());
+      }
+      if (c.ion) {
+        int k = 0;
+        for (const VoidRecordingCascade::Out& o : recorder->last) {
+          std::fprintf(w, "%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%d,%d\n", c.name, kept, k++,
+                       o.pdg, o.p.x(), o.p.y(), o.p.z(), o.e, o.newly_added ? 1 : 0, o.creator);
+        }
+      }
+      r->Clear();
+      ++kept;
+    }
+    std::fprintf(q, "%s,%s,%d,%d,%d\n", c.ion ? "ion" : "nucleon", c.name, tries, kept, c.keep);
+    std::printf("  void tape %-22s kept %d of %d events; %lld through the branch; decays asked "
+                "for %lld, %lld of them by its drain\n",
+                c.name, kept, tries, n_fired, rec->counter->calls_total - calls0,
+                rec->counter->drains_total - drains0);
+    std::fflush(stdout);
+    ++icase;
+  }
+  delete eng;
+  CLHEP::HepRandom::setTheEngine(saved);
+  std::fclose(f);
+  std::fclose(g);
+  std::fclose(h);
+  std::fclose(q);
+  std::fclose(w);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -4521,6 +5060,10 @@ void dump_bic(const DumpContext&) {
   // `Propagate1H1`, P18's. Before the lifetime sweep below like everything that scatters: its
   // probe and the cascade's `theH1Scatterer` both read the static channel list.
   write_bic_1h1();
+  // `FillVoidNucleusProducts`, P20's tapes, and the rates file `write_bic_apply` and
+  // `write_blir_apply` filled - closed here, before the registry checks its size.
+  write_bic_void();
+  void_rates_close();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
   write_imr_scatterlife();
@@ -4554,5 +5097,7 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_blir_initnuc.csv bic_gaussq.csv bic_argorder.csv "
                     "bic_blirapply.csv bic_blirapply_status.csv "
                     "bic_1h1_tape.csv bic_1h1_tapeval.csv bic_1h1_tapefs.csv bic_1h1.csv "
-                    "bic_1h1_status.csv bic_1h1_parent.csv bic_1h1_scan.csv",
+                    "bic_1h1_status.csv bic_1h1_parent.csv bic_1h1_scan.csv "
+                    "bic_void_rates.csv bic_void_tape.csv bic_void_tapeval.csv "
+                    "bic_void_tapefs.csv bic_void_tapecases.csv bic_void_tapepr.csv",
                     dump_bic);

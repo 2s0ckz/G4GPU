@@ -369,8 +369,10 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
   collisions.remove_tracks(gone_out, n_out);
 
   if (n_cap > 0) {
+    // `theCapturedList.insert(end, kt_captured...)` in the secondary list's order, then `Hit()`
+    // on each - and the order is kept, because the list is read in it (see `push_captured`).
     for (int k = 0; k < n_cap; ++k) {
-      st.lists.pool[captured[k]].list = kListCaptured;
+      push_captured(st, captured[k]);
       mark_hit(st, captured[k]);
     }
     collisions.remove_tracks(captured, n_cap);

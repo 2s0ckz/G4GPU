@@ -207,16 +207,23 @@ __host__ __device__ inline int decay_void_nucleus(BicCascadeState& st, CascadePr
   double masses[256];
   int n = 0;
   double sum_mass = 0.0;
-  // theTargetList first, then theCapturedList - the order the momenta are handed back in.
-  for (int pass = 0; pass < 2; ++pass) {
-    const int want = (pass == 0) ? kListTarget : kListCaptured;
-    for (int i = 0; i < st.lists.n_pool && n < 256; ++i) {
-      if (st.lists.pool[i].list != want) { continue; }
-      idx[n] = i;
-      masses[n] = st.lists.pool[i].pdg_mass;
-      sum_mass += masses[n];
-      ++n;
-    }
+  // theTargetList first, then theCapturedList - the order the momenta are handed back in. The
+  // target list's order is the pool's; the captured list's is the order of capture, which is
+  // not, once nucleons have been caught in more than one step (see `push_captured`).
+  for (int i = 0; i < st.lists.n_pool && n < 256; ++i) {
+    if (st.lists.pool[i].list != kListTarget) { continue; }
+    idx[n] = i;
+    masses[n] = st.lists.pool[i].pdg_mass;
+    sum_mass += masses[n];
+    ++n;
+  }
+  for (int seq = 0; seq < st.n_captured_pushed && n < 256; ++seq) {
+    const int i = captured_at(st, seq);
+    if (i < 0) { continue; }
+    idx[n] = i;
+    masses[n] = st.lists.pool[i].pdg_mass;
+    sum_mass += masses[n];
+    ++n;
   }
   if (n == 0) { return 0; }
   if (n > capacity) {
