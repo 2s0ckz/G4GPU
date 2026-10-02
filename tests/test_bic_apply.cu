@@ -231,6 +231,26 @@ std::string za_label(int key) {
   return "Z=" + std::to_string(k / 1000 - 500) + " A=" + std::to_string(k % 1000);
 }
 
+/// P20 diagnostic: the product classes `P20_CASE_DIAG` sums kinetic energy over.
+constexpr int kDiagClasses = 9;
+const char* const kDiagClassName[kDiagClasses] = {"n", "p", "Z1(d,t)", "Z2(He)", "Z>=3",
+                                                  "gamma", "e", "pions", "other"};
+int diag_class(int key) {
+  if (key == 2112) { return 0; }
+  if (key == 2212) { return 1; }
+  if (key == 22) { return 5; }
+  if (key == 11 || key == -11) { return 6; }
+  if (key == 211 || key == -211 || key == 111) { return 7; }
+  if (key >= 2000000000) {
+    const int z = (key - 2000000000) / 1000 - 500;
+    if (z == 1) { return 2; }
+    if (z == 2) { return 3; }
+    if (z >= 3) { return 4; }
+    if (z == -1) { return 6; }
+  }
+  return 8;
+}
+
 // ---------------------------------------------------------------------------------------------
 // CSV reading, the same shape test_bic_nucleus.cu uses
 // ---------------------------------------------------------------------------------------------
@@ -615,9 +635,17 @@ int main() {
     /// because only a tape can verify a draw and a tape verifies only what its events reach.
     long long port_void_late_decay = 0, port_void_late = 0;
     long long port_void_overflow = 0;   ///< of `port_void`: events that overflowed a buffer
-    /// P20 diagnostic (P20_H1_DIAG): the lab-frame balance of an ion on hydrogen, per event.
+    /// P20 diagnostic (P20_H1_DIAG): the lab-frame balance of an ion on hydrogen, per event,
+    /// and the case's event topologies.
     long long h1_n = 0, h1_n1 = 0, h1_n10 = 0, h1_n10v = 0, h1_n100 = 0;
     double h1_sum_de = 0.0, h1_sum_dpz = 0.0, h1_worst = 0.0;
+    const bool h1_diag = (c.ta == 1 && std::getenv("P20_H1_DIAG") != nullptr);
+    std::map<std::string, long long> h1_topology;
+    bool case_diag = false;
+    if (const char* cd = std::getenv("P20_CASE_DIAG")) {
+      case_diag = (std::string(",") + cd + ",").find("," + c.name + ",") != std::string::npos;
+    }
+    double diag_sum[kDiagClasses] = {}, diag_sum2[kDiagClasses] = {};
     physics::hadronic::HadProjectile<double> proj;
     proj.baryon_number = c.pa;
     proj.charge = static_cast<double>(c.pz);
@@ -902,6 +930,34 @@ int main() {
       for (const auto& kv : per_event) {
         mine[kv.first].sum_k2 += static_cast<double>(kv.second) * kv.second;
       }
+      if (case_diag) {
+        double ev_class[kDiagClasses] = {};
+        for (int i = 0; i < result.n_secondaries; ++i) {
+          const physics::hadronic::HadSecondary<double>& s = result.secondaries[i];
+          const int zz = (s.a == 0 && s.pdg == 11) ? -1 : s.z;
+          ev_class[diag_class(species_key(s.pdg, zz, s.a))] += s.kin_energy;
+        }
+        for (int k = 0; k < kDiagClasses; ++k) {
+          diag_sum[k] += ev_class[k];
+          diag_sum2[k] += ev_class[k] * ev_class[k];
+        }
+      }
+      if (h1_diag) {
+        // The event's TOPOLOGY - its products as a sorted list of labels, a nucleus by (Z, A)
+        // and anything else by its code - which is how P20 set the port's d + p beside
+        // Geant4's, 200,000 events a side, and found the bare "p d" twice as often
+        // (docs/RISK.md V216).
+        std::vector<std::string> labels;
+        for (int i = 0; i < result.n_secondaries; ++i) {
+          const physics::hadronic::HadSecondary<double>& s = result.secondaries[i];
+          labels.push_back((s.a >= 2) ? ("Z" + std::to_string(s.z) + "A" + std::to_string(s.a))
+                                      : std::to_string(s.pdg));
+        }
+        std::sort(labels.begin(), labels.end());
+        std::string topo;
+        for (const auto& l : labels) { topo += l + " "; }
+        ++h1_topology[topo];
+      }
       if (sum_z < 0) { sum_z = ez; sum_a = ea; }
       else if (ez != sum_z || ea != sum_a) { za_varies = true; }
       n_electrons += n_ev_electrons;
@@ -967,7 +1023,7 @@ int main() {
         // ABSORBED. So the ion event's books balance against `want_e` with no electron term at
         // all, and putting one in creates the discrepancy rather than removing it.
         double de_ion = std::fabs(tot_e - want_e);   // in the ion's frame when SWAPPED, below
-        if (c.ta == 1 && std::getenv("P20_H1_DIAG") != nullptr) {
+        if (h1_diag) {
           const double p_beam = std::sqrt(proj.kin_energy * (proj.kin_energy + 2.0 * proj.mass));
           const double sde = want_e - tot_e;
           const double sdpz = p_beam - tot_pz;
@@ -1466,6 +1522,9 @@ int main() {
                       c.name.c_str(), h1_n, port_void, h1_n1, h1_n10, h1_n10v, h1_n100,
                       h1_worst, h1_sum_de / static_cast<double>(h1_n),
                       h1_sum_dpz / static_cast<double>(h1_n));
+          for (const auto& kv : h1_topology) {
+            std::printf("   H1TOPO %s %8lld  %s\n", c.name.c_str(), kv.second, kv.first.c_str());
+          }
         }
       }
     }
@@ -1527,6 +1586,45 @@ int main() {
                            std::to_string(kv.second.count) + " g4 0 (species absent from the "
                            "oracle)";
         }
+      }
+    }
+
+    // P20 diagnostic (P20_CASE_DIAG=case,case,...): the case's every species side by side, and
+    // the kinetic energy per event carried by each class of product - what a dose downstream is
+    // made of - with the port's own per-event spread for both sides' standard errors.
+    if (case_diag) {
+      std::printf("   CASEDIAG %s: %lld port events, %lld Geant4\n", c.name.c_str(), n_kill, c.n);
+      std::map<int, bool> keys;
+      for (const auto& kv : go) { keys[kv.first] = true; }
+      for (const auto& kv : mine) { keys[kv.first] = true; }
+      for (const auto& kk : keys) {
+        const Tally& p = mine[kk.first];
+        const Tally o = (go.count(kk.first) != 0) ? go[kk.first] : Tally{};
+        const double zy = yield_z(p.count, n_kill, tally_var(p, n_kill), o.count, c.n,
+                                  (go.count(kk.first) != 0) ? tally_var(o, c.n) : -1.0);
+        const double pmean = (p.count > 0) ? p.sum_e / static_cast<double>(p.count) : 0.0;
+        const double omean = (o.count > 0) ? o.sum_e / static_cast<double>(o.count) : 0.0;
+        std::printf("   CASESP %s %-14s port %9lld (%.5f/ev) g4 %9lld (%.5f/ev) %6.2f sigma; "
+                    "Ekin port %.4f g4 %.4f MeV; energy/ev port %.4f g4 %.4f\n",
+                    c.name.c_str(), za_label(kk.first).c_str(), p.count,
+                    static_cast<double>(p.count) / nk, o.count,
+                    static_cast<double>(o.count) / static_cast<double>(c.n), zy, pmean, omean,
+                    p.sum_e / nk, o.sum_e / static_cast<double>(c.n));
+      }
+      for (int k = 0; k < kDiagClasses; ++k) {
+        double og = 0.0;
+        for (const auto& kv : go) {
+          if (diag_class(kv.first) == k) { og += kv.second.sum_e; }
+        }
+        og /= static_cast<double>(c.n);
+        const double pmn = diag_sum[k] / nk;
+        const double pvar = diag_sum2[k] / nk - pmn * pmn;
+        const double se = std::sqrt(std::max(0.0, pvar) * (1.0 / nk + 1.0 / c.n));
+        std::printf("   CASECLASS %s %-8s port %10.4f g4 %10.4f MeV/ev  diff %+9.4f (%+.3f%%) "
+                    "%+6.2f sigma\n",
+                    c.name.c_str(), kDiagClassName[k], pmn, og, pmn - og,
+                    (og != 0.0) ? 100.0 * (pmn - og) / og : 0.0,
+                    (se > 0.0) ? (pmn - og) / se : 0.0);
       }
     }
 

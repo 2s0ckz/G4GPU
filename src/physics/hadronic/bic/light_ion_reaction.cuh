@@ -196,12 +196,22 @@ __host__ __device__ inline BlirFrame blir_set_lighter_as_projectile(int pa, int 
     const int t = f.ta; f.ta = f.pa; f.pa = t;
     const int z = f.tz; f.tz = f.pz; f.pz = z;
     const double m1 = deex::nuclear_mass(f.pa, f.pz);
-    // `toBreit * G4LorentzVector(m1, (0,0,0))`. The boost matrix applied to an at-rest
-    // four-vector is (gamma*m1*beta, gamma*m1), and beta is along +z, so the result is along
-    // +z as well - which is why the rotate-to-lab block stays the identity after a swap.
-    const double b2 = g4gpu::mag2(f.breit_boost);
-    const double gamma = 1.0 / std::sqrt(1.0 - b2);
-    f.mom = LorentzVector(gamma * m1 * f.breit_boost, gamma * m1);
+    // `toBreit * G4LorentzVector(m1, (0,0,0))`, as CLHEP evaluates it: `toBreit` is
+    // `HepLorentzRotation::set(bx, by, bz)` and the product is `vectorMultiplication`, so each
+    // component is `m[i][3]*m1` with `m[i][3] = gamma*b[i]` - (gamma*b)*m1. Beta is along +z,
+    // so the result is too, which is why the rotate-to-lab block stays the identity after a
+    // swap.
+    //
+    // P9e wrote this as `(gamma*m1*beta, gamma*m1)`, which is the same number in exact
+    // arithmetic and (gamma*m1)*b in floating point - ONE ULP away on 644.6199 MeV/c, the
+    // proton of a 200 MeV/nucleon deuteron on hydrogen, on EVERY event of the beam. P20 found it
+    // where it decides something (docs/RISK.md V216): `CorrectFinalPandE` puts the remnant on
+    // its ground-state mass to within an ulp or two, and whether `Propagate` keeps that event
+    // or retries is the SIGN of what is left - MEASURED over the same 4,000 events, the port
+    // kept 61 of 71 such remnants and Geant4 36, and a deuteron on hydrogen came out whole
+    // twice as often as Geant4's.
+    f.mom = imr::LorentzRotation::from_boost(f.breit_boost) *
+            LorentzVector(Vec3d{0.0, 0.0, 0.0}, m1);
   }
   return f;
 }

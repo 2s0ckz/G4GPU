@@ -255,6 +255,53 @@ int main() {
                                 : "through the branch");
   }
 
+  // -------------------------------------------------------------------------------------------
+  // The SWAPPED frame, bitwise: `SetLighterAsProjectile`'s `toBreit * G4LorentzVector(m1, 0)`.
+  // -------------------------------------------------------------------------------------------
+  //
+  // Found by this file's hydrogen cases and not part of the branch: every event of an ion on
+  // hydrogen starts its projectile nucleon from this four-momentum, P9e wrote it as
+  // `(gamma*m1*beta, gamma*m1)` where CLHEP's matrix gives `(gamma*beta)*m1`, and the ulp
+  // between the two decides, on every event whose remnant `CorrectFinalPandE` has put on its
+  // ground state, whether `Propagate` keeps it (docs/RISK.md V216). Compared with zero
+  // tolerance, component by component, against the dump's own evaluation of the two statements.
+  {
+    const int b_swap = new_bucket("BlirSwapFrame", 0.0);
+    const auto srows = read_csv("bic_blir_swap.csv");
+    if (srows.empty()) {
+      std::printf("bic_blir_swap.csv is empty\n");
+      ++fails;
+    }
+    for (const auto& sr : srows) {
+      const int pz = iv(sr, 1), pa = iv(sr, 2), tz = iv(sr, 4), ta = iv(sr, 5);
+      const double ekin = dv(sr, 3) * pa;
+      const double m = deex::nuclear_mass(pa, pz);
+      // `G4HadProjectile::InitialiseLocal`: `theMom.set(0, 0, sqrt(T*(T + 2m)), m + T)`, which
+      // is `blir_apply_yourself`'s `p4`.
+      const deex::LorentzVector p4(deex::Vec3d{0.0, 0.0, std::sqrt(ekin * (ekin + 2.0 * m))},
+                                   ekin + m);
+      const bic::BlirFrame fr = bic::blir_set_lighter_as_projectile(pa, pz, ta, tz, p4);
+      const std::string w = sv(sr, 0);
+      cmp_int(b_swap, fr.swapped ? 1 : 0, iv(sr, 6), w + " swapped");
+      const double got[7] = {fr.mom.v.x, fr.mom.v.y, fr.mom.v.z, fr.mom.e, fr.breit_boost.x,
+                             fr.breit_boost.y, fr.breit_boost.z};
+      const char* comp[7] = {"px", "py", "pz", "e", "bx", "by", "bz"};
+      for (int k = 0; k < 7; ++k) {
+        const double want = std::strtod(sv(sr, 7 + k).c_str(), nullptr);
+        Bucket& b = buckets[b_swap];
+        ++b.n;
+        if (got[k] != want) {
+          b.worst = 1.0;
+          if (b.where.empty()) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, " %s got %.17g want %.17g", comp[k], got[k], want);
+            b.where = w + buf;
+          }
+        }
+      }
+    }
+  }
+
   const auto rows = read_csv("bic_void_tape.csv");
   const auto tfs = read_csv("bic_void_tapefs.csv");
   std::map<std::string, std::vector<const std::vector<std::string>*>> fs_of;
@@ -473,6 +520,13 @@ int main() {
     if (refused) { continue; }
     cmp_int(b_str, killed ? 1 : 0, 1, where + " stopAndKill");
     cmp_int(b_str, tape.n, ndraws, where + " uniforms consumed");
+    if (std::getenv("P20_DUMP_EVENT") != nullptr && where == std::getenv("P20_DUMP_EVENT")) {
+      std::printf("    %s: uniforms %d of %d (overrun %d), propagate outcome %d, %d products, "
+                  "fragment (A %d, Z %d), excitation %.6g MeV, secondaries %d (want %d)%s\n",
+                  where.c_str(), tape.n, ndraws, tape.overrun, pr.outcome, pr.n_products,
+                  pr.fragment_a, pr.fragment_z, pr.excitation_energy, n_secs, want_nsec,
+                  diag.c_str());
+    }
     cmp_int(b_str, tape.overrun, 0, where + " tape not overrun");
     cmp_int(b_str, pr.outcome, bic::kPropagateVoidNucleus, where + " went out through the branch");
     cmp_int(b_str, n_secs, want_nsec, where + " secondary count");

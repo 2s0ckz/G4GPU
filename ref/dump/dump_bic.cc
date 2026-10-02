@@ -109,12 +109,14 @@
 #include "G4SampleResonance.hh"
 #include "G4VDecayChannel.hh"
 #include "G4KineticTrackVector.hh"
+#include "G4LorentzRotation.hh"
 #include "G4Neutron.hh"
 #include "G4NuclearFermiDensity.hh"
 #include "G4NuclearShellModelDensity.hh"
 #include "G4NucleiProperties.hh"
 #include "G4Nucleon.hh"
 #include "G4Nucleus.hh"
+#include "G4ParticleTable.hh"
 #include "G4PhysicsModelCatalog.hh"
 #include "G4PionMinus.hh"
 #include "G4Pow.hh"
@@ -5020,6 +5022,63 @@ void write_bic_void() {
   std::fclose(w);
 }
 
+// ---------------------------------------------------------------------------------------------
+// G4BinaryLightIonReaction::SetLighterAsProjectile - the frame a swapped reaction runs in (P20)
+// ---------------------------------------------------------------------------------------------
+//
+// For a target lighter than the projectile the light-ion reaction runs the other way round: the
+// TARGET becomes the projectile of `Interact`, rebuilt as `toBreit * G4LorentzVector(m1, 0)` with
+// `toBreit = G4LorentzRotation(mom.boostVector())` of the original projectile. Every nucleon of
+// that projectile starts with this four-momentum, so a last-place difference here is a
+// last-place difference in every event of the beam - and P20 measured what one ulp of it does
+// where `Propagate` decides on the SIGN of an excitation the correction has put on zero
+// (docs/RISK.md V216). So the frame is written out bitwise, re-expressed from the public API in
+// the source's own two statements: the `G4HadProjectile` of a `G4DynamicParticle` along +z, its
+// `Get4Momentum()`, the rotation, and the product - for every ion-on-hydrogen case of the
+// campaign, the two iron-on-aluminium ones, and one that does not swap.
+//
+//   bic_blir_swap.csv   case, (pz, pa), MeV per nucleon, (tz, ta), swapped, the frame's
+//                       four-momentum and the original projectile's boost vector.
+void write_blir_swap() {
+  struct SCase { int pz, pa; double ekin_per_a; int tz, ta; const char* name; };
+  const SCase kCases[] = {
+    {1, 2, 50.0, 1, 1, "swap_d50_H1"},      {1, 2, 200.0, 1, 1, "swap_d200_H1"},
+    {1, 2, 1000.0, 1, 1, "swap_d1000_H1"},  {2, 4, 50.0, 1, 1, "swap_a50_H1"},
+    {2, 4, 200.0, 1, 1, "swap_a200_H1"},    {2, 4, 1000.0, 1, 1, "swap_a1000_H1"},
+    {6, 12, 50.0, 1, 1, "swap_C1250_H1"},   {6, 12, 200.0, 1, 1, "swap_C12200_H1"},
+    {6, 12, 1000.0, 1, 1, "swap_C121000_H1"}, {26, 56, 200.0, 13, 27, "swap_Fe56_200_Al27"},
+    {26, 56, 1000.0, 13, 27, "swap_Fe56_1000_Al27"}, {2, 4, 200.0, 6, 12, "noswap_a200_C12"},
+  };
+  G4IonTable* ions = G4IonTable::GetIonTable();
+  FILE* f = std::fopen("bic_blir_swap.csv", "w");
+  std::fprintf(f, "case,pz,pa,ekin_per_a,tz,ta,swapped,px,py,pz_mom,e,bx,by,bz\n");
+  for (const SCase& c : kCases) {
+    const G4ParticleDefinition* part = ions->GetIon(c.pz, c.pa, 0.0);
+    if (part == nullptr) { continue; }
+    G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin_per_a * c.pa * MeV);
+    G4HadProjectile proj(dp);
+    G4LorentzVector mom(proj.Get4Momentum());
+    // "G4LorentzRotation toBreit(mom.boostVector());"
+    const G4ThreeVector b = mom.boostVector();
+    G4LorentzRotation toBreit(b);
+    // `SetLighterAsProjectile(mom, toBreit)`, its body.
+    int pA = c.pa, pZ = c.pz, tA = c.ta, tZ = c.tz;
+    bool swapped = false;
+    if (tA < pA) {
+      swapped = true;
+      int tmp = tA; tA = pA; pA = tmp;
+      tmp = tZ; tZ = pZ; pZ = tmp;
+      const G4double m1 = G4ParticleTable::GetParticleTable()->GetIonTable()->GetIonMass(pZ, pA);
+      G4LorentzVector it(m1, G4ThreeVector(0, 0, 0));
+      mom = toBreit * it;
+    }
+    std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n",
+                 c.name, c.pz, c.pa, c.ekin_per_a, c.tz, c.ta, swapped ? 1 : 0, mom.x(), mom.y(),
+                 mom.z(), mom.e(), b.x(), b.y(), b.z());
+  }
+  std::fclose(f);
+}
+
 void dump_bic(const DumpContext&) {
   write_limits();
   write_density();
@@ -5063,6 +5122,7 @@ void dump_bic(const DumpContext&) {
   // `FillVoidNucleusProducts`, P20's tapes, and the rates file `write_bic_apply` and
   // `write_blir_apply` filled - closed here, before the registry checks its size.
   write_bic_void();
+  write_blir_swap();
   void_rates_close();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
@@ -5099,5 +5159,6 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_1h1_tape.csv bic_1h1_tapeval.csv bic_1h1_tapefs.csv bic_1h1.csv "
                     "bic_1h1_status.csv bic_1h1_parent.csv bic_1h1_scan.csv "
                     "bic_void_rates.csv bic_void_tape.csv bic_void_tapeval.csv "
-                    "bic_void_tapefs.csv bic_void_tapecases.csv bic_void_tapepr.csv",
+                    "bic_void_tapefs.csv bic_void_tapecases.csv bic_void_tapepr.csv "
+                    "bic_blir_swap.csv",
                     dump_bic);
