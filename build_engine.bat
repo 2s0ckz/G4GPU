@@ -32,20 +32,34 @@ rem right within one pipeline run and wrong the moment anyone sets the variable 
 rem which point the build links an engine compiled before the change under test and the run
 rem prints a plausible number for physics that was never compiled. See docs/RISK.md S4.
 rem
-rem freshness.ps1 is asked once PER UNIT, which costs seventeen PowerShell starts - about six
-rem seconds - on every call. It takes one -Unit and its header scan covers .cuh/.hh/.h/.inc and
-rem not .cu, so asking it once about transport_run.cu would miss an edit to any of the other
-rem sixteen units entirely. That is S4 again, for six seconds saved.
+rem freshness.ps1 is asked once PER UNIT, which costs twenty-three PowerShell starts - about
+rem eight seconds - on every call, and since 2026-10-02 it answers for that unit alone, from the
+rem unit's own dependency file (docs/RISK.md V221).
 call "%~dp0setupenv.bat" || exit /b 1
 pushd "%~dp0"
 if not exist out mkdir out
 set G4GPU_ENGINE_OBJ=%~dp0out\transport_run.lib
 
+rem PER UNIT since 2026-10-02 (docs/RISK.md V221). A unit is fresh when its object is newer than
+rem every file nvcc read to compile it - out\<unit>.d, written by -MD -MF in build_engine_unit.bat -
+rem and the recipe (the arch flags and which nvcc) is the one it was built with; tools\freshness.ps1
+rem decides, and every doubt is "stale". A fresh unit keeps its object and gets its .rc up front,
+rem so the passes below compile only the stale ones and the archive step still sees all of them.
+rem Before this, any newer header under src rebuilt all twenty-three units: 78 minutes for a change
+rem to one cascade file that reaches one of them.
 set STALE=
 for %%U in ("%~dp0src\host\transport_run*.cu") do (
-  for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Obj "%~dp0out\transport_run.lib" -Unit "%%~fU" -SrcDir "%~dp0src"`) do if /i "%%R"=="stale" set STALE=1
+  if exist "%~dp0out\%%~nU.rc" del /q "%~dp0out\%%~nU.rc"
+  for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Target "%~dp0out\%%~nU.obj" -Deps "%~dp0out\%%~nU.d" -Recipe "%~dp0out\%%~nU.recipe" -RecipeNow "%G4GPU_ARCH%"`) do (
+    if "%%R"=="fresh" (
+      > "%~dp0out\%%~nU.rc" echo 0
+    ) else (
+      set STALE=1
+      echo   %%~nU: %%R
+    )
+  )
 )
-if not defined STALE (
+if not defined STALE if exist "%~dp0out\transport_run.lib" (
   popd
   echo transport_run.lib is up to date
   exit /b 0
@@ -81,20 +95,21 @@ rem invoke - splitting it by arm would put Bertini in both halves and cost twice
 rem V189 has the whole table, and the reason nobody had found this before: every model test in
 rem this project is host-only, so no model had ever been compiled as device code at all.
 set CAP=6
-for %%U in ("%~dp0src\host\transport_run*.cu") do (
-  if exist "%~dp0out\%%~nU.rc" del /q "%~dp0out\%%~nU.rc"
-)
-echo compiling the seven interaction units, one at a time ^(they carry the hadronic models^)
+echo compiling the stale interaction units, one at a time ^(they carry the hadronic models^)
 for %%U in ("%~dp0src\host\transport_run_int_*.cu") do (
-  echo   %%~nU
-  call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
+  if not exist "%~dp0out\%%~nU.rc" (
+    echo   %%~nU
+    call "%~dp0build_engine_unit.bat" "%%~fU" "%~dp0out"
+  )
 )
 rem The GenericIon stepping unit is compiled ALONE as well, after the interaction units and before
 rem the parallel pass: its ptxas survives only the -O1 rung (V195), and MEASURED on integ/wiring4
 rem that rung died with an access violation twice in a row beside five other units while the same
 rem source compiled alone, twice in a row - docs/RISK.md V202. So it gets the idle machine too.
-echo compiling the GenericIon stepping unit alone ^(docs/RISK.md V202^)
-call "%~dp0build_engine_unit.bat" "%~dp0src\host\transport_run_generic_ion.cu" "%~dp0out"
+if not exist "%~dp0out\transport_run_generic_ion.rc" (
+  echo compiling the GenericIon stepping unit alone ^(docs/RISK.md V202^)
+  call "%~dp0build_engine_unit.bat" "%~dp0src\host\transport_run_generic_ion.cu" "%~dp0out"
+)
 echo compiling the transport engine, %CAP% units at a time
 call :launch_units
 

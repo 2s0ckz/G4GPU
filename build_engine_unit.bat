@@ -1,4 +1,8 @@
 @echo off
+rem One engine unit. Since 2026-10-02 (docs/RISK.md V221) every compile here also writes the unit's
+rem dependency file - nvcc's own list of every file it read, `-MD -MF out\<unit>.d` - and, after
+rem a success, the recipe it was compiled with (the arch flags and which nvcc), so build_engine.bat
+rem can ask tools\freshness.ps1 whether THIS unit needs compiling rather than rebuilding all of them.
 rem Compiles ONE translation unit of the transport engine, and records its exit code.
 rem
 rem build_engine.bat starts eight of these at once - one per kernel family - and then waits for
@@ -23,7 +27,7 @@ call "%~dp0setupenv.bat" || exit /b 1
 set UNIT=%~n1
 set OUTDIR=%~2
 if exist "%OUTDIR%\%UNIT%.rc" del /q "%OUTDIR%\%UNIT%.rc"
-nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
+nvcc -std=c++17 -O2 %G4GPU_ARCH% -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c -MD -MF "%OUTDIR%\%UNIT%.d" ^
   -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
 
 rem ---------------------------------------------------------------- the -O1 retry, and why
@@ -68,10 +72,11 @@ if errorlevel 1 (
     copy /y "%OUTDIR%\%UNIT%.log" "%OUTDIR%\%UNIT%.O3.log" >nul
     for %%L in (2 1 0) do (
       echo   %UNIT%: ptxas died with an access violation above -O%%L; retrying at -Xptxas -O%%L ^(docs/RISK.md V63, V195^)
-      nvcc -std=c++17 -O2 %G4GPU_ARCH% -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c ^
+      nvcc -std=c++17 -O2 %G4GPU_ARCH% -Xptxas -O%%L -I "%~dp0src" -I "%~dp0src\g4" -Xptxas -v -c -MD -MF "%OUTDIR%\%UNIT%.d" ^
         -o "%OUTDIR%\%UNIT%.obj" "%~1" > "%OUTDIR%\%UNIT%.log" 2>&1
       if not errorlevel 1 (
         > "%OUTDIR%\%UNIT%.o1" echo ptxas -O%%L
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Recipe "%OUTDIR%\%UNIT%.recipe" -RecipeNow "%G4GPU_ARCH%" -Stamp
         > "%OUTDIR%\%UNIT%.rc" echo 0
         exit /b 0
       )
@@ -86,5 +91,6 @@ rem everything up to the redirect, trailing space included - and build_engine.ba
 rem line against "0", so that one space would have reported every successful unit as a
 rem failure. Found by reading it; it is the sort of thing that only fails once it matters.
 if exist "%OUTDIR%\%UNIT%.o1" del /q "%OUTDIR%\%UNIT%.o1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Recipe "%OUTDIR%\%UNIT%.recipe" -RecipeNow "%G4GPU_ARCH%" -Stamp
 > "%OUTDIR%\%UNIT%.rc" echo 0
 exit /b 0

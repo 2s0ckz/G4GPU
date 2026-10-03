@@ -76,13 +76,16 @@ echo --- example B1 (Geant4-shaped API) ---
 call "%~dp0examples\B1\build.bat" || exit /b 1
 
 echo --- tests ---
-for %%T in (%TESTS%) do (
-  %NV% -o tests\%%T.exe tests\%%T.cu || exit /b 1
-)
-for %%T in (%TESTS_GPU%) do (
-  %NVG% -o tests\%%T.exe tests\%%T.cu -Xlinker /IMPLIB:out/%%T.lib || exit /b 1
-)
-rem From here on they are just tests - run and counted with the rest.
+rem Incremental and parallel since 2026-10-02 (docs/RISK.md V221): tools\build_tests.ps1 compiles
+rem only the tests whose own include set changed - nvcc's -MD dependency file per test, under
+rem out\deps, read by tools\freshness.ps1 - six host-only tests at a time and the kernel-launching
+rem ones one at a time, and prints each compile's output as it finishes.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_tests.ps1" -Root "%~dp0." ^
+  -Plain "%TESTS%" -Gpu "%TESTS_GPU%" -Arch "%G4GPU_ARCH%" -Mode build -Jobs 6 || exit /b 1
+rem From here on they are just tests - run and counted with the rest; the host-only list is kept
+rem apart because the run schedules the two kinds differently.
+set TESTS_HOST=%TESTS%
+set TESTS_RUN_GPU=%TESTS_GPU%
 set TESTS=%TESTS% %TESTS_GPU%
 echo BUILD OK
 if "%MODE%"=="build" exit /b 0
@@ -90,23 +93,10 @@ if "%MODE%"=="build" exit /b 0
 echo.
 echo --- running tests ---
 if "%G4GPU_ORACLE%"=="" set G4GPU_ORACLE=%~dp0ref\oracle
-set PASS=0
-set FAIL=0
-set FAILED=
-for %%T in (%TESTS%) do (
-  tests\%%T.exe >nul 2>&1
-  if errorlevel 1 (
-    set /a FAIL+=1
-    set FAILED=!FAILED! %%T
-  ) else (
-    set /a PASS+=1
-  )
-)
-echo !PASS! passed, !FAIL! failed
-if not "!FAILED!"=="" (
-  echo FAILED:!FAILED!
-  exit /b 1
-)
+rem Six host-only tests at a time, the kernel-launching ones one at a time on the one GPU, and the
+rem tail of any failing test's output printed - the loop this replaced ran them one by one into nul.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_tests.ps1" -Root "%~dp0." ^
+  -Plain "%TESTS_HOST%" -Gpu "%TESTS_RUN_GPU%" -Mode run -Jobs 6 || exit /b 1
 if "%MODE%"=="test" exit /b 0
 
 echo.

@@ -17,7 +17,8 @@ hand when its input changes, and each writes something that is committed.
 | `extract_fermi.sh` | `G4IonisParamElm.cc`'s `vFermi[92]` and `lFactor[92]` -> `src/data/fermi_velocity.hh` |
 | `extract_mott.sh` | `G4MottData.hh`'s `fMottCoef[93][5][6]` -> `mott_raw.hh`, 2790 coefficients, count asserted |
 | `gen_mott.cc` | those plus the 92 target nuclear masses from `ref/oracle/mott_target.csv` -> `src/data/mott.hh` |
-| `freshness.ps1` | is an object older than any source it depends on? Used by `build_engine.bat` and `build_vis.bat` |
+| `freshness.ps1` | is a build product older than anything the compiler read to make it? The product's own nvcc dependency file (`-MD -MF`) and the recipe it was built with decide, and every doubt is "stale"; the older form (`-Obj -Unit -SrcDir`: newest header under a directory) is still answered for `build_vis.bat` and `build_hook_engine.bat`. Asked per unit by `build_engine.bat` and per test by `build_tests.ps1` (docs/RISK.md V221) |
+| `build_tests.ps1` | builds the pipeline's test lists incrementally and in parallel - six host-only tests at a time, the kernel-launching ones one at a time - and runs them the same way, printing the tally `build_all.bat` always printed and the tail of any failing test. Called by `build_all.bat` and `build_extras.bat` |
 
 ## Which Geant4 to read from
 

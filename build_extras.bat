@@ -97,9 +97,11 @@ echo --- example B1 (Geant4-shaped API) ---
 call "%~dp0examples\B1\build.bat" || exit /b 1
 
 echo --- tests ---
-for %%T in (%TESTS%) do (
-  %NV% -o tests\%%T.exe tests\%%T.cu || exit /b 1
-)
+rem The host-only tests through tools\build_tests.ps1, as build_all.bat compiles its own (docs/RISK.md
+rem V221): only the stale ones, six at a time. The projects and the scene tests below keep their own
+rem recipes - each links something a plain test does not.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_tests.ps1" -Root "%~dp0." ^
+  -Plain "%TESTS%" -Mode build -Jobs 6 || exit /b 1
 rem THE TWO CUSTOM-HOOK PROJECTS ARE BUILT WITHOUT A `for` LOOP, and that is not an oversight.
 rem Each one needs its own hook header, its own type name, its own archive and its own -I, so a
 rem loop over a list of names could never have served two of them; the list existed because the
@@ -135,7 +137,11 @@ call "%~dp0build_hook_engine.bat" "%~dp0tests\include\CellTap.hh" CellTap cell |
 call :hook_object_gate test_voxel_scoring || exit /b 1
 %NVG% -I "%SRC%\g4" -o tests\test_voxel_scoring.exe out\test_voxel_scoring.obj ^
   "%G4GPU_HOOK_LIB%" -Xlinker /IMPLIB:out/test_voxel_scoring.lib || exit /b 1
-rem From here on they are just tests - run and counted with the rest.
+rem From here on they are just tests - run and counted with the rest; the host-only list is kept
+rem apart because the run schedules the two kinds differently, and every project and scene test
+rem runs on the GPU.
+set TESTS_HOST=%TESTS%
+set TESTS_RUN_GPU=%TESTS_PROJECT% %TESTS_SCENE% %TESTS_HOOK%
 set TESTS=%TESTS% %TESTS_PROJECT% %TESTS_SCENE% %TESTS_HOOK%
 echo BUILD OK
 if "%MODE%"=="build" exit /b 0
@@ -143,23 +149,10 @@ if "%MODE%"=="build" exit /b 0
 echo.
 echo --- running tests ---
 if "%G4GPU_ORACLE%"=="" set G4GPU_ORACLE=%~dp0ref\oracle
-set PASS=0
-set FAIL=0
-set FAILED=
-for %%T in (%TESTS%) do (
-  tests\%%T.exe >nul 2>&1
-  if errorlevel 1 (
-    set /a FAIL+=1
-    set FAILED=!FAILED! %%T
-  ) else (
-    set /a PASS+=1
-  )
-)
-echo !PASS! passed, !FAIL! failed
-if not "!FAILED!"=="" (
-  echo FAILED:!FAILED!
-  exit /b 1
-)
+rem Six host-only tests at a time, the kernel-launching ones one at a time on the one GPU, and the
+rem tail of any failing test's output printed - the loop this replaced ran them one by one into nul.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_tests.ps1" -Root "%~dp0." ^
+  -Plain "%TESTS_HOST%" -Gpu "%TESTS_RUN_GPU%" -Mode run -Jobs 6 || exit /b 1
 if "%MODE%"=="test" exit /b 0
 
 echo.
