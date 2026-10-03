@@ -1041,6 +1041,9 @@ struct EmExtraDiag {
   /// The last attempt `CheckResult` threw away, if any: its verdict and its energy imbalance.
   int rejected_verdict = 0;  ///< hp::CheckResultVerdict
   double rejected_delta_e = 0.0;
+  /// P21: the photon's data store was empty and the general process's table 9 put it on a
+  /// nucleus anyway - the table's edge - so the target came off all-zero partial sums.
+  bool zero_store_edge = false;
 };
 
 /// One photo- or lepto-nuclear model call through P13's PROCESS entry point, into `s.fs`.
@@ -1105,19 +1108,29 @@ __host__ __device__ __noinline__ ee::EmExtraRefusal run_arm_emextra(
 ///      delegating) and at the lepton's PRE-step energy (`PostStepGetPhysicalInteractionLength`'s
 ///      `DefineXSandMFP` is the last call). `ekin_partials` is that energy; the isotope draw
 ///      reads the dynamic particle's own, which is `proj.kin_energy` - the post-step one - and
-///      only the photon's data set looks at it.
+///      only the photon's data set looks at it. THE PHOTON'S STORE CAN BE EMPTY HERE (P21): the
+///      general process selects photonNuclear off table 9, which is below 1 between a material's
+///      last zero node and its threshold, where the store is exactly 0 (emextra_wiring.cuh's
+///      header). Geant4 then walks all-zero partial sums - one element uniform, `0 <= xsecelm[0]`,
+///      the first element - and so does this, when `gamma_general_selects_nuclear` says the
+///      general process could have made the choice; anywhere else an empty store is still the
+///      tripwire it was.
 ///   5-6. The model through P13's entry point, `do { ApplyYourself } while(!CheckResult)`
 ///      bounded at 100, with `G4HadronicInteraction`'s default (2%, 1 GeV) levels - neither VD
 ///      model, `G4LowEGammaNuclearModel` nor `G4CascadeInterface` overrides
 ///      `GetFatalEnergyCheckLevels`.
 ///   7. K0 / anti-K0 mixing, one uniform each - Bertini's photon arm can make kaons.
 ///   8. FillResult is the caller's, with the track's own direction.
+///
+/// @param gamma_general the general process's state, `HadronicWiring::gamma_general` - it decides
+///        whether an empty photon store is Geant4's table-9 edge or a tripwire (step 3).
 template <typename real_t, InteractionBucket kBucket, typename Rng>
 __host__ __device__ __noinline__ InteractionOutcome run_emextra(
     const physics::hadronic::HadProjectile<real_t>& proj, ParticleType species,
     const data::Material<real_t>& mat, int mat_index, const EmExtraTables<real_t>& tables,
     real_t ekin_partials, InteractionSlot<real_t>& s, const data::LevelTable& lt,
-    const deex::FermiPool& fpool, Rng& rng, EmExtraDiag* diag) {
+    const deex::FermiPool& fpool, Rng& rng, EmExtraDiag* diag,
+    GammaGeneralProcess gamma_general = GammaGeneralProcess::kOn) {
   InteractionOutcome out;
   EmExtraDiag d{};
   const EmExtraProcess process = emextra_process_of(species);
@@ -1127,12 +1140,26 @@ __host__ __device__ __noinline__ InteractionOutcome run_emextra(
   const real_t xs =
       emextra_xs_per_volume<real_t>(tables, process, mat_index, mat, ekin_partials, mxs);
   if (!(xs > real_t(0)) || mxs.n_elements <= 0) {
-    // The stepper drew this interaction from a positive cross section at the same energy and in
-    // the same material, so an empty store here means the two disagree - a tripwire, booked as
-    // the model's refusal rather than applied as a phantom target.
-    out.refusal = HadronicRefusal::kEmExtraRefused;
-    if (diag != nullptr) { *diag = d; }
-    return out;
+    // TABLE 9's EDGE IS GEANT4's (P21): the general process put this photon on a nucleus where
+    // the store is exactly 0, and `SampleZandA` takes `cross = 0*G4UniformRand()` against
+    // all-zero partial sums - the first element, one uniform drawn if the material has more
+    // than one. `store_sample_za_rng` below does exactly that over the empty `mxs`: its sums are
+    // zero-initialised and the store left them so (`emextra_xs_per_volume`'s threshold skip).
+    bool edge = false;
+    if constexpr (kBucket == InteractionBucket::kPhotoNuclear) {
+      edge = gamma_general_selects_nuclear<real_t>(tables, gamma_general, mat_index,
+                                                   ekin_partials);
+    }
+    if (!edge) {
+      // Anywhere else the stepper drew this interaction from a positive cross section at the
+      // same energy and in the same material - the leptons always, the photon with the general
+      // process off or in zone 3 - so an empty store here means the two disagree: a tripwire,
+      // booked as the model's refusal rather than applied as a phantom target.
+      out.refusal = HadronicRefusal::kEmExtraRefused;
+      if (diag != nullptr) { *diag = d; }
+      return out;
+    }
+    d.zero_store_edge = true;
   }
   const EmExtraXsFn<real_t> fn = emextra_xs_fn<real_t>(tables, process, proj.kin_energy);
   const hxs::TargetZA tgt =

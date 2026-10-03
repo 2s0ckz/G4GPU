@@ -76,24 +76,46 @@
 // sub-process of the general process cannot be inactivated) and it is kept as a study switch,
 // because it is the one in which Bertini's photon arm and the QGS refusal become reachable.
 //
-// THE REST OF THE PHOTON'S STEP. The port's photon is P1's: four cross sections evaluated from
-// the models every step, one length uniform and one selection uniform walked as Compton,
-// conversion, photoelectric, Rayleigh. The general process differs from that in two more ways
-// than photonNuclear - Rayleigh is ABSENT above 2 m_e (zones 2 and 3 sum no `sigR`), and its
-// shares are its own tables, interpolated linearly between 51 nodes from 2 m_e to 100 MeV. P19
-// changed neither. The first is transcribed since P21: the running Geant4 counts no Rayleigh
-// scatter above 2 m_e in forty million where its share is 17,293 (water) and 30,846 (bone) at
-// 1.5 MeV (docs/RISK.md V208, V223), and `em::gamma_macroscopic_xs` takes the general process's
-// state and leaves the term out from `minEEEnergy` up - the total, the length and the walk all.
-// The second is where the photo-nuclear share itself parts from its cross section: across the
-// giant resonance the interpolated share is 16% under sigN/sum at 22 MeV in bone and 8% over at
-// 20 MeV in water, the running Geant4 follows the table to within statistics, and this port
-// follows the cross section, which is what the P19 brief specified (docs/RISK.md V209 has both
-// and the recipe for the table).
+// THE REST OF THE PHOTON'S STEP, AND WHAT P21 CHANGED IN IT. The port's photon is P1's: four
+// cross sections evaluated from the models every step, one length uniform and one selection
+// uniform walked as Compton, conversion, photoelectric, Rayleigh. The general process differed
+// from that in two more ways than photonNuclear, P19 measured both and changed neither, and P21
+// transcribed both:
+//
+//   * RAYLEIGH IS ABSENT FROM 2 m_e UP (zones 2 and 3 sum no `sigR`): 0 Rayleigh scatters counted
+//     in forty million first interactions at 1.5 MeV in water and in bone, where the cross
+//     section's share is 17,293 and 30,846 of them (docs/RISK.md V208, V223).
+//     `em::gamma_macroscopic_xs` takes the general process's state and leaves the term out, so
+//     the total, the length and the walk are the zones'.
+//   * IN ZONE 2 THE PHOTO-NUCLEAR SHARE IS TABLE 9, not sigN/sum: `BuildPhysicsTable` fills
+//     `(sigConv + sigComp + sigPE)/sum` - 1.0 where sigN is 0 - at the 51 nodes of
+//     `G4PhysicsLogVector(minEEEnergy, minMMEnergy, 50, false)`, 9.6% apart, NO spline, and
+//     `PostStepDoIt` reads it through `LogVectorValue`, linear in E between two nodes. Across
+//     the giant resonance that is 16% under sigN/sum at 22 MeV in bone and 8% over at 20 MeV in
+//     water, and the running Geant4 follows the table (V209). `GammaGeneralTable9` below is that
+//     table, built at upload from this port's cross sections at Geant4's own nodes, and
+//     `step_gamma` selects photonNuclear in zone 2 exactly when `q > P9(E)` - the same
+//     comparison on the same uniform as `case 2` of `PostStepDoIt`.
+//
+// What zone 2's TOTAL is, then. Geant4's is table 6, the linear interpolant of the node sums;
+// this port keeps P1's direct EM total `xs.total` - it does not read tables 6, 7 and 8, whose
+// difference from the models is EM interpolation, measured and recorded in docs/RISK.md - and
+// makes the photo-nuclear part of its total the one table 9 implies: `xs.total / P9`, so that
+// the share of the photon's interactions that go to a nucleus is `1 - P9` exactly and the EM
+// rate is still the models'. The per-step store evaluation `sigN` needed is gone from zone 2.
+//
+// AND THE TABLE HAS AN EDGE THE CROSS SECTION DOES NOT. Between a material's last node where sigN
+// is 0 and its threshold (11.08 - 11.50 MeV in water, 5.32 - 5.5 in compact bone, 3.69 - 4.0 in
+// A-150) P9 interpolates below 1 where the data store's cross section is exactly 0, so Geant4
+// selects photonNuclear on a zero cross section - 126 times in a million first interactions at
+// 11.2 MeV in water, counted - and `SampleZandA` walks all-zero partial sums: one uniform, the
+// material's FIRST element (`interaction_apply.cuh`'s `run_emextra` does the same, and counts it,
+// `kEmxTable9Edge`).
+//
 // The photo-nuclear slice is placed where the general process places it RELATIVE TO THE ONE
-// UNIFORM: it is the TOP slice of `q` in zone 2 in both codes (`q > P9` there, `q*total >=
-// total_em` here), so for a given `q` the two agree on whether the photon reacts with a
-// nucleus - which is the sense in which the selection is on Geant4's stream.
+// UNIFORM: it is the TOP slice of `q` in zone 2 in both codes (`q > P9` in both, since P21), so
+// for a given `q` the two agree on whether the photon reacts with a nucleus - which is the sense
+// in which the selection is on Geant4's stream.
 //
 // ---------------------------------------------------------------------------------------------
 // THE THREE LEPTON PROCESSES ARE fHadNoIntegral, AND THE TARGET IS DRAWN AT THE PRE-STEP ENERGY
@@ -292,6 +314,36 @@ __host__ __device__ inline em::GammaProcess select_gamma_process_at(const em::Ga
 // The device tables
 // =============================================================================================
 
+/// `nHighE`. Zone 2's vectors are `G4PhysicsLogVector(minEEEnergy, minMMEnergy, nHighE, false)`
+/// (`G4GammaGeneralProcess::InitialiseProcess`, the `cVector` every table 6-9 is copied from):
+/// 50 bins, 51 nodes, 9.6% apart, no spline.
+inline constexpr int kGammaGeneralZone2Bins = 50;
+inline constexpr int kGammaGeneralZone2Nodes = kGammaGeneralZone2Bins + 1;
+
+/// P21: `G4GammaGeneralProcess`'s table 9 for every material of the scene - the fraction of a
+/// zone-2 photon's interactions that are NOT photo-nuclear, `(sigConv + sigComp + sigPE)/sum`
+/// at each node and 1.0 where sigN is 0 (`BuildPhysicsTable`, G4GammaGeneralProcess.cc:366-393).
+/// Built once at upload by `host::build_emextra_host_tables` (`gamma_general_zone2_grid` and
+/// `gamma_general_table9_node` below) from this port's cross sections - the numbers Geant4 builds
+/// it from, to the EM lambda tables' interpolation (`tests/test_emextra_wiring.cu` section 8
+/// holds it against the running Geant4's own table) - and read by `gamma_general_p9`, which is
+/// `LogVectorValue`.
+template <typename real_t>
+struct GammaGeneralTable9 {
+  const real_t* e = nullptr;  ///< the 51 node energies, MeV: `cVector`'s binVector
+  const real_t* v = nullptr;  ///< `n_materials` x 51 values, row-major by material
+  /// Per material: table 9 is EXACTLY 1.0 at and below this energy - the last node of its
+  /// leading run of 1.0s, because `y1 + b*dy` with y1 = 1 and dy = 0 is 1.0 to the bit - so
+  /// `step_gamma` evaluates nothing there and its step is the step with no photo-nuclear term.
+  /// 0 when node 0 is already below 1: in air, argon's threshold is under 2 m_e.
+  const real_t* threshold = nullptr;
+  int n_materials = 0;
+  real_t edge_min = 0;  ///< `edgeMin` = minEEEnergy
+  real_t edge_max = 0;  ///< `edgeMax` = minMMEnergy
+  real_t inv_dbin = 0;  ///< `invdBin` = (idxmax + 1)/G4Log(edgeMax/edgeMin)
+  real_t log_emin = 0;  ///< `logemin` = G4Log(edgeMin)
+};
+
 /// Which threshold row `EmExtraTables::threshold` holds. The muon has none: its cross section is
 /// the clamped Kokoulin table and is positive at every energy.
 enum EmExtraThreshold : int {
@@ -328,6 +380,12 @@ struct EmExtraTables {
   /// otherwise evaluate all four vectors at every photon step to add three zeros (docs/RISK.md
   /// V210 has what that cost the gamma gate). Zero for an element means "evaluate".
   const real_t* element_threshold = nullptr;
+  /// P21: the general process's zone-2 table 9, one device struct. Null is "no photo-nuclear
+  /// term in zone 2" - a run with no G4PARTICLEXS gamma data - exactly as a null `gamma` is.
+  /// A pointer and not the struct, because this one travels by value in every kernel's wiring
+  /// and the hadron kernels copy the wiring into their frames (docs/RISK.md V210): 8 bytes
+  /// rather than 64.
+  const GammaGeneralTable9<real_t>* p9 = nullptr;
 };
 
 /// The Z range `EmExtraTables::element_threshold` covers: every Z either CHIPS class answers
@@ -504,9 +562,14 @@ __host__ __device__ __noinline__ real_t emextra_length(const EmExtraTables<real_
 /// material's threshold, and with the process switched off. Otherwise the element sum
 /// `G4GammaGeneralProcess::BuildPhysicsTable` computes through
 /// `theGammaNuclear->GetCrossSectionDataStore()->ComputeCrossSection(dynParticle, material)`,
-/// evaluated at the photon's energy rather than interpolated from the general process's zone-2
-/// and zone-3 tables - the same choice P1 made for the other four terms, and the same
-/// interpolation-level difference from Geant4.
+/// evaluated at the photon's energy rather than interpolated from the general process's zone-3
+/// tables - the same choice P1 made for the other four terms, and the same interpolation-level
+/// difference from Geant4.
+///
+/// NOT WHAT `step_gamma` READS IN ZONE 2 SINCE P21: there the general process applies table 9,
+/// not this cross section (`gamma_general_p9`, docs/RISK.md V209 and P21's entry). It is read in
+/// zone 3, where its share of the total goes to conversion (V207), and at every energy with the
+/// general process off, where photonNuclear is an ordinary competitor.
 template <typename real_t>
 __host__ __device__ __noinline__ real_t photon_nuclear_xs(const EmExtraTables<real_t>& t,
                                                          GammaGeneralProcess mode,
@@ -520,11 +583,104 @@ __host__ __device__ __noinline__ real_t photon_nuclear_xs(const EmExtraTables<re
 }
 
 // =============================================================================================
+// P21: table 9 - zone 2's photo-nuclear share, as G4GammaGeneralProcess builds and reads it
+// =============================================================================================
+
+/// `GetProbability(9)` in zone 2: `theHandler->GetVector(9, basedCoupleIndex)->LogVectorValue(
+/// preStepKinEnergy, preStepLogE)` - the bin from the logarithm, the value LINEAR in E between its
+/// two nodes, clamped to the end nodes outside (`xs/physics_vector.cuh`'s transcription of
+/// `G4PhysicsVector::LogVectorValue`, whose `G4Log` is `std::log` on this platform). `preStepLogE`
+/// is `G4DynamicParticle::GetLogKineticEnergy()`, which is `G4Log` of the same energy.
+///
+/// `__noinline__` FOR `photon_nuclear_xs`'s REASON, the other way round: it is reached only above
+/// the material's table-9 threshold - which `step_gamma` tests inline first - and there a call
+/// out of the 255-register kernel costs less than this function's registers inlined into every
+/// photon step.
+template <typename real_t>
+__host__ __device__ __noinline__ real_t gamma_general_p9(const GammaGeneralTable9<real_t>& t,
+                                                        int mat, real_t e) {
+  hxs::PhysVec<real_t> pv;
+  pv.e = t.e;
+  pv.v = t.v + static_cast<long long>(mat) * kGammaGeneralZone2Nodes;
+  pv.n = kGammaGeneralZone2Nodes;
+  pv.edge_min = t.edge_min;
+  pv.edge_max = t.edge_max;
+  pv.inv_dbin = t.inv_dbin;
+  pv.log_emin = t.log_emin;
+  pv.type = hxs::kLogVector;
+  return hxs::phys_vec_log_value<real_t>(pv, e, log(e));
+}
+
+/// True when `G4GammaGeneralProcess` could have selected photonNuclear for a photon of energy `e`
+/// in material `mat`: the general process on, zone 2, and table 9 below 1 there. The drain asks it
+/// of a photo-nuclear entry whose data store is EMPTY - the table's edge (this file's header) -
+/// and books its tripwire only when the answer is no.
+template <typename real_t>
+__host__ __device__ inline bool gamma_general_selects_nuclear(const EmExtraTables<real_t>& t,
+                                                             GammaGeneralProcess mode, int mat,
+                                                             real_t e) {
+  if (mode != GammaGeneralProcess::kOn || gamma_general_zone<real_t>(e) != 2 || t.p9 == nullptr) {
+    return false;
+  }
+  if (mat < 0 || mat >= t.p9->n_materials || !(e > t.p9->threshold[mat])) { return false; }
+  return gamma_general_p9<real_t>(*t.p9, mat, e) < real_t(1);
+}
+
+/// `cVector`'s 51 node energies, in `G4PhysicsLogVector`'s own order of operations
+/// (G4PhysicsLogVector.cc, 11.1.1): the two edges stored as given, `Initialise()` setting
+/// `invdBin = (idxmax + 1)/G4Log(edgeMax/edgeMin)` and `logemin = G4Log(edgeMin)`, and then
+/// `binVector[i] = edgeMin*G4Exp(i/invdBin)` for the 49 inside. `G4Log` and `G4Exp` are
+/// `std::log` and `std::exp` on this platform (G4Log.hh, G4Exp.hh `#ifdef WIN32`), and host code
+/// computes this, so the nodes are Geant4's to the bit - which `tests/test_emextra_wiring.cu`
+/// asserts against the running process's stored table.
+template <typename real_t>
+__host__ inline void gamma_general_zone2_grid(real_t* e, real_t& inv_dbin, real_t& log_emin) {
+  const real_t emin = gamma_general_min_ee<real_t>();
+  const real_t emax = gamma_general_min_mm<real_t>();
+  e[0] = emin;
+  e[kGammaGeneralZone2Bins] = emax;
+  inv_dbin = real_t(kGammaGeneralZone2Bins) / std::log(emax / emin);
+  log_emin = std::log(emin);
+  for (int i = 1; i < kGammaGeneralZone2Bins; ++i) {
+    e[i] = emin * std::exp(real_t(i) / inv_dbin);
+  }
+}
+
+/// One node of table 9: the body of `BuildPhysicsTable`'s zone-2 loop, in its order of
+/// operations -
+///
+///     G4double sum = sigComp + sigConv + sigPE + sigN;
+///     val = (sigN > 0.0) ? (sigConv + sigComp + sigPE)/sum : 1.0;
+///
+/// with `sigComp`, `sigConv` and `sigPE` this port's (`em::gamma_macroscopic_xs`, no Rayleigh:
+/// zone 2 sums none) and `sigN` the data store's (`gn->ComputeCrossSection`, which is
+/// `emextra_xs_per_volume`). Geant4 takes the first two through `GetLambda`, i.e. off their
+/// lambda tables, and this port evaluates the models - the one difference, measured in
+/// section 8 of `tests/test_emextra_wiring.cu`.
+///
+/// @param t a view whose pointers are HOST pointers (`EmExtraHostTables::view()`).
+template <typename real_t>
+__host__ inline real_t gamma_general_table9_node(const EmExtraTables<real_t>& t, int mat_index,
+                                                 const data::Material<real_t>& mat,
+                                                 const data::PhotoElectricTable<real_t>& pe,
+                                                 real_t e) {
+  const em::GammaXS<real_t> xs = em::gamma_macroscopic_xs<real_t>(mat, e, &pe, nullptr);
+  hxs::MaterialXs<real_t> mxs{};
+  const real_t sig_n =
+      emextra_xs_per_volume<real_t>(t, EmExtraProcess::kPhotonNuclear, mat_index, mat, e, mxs);
+  const real_t sig_comp = xs.compton;
+  const real_t sig_conv = xs.pair;
+  const real_t sig_pe = xs.photoelectric;
+  const real_t sum = sig_comp + sig_conv + sig_pe + sig_n;
+  return (sig_n > real_t(0)) ? (sig_conv + sig_comp + sig_pe) / sum : real_t(1);
+}
+
+// =============================================================================================
 // What the run counts
 // =============================================================================================
 
-/// The three counters `HadronicWiring::emx_stats` holds - device-side, because the drain that
-/// runs these interactions never reports back to the host until the run is over.
+/// The counters `HadronicWiring::emx_stats` holds - device-side, because the drain that runs
+/// these interactions never reports back to the host until the run is over.
 enum EmxStat : int {
   /// `photonNuclear` interactions `run_emextra_drain` ran (or refused by name).
   kEmxPhotoDrained = 0,
@@ -535,7 +691,13 @@ enum EmxStat : int {
   /// V207). The finding, counted: in QBBC this is how often a photon above 100 MeV would have
   /// reacted with a nucleus and did not.
   kEmxZone3Conversion = 2,
-  kNumEmxStats = 3,
+  /// P21: photons the general process put on a nucleus at an energy where the data store's
+  /// cross section is EXACTLY zero - table 9's edge (this file's header), at or below the
+  /// material's threshold and above its table's last 1.0 node. Each is applied as Geant4 applies
+  /// it, on the material's first element; counted because it is a reaction no cross section
+  /// asked for, and a run that has one should say so.
+  kEmxTable9Edge = 3,
+  kNumEmxStats = 4,
 };
 
 // =============================================================================================

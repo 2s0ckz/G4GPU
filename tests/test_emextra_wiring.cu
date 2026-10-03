@@ -22,8 +22,14 @@
 //  6. `run_emextra` - G4HadronicProcess::PostStepDoIt for the four processes - runs, balances
 //     baryon number, charge and energy, draws the target from the right partial sums (the
 //     leptons' at the PRE-step energy: a sharp case where only one element is open), consumes
-//     one attempt, and maps P13's refusals onto the right ledger names.
+//     one attempt, and maps P13's refusals onto the right ledger names. And since P21 the
+//     photon's zero-store edge: where table 9 is below 1 and the store is exactly 0, the model
+//     runs on the first element as Geant4's `SampleZandA` leaves it; anywhere else a zero store
+//     is still the tripwire.
 //  7. The ledger: every new name is in the right group.
+//  8. P21: TABLE 9 against the running G4GammaGeneralProcess's own, node by node and
+//     interpolated (`ref/gammagp`'s dump): the grid to the bit, where it is exactly 1 to the
+//     node, and 1 - P9 to the EM tables' interpolation.
 //
 // The device half - the steppers, the queue, bit-identity below the thresholds and the rates
 // on the device - is `tests/test_emextra_transport.cu`.
@@ -127,13 +133,79 @@ const char* kMatName[data::kNumMaterials] = {"G4_AIR", "G4_WATER", "G4_A-150_TIS
 
 }  // namespace
 
+/// One row of `ref/oracle/gammagp_tables.csv` - `ref/gammagp/gammagp.cc`'s dump of the running
+/// G4GammaGeneralProcess's own tables (P21). Geant4's log lines are interleaved in that file,
+/// so a row is anything that parses as `material,table,kind,index,E,value` with a known
+/// material and a known kind, and nothing else.
+struct GpRow {
+  int mat = -1;
+  int table = -1;
+  bool node = false;  ///< a node of the vector; otherwise LogVectorValue at an energy asked for
+  int index = -1;
+  double e = 0, v = 0;
+};
+
+std::vector<GpRow> load_gp_tables(const std::string& path) {
+  std::vector<GpRow> out;
+  FILE* f = std::fopen(path.c_str(), "r");
+  if (f == nullptr) { return out; }
+  static char line[8192];
+  while (std::fgets(line, sizeof line, f) != nullptr) {
+    const std::vector<std::string> v = split(line);
+    if (v.size() != 6) { continue; }
+    GpRow r;
+    for (int m = 0; m < data::kNumMaterials; ++m) {
+      if (v[0] == kMatName[m]) { r.mat = m; }
+    }
+    if (r.mat < 0 || (v[2] != "node" && v[2] != "at")) { continue; }
+    r.table = std::atoi(v[1].c_str());
+    r.node = (v[2] == "node");
+    r.index = std::atoi(v[3].c_str());
+    r.e = std::strtod(v[4].c_str(), nullptr);
+    r.v = std::strtod(v[5].c_str(), nullptr);
+    out.push_back(r);
+  }
+  std::fclose(f);
+  return out;
+}
+
 int main() {
   const std::string dir = oracle_dir();
   static data::Material<real_t> mats[data::kNumMaterials];
   data::build_b1_materials<real_t>(mats);
 
+  // The photoelectric and Rayleigh tables on the host, for every element of B1's materials -
+  // the photoelectric one before the emextra tables, since P21: table 9 of the general process
+  // is built from it at upload, as `BuildPhysicsTable` builds it from `thePhotoElectric`.
+  const std::string phot_dir = host::g4emlow_subdir("epics2017/phot", "pe-cs-1.dat");
+  const std::string rayl_dir = host::g4emlow_subdir("epics2017/rayl", "re-cs-1.dat");
+  int zlist[32];
+  int nzl = 0;
+  for (int m = 0; m < data::kNumMaterials; ++m) {
+    for (int i = 0; i < mats[m].n_elements; ++i) {
+      const int z = static_cast<int>(mats[m].z[i] + 0.5);
+      bool seen = false;
+      for (int k = 0; k < nzl; ++k) { seen |= (zlist[k] == z); }
+      if (!seen) { zlist[nzl++] = z; }
+    }
+  }
+  static data::PhotoElectricTable<real_t> pe{};
+  static std::vector<real_t> pte, ptv;
+  static data::RayleighTable<real_t> rt{};
+  static std::vector<real_t> rte, rtv;
+  const bool pe_ok = data::load_photoelectric<real_t>(phot_dir, zlist, nzl, pe, pte, ptv);
+  pe.table_e = pte.data();
+  pe.table_v = ptv.data();
+  const bool ra_ok = data::load_rayleigh<real_t>(rayl_dir, zlist, nzl, rt, rte, rtv);
+  rt.table_e = rte.data();
+  rt.table_v = rtv.data();
+  if (!pe_ok || !ra_ok) {
+    std::printf("could not load the photoelectric / Rayleigh tables - nothing here can be tested\n");
+    return 1;
+  }
+
   host::EmExtraHostTables<real_t> ht;
-  host::build_emextra_host_tables<real_t>(ht, mats, data::kNumMaterials, /*verbose=*/true);
+  host::build_emextra_host_tables<real_t>(ht, mats, data::kNumMaterials, /*verbose=*/true, &pe);
   if (!ht.gamma_ok) {
     std::printf("G4PARTICLEXS gamma data could not be resolved - nothing here can be tested\n");
     return 1;
@@ -269,7 +341,7 @@ int main() {
     }
 
     // The EM half of the same edge: `em::gamma_macroscopic_xs` drops Rayleigh at
-    // `em::gamma_general_min_ee` (P21), and it has to be this file's `minEEEnergy` to the bit.
+    // `em::gamma_general_min_ee`, and it has to be this file's `minEEEnergy` to the bit.
     if (em::gamma_general_min_ee<real_t>() != had::gamma_general_min_ee<real_t>()) {
       fail("the EM zone edge and the general process's minEEEnergy are different numbers");
     }
@@ -280,31 +352,7 @@ int main() {
     //     use, the replay is a statement about the branch structure, which is what V207 is: with
     //     sigM = 0.0 the photonNuclear arm is never taken and its share lands on `conv`; with a
     //     sigM of any size it is taken, so the zero is something this replay could have missed
-    //     and did not.
-    const std::string phot_dir = host::g4emlow_subdir("epics2017/phot", "pe-cs-1.dat");
-    const std::string rayl_dir = host::g4emlow_subdir("epics2017/rayl", "re-cs-1.dat");
-    int zlist[32];
-    int nzl = 0;
-    for (int m = 0; m < data::kNumMaterials; ++m) {
-      for (int i = 0; i < mats[m].n_elements; ++i) {
-        const int z = static_cast<int>(mats[m].z[i] + 0.5);
-        bool seen = false;
-        for (int k = 0; k < nzl; ++k) { seen |= (zlist[k] == z); }
-        if (!seen) { zlist[nzl++] = z; }
-      }
-    }
-    static data::PhotoElectricTable<real_t> pe{};
-    static std::vector<real_t> pte, ptv;
-    static data::RayleighTable<real_t> rt{};
-    static std::vector<real_t> rte, rtv;
-    const bool pe_ok = data::load_photoelectric<real_t>(phot_dir, zlist, nzl, pe, pte, ptv);
-    pe.table_e = pte.data();
-    pe.table_v = ptv.data();
-    const bool ra_ok = data::load_rayleigh<real_t>(rayl_dir, zlist, nzl, rt, rte, rtv);
-    rt.table_e = rte.data();
-    rt.table_v = rtv.data();
-    if (!pe_ok || !ra_ok) { fail("could not load the photoelectric / Rayleigh tables"); }
-
+    //     and did not. Rayleigh is out of the sum, as it is in zone 3.
     long long gn_taken_m0 = 0, gn_taken_m1 = 0, conv_extra = 0, grid = 0;
     const real_t es[] = {100.0, 120.0, 150.0, 200.0, 500.0, 1000.0, 3000.0};
     for (int m = 0; m < data::kNumMaterials; ++m) {
@@ -911,6 +959,148 @@ int main() {
         }
       }
 
+      // P21: THE ZERO STORE AT TABLE 9's EDGE IS GEANT4's, AND ANYWHERE ELSE A TRIPWIRE.
+      //
+      // Between a material's last all-zero node of table 9 and its photo-nuclear threshold the
+      // general process's linear table is below 1 where the data store's cross section is
+      // exactly 0, so Geant4 selects photonNuclear on a zero cross section - counted in the
+      // running Geant4, 126 of a million first interactions at 11.2 MeV in water - and
+      // `SampleZandA` walks all-zero partial sums: one element uniform, `cross = 0 <= xsecelm[0]`,
+      // the material's FIRST element, then `G4GammaNuclearXS::SelectIsotope` over that
+      // element's isotope cross sections. `run_emextra` must do the same there, and must still
+      // book `kEmExtraRefused` for a zero store anywhere Geant4 could not have selected the
+      // process: with the general process off (the photon's length was drawn FROM the store),
+      // and with it on below the edge, where table 9 is exactly 1.
+      {
+        const had::GammaGeneralTable9<real_t>* t9 = tables.p9;
+        if (t9 == nullptr) {
+          fail("the host tables carry no table 9");
+        } else {
+          struct EdgeCase {
+            int mat;
+            real_t e;
+            had::GammaGeneralProcess mode;
+            bool geant4_selects;
+            const char* name;
+          };
+          const EdgeCase ecs[] = {
+              {data::kWater, 11.2, had::GammaGeneralProcess::kOn, true, "water 11.2 MeV, on"},
+              {data::kBoneCompact, 5.35, had::GammaGeneralProcess::kOn, true, "bone 5.35 MeV, on"},
+              {data::kA150Tissue, 3.7, had::GammaGeneralProcess::kOn, true, "A-150 3.7 MeV, on"},
+              {data::kWater, 11.2, had::GammaGeneralProcess::kOff, false, "water 11.2 MeV, off"},
+              {data::kWater, 11.0, had::GammaGeneralProcess::kOn, false, "water 11.0 MeV, on"},
+          };
+          for (const EdgeCase& ec : ecs) {
+            hxs::MaterialXs<real_t> mx{};
+            const real_t store = had::emextra_xs_per_volume<real_t>(
+                tables, had::EmExtraProcess::kPhotonNuclear, ec.mat, mats[ec.mat], ec.e, mx);
+            const real_t p9 = had::gamma_general_p9<real_t>(*t9, ec.mat, ec.e);
+            // The first element and the isotope `SelectIsotope` gives it with these cross
+            // sections at this energy: abundance-weighted when all are zero, the positive one
+            // when one is (a deuteron is open where the proton and the element are not).
+            const int z0 = static_cast<int>(mats[ec.mat].z[0] + 0.5);
+            const hxs::ElementIsotopes<real_t> iso0 = hxs::nist_element_isotopes<real_t>(z0);
+            double iso_sum = 0;
+            for (int j = 0; j < iso0.n; ++j) {
+              iso_sum += double(iso0.abundance[j])
+                         * double(hxs::pxs_iso_xs<real_t>(ht.gamma, ec.e, std::log(ec.e), z0,
+                                                           iso0.a[j]).value);
+            }
+            hp::HadProjectile<real_t> g;
+            g.pdg = 22;
+            g.kin_energy = ec.e;
+            int ran = 0, tripwire = 0, other = 0, not_first = 0, edge_flag = 0, bad_ab = 0;
+            std::map<int, int> by_a;
+            for (int k = 0; k < 200; ++k) {
+              Philox<real_t> rng(7300u + static_cast<unsigned int>(k), 3u,
+                                 had::kInteractionRngPurpose);
+              had::EmExtraDiag dg;
+              const had::InteractionOutcome o =
+                  had::run_emextra<real_t, had::InteractionBucket::kPhotoNuclear>(
+                      g, ParticleType::kGamma, mats[ec.mat], ec.mat, tables, ec.e, *slot, lt,
+                      fpool, rng, &dg, ec.mode);
+              if (dg.zero_store_edge) { ++edge_flag; }
+              if (!o.ran) {
+                if (o.refusal == had::HadronicRefusal::kEmExtraRefused && dg.emextra_refusal == 0) {
+                  ++tripwire;
+                } else {
+                  ++other;
+                }
+                continue;
+              }
+              ++ran;
+              ++by_a[o.target_a];
+              if (o.target_z != z0) { ++not_first; }
+              had::fill_result_into<real_t, had::kInteractionSecondaryCap,
+                                    had::kInteractionSecondaryCap>(
+                  slot->fs, Vec3<real_t>{0, 0, 1}, real_t(0), real_t(1), false, slot->pdg_mass,
+                  slot->filled);
+              int b = 0, q = 0;
+              for (int i = 0; i < slot->filled.n_secondaries; ++i) {
+                const auto& s = slot->filled.secondaries[i];
+                if (s.a > 0) {
+                  b += s.a;
+                  q += s.z;
+                } else if (s.pdg != 11) {
+                  const ParticleType st = particle_type_of_pdg(s.pdg);
+                  if (st != ParticleType::kNumTypes) {
+                    b += had::baryon_number_of(st, 0);
+                    q += static_cast<int>(std::lrint(particle_def<real_t>(st).charge));
+                  }
+                }
+              }
+              if (b != o.target_a || q != o.target_z) { ++bad_ab; }
+            }
+            std::string isos;
+            for (const auto& kv : by_a) {
+              isos += " A=" + std::to_string(kv.first) + "x" + std::to_string(kv.second);
+            }
+            std::printf("   zero-store edge, %-20s store %.3g /mm, table 9 %.9f: ran %d (on Z=%d:"
+                        "%s), tripwire %d, other %d, edge flagged %d, A/Z unbalanced %d\n",
+                        ec.name, double(store), double(p9), ran, z0, isos.c_str(), tripwire,
+                        other, edge_flag, bad_ab);
+            if (store != 0) {
+              fail(std::string(ec.name) + ": the case is meant to have a zero store");
+            }
+            const bool g4 = (ec.mode == had::GammaGeneralProcess::kOn && p9 < 1.0);
+            if (g4 != ec.geant4_selects) {
+              fail(std::string(ec.name) + ": table 9 does not put this energy where the case "
+                   "says Geant4 can select photonNuclear");
+            }
+            if (ec.geant4_selects) {
+              if (ran != 200 || edge_flag != 200) {
+                fail(std::string(ec.name) + ": Geant4 runs the model on a zero store here and "
+                     "this did not, every time");
+              }
+              if (not_first != 0) {
+                fail(std::string(ec.name) + ": an all-zero SampleZandA must take the first "
+                     "element");
+              }
+              if (bad_ab != 0) { fail(std::string(ec.name) + ": baryon number or charge"); }
+              // The isotope: abundance alone over zero cross sections gives the first isotope
+              // (`temp[0] = 0 >= 0`), a positive isotope sum gives only open isotopes.
+              for (const auto& kv : by_a) {
+                double w = 0;
+                for (int j = 0; j < iso0.n; ++j) {
+                  if (iso0.a[j] == kv.first) {
+                    w = double(hxs::pxs_iso_xs<real_t>(ht.gamma, ec.e, std::log(ec.e), z0,
+                                                       iso0.a[j]).value);
+                  }
+                }
+                const bool ok = (iso_sum > 0) ? (w > 0) : (kv.first == iso0.a[0]);
+                if (!ok) {
+                  fail(std::string(ec.name) + ": isotope A=" + std::to_string(kv.first)
+                       + " is not the one SelectIsotope gives");
+                }
+              }
+            } else if (tripwire != 200 || edge_flag != 0) {
+              fail(std::string(ec.name) + ": a zero store where Geant4 cannot select "
+                   "photonNuclear must stay kEmExtraRefused's tripwire");
+            }
+          }
+        }
+      }
+
       // THE ISOTOPE DRAW, which the element chi-square above cannot see: `G4GammaNuclearXS::
       // SelectIsotope` weights the abundances by `IsoCrossSection` below 150 MeV and uses the
       // abundances alone above it, and the two lepton data sets always use the abundances alone
@@ -1036,6 +1226,179 @@ int main() {
     // Appended, so no P15 row moved: kRefusedEnergyScored is still the one before them.
     if (static_cast<int>(R::kPhotoNuclear) != static_cast<int>(R::kRefusedEnergyScored) + 1) {
       fail("the P19 rows were not appended after kRefusedEnergyScored");
+    }
+  }
+
+  // ============================================================================================
+  // 8. P21: table 9, against the running G4GammaGeneralProcess's own
+  // ============================================================================================
+  //
+  // `ref/gammagp/gammagp.cc` has the general process store its tables and prints them node by
+  // node, with Geant4's own `LogVectorValue` at a set of energies (`gammagp_tables.csv`). The
+  // port builds table 9 at upload from its own cross sections - `BuildPhysicsTable`'s formula,
+  // `(sigConv + sigComp + sigPE)/sum`, and 1.0 where `sigN` is 0 - and reads it with
+  // `had::gamma_general_p9`. Asserted:
+  //   * the 51 node energies to the bit - `G4PhysicsLogVector`'s constructor's arithmetic, which
+  //     the general process's tables 6-9 all share;
+  //   * WHERE the table is exactly 1.0, node for node - what makes the stepper's skip below the
+  //     threshold an identity and what puts the zero-store edge where Geant4 has it;
+  //   * that the photo-nuclear numerator is the SAME at every node: Geant4's sigN, recovered as
+  //     `(1 - P9) * T6` off its own two tables (table 6's node IS the node's sum), equals the
+  //     data store's sigN this port evaluates, to the rounding of recovering it. So the whole
+  //     difference in `1 - P9` is the EM sum's - Geant4 takes Compton's and conversion's off their
+  //     lambda tables through `GetLambda`, this port evaluates the models - and it is printed;
+  //   * and every interpolated value off by no more than its two nodes are, since `LogVectorValue`
+  //     is a convex combination of them.
+  //
+  // Printed and NOT asserted: Geant4's zone-1 and zone-2 totals (tables 2 and 6) against the
+  // port's directly evaluated sums - linear on 4.9% and 9.6% grids of lambda-table node sums,
+  // which this port does not read (docs/RISK.md has the measurement).
+  std::printf("== 8. table 9 against G4GammaGeneralProcess's own (gammagp_tables.csv) ==\n");
+  {
+    const std::vector<GpRow> rows = load_gp_tables(dir + "/gammagp_tables.csv");
+    const had::GammaGeneralTable9<real_t>* t9 = tables.p9;
+    if (rows.empty()) {
+      fail("cannot read " + dir + "/gammagp_tables.csv - run ref/oracle/run.bat");
+    } else if (t9 == nullptr) {
+      fail("the host tables carry no table 9");
+    } else {
+      constexpr int kN9 = had::kGammaGeneralZone2Nodes;
+      int grid_bad = 0, ones_bad = 0, nodes = 0, at_n = 0, mats_seen = 0, sign_bad = 0;
+      int at_bad = 0;
+      double worst_sign = 0, worst_node = 0, worst_at_excess = 0;
+      std::string worst_sign_where, worst_node_where;
+      for (int m = 0; m < data::kNumMaterials; ++m) {
+        int seen = 0, last_one_g4 = -1, last_one_port = -1;
+        bool leading_g4 = true, leading_port = true;
+        // Geant4's table 6 and table 9 at the nodes, and this port's node sums.
+        std::vector<double> t6(kN9, -1.0), g9(kN9, -1.0), rel_node(kN9, 0.0);
+        for (const GpRow& r : rows) {
+          if (r.mat != m || !r.node || r.index < 0 || r.index >= kN9) { continue; }
+          if (r.table >= 6 && r.table <= 9 && double(t9->e[r.index]) != r.e) { ++grid_bad; }
+          if (r.table == 6) { t6[r.index] = r.v; }
+          if (r.table == 9) { g9[r.index] = r.v; }
+        }
+        for (int j = 0; j < kN9; ++j) {
+          if (g9[j] < 0 || t6[j] < 0) { continue; }
+          ++seen;
+          ++nodes;
+          const double port = double(t9->v[m * kN9 + j]);
+          if ((port == 1.0) != (g9[j] == 1.0)) { ++ones_bad; }
+          if (leading_g4 && g9[j] == 1.0) { last_one_g4 = j; } else { leading_g4 = false; }
+          if (leading_port && port == 1.0) { last_one_port = j; } else { leading_port = false; }
+          if (!(g9[j] < 1.0)) { continue; }
+          // The numerator: Geant4's sigN off its own tables, against the store's here.
+          const real_t e = t9->e[j];
+          hxs::MaterialXs<real_t> mx{};
+          const double sn = double(had::emextra_xs_per_volume<real_t>(
+              tables, had::EmExtraProcess::kPhotonNuclear, m, mats[m], e, mx));
+          const double sn_g4 = (1.0 - g9[j]) * t6[j];
+          const double tol = 1e-12 + 4.5e-16 / (1.0 - g9[j]);
+          const double ds = std::fabs(sn_g4 - sn) / sn;
+          if (!(ds <= tol)) { ++sign_bad; }
+          if (ds / tol > worst_sign) {
+            worst_sign = ds / tol;
+            worst_sign_where = std::string(kMatName[m]) + " node " + std::to_string(j);
+          }
+          // What is left is the EM sum's: 1 - P9 here over Geant4's.
+          rel_node[j] = (1.0 - port) / (1.0 - g9[j]) - 1.0;
+          if (std::fabs(rel_node[j]) > worst_node) {
+            worst_node = std::fabs(rel_node[j]);
+            worst_node_where = std::string(kMatName[m]) + " node " + std::to_string(j) + " ("
+                               + std::to_string(double(e)) + " MeV)";
+          }
+        }
+        // Interpolated: within what its two nodes are off by.
+        for (const GpRow& r : rows) {
+          if (r.mat != m || r.node || r.table != 9) { continue; }
+          ++at_n;
+          const double port = double(had::gamma_general_p9<real_t>(*t9, m, r.e));
+          if ((port == 1.0) != (r.v == 1.0)) { ++ones_bad; }
+          if (!(r.v < 1.0) || !(r.e > double(t9->edge_min)) || !(r.e < double(t9->edge_max))) {
+            continue;
+          }
+          const int j = hxs::phys_vec_log_bin<real_t>(
+              hxs::PhysVec<real_t>{t9->e, t9->v + m * kN9, kN9, t9->edge_min, t9->edge_max,
+                                   t9->inv_dbin, t9->log_emin, hxs::kLogVector},
+              std::log(r.e));
+          const double bound = std::fmax(std::fabs(rel_node[j]), std::fabs(rel_node[j + 1]));
+          const double rel = std::fabs((1.0 - port) / (1.0 - r.v) - 1.0);
+          if (rel > bound + 1e-9) { ++at_bad; }
+          if (rel - bound > worst_at_excess) { worst_at_excess = rel - bound; }
+        }
+        if (seen > 0) { ++mats_seen; }
+        // The edge: table 9 is exactly 1 up to node `last_one`, and the material's photo-nuclear
+        // threshold - where the store opens - lies past it, inside the next bin.
+        const double th =
+            double(had::emextra_threshold<real_t>(tables, had::kGammaNuclearThreshold, m));
+        const double e_last = (last_one_g4 >= 0) ? double(t9->e[last_one_g4]) : 0.0;
+        std::printf("   %-22s table 9 is exactly 1 to node %d (%.4f MeV) in Geant4's and node %d "
+                    "in the port's; the store opens at %.4f MeV%s\n",
+                    kMatName[m], last_one_g4, e_last, last_one_port, th,
+                    (last_one_g4 >= 0 && th > e_last) ? " - the zero-store edge is between" : "");
+        if (last_one_g4 != last_one_port) {
+          fail(std::string(kMatName[m]) + ": table 9's leading ones end at a different node");
+        }
+        if (double(t9->threshold[m]) != e_last) {
+          fail(std::string(kMatName[m]) + ": the stepper's table-9 threshold is not the last "
+               "leading one's node");
+        }
+      }
+      std::printf("   %d materials, %d nodes and %d interpolated values: grid mismatches %d, "
+                  "exactly-1 mismatches %d; sigN off Geant4's tables against the store's: %d "
+                  "beyond the rounding of recovering it (worst %.2f of it, %s); interpolated "
+                  "values beyond their nodes' difference: %d (worst excess %.2g)\n",
+                  mats_seen, nodes, at_n, grid_bad, ones_bad, sign_bad, worst_sign,
+                  worst_sign_where.c_str(), at_bad, worst_at_excess);
+      std::printf("   1 - P9 here against Geant4's, at the nodes - the EM sums' difference: worst "
+                  "%.3g at %s\n", worst_node, worst_node_where.c_str());
+      if (mats_seen != data::kNumMaterials || nodes < data::kNumMaterials * kN9) {
+        fail("gammagp_tables.csv does not hold tables 6 and 9 for all four of B1's materials");
+      }
+      if (grid_bad != 0) { fail("the zone-2 node energies are not Geant4's to the bit"); }
+      if (ones_bad != 0) { fail("table 9 is exactly 1 at different places from Geant4's"); }
+      if (sign_bad != 0) {
+        fail("table 9's photo-nuclear numerator is not the data store's at every node");
+      }
+      if (at_bad != 0) {
+        fail("an interpolated 1 - P9 is further from Geant4's than its two nodes are");
+      }
+      // And a sanity bound on what the EM sums may differ by: Geant4's lambda tables are within
+      // half a per cent of the models (docs/RISK.md has where they are not exact), and V209's
+      // sigN/sum against this table was 16%.
+      if (!(worst_node < 5e-3)) { fail("1 - P9 is further from Geant4's than its EM sums are"); }
+
+      // For the record, not asserted: what Geant4's photon total is in zones 1 and 2 - tables 2
+      // and 6, linear between nodes 4.9% and 9.6% apart, whose node sums come off the EM
+      // processes' own lambda tables - against this port's direct evaluation of the models, at
+      // every energy the dump was asked for. One line a material: the extremes and where.
+      for (int m = 0; m < data::kNumMaterials; ++m) {
+        double lo = 1e9, hi = -1e9, e_lo = 0, e_hi = 0;
+        int n = 0;
+        for (const GpRow& r : rows) {
+          if (r.mat != m || r.node) { continue; }
+          const bool z1 = (r.table == 2 && r.e >= 0.15 && r.e < 1.0219978);
+          const bool z2 = (r.table == 6 && r.e >= 1.0219978 && r.e < 100.0);
+          if (!z1 && !z2) { continue; }
+          // Zone 1 sums Rayleigh and no conversion; zone 2 sums conversion and no Rayleigh.
+          const auto xs =
+              em::gamma_macroscopic_xs<real_t>(mats[m], r.e, &pe, &rt, true, true, true);
+          hxs::MaterialXs<real_t> mx{};
+          const double sn = z2 ? double(had::emextra_xs_per_volume<real_t>(
+                                     tables, had::EmExtraProcess::kPhotonNuclear, m, mats[m],
+                                     r.e, mx))
+                               : 0.0;
+          const double d = r.v / (double(xs.total) + sn) - 1.0;
+          ++n;
+          if (d < lo) { lo = d; e_lo = r.e; }
+          if (d > hi) { hi = d; e_hi = r.e; }
+        }
+        if (n > 0) {
+          std::printf("      %-22s Geant4's zone-1/2 total against the port's, %d energies: "
+                      "%+.3f%% at %.3g MeV to %+.3f%% at %.3g MeV\n", kMatName[m], n,
+                      100.0 * lo, e_lo, 100.0 * hi, e_hi);
+        }
+      }
     }
   }
 

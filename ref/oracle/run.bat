@@ -25,27 +25,28 @@ rem   gammagp_tables.csv   the general process's own tables for B1's four materi
 rem                        5, which it never builds), node by node as BuildPhysicsTable filled
 rem                        them, and LogVectorValue at a set of energies.
 rem                        tests\test_emextra_wiring.cu holds the port's table 9 to it.
-rem   gammagp_counts.csv   which sub-process took the first interaction of a million photons, at
-rem                        each point P21 was asked about: Rayleigh at 1.5 MeV in water and bone
-rem                        - FORTY million there, so that Geant4's side of that comparison is
-rem                        not its noise: its Rayleigh share would be 17,293 and 30,846 of them,
-rem                        and a million left its conversion count 2.1 sigma over its own table
-rem                        (docs/RISK.md V223) -
-rem                        table 9 at 20, 22 and 60 MeV in both and at every other point of
+rem   gammagp_counts.csv   which sub-process took the first interaction of FORTY MILLION photons,
+rem                        at each point P21 was asked about: Rayleigh at 1.5 MeV in water and
+rem                        bone, table 9 at 20, 22 and 60 MeV in both and at every other point of
 rem                        docs/RISK.md V209's table, and its zero-store edge at 11.2 MeV in
 rem                        water. tests\test_emextra_transport.cu runs the port's stepper at the
-rem                        same points against these counts.
+rem                        same points - a million photons - against these counts.
 rem
+rem Forty million and not one, so that Geant4's side of each comparison is not its noise: at a
+rem million the probe left its conversion count at 1.5 MeV in water 2.1 sigma over its own table,
+rem and its photonNuclear counts at the twelve points under their own table 9 by a mean of 1.0
+rem sigma; at forty million the twelve are their table's, z -1.84 to +1.20 and a mean of -0.02
+rem (docs/RISK.md V223, V224).
 rem One invocation per point, each from the probe's fixed seed, so that a point's count does not
-rem depend on which points were asked before it. Here and not after the `tables` exit below:
-rem both files take a few minutes, and a package regenerating the tables needs them as much as any.
+rem depend on which points were asked before it; about a minute a point. Here and not after the
+rem `tables` exit below: a package regenerating the tables needs these files as much as any.
 call "%~dp0..\gammagp\build.bat" || exit /b 1
 if exist "%~dp0gammagp_tables.csv" del /q "%~dp0gammagp_tables.csv"
 for %%M in (G4_AIR G4_WATER G4_A-150_TISSUE G4_BONE_COMPACT_ICRU) do (
   call "%~dp0..\gammagp\run.bat" %%M tables 0.2 0.3 0.5 0.8 1.0 1.2 1.5 2 2.5 3 3.9 4.5 5.4 6 7 8 10 11.2 12.5 14 17 20 21 22 23 25 30 40 60 80 99.9 >> "%~dp0gammagp_tables.csv" || exit /b 1
 )
 if exist "%~dp0gammagp_counts.csv" del /q "%~dp0gammagp_counts.csv"
-for %%P in ("G4_WATER 40000000 1.5" "G4_WATER 1000000 11.2" "G4_WATER 1000000 20" "G4_WATER 1000000 22" "G4_WATER 1000000 60" "G4_BONE_COMPACT_ICRU 40000000 1.5" "G4_BONE_COMPACT_ICRU 1000000 20" "G4_BONE_COMPACT_ICRU 1000000 22" "G4_BONE_COMPACT_ICRU 1000000 60" "G4_WATER 1000000 99.9" "G4_BONE_COMPACT_ICRU 1000000 99.9" "G4_AIR 1000000 17" "G4_AIR 1000000 6" "G4_A-150_TISSUE 1000000 60") do (
+for %%P in ("G4_WATER 40000000 1.5" "G4_WATER 40000000 11.2" "G4_WATER 40000000 20" "G4_WATER 40000000 22" "G4_WATER 40000000 60" "G4_BONE_COMPACT_ICRU 40000000 1.5" "G4_BONE_COMPACT_ICRU 40000000 20" "G4_BONE_COMPACT_ICRU 40000000 22" "G4_BONE_COMPACT_ICRU 40000000 60" "G4_WATER 40000000 99.9" "G4_BONE_COMPACT_ICRU 40000000 99.9" "G4_AIR 40000000 17" "G4_AIR 40000000 6" "G4_A-150_TISSUE 40000000 60") do (
   call "%~dp0..\gammagp\run.bat" %%~P >> "%~dp0gammagp_counts.csv" || exit /b 1
 )
 

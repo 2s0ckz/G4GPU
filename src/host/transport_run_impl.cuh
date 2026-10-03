@@ -1203,9 +1203,12 @@ __global__ void run_emextra_drain(Scene<real_t> scene, const had::PendingInterac
       proj.mass = track_mass;
       proj.kin_energy = p.ekin;
       proj.baryon_number = 0;
+      // `had.gamma_general`: an empty photon store is Geant4's table-9 edge with the general
+      // process on and a tripwire with it off (P21; `run_emextra`'s step 3).
       outc = had::run_emextra<real_t, kBucket>(proj, q.species, scene.materials[q.material],
                                                q.material, had.emextra, q.ekin_pre, *slot,
-                                               had.level_data, pool.fermi, rng, nullptr);
+                                               had.level_data, pool.fermi, rng, nullptr,
+                                               had.gamma_general);
     }
     if (outc.ran && slot != nullptr) {
       had::fill_result_into<real_t, had::kInteractionSecondaryCap, had::kInteractionSecondaryCap>(
@@ -1349,9 +1352,12 @@ __global__ void run_emextra_drain(Scene<real_t> scene, const had::PendingInterac
 // enforced by the object check, is the rule; the error message is not a safety net.
 //
 // A project with its own hook is unaffected. These declarations name StepTap<double> and
-// nothing else, so a different hook's specialisations still instantiate implicitly in the one
-// translation unit that instantiates the engine for it - see the note at the top of this file,
-// and tests/test_custom_hook.cu, which is that arrangement built and run by build_all.bat.
+// nothing else, so a different hook's specialisations would instantiate implicitly in the one
+// translation unit that instantiates the engine for it - which is why tools/gen_hook_units.ps1
+// READS this block, writes the same declarations for the project's hook type, and compiles each
+// kernel in a unit of its own (build_hook_engine.bat). Every line here becomes one of those, the
+// interaction kernels and the drains included since P21 (docs/RISK.md V210), so a kernel added
+// here is split for a hook project the day it is added.
 //
 // The three utility kernels - seed_from_primaries, count_species, scatter_species - are NOT
 // declared here. They are templated on real_t alone, hold no physics, and compile in seconds;
@@ -1760,7 +1766,24 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // which the photo- and electro-nuclear cross sections are exactly zero. Unconditional for
     // the reason the inelastic ones are: a photon beam's shower can reach the giant resonance,
     // and `Upload` cannot know whether it will. See host/hadronic_upload.cuh.
-    emextra_tables_ = upload_emextra_tables<real_t>(h_mats_.data(), n_materials_);
+    //
+    // P21: and G4GammaGeneralProcess's table 9, which is built from the photoelectric cross
+    // section as well as the store's - so the photoelectric data are read once more here, onto
+    // the HOST, for the scene's elements. A missing file is fatal exactly as it is above.
+    {
+      data::PhotoElectricTable<real_t> pe_host{};
+      std::vector<real_t> pe_e, pe_v;
+      if (!data::load_photoelectric<real_t>(default_phot_dir(), zs.data(),
+                                            static_cast<int>(zs.size()), pe_host, pe_e, pe_v)) {
+        fatal_missing_data("photoelectric (G4EMLOW epics2017/phot), for table 9",
+                           default_phot_dir());
+      }
+      pe_host.table_e = pe_e.data();
+      pe_host.table_v = pe_v.data();
+      pe_host.table_n = static_cast<int>(pe_e.size());
+      emextra_tables_ =
+          upload_emextra_tables<real_t>(h_mats_.data(), n_materials_, true, &pe_host);
+    }
 
     // P3's nuclear level data, which the capture sub-process walks. Unconditional by default
     // since P8d - `SetNuclearLevelData` has the reason, and it is Geant4's own answer
@@ -2178,15 +2201,17 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // gate's one photo-nuclear reaction raised the device stack into a card with 0.00 GB left
     // and the event loop went from 1.2 s to 13.5 s (docs/RISK.md V210).
     //
-    // What a launch actually queues is a Bernoulli sum: a photon's photo-nuclear probability is
-    // sigN/(total + sigN), 4.27% at its largest in B1's four materials (compact bone, 22 MeV)
-    // and under 5% at every giant-resonance peak of the periodic table, and a lepton's is
-    // about 1e-5 a step. So a tenth of the EM budget bounds the expectation twice over, the
-    // Chernoff tail past it is exp(-0.017 N) for a launch of N photons - below 1e-13 from
-    // N = 2,000 - and the 1,024-entry floor covers smaller launches. It is capped at 131,072
-    // entries (51.4 MB), which a launch reaches only by stepping three million photons at the
-    // resonance peak at once. `kInelasticQueueFull` + the SIZE row is still the tripwire, with the
-    // conservative disposal, and the run prints how deep the queue got.
+    // What a launch actually queues is a Bernoulli sum: a photon's photo-nuclear probability is,
+    // since P21, `1 - P9` of the general process's table 9 in zone 2 - 6.09% at its largest in
+    // B1's four materials, at the table's node at 23.07 MeV in air (5.08% in water, 4.43% in
+    // compact bone) - where P19 had sigN/(total + sigN), 4.27% at its largest (compact bone,
+    // 22 MeV); and a lepton's is about 1e-5 a step. So a tenth of the EM budget bounds the
+    // expectation 1.6 times over, the Chernoff tail past it is exp(-0.0095 N) for a launch of N
+    // photons all at that peak - below 1e-13 from N = 3,200 - and the 1,024-entry floor covers
+    // smaller launches many times over. It is capped at 131,072 entries (51.4 MB), which a
+    // launch reaches only by stepping two million photons at the resonance peak at once.
+    // `kInelasticQueueFull` + the SIZE row is still the tripwire, with the conservative
+    // disposal, and the run prints how deep the queue got.
     {
       constexpr long long kEmxQueueCap = 131072;
       const long long e_bound = pool_ / (10 * max_secondaries_per_step(kSpeciesGamma)) + 1024;
@@ -3222,6 +3247,16 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                   es[had::kEmxZone3Conversion],
                   emx_config_used_[3] ? "" : " [general process OFF]", es[kEmxQueueDepth],
                   emx_queue_capacity_, hadron_iterations_, iterations_run_);
+      // P21: the photo-nuclear interactions table 9 made where the store's cross section is
+      // exactly zero. Printed only when there were any: zero is the expectation of almost every
+      // run, and it is in the line above's photonNuclear count either way.
+      if (es[had::kEmxTable9Edge] > 0) {
+        std::printf("photo-/lepto-nuclear: %llu of the photonNuclear interactions were table 9's "
+                    "edge - selected by G4GammaGeneralProcess's linear table where the "
+                    "photo-nuclear cross section is exactly zero, and applied to the material's "
+                    "first element as Geant4's SampleZandA applies them\n",
+                    es[had::kEmxTable9Edge]);
+      }
       // THE STACK THE DRAINS RAN UNDER. They never raise it themselves; if the driver had to,
       // the limit says so - the same tripwire as P15's below, for a kernel that launches on
       // photon runs where nothing else would ever have raised it.

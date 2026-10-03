@@ -14277,3 +14277,211 @@ edited. What P21 adds to `ref/oracle/run.bat` is the probe's two files, `gammagp
 1.1914 sigma; batch and macro 0.05 sigma; B1 against B1mesh 0.01 sigma; every switch still
 changes the answer (Rayleigh off: -0.0038 pGy, -0.41% of the steps, at 200,000 events); the step
 hook; the three pools identical; two runs and the replay as Geant4's.
+
+### V224: in zone 2 the port's photon goes to a nucleus at table 9's rate - Geant4's own table to the 0.43% its EM lambda tables differ by - and on a zero cross section where that table says so
+
+docs/RISK.md V209, closed. `G4GammaGeneralProcess::BuildPhysicsTable` fills zone 2 (2 m_e to
+100 MeV) on `cVector = G4PhysicsLogVector(minEEEnergy, minMMEnergy, nHighE = 50, false)` - 51
+nodes, 9.6% apart, NO spline - and table 9 is `(sigConv + sigComp + sigPE)/sum` at each node,
+1.0 where `sigN` is 0 (G4GammaGeneralProcess.cc:366-393). `PostStepDoIt`'s case 2 draws one `q`
+and walks `q <= P7` conversion, `q <= P8` Compton, `q <= P9` photoelectric, and gives what is left,
+`q > P9`, to photonNuclear, P9 read through `LogVectorValue`: the bin from the logarithm, the
+value LINEAR in E between its two nodes. P19 applied `sigN/(total + sigN)` at the photon's energy
+instead, which across the giant resonance is up to 16% off what Geant4 applies.
+
+**WHAT THE PORT DOES NOW.** `had::GammaGeneralTable9` (`hadronic/emextra_wiring.cuh`) is that
+table for every material of the scene, built once at upload by `host::build_emextra_host_tables`:
+`gamma_general_zone2_grid` is `G4PhysicsLogVector`'s constructor's arithmetic for the 51 nodes
+(`G4Log`/`G4Exp` are `std::log`/`std::exp` on this platform), `gamma_general_table9_node` is the
+loop body in its order of operations, from this port's Compton, conversion and photoelectric
+cross sections and the data store's `sigN`. `had::gamma_general_p9` reads it with
+`xs/physics_vector.cuh`'s transcription of `LogVectorValue`. In zone 2 with the general process
+on, `step_gamma` sends the photon to a nucleus exactly when `q > P9(E)` - `case 2`'s comparison
+on the same uniform - and draws its length over `xs.total / P9`: the share of its interactions
+that go to a nucleus is `1 - P9` exactly, and the EM rate stays the models' (V225 says what
+Geant4's EM rate is instead). Below the material's last leading 1.0 node table 9 is exactly 1
+(`y1 + b*dy` with dy = 0), so the stepper tests that threshold inline and the step there is P1's
+to the bit; above it, one `__noinline__` table read replaces P19's per-step evaluation of the
+data store. Zone 3, and every energy with the general process off, are P19's, unchanged.
+
+**THE TABLE IS GEANT4'S.** `ref/gammagp` has the running process store its tables
+(`StorePhysicsTable`, binary, every double) and prints them node by node with
+`LogVectorValue` at 31 energies (`gammagp_tables.csv`); `tests/test_emextra_wiring.cu` section 8
+holds the port's table 9 to it, four materials:
+
+  * the 204 node energies equal Geant4's to the bit;
+  * table 9 is exactly 1.0 at the same nodes in both - to node 26 (11.0799 MeV) in water, 18
+    (5.3217 MeV) in compact bone, 14 (3.6881 MeV) in A-150, and nowhere in air, where argon's
+    cross section is open from 0.5 MeV;
+  * the numerator is the same: Geant4's sigN, recovered off its own tables as `(1 - P9) * T6`,
+    equals the data store's sigN that this port evaluates at every node, to the rounding of
+    recovering it (worst 0.24 of that rounding). So what is left between the two `1 - P9` is
+    the EM sums' - Geant4 takes Compton's and conversion's off their lambda tables through
+    `GetLambda`, this port evaluates the models - at worst 0.43%, at 1.2276 MeV in air, which is
+    Compton's own lambda table there (V225);
+  * the 124 interpolated values lie within what their two nodes differ by.
+
+**V209's TABLE, WITH AN AFTER COLUMN.** First interactions, `ref/gammagp` in the running
+Geant4 - FORTY million photons a point now (`ref/oracle/run.bat`; at a million its photonNuclear
+counts sat under their own table 9 by a mean of 1.0 sigma over these twelve points, one seed's
+sample, and at forty million they are the table's) - against `step_gamma` in a box nothing
+leaves, a million photons a point (`tests/test_emextra_transport.cu` section 7):
+
+| material | E (MeV) | sigN/sum (P19) | table 9's 1 - P9 | Geant4, counted | z, Geant4 against the table / against sigN/sum | **after: the port, counted** | **z, port against Geant4** |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| water | 20 | 1.4821e-2 | 1.6071e-2 | 1.6064e-2 | -0.38 / +65.1 | **1.6241e-2** | **+1.39** |
+| water | 22 | 4.4429e-2 | 3.4885e-2 | 3.4868e-2 | -0.59 / -293 | **3.5193e-2** | **+1.75** |
+| water | 60 | 4.4651e-3 | 4.6757e-3 | 4.6887e-3 | +1.20 / +21.2 | **4.719e-3** | **+0.44** |
+| water | 99.9 | 1.3662e-3 | 1.3519e-3 | 1.3509e-3 | -0.17 / -2.6 | **1.308e-3** | **-1.15** |
+| bone | 20 | 2.3846e-2 | 2.3459e-2 | 2.3445e-2 | -0.57 / -16.6 | **2.3415e-2** | **-0.20** |
+| bone | 22 | 4.2695e-2 | 3.5692e-2 | 3.5714e-2 | +0.74 / -218 | **3.5692e-2** | **-0.12** |
+| bone | 60 | 3.6798e-3 | 3.7992e-3 | 3.7813e-3 | -1.84 / +10.6 | **3.804e-3** | **+0.36** |
+| bone | 99.9 | 1.7353e-3 | 1.7284e-3 | 1.7340e-3 | +0.85 / -0.20 | **1.727e-3** | **-0.17** |
+| air | 17 | 1.0415e-2 | 9.5585e-3 | 9.5753e-3 | +1.09 / -52.3 | **9.606e-3** | **+0.31** |
+| air | 6 | 3.2284e-6 | 3.2880e-6 | 3.1e-6 | -0.57 / -0.36 | **5e-6** | **+1.04** |
+| A-150 | 60 | 4.7101e-3 | 4.8121e-3 | 4.8125e-3 | +0.04 / +9.46 | **4.792e-3** | **-0.29** |
+| water | 11.2 | **0** | 1.4896e-4 | 1.4878e-4 | -0.09 / - | **1.51e-4** | **+0.18** |
+
+"Table 9" here is GEANT4's own (`gammagp_tables.csv`), where V209's was rebuilt from this port's
+cross sections; the two agree to the EM sums' 0.43% of 1 - P9 (above). **Every point inside 2
+sigma**, the six the P21 brief named - 20, 22 and 60 MeV in water and bone - at +1.39, +1.75,
++0.44, -0.20, -0.12 and +0.36. Before, the port applied the sigN/sum column, from which Geant4's
+own counts at forty million part by up to 293 sigma. The EM processes are compared at the same
+points (section 7 prints them) and agree inside 3 sigma, with one thing to know when reading them:
+the port's points of one material share one random stream, so their Compton counts sit low
+together (water: -2.23 to -0.97 sigma at 11.2 to 99.9 MeV) and their conversion counts high by the
+same, on top of Geant4's EM fractions being its tables (V225).
+
+**TABLE 9's EDGE, AS GEANT4 HAS IT.** Between a material's last 1.0 node and its photo-nuclear
+threshold - 11.0799 to 11.499 MeV in water, 5.3217 to 5.500 in compact bone, 3.6881 to 4.000 in
+A-150; air has no leading 1.0 node, argon being open from 0.5 MeV - P9 interpolates below 1 where
+the data store's cross section is exactly 0, so Geant4 selects photonNuclear on a zero cross
+section: **5,951 of forty million first interactions at 11.2 MeV in water**, its table's 1.4896e-4
+to z -0.09, and the port 151 of a million (z +0.18). `SampleZandA` then walks all-zero partial
+sums - `cross = 0 <= xsecelm[0]`, the material's FIRST element, one uniform drawn - and
+`G4GammaNuclearXS::SelectIsotope` walks that element's isotope cross sections. `run_emextra` does
+the same when `had::gamma_general_selects_nuclear` says the general process could have made the
+choice (on, zone 2, table 9 below 1 at that energy), and books `kEmExtraRefused` for an empty
+store anywhere else, as before: water's 134 edge entries in section 5 all ran, on hydrogen - and
+of it deuterium every time, the only isotope whose cross section is positive at 11.2 MeV - with 0
+tripwires, and section 6 of the host test runs the three materials' edges 200 times each and
+keeps the tripwire with the general process off and below the edge. Each such interaction is
+counted (`kEmxTable9Edge`) and a run that has any prints the count: section 2's 138 of 138 queued
+at 11.2 MeV.
+
+**THE QUEUE.** A photon's photo-nuclear probability is now `1 - P9`, 6.09% at its largest in B1's
+four materials - the node at 23.07 MeV in air; 5.08% in water, 4.43% in compact bone - where P19
+sized `emx_queue` on sigN/(total + sigN)'s 4.27%. The tenth of the EM budget it reserves still
+bounds the expectation, 1.6 times over, and the Chernoff tail past it is exp(-0.0095 N) for a
+launch of N photons all at that peak; the comment in `transport_run_impl.cuh` says so.
+
+**FRAMES** (CUDA 12.9.86, -O3, against main's own build of b937164): `run_step_gamma` 3,840 bytes
+(3,856), the photo-nuclear drain 11,952 (11,936) and the lepto-nuclear 4,128 (4,112), both under
+the 16,384-byte stepping stack. `EmExtraTables` carries table 9 as one POINTER, because the
+wiring travels by value in every kernel and the hadron kernels copy it into their frames: for
+those 8 bytes fourteen kernels' frames moved by 16 either way and Bertini's by 48, the Binary
+cascade's to 90,592, still under V218's 98,304-byte reservation.
+
+**THE GATE**, five paired seeds against V223's build: B1's dose is the same in every printed digit
+at all five, the difference lines moving by -0.00009, -0.00044, -0.00023, -0.00059 and -0.00018
+pGy, with 1, 2, 3, 3 and 2 photo-nuclear interactions a run as before and no edge interaction; at
+6 MeV table 9 is exactly 1 in water, and its 1 - P9 is 0.912, 1.002 and 1.018 times sigN/sum in
+bone, A-150 and air, which moves -85 to +44 of 26 million track-steps. `b1_gpu_sched` is
+unchanged (427.699 pGy). `build_all.bat`'s gate section on these binaries passes, and so do the
+three `TESTS_SCENE` tests, which link this engine.
+
+**Tests, each assertion run once with its fix removed or its input perturbed:**
+
+  * `tests/test_emextra_wiring.cu` section 8, the table against Geant4's: the nodes computed by
+    `std::pow` instead of `G4PhysicsLogVector`'s `exp` - "grid mismatches 480", 1 failure; the
+    stepper's threshold one node late - 6 (the three materials' thresholds and their edges); the
+    table read at its lower node - 8 ("exactly-1 mismatches 3", 80 interpolated values beyond
+    their nodes, and the edges); the photon's store a part in 1e9 off - the numerator check, 130
+    nodes beyond the rounding of recovering it (worst 993 times it), with section 3's identities;
+    Compton 1% off in the node sums - "1 - P9 ... worst 0.0142", 1 failure.
+  * `tests/test_emextra_wiring.cu` section 6, the edge: `run_emextra` refusing every empty photon
+    store - 3 failures ("Geant4 runs the model on a zero store here and this did not"); the
+    general process's choice granted everywhere - 2 (the general process off, and below the edge).
+  * `tests/test_emextra_transport.cu`: the stepper back on P19's store ratio in zone 2 - 25
+    failures (11.49 MeV no longer differs from photonNuclear off; every table-9 cell's replay and
+    rate; the edge queues nothing; section 7's photonNuclear at +54.1 sigma at 22 MeV in water,
+    +36.8 in bone and -12.2 at the edge); the edge left uncounted - "0 table-9 edge interactions
+    counted for 138"; `run_emextra` refusing every empty photon store - 3 (the edge entries no
+    longer run on the first element).
+
+### V225: what is still not the general process - its zone totals and EM fractions are tables, off the models by up to 0.43% below 2 MeV (Compton's own lambda table) and 0.93% across the resonance; read for the totals alone they move B1's gate by +0.036%
+
+After V223 and V224 the port's photon sums what each zone of `G4GammaGeneralProcess` sums and goes
+to a nucleus at table 9's rate. What it still does not read are the general process's OTHER
+tables: the zone totals (`LambdaGeneral0/2/6/10`) and the EM selection fractions
+(`ProbGeneral1, 3, 4, 7, 8, 11-13`). Geant4's photon interacts at the table's total - in zones 1
+and 2 a LINEAR interpolant between nodes 4.9% and 9.6% apart - and splits its EM interactions by
+P7 and P8 the same way; this port interacts at its models' cross sections evaluated at the photon's
+energy (P1's choice, docs/PORTED.md 1.1) and splits by them. `ref/gammagp` prints, beside each
+table, each sub-process's own model (`G4EmCalculator`, `kind=model`) and what `BuildPhysicsTable`
+actually read for it, `GetLambda` off its own lambda tables (`kind=lambda`), so the difference can
+be taken apart. Geant4's zone-1 and zone-2 totals against the sum of its own models
+(`gammagp_tables.csv`, 31 energies):
+
+| E (MeV) | zone | water | compact bone | A-150 | air |
+|--:|:--:|--:|--:|--:|--:|
+| 0.2 | 1 | +0.010% | +0.017% | +0.007% | +0.011% |
+| 0.5 | 1 | +0.005% | +0.005% | +0.004% | +0.005% |
+| 0.8 | 1 | +0.087% | +0.086% | +0.088% | +0.087% |
+| 1.0 | 1 | -0.009% | -0.010% | -0.009% | -0.009% |
+| 1.2 | 2 | **-0.377%** | **-0.376%** | **-0.377%** | **-0.376%** |
+| 1.5 | 2 | -0.123% | -0.122% | -0.123% | -0.122% |
+| 2 | 2 | +0.081% | +0.081% | +0.081% | +0.081% |
+| 3 | 2 | +0.064% | +0.063% | +0.064% | +0.064% |
+| 4.5 | 2 | +0.059% | +0.057% | +0.061% | +0.059% |
+| 6 | 2 | +0.079% | +0.074% | +0.082% | +0.077% |
+| 8 | 2 | +0.087% | +0.079% | +0.092% | +0.084% |
+| 10 | 2 | +0.035% | +0.032% | +0.038% | +0.033% |
+| 14 | 2 | +0.098% | +0.039% | +0.075% | +0.072% |
+| 17 | 2 | -0.658% | -0.189% | +0.152% | -0.037% |
+| 20 | 2 | +0.177% | 0.000% | +0.431% | -0.016% |
+| 22 | 2 | **-0.929%** | -0.686% | -0.888% | -0.514% |
+| 25 | 2 | +0.069% | +0.162% | +0.467% | +0.131% |
+| 30 | 2 | +0.055% | +0.021% | +0.024% | -0.024% |
+| 60 | 2 | +0.032% | +0.015% | +0.026% | +0.049% |
+
+**TWO THINGS MAKE IT, AND THE LARGER IS NOT THE GENERAL PROCESS's.**
+
+  * **Its node sums are its sub-processes' lambda tables, and Compton's is 0.43% under its own
+    model at 1.1-1.2 MeV.** At the zone-2 nodes themselves, where the interpolation is exact, the
+    sum is -0.119% at 1.022 MeV, -0.424% at 1.120, -0.432% at 1.228, -0.158% at 1.345, -0.156% at
+    1.475, -0.229% at 1.616 and +0.002% at 5.83 and 6.39. Compton's `GetLambda` against
+    `G4KleinNishinaCompton` at the same energies: -0.119%, -0.427%, -0.433%, -0.158%, -0.157%,
+    -0.231%, and +0.002% at 5.83. `G4ComptonScattering` builds its table above 1 MeV as a "prim"
+    table of E*sigma (`SetMinKinEnergyPrim(1*CLHEP::MeV)`, `SetSplineFlag(true)`), and its spline
+    near its first node is that far off. That is present with the general process OFF as well -
+    `G4ComptonScattering::GetLambda` is what the separate process reads too - so it is a P1-level
+    difference this port has always had, and one a comparison against `G4EmCalculator` - which
+    computes the models - cannot see.
+  * **Between nodes, the linear interpolation**: +0.03% to +0.10% mid-bin from 2 to 14 MeV, the
+    convexity of a falling cross section (+0.079% at 6 MeV in water, the gate's primary). Across
+    the giant resonance sigN's structure is inside one bin: -0.93% at 22 MeV in water, -0.69% in
+    bone, +0.43% and +0.47% at 20 and 25 MeV in A-150.
+
+The EM fractions follow the same tables, and the running process follows them: at 1.5 MeV P7,
+conversion's share, is 1.6239e-3 in water and 2.2664e-3 in compact bone, 1.7% and 1.6% over the
+models', and forty million first interactions convert 1.6238e-3 and 2.2633e-3 of the time (z -0.03
+and -0.42 against the tables, +4.3 and +4.4 sigma against the models; V223).
+
+**WHY IT IS NOT DONE HERE, AND WHAT IT WOULD TAKE.** The brief bounded P21's first change to
+Rayleigh's share of the dose, and reading these tables moves every photon above 150 keV. Doing it
+EXACTLY is not table 6 alone: its nodes are the sub-processes' lambda tables, so it is
+`G4VEmProcess`'s lambda and prim tables for Compton, conversion and the photoelectric effect - with
+`G4PhysicsVector`'s spline (`FillSecondDerivatives`), which `xs/physics_vector.cuh` deliberately
+does not transcribe - then the general process's tables built from them, then `step_gamma` reading
+them: a different photon from P1's at every energy, in every run, with or without the general
+process.
+
+**WHAT THE TOTALS ARE WORTH ON B1's GATE: +0.036%.** As an experiment only, never committed:
+`step_gamma` drew its LENGTH from Geant4's own zone-1 and zone-2 totals for B1's four materials
+(tables 2 and 6 off `gammagp_tables.csv`, read as `LogVectorValue` reads them), its selection
+unchanged, on V223's build. At the five paired seeds the gate moved by +0.154, +0.204, +0.137,
++0.144 and +0.128 pGy - **+0.153 +/- 0.013 pGy, +0.036%** - with 7,396 to 10,480 more track-steps:
+a sixth of the gate's own sigma, and towards Geant4, whose reference the five seeds sit 0.58 pGy
+under on average. The EM fractions read as tables as well would add their own share, not measured
+here; at the gate's 6 MeV P7 and P8 are within 0.03% of the models' shares in all four materials.

@@ -396,6 +396,12 @@ struct EmExtraHostTables {
   std::vector<real_t> element_threshold;
   int n_mat = 0;
   bool gamma_ok = false;
+  /// P21: `G4GammaGeneralProcess`'s zone-2 table 9 - the 51 node energies, `n_mat` x 51 values
+  /// and the per-material energy at and below which it is exactly 1 - and the view of them.
+  /// Empty without the gamma data set or without the photoelectric table it is built from.
+  std::vector<real_t> p9_e, p9_v, p9_threshold;
+  had::GammaGeneralTable9<real_t> p9{};
+  bool p9_ok = false;
 
   /// A view whose pointers are HOST pointers, for host callers of the transport's functions.
   had::EmExtraTables<real_t> view() const {
@@ -406,6 +412,7 @@ struct EmExtraHostTables {
     v.threshold = threshold.empty() ? nullptr : threshold.data();
     v.n_materials = n_mat;
     v.element_threshold = element_threshold.empty() ? nullptr : element_threshold.data();
+    v.p9 = p9_ok ? &p9 : nullptr;
     return v;
   }
   EmExtraHostTables() = default;
@@ -418,15 +425,22 @@ struct EmExtraHostTables {
   }
 };
 
-/// Builds P13's three tables on the host and the thresholds of @p n_mat materials.
+/// Builds P13's three tables on the host and the thresholds of @p n_mat materials - and since
+/// P21 the general process's table 9 from @p pe.
 ///
 /// The muon's two tables are built with the mu- mass for both charges: `G4KokoulinMuonNuclearXS`
 /// reads `G4MuonMinus::MuonMinus()->GetPDGMass()` unconditionally (P13's note in
 /// `xs/kokoulin_muon_xs.cuh`), and one `G4MuonVDNuclearModel` serves both muons.
+///
+/// @param pe the photoelectric table with HOST pointers, for every element of @p mats. Table 9's
+///        nodes are `(sigConv + sigComp + sigPE)/sum`, so without it there is no table 9 - and
+///        then no photo-nuclear term in zone 2 at all, which this prints when the gamma data
+///        set is there to be missed.
 template <typename real_t>
 inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
                                       const data::Material<real_t>* mats, int n_mat,
-                                      bool verbose = true) {
+                                      bool verbose = true,
+                                      const data::PhotoElectricTable<real_t>* pe = nullptr) {
   namespace hxs = g4gpu::hadronic::xs;
   namespace ee = g4gpu::physics::hadronic::emextra;
   const std::string gdir = g4particlexs_subdir("gamma");
@@ -480,6 +494,48 @@ inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
     h.element_threshold[static_cast<std::size_t>(had::kElectroNuclearThreshold) * had::kEmExtraMaxZ
                         + z] = emextra_electro_element_threshold<real_t>(z);
   }
+
+  // P21: G4GammaGeneralProcess's table 9, at Geant4's own 51 nodes, from this port's cross
+  // sections - `had::gamma_general_table9_node` is the loop body of `BuildPhysicsTable`'s zone 2.
+  // Built from the HOST view above, so the store it evaluates is the one the drain will use.
+  h.p9_ok = false;
+  if (h.gamma_ok && pe != nullptr && n_mat > 0) {
+    h.p9_e.assign(had::kGammaGeneralZone2Nodes, real_t(0));
+    real_t inv_dbin = 0, log_emin = 0;
+    had::gamma_general_zone2_grid<real_t>(h.p9_e.data(), inv_dbin, log_emin);
+    h.p9_v.assign(static_cast<std::size_t>(n_mat) * had::kGammaGeneralZone2Nodes, real_t(1));
+    h.p9_threshold.assign(static_cast<std::size_t>(n_mat), real_t(0));
+    const had::EmExtraTables<real_t> hv = h.view();
+    for (int m = 0; m < n_mat; ++m) {
+      int last_one = -1;
+      bool leading = true;
+      for (int j = 0; j < had::kGammaGeneralZone2Nodes; ++j) {
+        const real_t v = had::gamma_general_table9_node<real_t>(hv, m, mats[m], *pe, h.p9_e[j]);
+        h.p9_v[static_cast<std::size_t>(m) * had::kGammaGeneralZone2Nodes + j] = v;
+        if (leading && v == real_t(1)) {
+          last_one = j;
+        } else {
+          leading = false;
+        }
+      }
+      // At and below the last leading 1.0 node the interpolant is 1.0 to the bit (`y1 + b*dy`
+      // with y1 = 1, dy = 0), and at or below `edgeMin` it is node 0's value: either way exactly
+      // 1, so the stepper may skip the evaluation there. Above it, it may not.
+      h.p9_threshold[m] = (last_one >= 0) ? h.p9_e[last_one] : real_t(0);
+    }
+    h.p9.e = h.p9_e.data();
+    h.p9.v = h.p9_v.data();
+    h.p9.threshold = h.p9_threshold.data();
+    h.p9.n_materials = n_mat;
+    h.p9.edge_min = h.p9_e[0];
+    h.p9.edge_max = h.p9_e[had::kGammaGeneralZone2Bins];
+    h.p9.inv_dbin = inv_dbin;
+    h.p9.log_emin = log_emin;
+    h.p9_ok = true;
+  } else if (h.gamma_ok && verbose) {
+    std::printf("photo-nuclear table 9: no photoelectric table was given to build it from - "
+                "the photon has no photo-nuclear term in zone 2 (2 m_e to 100 MeV)\n");
+  }
 }
 
 /// Everything `upload_emextra_tables` allocated.
@@ -492,15 +548,22 @@ struct EmExtraTableOwner {
 };
 
 /// Builds P13's tables on the host and uploads them, with the thresholds of the scene's
-/// materials. The view it returns travels in `had::HadronicWiring::emextra`.
+/// materials and, since P21, the general process's table 9. The view it returns travels in
+/// `had::HadronicWiring::emextra`.
+///
+/// @param pe the photoelectric table with HOST pointers (`data::load_photoelectric`'s), which
+///        table 9 is built from. Required for a photo-nuclear term in zone 2, and so not
+///        defaulted: a caller that forgot it would get a photon that silently never reacts
+///        below 100 MeV.
 template <typename real_t>
-inline EmExtraTableOwner<real_t> upload_emextra_tables(const data::Material<real_t>* mats,
-                                                        int n_mat, bool verbose = true) {
+inline EmExtraTableOwner<real_t> upload_emextra_tables(
+    const data::Material<real_t>* mats, int n_mat, bool verbose,
+    const data::PhotoElectricTable<real_t>* pe) {
   namespace hxs = g4gpu::hadronic::xs;
   namespace ee = g4gpu::physics::hadronic::emextra;
   EmExtraTableOwner<real_t> own;
   EmExtraHostTables<real_t> h;
-  build_emextra_host_tables<real_t>(h, mats, n_mat, verbose);
+  build_emextra_host_tables<real_t>(h, mats, n_mat, verbose, pe);
 
   auto up = [&own](const void* src, std::size_t n) -> void* {
     void* p = nullptr;
@@ -530,12 +593,23 @@ inline EmExtraTableOwner<real_t> upload_emextra_tables(const data::Material<real
     own.view.element_threshold = static_cast<const real_t*>(
         up(h.element_threshold.data(), h.element_threshold.size() * sizeof(real_t)));
   }
+  // P21: table 9 - its three arrays, then the struct pointing at the device copies.
+  if (h.p9_ok) {
+    had::GammaGeneralTable9<real_t> d9 = h.p9;
+    d9.e = static_cast<const real_t*>(up(h.p9_e.data(), h.p9_e.size() * sizeof(real_t)));
+    d9.v = static_cast<const real_t*>(up(h.p9_v.data(), h.p9_v.size() * sizeof(real_t)));
+    d9.threshold = static_cast<const real_t*>(
+        up(h.p9_threshold.data(), h.p9_threshold.size() * sizeof(real_t)));
+    own.view.p9 = static_cast<const had::GammaGeneralTable9<real_t>*>(up(&d9, sizeof(d9)));
+  }
 
   if (verbose) {
     std::printf("photo-/lepto-nuclear tables: %.2f MB - G4GammaNuclearXS %s, "
-                "G4KokoulinMuonNuclearXS %zu B, G4MuonVDNuclearModel sampling table %zu B\n",
+                "G4KokoulinMuonNuclearXS %zu B, G4MuonVDNuclearModel sampling table %zu B, "
+                "G4GammaGeneralProcess table 9 %s\n",
                 double(own.bytes) / 1048576.0, h.gamma_ok ? "loaded" : "ABSENT",
-                sizeof(hxs::kokoulin::KokoulinTable<real_t>), sizeof(ee::MuVdTable));
+                sizeof(hxs::kokoulin::KokoulinTable<real_t>), sizeof(ee::MuVdTable),
+                h.p9_ok ? "built" : "ABSENT");
   }
   return own;
 }

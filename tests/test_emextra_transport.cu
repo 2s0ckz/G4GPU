@@ -7,21 +7,22 @@
 //  1. BIT-IDENTITY WHERE THE PROCESS IS UNREACHABLE. One step of 20,000 photons through
 //     `step_gamma` against a step where photonNuclear is off or absent, every output field
 //     compared with tolerance ZERO: below 2 m_e in all four of B1's materials against the call
-//     with no wiring (the pre-P19 call), and in water up to oxygen's 11.499 MeV threshold - the
-//     6 MeV gamma gate's photons among them - against the wiring with photonNuclear off, since
-//     P21 took Rayleigh out of the general process's sum from 2 m_e up. The general process OFF
-//     against no wiring at every energy. The same for electrons and positrons in water below
-//     oxygen's electro-nuclear 7.296 MeV. And the converse, so that the comparison is shown able
-//     to fail: at 6 MeV in air, where argon is open from 0.5 MeV; the general process against no
-//     wiring above 2 m_e (Rayleigh); and a 50 MeV electron in water - the steps differ.
+//     with no wiring, and in water up to table 9's last 1.0 node (11.0799 MeV) - the 6 MeV gamma
+//     gate's photons among them - against the wiring with photonNuclear off, since P21 took
+//     Rayleigh out of the general process's sum from 2 m_e up. The general process OFF against
+//     no wiring at every energy. The same for electrons and positrons in water below oxygen's
+//     electro-nuclear 7.296 MeV. And the converse, so that the comparison is shown able to fail:
+//     at 6 MeV in air, where argon is open from 0.5 MeV; at 11.49 MeV in water, table 9's edge;
+//     the general process against no wiring above 2 m_e (Rayleigh); a 50 MeV electron in water.
 //  2. THE PHOTON'S SLICE, AT ITS RATE, IN EACH ZONE. First (a): the four processes' cross
 //     sections evaluated on the device equal the host's - the evaluation the host test holds
 //     against Geant4 - to 1e-12, at 1,760 points. Then a million first interactions per cell in
-//     a medium nothing leaves: in zone 2 the fraction queued as photo-nuclear against
-//     sigN/(total + sigN), binomially; at 100, 150 and 500 MeV with the general process ON,
-//     NONE queued, the zone-3 hand-offs counted at that fraction instead and the conversions at
-//     (pair + sigN)/(total + sigN) (docs/RISK.md V207); with it OFF, queued at
-//     sigN/(total + sigN) again; below 2 m_e, nothing.
+//     a medium nothing leaves: in zone 2 the fraction queued as photo-nuclear against table 9's
+//     1 - P9 (P21; docs/RISK.md V209), with every photon's step replayed on the host, and the
+//     zero-store edge at 11.2 MeV in water counted as `kEmxTable9Edge`; at 100, 150 and 500 MeV
+//     with the general process ON, NONE queued, the zone-3 hand-offs counted at sigN/(total +
+//     sigN) instead and the conversions at (pair + sigN)/(total + sigN) (V207); with it OFF,
+//     queued at sigN/(total + sigN); below 2 m_e, nothing.
 //  3. THE LEPTON'S LENGTH, AT ITS RATE. Electrons and positrons of 1 GeV and 200 MeV followed in
 //     bone until they stop or their step goes to the queue, the queued interactions counted
 //     against the Poisson mean sum(L_i * sigma(E_pre,i)) over the realised path - P15's
@@ -41,9 +42,10 @@
 //     with the conservative disposal, and nothing is lost silently.
 //  7. P21: THE PORT AGAINST THE RUNNING GEANT4. A million first interactions a point through
 //     `step_gamma`, counted by process against `ref/gammagp`'s count of the same in QBBC's
-//     G4GammaGeneralProcess: no Rayleigh at 1.5 MeV in water and in bone in either - forty
-//     million photons on Geant4's side there - every other process inside 3 sigma, and the
-//     general process off scattering by Rayleigh at its share.
+//     G4GammaGeneralProcess: no Rayleigh at 1.5 MeV in water and bone in either (forty million
+//     photons on Geant4's side there); photonNuclear at 20, 22 and 60 MeV in both and at the
+//     zero-store edge, 11.2 MeV in water; every process inside 3 sigma, and Geant4's counts
+//     shown to part from P19's sigN/sum by far more.
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -356,15 +358,38 @@ int main() {
   cudaMalloc(&d_mats, sizeof(mats));
   cudaMemcpy(d_mats, mats, sizeof(mats), cudaMemcpyHostToDevice);
 
+  // The photoelectric and Rayleigh tables on the HOST: the four EM cross sections exactly as
+  // `step_gamma` computes them, for the replays, and - since P21 - what table 9 is built from.
+  static data::PhotoElectricTable<real_t> pe{};
+  static std::vector<real_t> pte, ptv;
+  static data::RayleighTable<real_t> rt{};
+  static std::vector<real_t> rte, rtv;
+  {
+    const bool pe_ok = data::load_photoelectric<real_t>(host::default_phot_dir(), zs.data(),
+                                                        static_cast<int>(zs.size()), pe, pte, ptv);
+    const bool ra_ok = data::load_rayleigh<real_t>(host::default_rayl_dir(), zs.data(),
+                                                   static_cast<int>(zs.size()), rt, rte, rtv);
+    if (!pe_ok || !ra_ok) {
+      std::printf("  FAIL: could not load the photoelectric / Rayleigh tables on the host\n");
+      return 1;
+    }
+    pe.table_e = pte.data();
+    pe.table_v = ptv.data();
+    rt.table_e = rte.data();
+    rt.table_v = rtv.data();
+  }
+
   host::EmExtraTableOwner<real_t> emx =
-      host::upload_emextra_tables<real_t>(mats, data::kNumMaterials);
+      host::upload_emextra_tables<real_t>(mats, data::kNumMaterials, true, &pe);
   static host::EmExtraHostTables<real_t> hemx;
-  host::build_emextra_host_tables<real_t>(hemx, mats, data::kNumMaterials, false);
-  if (!emx.gamma_ok || !hemx.gamma_ok) {
-    std::printf("  FAIL: G4PARTICLEXS gamma data could not be resolved\n");
+  host::build_emextra_host_tables<real_t>(hemx, mats, data::kNumMaterials, false, &pe);
+  if (!emx.gamma_ok || !hemx.gamma_ok || emx.view.p9 == nullptr || !hemx.p9_ok) {
+    std::printf("  FAIL: G4PARTICLEXS gamma data could not be resolved, or table 9 not built\n");
     return 1;
   }
   const had::EmExtraTables<real_t> htab = hemx.view();
+  // Table 9 as the HOST reads it: the photo-nuclear share `step_gamma` applies in zone 2.
+  auto p9_at = [&](int m, real_t e) { return had::gamma_general_p9<real_t>(*htab.p9, m, e); };
 
   // One box per material, 10 km of half-width: nothing leaves on a first step - a 17 MeV photon
   // in air has a 420 m mean free path - and every lepton followed in section 3 stops inside it.
@@ -483,9 +508,9 @@ int main() {
         {0, data::kWater, 1.0, kNoWiring, true, "below 2 m_e"},
         {0, data::kA150Tissue, 0.9, kNoWiring, true, "below 2 m_e"},
         {0, data::kBoneCompact, 1.02, kNoWiring, true, "below 2 m_e"},
-        {0, data::kWater, 1.5, kNuclearOff, true, "zone 2, below oxygen's 11.499 MeV"},
-        {0, data::kWater, 6.0, kNuclearOff, true, "the gamma gate's energy, below 11.499"},
-        {0, data::kWater, 11.49, kNuclearOff, true, "a hair under 11.499"},
+        {0, data::kWater, 1.5, kNuclearOff, true, "zone 2, table 9 exactly 1 to 11.0799 MeV"},
+        {0, data::kWater, 6.0, kNuclearOff, true, "the gamma gate's energy, table 9 is 1"},
+        {0, data::kWater, 11.07, kNuclearOff, true, "a hair under table 9's last 1.0 node"},
         {0, data::kWater, 1.5, kNoGeneral, true, "general process off = the no-wiring photon"},
         {0, data::kWater, 6.0, kNoGeneral, true, "general process off = the no-wiring photon"},
         {0, data::kBoneCompact, 22.0, kNoGeneral, true, "... with photonNuclear off, at 22 MeV"},
@@ -493,6 +518,10 @@ int main() {
         {2, data::kWater, 7.2, kNoWiring, true, "below 7.296"},
         {0, data::kAir, 6.0, kNuclearOff, false,
          "argon is open from 0.5 MeV, so the steps MUST differ"},
+        // Table 9's edge: oxygen's store is still exactly 0 at 11.49 MeV, but the general
+        // process's linear table is below 1 from 11.0799, so the total - and every step - moves.
+        {0, data::kWater, 11.49, kNuclearOff, false,
+         "table 9's edge: store 0, table below 1, every step MUST differ"},
         {0, data::kWater, 1.5, kNoWiring, false,
          "Rayleigh left the sum at 2 m_e: every step MUST differ"},
         {0, data::kWater, 6.0, kNoWiring, false,
@@ -560,24 +589,6 @@ int main() {
   // ============================================================================================
   std::printf("-- 2. the photo-nuclear slice of the selection uniform --\n");
   {
-    // The four EM cross sections exactly as `step_gamma` computes them, on the host.
-    static data::PhotoElectricTable<real_t> pe{};
-    static std::vector<real_t> pte, ptv;
-    static data::RayleighTable<real_t> rt{};
-    static std::vector<real_t> rte, rtv;
-    const bool pe_ok = data::load_photoelectric<real_t>(host::default_phot_dir(), zs.data(),
-                                                        static_cast<int>(zs.size()), pe, pte, ptv);
-    const bool ra_ok = data::load_rayleigh<real_t>(host::default_rayl_dir(), zs.data(),
-                                                   static_cast<int>(zs.size()), rt, rte, rtv);
-    if (!pe_ok || !ra_ok) {
-      fail("could not load the photoelectric / Rayleigh tables on the host");
-      return 1;
-    }
-    pe.table_e = pte.data();
-    pe.table_v = ptv.data();
-    rt.table_e = rte.data();
-    rt.table_v = rtv.data();
-
     // (a) THE DEVICE'S CROSS SECTIONS ARE THE HOST'S. The host evaluation is the one
     // `tests/test_emextra_wiring.cu` compares with Geant4's element oracles; the stepper draws
     // from the device evaluation of the same functions on uploaded copies of the same tables.
@@ -641,17 +652,22 @@ int main() {
       if (positive < np / 2) { fail("too few positive cross sections for (a) to test anything"); }
     }
 
-    // `edge` marks a cell a hair above its material's threshold, where the photo-nuclear share
-    // is far too small for its rate to be counted and the per-photon replay is the whole test:
-    // water at 11.55 MeV, half a per cent above oxygen's 11.499, catches a stepper that skips
-    // the term a little too eagerly - its lengths then lack a sigN the host replay has.
-    struct Cell { int m; real_t e; bool general_on; bool edge; };
-    const Cell cells[] = {{data::kWater, 20.0, true, false},        {data::kBoneCompact, 22.0, true, false},
-                          {data::kAir, 17.0, true, false},          {data::kA150Tissue, 60.0, true, false},
-                          {data::kWater, 100.0, true, false},       {data::kWater, 150.0, true, false},
-                          {data::kBoneCompact, 500.0, true, false}, {data::kWater, 100.0, false, false},
-                          {data::kWater, 150.0, false, false},      {data::kBoneCompact, 500.0, false, false},
-                          {data::kAir, 0.8, true, false},           {data::kWater, 11.55, true, true}};
+    // ZONE 2 WITH THE GENERAL PROCESS ON IS TABLE 9 SINCE P21. There the slice is `q > P9(E)`
+    // and the length is drawn over `xs.total / P9` (stepper.cuh's note); everywhere else - zone 3,
+    // and every energy with the general process off - it is P19's `u2 * (total + sigN) >= total`
+    // with sigN from the store. Two zone-2 cells are on the table's edge in water: at 11.2 MeV the
+    // store is exactly 0 and table 9 is not, so every photon queued there is one Geant4 also puts
+    // on a nucleus with no cross section (126 of a million, counted), and every one is counted as
+    // `kEmxTable9Edge`; at 11.55 MeV, just above oxygen's 11.499, the store is open and the table
+    // still reads off its edge bin.
+    struct Cell { int m; real_t e; bool general_on; };
+    const Cell cells[] = {{data::kWater, 20.0, true},        {data::kBoneCompact, 22.0, true},
+                          {data::kAir, 17.0, true},          {data::kA150Tissue, 60.0, true},
+                          {data::kWater, 11.2, true},        {data::kWater, 11.55, true},
+                          {data::kWater, 100.0, true},       {data::kWater, 150.0, true},
+                          {data::kBoneCompact, 500.0, true}, {data::kWater, 100.0, false},
+                          {data::kWater, 150.0, false},      {data::kBoneCompact, 500.0, false},
+                          {data::kWater, 20.0, false},       {data::kAir, 0.8, true}};
     // A million photons a cell, in five launches of 200,000 with their own keys.
     constexpr int kN2 = 200000;
     constexpr int kBatches2 = 5;
@@ -665,21 +681,30 @@ int main() {
       // from 2 m_e up (P21).
       const auto xs =
           em::gamma_macroscopic_xs<real_t>(mats[c.m], c.e, &pe, &rt, true, true, c.general_on);
-      const real_t sn =
-          had::photon_nuclear_xs<real_t>(htab, h2.gamma_general, c.m, mats[c.m], c.e);
-      const real_t xs_total = (sn > real_t(0)) ? xs.total + sn : xs.total;
+      const bool zone2_on = c.general_on && c.e >= 1.0219978 && c.e < 100.0;
       const bool zone3_on = c.general_on && c.e >= 100.0;
+      // The term `step_gamma` adds: table 9's in zone 2 (general on), the store's elsewhere.
+      const real_t p9 = (zone2_on && c.e > htab.p9->threshold[c.m]) ? p9_at(c.m, c.e) : real_t(1);
+      const real_t sn = zone2_on ? real_t(0)
+                                 : had::photon_nuclear_xs<real_t>(htab, h2.gamma_general, c.m,
+                                                                  mats[c.m], c.e);
+      const real_t store = had::photon_nuclear_xs<real_t>(htab, had::GammaGeneralProcess::kOff,
+                                                          c.m, mats[c.m], c.e);
+      const real_t xs_total = (p9 < real_t(1)) ? xs.total / p9
+                              : (sn > real_t(0)) ? xs.total + sn
+                                                 : xs.total;
       // THE SELECTION REPLAYED, PHOTON BY PHOTON. Each photon's two uniforms are drawn again on
       // the host from its own key, and its step must be the one `G4GammaGeneralProcess` makes
-      // of them: the length `-log(u1)` over the SUMMED total (sigN in it), and the photo-nuclear
-      // branch exactly when `u2 * total` lands in the top slice - queued in zone 2 and with the
+      // of them: the length `-log(u1)` over the SUMMED total, and the photo-nuclear branch
+      // exactly when the second uniform lands in the top slice - queued in zone 2 and with the
       // general process off, a conversion in zone 3. A binomial count cannot tell the top slice
       // from the bottom one, or the second uniform from a third; this can, with no statistics.
       int q = 0, conv = 0, boundary = 0;
       long long in_slice = 0, wrong_branch = 0, wrong_length = 0;
       for (int batch = 0; batch < kBatches2; ++batch) {
         const unsigned int key0 = 0xABCD000u + 0x100000u * static_cast<unsigned>(c.m)
-                                  + static_cast<unsigned>(batch * kN2);
+                                  + static_cast<unsigned>(batch * kN2)
+                                  + (c.general_on ? 0u : 0x8000000u);
         k_gamma<<<blocks(kN2), kT>>>(s, h2, true, c.e, kN2, key0, d_out);
         if (!get(a, kN2)) { return 1; }
         for (int i = 0; i < kN2; ++i) {
@@ -690,7 +715,8 @@ int main() {
           Philox<real_t> rng(key0 + static_cast<unsigned>(i), 0u, 0u);
           const real_t u1 = rng.uniform();
           const real_t u2 = rng.uniform();
-          const bool top = (sn > real_t(0)) && (u2 * xs_total >= xs.total);
+          const bool top = (p9 < real_t(1)) ? (u2 > p9)
+                                            : ((sn > real_t(0)) && (u2 * xs_total >= xs.total));
           if (top) { ++in_slice; }
           const bool branch_ok = zone3_on ? (!a[i].queued && (!top || is_conv))
                                           : ((a[i].queued != 0) == top);
@@ -701,7 +727,7 @@ int main() {
       unsigned long long st[had::kNumEmxStats] = {};
       cudaMemcpy(st, d_stats, sizeof(st), cudaMemcpyDeviceToHost);
       const double tot = double(xs_total);
-      const double pn = double(sn) / tot;
+      const double pn = (p9 < real_t(1)) ? 1.0 - double(p9) : double(sn) / tot;
       std::printf("   %-6s %7.2f MeV general %-3s replayed: %lld in the top slice, %lld steps on "
                   "the wrong branch, %lld with a length not drawn from the summed total\n",
                   mat_name(c.m), c.e, c.general_on ? "on" : "off", in_slice, wrong_branch,
@@ -714,6 +740,12 @@ int main() {
         fail("%s %.1f MeV: %llu zone-3 hand-offs counted for %lld photons in the slice",
              mat_name(c.m), c.e, st[had::kEmxZone3Conversion], in_slice);
       }
+      // Table 9's edge, counted: every queued photon whose store is exactly zero, and no other.
+      const long long want_edge = (zone2_on && !(store > real_t(0))) ? q : 0;
+      if (static_cast<long long>(st[had::kEmxTable9Edge]) != want_edge) {
+        fail("%s %.2f MeV: %llu table-9 edge interactions counted for %lld", mat_name(c.m), c.e,
+             st[had::kEmxTable9Edge], want_edge);
+      }
       // Conditioned on an interaction inside the box, which is every photon here: the selection
       // uniform is independent of the length uniform, so the condition does not bias it.
       const double n = double(kBatches2 * kN2 - boundary);
@@ -723,12 +755,17 @@ int main() {
       };
       const double z_q = zscore(q, zone3_on ? 0.0 : pn);
       const double z_h = zscore(double(st[had::kEmxZone3Conversion]), zone3_on ? pn : 0.0);
-      const double p_conv = (double(xs.pair) + (zone3_on ? double(sn) : 0.0)) / tot;
+      // Conversion's share: its own cross section of the EM total, times the EM share - P9 in
+      // zone 2, the rest of the summed total elsewhere - plus the photo-nuclear slice in zone 3.
+      const double p_conv = (p9 < real_t(1))
+                                ? double(xs.pair) / double(xs.total) * double(p9)
+                                : (double(xs.pair) + (zone3_on ? double(sn) : 0.0)) / tot;
       const double z_c = zscore(conv, p_conv);
-      std::printf("   %-6s %7.2f MeV general %-3s sigN/tot %.4e | queued %5d (z %+5.2f) | "
-                  "zone-3 hand-offs %5llu (z %+5.2f) | conversions %6d (z %+5.2f)\n",
-                  mat_name(c.m), c.e, c.general_on ? "on" : "off", pn, q, z_q,
-                  st[had::kEmxZone3Conversion], z_h, conv, z_c);
+      std::printf("   %-6s %7.2f MeV general %-3s %s %.4e | queued %5d (z %+5.2f) | "
+                  "zone-3 hand-offs %5llu (z %+5.2f) | conversions %6d (z %+5.2f) | edge %llu\n",
+                  mat_name(c.m), c.e, c.general_on ? "on" : "off",
+                  (p9 < real_t(1)) ? "1-P9    " : "sigN/tot", pn, q, z_q,
+                  st[had::kEmxZone3Conversion], z_h, conv, z_c, st[had::kEmxTable9Edge]);
       if (boundary > kBatches2 * kN2 / 100) {
         fail("%d first steps reached the boundary; the box is meant to hold them", boundary);
       }
@@ -737,16 +774,15 @@ int main() {
              mat_name(c.m), c.general_on ? "on" : "off");
       }
       if (zone3_on && q != 0) { fail("zone 3 queued %d photo-nuclear interactions", q); }
-      if (c.e < 1.022 && (q != 0 || sn != 0)) {
+      if (c.e < 1.022 && (q != 0 || sn != 0 || p9 != 1)) {
         fail("a photon below 2 m_e has a photo-nuclear term");
       }
-      if (c.e > 1.022 && !c.edge && !(pn > 1e-4)) {
-        fail("%s %.1f MeV: sigN/tot %.3g is too small for this cell to test anything",
-             mat_name(c.m), c.e, pn);
+      if (c.e > 1.022 && !(pn > 1e-4)) {
+        fail("%s %.1f MeV: the photo-nuclear share %.3g is too small for this cell to test "
+             "anything", mat_name(c.m), c.e, pn);
       }
-      if (c.edge && !(sn > 0)) {
-        fail("%s %.2f MeV: the edge cell is not above the threshold, so it tests no skip",
-             mat_name(c.m), c.e);
+      if (c.e == real_t(11.2) && !(store == 0 && p9 < 1 && q > 0)) {
+        fail("water 11.2 MeV is meant to be table 9's edge: a zero store, P9 below 1, queued");
       }
     }
   }
@@ -916,10 +952,12 @@ int main() {
     k_gamma<<<blocks(kN5), kT>>>(s, had, true, e0, kN5, 0x7000u, d_out);
     if (!get(a, kN5)) { return 1; }
     const int nq = cursor();
-    const std::vector<had::PendingInteraction<real_t>> photon_q =
-        entries(std::min(nq, kQueueCap));
-    const double want_xs =
-        had::photon_nuclear_xs<real_t>(htab, had::GammaGeneralProcess::kOn, m, mats[m], e0);
+    std::vector<had::PendingInteraction<real_t>> photon_q = entries(std::min(nq, kQueueCap));
+    // The entry's cross section is the photo-nuclear part of the total its length was drawn from:
+    // in zone 2 since P21 the one table 9 implies, `xs.total/P9 - xs.total`.
+    const auto xs20 = em::gamma_macroscopic_xs<real_t>(mats[m], e0, &pe, &rt, true, true, true);
+    const real_t p9_20 = p9_at(m, e0);
+    const double want_xs = double(xs20.total / p9_20 - xs20.total);
     int bad = 0;
     for (const auto& e : photon_q) {
       // A photon has no along-step physics: the entry is the pre-step photon moved to the
@@ -940,6 +978,36 @@ int main() {
     if (nq == 0) { fail("no photo-nuclear entry to check"); }
     if (bad != 0) { fail("%d photo-nuclear entries do not carry what the drain reads", bad); }
 
+    // P21: TABLE 9's EDGE, queued by the device and run as the drain runs it. A million photons
+    // of 11.2 MeV in water, where the store is exactly 0 and the table is not; each entry the
+    // stepper queued goes through `run_emextra` with the general process on, and every one must
+    // RUN - on water's first element, as Geant4's all-zero `SampleZandA` leaves it - and not trip
+    // `kEmExtraRefused`, which is what P19's drain would have booked.
+    {
+      long long edge_q = 0;
+      std::vector<had::PendingInteraction<real_t>> edge_entries;
+      const Scene<real_t> sw = scene_for(data::kWater);
+      for (int batch = 0; batch < 5; ++batch) {
+        reset();
+        k_gamma<<<blocks(kN5), kT>>>(sw, had, true, 11.2, kN5,
+                                     0x7800000u + static_cast<unsigned>(batch * kN5), d_out);
+        if (!get(a, kN5)) { return 1; }
+        const int n = cursor();
+        edge_q += n;
+        for (const auto& e : entries(std::min(n, kQueueCap))) { edge_entries.push_back(e); }
+      }
+      std::printf("   g 11.2 MeV water (table 9's edge): %lld queued of 1,000,000\n", edge_q);
+      if (edge_q == 0) { fail("table 9's edge queued nothing at 11.2 MeV in water"); }
+      for (const auto& e : edge_entries) {
+        if (e.bucket != had::InteractionBucket::kPhotoNuclear || e.material != data::kWater
+            || !(e.xs_at_step_start > 0)) {
+          fail("an edge entry does not carry what the drain reads");
+          break;
+        }
+      }
+      photon_q.insert(photon_q.end(), edge_entries.begin(), edge_entries.end());
+    }
+
     const std::string pe_dir = host::g4photon_evaporation_dir();
     if (pe_dir.empty()) {
       fail("PhotonEvaporation not found");
@@ -953,7 +1021,10 @@ int main() {
       deex::build_fermi_pool(fps, lt);
       const deex::FermiPool fpool = fps.view();
       auto* slot = new had::InteractionSlot<real_t>();
-      struct Tally { int tried = 0, ran = 0, tripwire = 0, refused = 0, unbalanced = 0; };
+      struct Tally {
+        int tried = 0, ran = 0, tripwire = 0, refused = 0, unbalanced = 0;
+        int edge = 0, edge_first = 0;  ///< P21: zero-store entries, and those on element 0
+      };
       auto run_one = [&](const had::PendingInteraction<real_t>& e, Tally& t) {
         ++t.tried;
         hp::HadProjectile<real_t> proj;
@@ -986,6 +1057,10 @@ int main() {
           return;
         }
         ++t.ran;
+        if (dg.zero_store_edge) {
+          ++t.edge;
+          if (o.target_z == static_cast<int>(mats[e.material].z[0] + 0.5)) { ++t.edge_first; }
+        }
         had::fill_result_into<real_t, had::kInteractionSecondaryCap,
                               had::kInteractionSecondaryCap>(
             slot->fs, e.track.dir, real_t(0), real_t(1), had::emextra_has_at_rest(e.species),
@@ -1012,10 +1087,22 @@ int main() {
         if (!untouched && (bsum != o.target_a || qsum != want_q)) { ++t.unbalanced; }
       };
       Tally tp, tl;
-      for (std::size_t k = 0; k < photon_q.size() && k < 60; ++k) { run_one(photon_q[k], tp); }
+      // The first 60 photon entries (bone, 20 MeV) and every one of table 9's edge (water,
+      // 11.2 MeV), which `photon_q` carries after them.
+      int edge_entries = 0;
+      for (std::size_t k = 0; k < photon_q.size(); ++k) {
+        const bool is_edge = photon_q[k].material == data::kWater;
+        if (is_edge) { ++edge_entries; }
+        if (is_edge || k < 60) { run_one(photon_q[k], tp); }
+      }
       for (std::size_t k = 0; k < lepton_q.size() && k < 60; ++k) { run_one(lepton_q[k], tl); }
       std::printf("   photon entries: %d run, %d ran, %d refused by name, %d tripwires, %d "
-                  "unbalanced\n", tp.tried, tp.ran, tp.refused, tp.tripwire, tp.unbalanced);
+                  "unbalanced; table 9's edge: %d of %d ran on a zero store, %d of them on water's "
+                  "first element\n", tp.tried, tp.ran, tp.refused, tp.tripwire, tp.unbalanced,
+                  tp.edge, edge_entries, tp.edge_first);
+      if (tp.edge != edge_entries || tp.edge_first != edge_entries || edge_entries == 0) {
+        fail("table 9's edge entries did not all run on the first element as Geant4 runs them");
+      }
       std::printf("   lepton entries: %d run, %d ran, %d refused by name, %d tripwires, %d "
                   "unbalanced\n", tl.tried, tl.ran, tl.refused, tl.tripwire, tl.unbalanced);
       if (tp.tried == 0 || tl.tried == 0) { fail("no entries to run"); }
@@ -1126,8 +1213,19 @@ int main() {
       return -1;
     };
     struct Point { int m; real_t e; };
-    // P21 deliverable 1 (docs/RISK.md V208): no Rayleigh from 2 m_e up, in water and in bone.
-    const Point points[] = {{data::kWater, 1.5}, {data::kBoneCompact, 1.5}};
+    // No Rayleigh from 2 m_e up, in water and in bone (docs/RISK.md V208); table 9 at V209's
+    // points across the giant resonance; and its zero-store edge at 11.2 MeV in water.
+    const Point points[] = {{data::kWater, 1.5},         {data::kBoneCompact, 1.5},
+                            {data::kWater, 11.2},        {data::kWater, 20.0},
+                            {data::kWater, 22.0},        {data::kWater, 60.0},
+                            {data::kBoneCompact, 20.0},  {data::kBoneCompact, 22.0},
+                            {data::kBoneCompact, 60.0},  {data::kWater, 99.9},
+                            {data::kBoneCompact, 99.9},  {data::kAir, 17.0},
+                            {data::kAir, 6.0},           {data::kA150Tissue, 60.0}};
+    // THE COMPARISON CAN TELL THE TABLE FROM THE CROSS SECTION: Geant4's photonNuclear count
+    // against what P19's rule, sigN/(total + sigN), would have made of it. Collected over the
+    // points and required to fail somewhere by far - V209 measured -35 sigma at 22 MeV in bone.
+    double worst_old_rule = 0;
     const char* procs[5] = {"compt", "conv", "phot", "Rayl", "photonNuclear"};
     constexpr int kN7 = 200000;
     constexpr int kBatches7 = 5;
@@ -1186,23 +1284,32 @@ int main() {
       }
       std::printf("\n");
       if (boundary != 0) { fail("%lld first steps reached the boundary", boundary); }
+      {
+        long long n_g4 = 0;
+        const long long k_g4 = g4_count(pt.m, pt.e, "photonNuclear", n_g4);
+        const auto xs = em::gamma_macroscopic_xs<real_t>(mats[pt.m], pt.e, &pe, &rt, true, true,
+                                                         true);
+        const double sn = double(had::photon_nuclear_xs<real_t>(
+            htab, had::GammaGeneralProcess::kOff, pt.m, mats[pt.m], pt.e));
+        const double p_old = sn / (double(xs.total) + sn);
+        if (k_g4 >= 0 && p_old > 0) {
+          const double z_old = (double(k_g4) - n_g4 * p_old) / std::sqrt(n_g4 * p_old * (1 - p_old));
+          const double p_new = 1.0 - double(p9_at(pt.m, pt.e));
+          const double z_new = (double(k_g4) - n_g4 * p_new) / std::sqrt(n_g4 * p_new * (1 - p_new));
+          std::printf("      Geant4's photonNuclear %lld against table 9's 1 - P9 = %.4e: z %+.2f;"
+                      " against P19's sigN/(total + sigN) = %.4e: z %+.2f\n", k_g4, p_new, z_new,
+                      p_old, z_old);
+          if (std::fabs(z_old) > worst_old_rule) { worst_old_rule = std::fabs(z_old); }
+        }
+      }
+    }
+    if (worst_old_rule < 10.0) {
+      fail("Geant4's photo-nuclear counts never part from sigN/sum by 10 sigma - section 7 "
+           "could not tell table 9 from the cross section");
     }
     // The converse, so that the zero above is shown able to be anything else: the general process
     // OFF scatters by Rayleigh at 1.5 MeV in water, at its share of the summed cross section.
     {
-      static data::RayleighTable<real_t> rt7{};
-      static std::vector<real_t> rte7, rtv7;
-      static data::PhotoElectricTable<real_t> pe7{};
-      static std::vector<real_t> pte7, ptv7;
-      const bool ok = data::load_rayleigh<real_t>(host::default_rayl_dir(), zs.data(),
-                                                  static_cast<int>(zs.size()), rt7, rte7, rtv7)
-                      && data::load_photoelectric<real_t>(host::default_phot_dir(), zs.data(),
-                                                          static_cast<int>(zs.size()), pe7, pte7,
-                                                          ptv7);
-      rt7.table_e = rte7.data();
-      rt7.table_v = rtv7.data();
-      pe7.table_e = pte7.data();
-      pe7.table_v = ptv7.data();
       had::HadronicWiring<real_t> off = had;
       off.gamma_general = had::GammaGeneralProcess::kOff;
       const Scene<real_t> s = scene_for(data::kWater);
@@ -1216,13 +1323,12 @@ int main() {
           if (a[i].process == static_cast<int>(ProcessId::fRayleigh)) { ++rayl; }
         }
       }
-      const auto xs = em::gamma_macroscopic_xs<real_t>(mats[data::kWater], 1.5, &pe7, &rt7);
+      const auto xs = em::gamma_macroscopic_xs<real_t>(mats[data::kWater], 1.5, &pe, &rt);
       const double share = double(xs.rayleigh) / double(xs.total);
       const double n = double(kN7) * kBatches7;
       const double z = (double(rayl) - n * share) / std::sqrt(n * share * (1 - share));
       std::printf("   water   1.50 MeV, general process OFF: %lld Rayleigh scatters against its "
                   "share %.4e (z %+.2f)\n", rayl, share, z);
-      if (!ok) { fail("could not load the Rayleigh / photoelectric tables for the converse"); }
       if (rayl == 0 || std::fabs(z) > 5) {
         fail("with the general process off Rayleigh is not at its share - the zero above "
              "would be blind");

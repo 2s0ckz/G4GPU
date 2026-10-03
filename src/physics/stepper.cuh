@@ -305,10 +305,10 @@ __host__ __device__ __noinline__ Vec3<real_t> urban_hadron_scatter(
 ///        that ended it, the material, the safety. See core/step_report.cuh. Every field on it
 ///        is a value this function already computes; nothing here is calculated for its sake.
 /// @param had P19: the hadronic wiring, for `photonNuclear`, and since P21 for the state of
-///        `G4GammaGeneralProcess`, whose zones decide whether Rayleigh is in the sum. Null - the
-///        default, and what `src/host/b1_gpu_sched.cu` passes - is a photon with no nuclear
-///        process and no general process, Rayleigh at every energy: this function exactly as it
-///        was before P19.
+///        `G4GammaGeneralProcess` - whose zones decide whether Rayleigh is in the sum and whose
+///        table 9 is zone 2's photo-nuclear share. Null - the default, and what
+///        `src/host/b1_gpu_sched.cu` passes - is a photon with no nuclear process and no general
+///        process, Rayleigh at every energy: this function exactly as it was before P19.
 /// @param queued set true when the step ended in a photo-nuclear interaction, which goes to
 ///        `HadronicWiring::emx_queue` and is applied by `run_emextra_drain`. The caller must
 ///        then neither append the photon nor call the step hook - see `step_hadron`'s own
@@ -355,39 +355,59 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   const real_t d_boundary =
       geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
 
-  // ---- `photonNuclear`: the fifth term of `G4GammaGeneralProcess`'s total (P19).
+  // ---- `photonNuclear`: the fifth term of `G4GammaGeneralProcess`'s total (P19), and in zone 2
+  //      table 9's share of it (P21).
   //
   // NOT A FIFTH COMPETITOR WITH A LENGTH OF ITS OWN. Inside the general process there is one
   // summed cross section, one interaction length and one selection uniform, and this photon's
   // step already has exactly that shape - so the photo-nuclear term is added to the total the
   // length is drawn from and given the TOP slice of the selection uniform, which is where
-  // `G4GammaGeneralProcess::PostStepDoIt` puts it in zone 2 (`q > P9`). `had::photon_nuclear_xs`
-  // returns zero, having evaluated nothing, below 2 m_e (zones 0 and 1 sum no photo-nuclear
-  // term), at or below the material's threshold, and with the process off.
+  // `G4GammaGeneralProcess::PostStepDoIt` puts it in zone 2 (`q > P9`).
   //
-  // AND WHEN IT IS ZERO THIS STEP IS THE STEP WITHOUT IT, TO THE BIT. The total is the same
-  // double (`xs.total`, not `xs.total + 0`), the length uniform is the same draw, and the
-  // selection is P1's own `select_gamma_process` on the same uniform. No uniform is added
-  // anywhere. `tests/test_emextra_transport.cu` asserts it on the device for photons below
-  // 2 m_e and in water below oxygen's 11.5 MeV threshold - against the same wiring with
-  // photonNuclear off, since P21's Rayleigh (above) is the general process's too.
+  // ZONE 2, GENERAL PROCESS ON: TABLE 9, NOT THE CROSS SECTION (P21, docs/RISK.md V209). The
+  // general process applies `1 - P9(E)`, its 51-node linear table, where P19 applied
+  // sigN/(total + sigN) - 16% apart at 22 MeV in bone, and the running Geant4 follows the table.
+  // So the photon goes to a nucleus exactly when `q > P9`, the comparison `case 2` makes on the
+  // same uniform, and the photo-nuclear part of the total is the one the table implies,
+  // `xs.total/P9 - xs.total`: the EM rate stays the models' (P1's direct evaluation - Geant4's is
+  // its own tables 6-8, which this port does not read; docs/RISK.md has the measurement) and the
+  // nuclear share is Geant4's. Nothing is evaluated in the data store per step any more.
   //
-  // THE ZONE AND THE MATERIAL'S THRESHOLD ARE TESTED HERE, INLINE, and `photon_nuclear_xs`
-  // tests them again. That is not redundancy: the function is `__noinline__` (its reason is
-  // its own), and a call out of this 255-register kernel saves and restores what is live
-  // around it - which the first version paid on EVERY photon step, below 2 m_e included, for a
-  // function that returned zero without evaluating anything. B1's 6 MeV gate measured it
-  // (docs/RISK.md V210); the two comparisons below cost two loads and no call.
-  const real_t sig_n =
-      (had != nullptr && had->photon_nuclear
-       && had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
-              != had::GammaNuclearSlot::kAbsent
-       && p.ekin > had::emextra_threshold<real_t>(had->emextra, had::kGammaNuclearThreshold,
-                                                  mat))
-          ? had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general, mat,
-                                           s.materials[mat], p.ekin)
-          : real_t(0);
-  const real_t xs_total = (sig_n > real_t(0)) ? xs.total + sig_n : xs.total;
+  // ZONE 3, AND ANY ENERGY WITH THE GENERAL PROCESS OFF: P19's sigN from the store, its slice
+  // a conversion in zone 3 (V207) and photonNuclear with the process off.
+  //
+  // AND WHEN THERE IS NO TERM THIS STEP IS THE STEP WITHOUT ONE, TO THE BIT. The total is the
+  // same double (`xs.total`, not `xs.total + 0` nor `xs.total / 1`), the length uniform is the
+  // same draw, and the selection is P1's own `select_gamma_process` on the same uniform. No
+  // uniform is added anywhere. `tests/test_emextra_transport.cu` asserts it on the device below
+  // 2 m_e and in water below table 9's last 1.0 node, 11.08 MeV.
+  //
+  // THE ZONE AND THE THRESHOLDS ARE TESTED HERE, INLINE, before either `__noinline__` function
+  // is called. A call out of this 255-register kernel saves and restores what is live around it
+  // - which the first version of P19 paid on EVERY photon step, below 2 m_e included, for a
+  // function that returned zero without evaluating anything (docs/RISK.md V210). Table 9's
+  // threshold is its last leading node of exactly 1.0, the store's is the material's; below
+  // either, the answer is known without a call.
+  const had::GammaNuclearSlot gn_slot =
+      (had != nullptr && had->photon_nuclear)
+          ? had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
+          : had::GammaNuclearSlot::kAbsent;
+  real_t p9 = real_t(1);
+  real_t sig_n = real_t(0);
+  if (gn_slot == had::GammaNuclearSlot::kPhotoNuclear && general_on) {
+    const had::GammaGeneralTable9<real_t>* t9 = had->emextra.p9;
+    if (t9 != nullptr && p.ekin > t9->threshold[mat]) {
+      p9 = had::gamma_general_p9<real_t>(*t9, mat, p.ekin);
+    }
+  } else if (gn_slot != had::GammaNuclearSlot::kAbsent
+             && p.ekin > had::emextra_threshold<real_t>(had->emextra,
+                                                        had::kGammaNuclearThreshold, mat)) {
+    sig_n = had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general, mat,
+                                           s.materials[mat], p.ekin);
+  }
+  const real_t xs_total = (p9 < real_t(1))      ? xs.total / p9
+                          : (sig_n > real_t(0)) ? xs.total + sig_n
+                                                : xs.total;
 
   const real_t s_int =
       (xs_total > real_t(0)) ? -log(rng.uniform()) / xs_total : geom::kInfinity<real_t>();
@@ -416,15 +436,23 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   em.event = p.event;
 
   // THE SELECTION UNIFORM, drawn here exactly where P1 drew it. With no photo-nuclear term the
-  // walk is P1's function on it, unchanged; with one, the product is formed against the larger
-  // total and the EM walk is entered with it only if it falls below the EM share.
+  // walk is P1's function on it, unchanged; with one, the EM walk is entered with the product
+  // against the larger total only if `q` falls below the photo-nuclear slice.
   const real_t q_sel = rng.uniform();
-  em::GammaProcess proc;
-  if (sig_n > real_t(0)) {
+  em::GammaProcess proc = em::GammaProcess::kNone;
+  bool to_nucleus = false;
+  if (p9 < real_t(1)) {
+    // ZONE 2: `case 2` of `PostStepDoIt`, whose EM arms all test `q <= P7/P8/P9` and whose
+    // photonNuclear arm is what is left - `q > P9` - on the same `q`. Below it `q * xs_total` is
+    // `q/P9` of the EM total, uniform over it, and P1's walk splits it by the models' shares; a
+    // product a rounding residue over the EM total takes the walk's last slice
+    // (`em::gamma_walk_last_slice`).
+    to_nucleus = (q_sel > p9);
+    if (!to_nucleus) { proc = had::select_gamma_process_at<real_t>(xs, q_sel * xs_total); }
+  } else if (sig_n > real_t(0)) {
     const real_t r_sel = q_sel * xs_total;
     if (r_sel >= xs.total) {
-      if (had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
-          == had::GammaNuclearSlot::kConversion) {
+      if (gn_slot == had::GammaNuclearSlot::kConversion) {
         // ZONE 3: THE PHOTO-NUCLEAR SLICE BELONGS TO CONVERSION. Table 14 is table 13 in QBBC,
         // the photonNuclear branch tests the complement of the one that just failed, and the
         // `else` gives the share to `theConversionEE` (emextra_wiring.cuh's header; docs/RISK.md
@@ -437,38 +465,50 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
           atomicAdd(&had->emx_stats[had::kEmxZone3Conversion], 1ull);
         }
       } else {
-        // `G4GammaGeneralProcess::SelectHadProcess` - `photonNuclear`'s PostStepDoIt, which is
-        // `G4HadronicProcess`'s and runs in `run_emextra_drain` with the models (docs/RISK.md
-        // V188). The photon leaves this kernel through the queue; its energy and direction are
-        // unchanged, because a photon has no along-step physics.
-        rep.process = ProcessId::fPhotoNuclear;
-        const int slot = s.geometry.volumes[p.volume].score_index;
-        if (had->emx_queue.items != nullptr
-            && had::enqueue_interaction<real_t>(
-                   had->emx_queue, p, had::InteractionKind::kInelastic, ParticleType::kGamma,
-                   rep, edep, p.ekin, pos_before, p.dir, p.volume, slot,
-                   static_cast<unsigned int>(em.child_count), had::emitter_last_secondary(em),
-                   rep.status, sig_n, had::InteractionBucket::kPhotoNuclear,
-                   had::InelasticModel::kNone)) {
-          if (queued != nullptr) { *queued = true; }
-          return false;
-        }
-        // A full (or absent) queue - a tripwire, see `emx_queue`'s bound. The conservative
-        // disposal every P15 refusal uses: the photon is killed with its energy deposited here,
-        // and both halves of the ledger say so.
-        had::book_refusal<real_t>(had->books, had::HadronicRefusal::kInelasticQueueFull,
-                                  p.ekin);
-        had::book_refusal<real_t>(had->books, had::HadronicRefusal::kPhotoNuclear, p.ekin);
-        rep.status = StepStatus::fStopAndKill;
-        if (slot >= 0) { edep = p.ekin; }
-        p.ekin = real_t(0);
-        return false;
+        to_nucleus = true;  // the general process off: photonNuclear is a competitor
       }
     } else {
       proc = had::select_gamma_process_at<real_t>(xs, r_sel);
     }
   } else {
     proc = em::select_gamma_process(xs, q_sel);
+  }
+  if (to_nucleus) {
+    // `G4GammaGeneralProcess::SelectHadProcess` - `photonNuclear`'s PostStepDoIt, which is
+    // `G4HadronicProcess`'s and runs in `run_emextra_drain` with the models (docs/RISK.md V188).
+    // The photon leaves this kernel through the queue; its energy and direction are unchanged,
+    // because a photon has no along-step physics. The entry's cross section is the photo-nuclear
+    // part of the total its length was drawn from.
+    rep.process = ProcessId::fPhotoNuclear;
+    const int slot = s.geometry.volumes[p.volume].score_index;
+    const real_t sig_n_total = (p9 < real_t(1)) ? xs_total - xs.total : sig_n;
+    // TABLE 9's EDGE, counted (P21): a photon put on a nucleus at or below the material's
+    // threshold, where the data store's cross section is exactly zero and the general process's
+    // linear table is not. `run_emextra` applies it as Geant4 does, on the first element.
+    if (p9 < real_t(1) && had->emx_stats != nullptr
+        && !(p.ekin > had::emextra_threshold<real_t>(had->emextra, had::kGammaNuclearThreshold,
+                                                     mat))) {
+      atomicAdd(&had->emx_stats[had::kEmxTable9Edge], 1ull);
+    }
+    if (had->emx_queue.items != nullptr
+        && had::enqueue_interaction<real_t>(
+               had->emx_queue, p, had::InteractionKind::kInelastic, ParticleType::kGamma, rep,
+               edep, p.ekin, pos_before, p.dir, p.volume, slot,
+               static_cast<unsigned int>(em.child_count), had::emitter_last_secondary(em),
+               rep.status, sig_n_total, had::InteractionBucket::kPhotoNuclear,
+               had::InelasticModel::kNone)) {
+      if (queued != nullptr) { *queued = true; }
+      return false;
+    }
+    // A full (or absent) queue - a tripwire, see `emx_queue`'s bound. The conservative
+    // disposal every P15 refusal uses: the photon is killed with its energy deposited here,
+    // and both halves of the ledger say so.
+    had::book_refusal<real_t>(had->books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+    had::book_refusal<real_t>(had->books, had::HadronicRefusal::kPhotoNuclear, p.ekin);
+    rep.status = StepStatus::fStopAndKill;
+    if (slot >= 0) { edep = p.ekin; }
+    p.ekin = real_t(0);
+    return false;
   }
 
   if (proc == em::GammaProcess::kCompton) {
