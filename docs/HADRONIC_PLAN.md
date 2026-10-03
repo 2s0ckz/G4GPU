@@ -339,7 +339,7 @@ The point of every rule is that five people can work at once and the result can 
 1. **Branch and worktree.** Each package works in its own git worktree on `phys/<package>`,
    branched from `main`. Commit there in the house style (a title that is a finding, then the
    body; `Co-Authored-By` line). Do not push; the lead integrates.
-2. **Do not run `build_all.bat`.** It takes twenty minutes, it uses the one GPU, and it writes
+2. **Do not run `build_all.bat`.** It takes hours (and `build_extras.bat` two more), it uses the one GPU, and it writes
    its logs to fixed `%TEMP%\g4gpu_*.txt` names, so two at once corrupt each other. A package's
    tests are host-only translation units: build them with `build_one_test.bat <name>` or
    `nvcc -std=c++17 -O2 -I src -I src/g4 -o tests/<name>.exe tests/<name>.cu`, run them, and run
@@ -351,7 +351,7 @@ The point of every rule is that five people can work at once and the result can 
 4. **No approximations, no surrogates.** A sub-case that is not done is refused with a message
    that names it, at the point it would have been needed, and appears in PORTED.md as `P`.
    General across particle, energy and material: nothing hard-coded to a species or a Z.
-5. **Shared files are append-only, and only these**: your `TESTS` entry in `build_all.bat`;
+5. **Shared files are append-only, and only these**: your `TESTS` entry in `build_all.bat` (or in `build_extras.bat`, for a viewer, GUI or hook-project test);
    your rows in `docs/PORTED.md`; your `RISK.md` entry if you found something worth one. New
    code goes in the directories the package owns. Only P1 edits `stepper.cuh`,
    `transport_run*.cuh`, `particle.cuh`, `track_buffer.cuh`.
@@ -369,7 +369,7 @@ The point of every rule is that five people can work at once and the result can 
 ## 7. Integration
 
 Serial, by the lead, one branch at a time: merge (or cherry-pick, to keep `main` linear as it
-has always been), resolve the append-only conflicts, `build_all.bat`, commit to `main`. The
+has always been), resolve the append-only conflicts, `build_all.bat` (and `build_extras.bat` when the change touches what it covers), commit to `main`. The
 `%TEMP%` collision in `build_all.bat` is worth fixing before two integrations ever run at once -
 a per-invocation suffix on the log names - but it is not needed while integration is serial.
 

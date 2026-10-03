@@ -6,7 +6,8 @@
 #   tools\quick.ps1 -Check b1                                example B1 and the sigma gate
 #   tools\quick.ps1 -List                                    what is available
 #
-# `build_all.bat` is the only thing that decides whether the port is correct, and nothing here
+# `build_all.bat` is the only thing that decides whether the physics is correct (and
+# `build_extras.bat` the viewer, the GUI and the hook projects), and nothing here
 # replaces it - the last word before saying a change is good is still a full run. What this is
 # for is the fifty runs before that one, where a full pipeline spends nineteen of its twenty
 # minutes rebuilding the transport engine, the viewer, the GUI and example B1 to re-run a test
@@ -21,7 +22,8 @@
 #   * anything under src/host, src/render, src/builder or src/g4 - those are what the drivers
 #     are made of, and no test links them
 #   * any change that could alter a dose, because the sigma gates and the batch-vs-macro,
-#     mesh, per-voxel and generated-project comparisons live only in build_all.bat
+#     mesh and pool comparisons live only in build_all.bat, and the per-voxel and
+#     generated-project ones in build_extras.bat
 #   * before saying a piece of work is finished
 # Parameter sets, because ValueFromRemainingArguments does not take part in positional binding:
 # with a plain `[string]$Check` declared after it, position 0 belongs to $Check and
@@ -40,15 +42,23 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-# The pipeline's own list, read from build_all.bat rather than duplicated. A second copy of it
-# here would drift, and the failure mode is a test that quietly stops being run.
-$line = Select-String -Path "$root\build_all.bat" -Pattern '^set TESTS=' | Select-Object -First 1
-if (-not $line) { Write-Host "could not find 'set TESTS=' in build_all.bat"; exit 1 }
-$all = ($line.Line -replace '^set TESTS=', '').Trim() -split '\s+'
+# The pipeline's own lists, read from build_all.bat and build_extras.bat rather than duplicated.
+# A second copy here would drift, and the failure mode is a test that quietly stops being run.
+$all = @()
+$groups = @()
+foreach ($f in @("build_all.bat", "build_extras.bat")) {
+  $line = Select-String -Path "$root\$f" -Pattern '^set TESTS=' | Select-Object -First 1
+  if (-not $line) { Write-Host "could not find 'set TESTS=' in $f"; exit 1 }
+  $names = ($line.Line -replace '^set TESTS=', '').Trim() -split '\s+'
+  $groups += ,@($f, $names)
+  $all += $names
+}
 
 if ($List) {
-  Write-Host ("{0} tests in build_all.bat:" -f $all.Count)
-  $all | ForEach-Object { Write-Host "  $_" }
+  foreach ($g in $groups) {
+    Write-Host ("{0} tests in {1}:" -f $g[1].Count, $g[0])
+    $g[1] | ForEach-Object { Write-Host "  $_" }
+  }
   Write-Host ""
   Write-Host "checks: proton (depth-dose vs Geant4), b1 (example B1 + sigma gate), beams (B1 proton/alpha)"
   exit 0
