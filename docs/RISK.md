@@ -14059,3 +14059,92 @@ move is correct, not a bug, because those headers are in the list too; "stale: r
 is a different nvcc or different arch flags; `out\deps` and the `.d`/`.recipe` files beside the
 objects are build products and gitignored with `out\`. `tests built in` and `tests ran in` are
 wall time of the parallel stage, not CPU time.
+### V222: a custom-hook project compiled every hadronic model into its own object - split one kernel to a unit, each lands on the engine's own frame and the drains stop raising the stack
+
+docs/RISK.md V210's last finding, and the fix it named. `tools/gen_hook_units.ps1` read
+`extern template G4GPU_STEP_\w+(...)` out of `transport_run_impl.cuh` and nothing else, so P15's
+five `run_interaction` kernels and P19's two `run_emextra_drain` kernels - the seven that carry
+every hadronic model - had no unit and no declaration, and a project's
+`template class TransportEngine<double, Hook>` instantiated all seven into its own object: one
+module with FTFP, Bertini, the Binary cascade, the light-ion reaction, the at-rest chain and P13's
+two model families in it, the arrangement V189 measured to be past ptxas for the ENGINE. For the
+two hook projects in this repository (`tests/test_custom_hook.cu`, `QualityFactorScoring`;
+`tests/test_voxel_scoring.cu`, `CellTap`) it compiled - slowly, and with frames that were not the
+engine's, because ptxas allocates per module.
+
+**THE FIX.** Every `extern template G4GPU_*(...)` line of that block is a unit now, whatever its
+macro. A stepping kernel's is `hook_<kind>_<arg>.cu`, named as before; any other's is
+`hook_int_<kind>_<arg>.cu`, and `build_hook_engine.bat` compiles those ONE AT A TIME before the
+stepping units, as `build_engine.bat` compiles the engine's `transport_run_int_*.cu` (a family
+that is not a stepping kernel is treated as heavy without being named - the direction that cannot
+run the machine out of memory). The generated `hook_kernels.cuh` declares all 25. Two checks came
+with it, each inverted once:
+
+  * the generator COUNTS its parse against every `extern template` line of the header. Its old
+    pattern was right the day it was written and read past seven kernels without a word; put back
+    on a copy, the count stops it: "declares 25 kernels extern and this script parsed 18 of them".
+  * the custom-hook object gate (`build_all.bat`'s `:hook_object_gate` at b937164, which main has
+    since moved to `build_extras.bat` unchanged) greps the project's object for `run_interaction`
+    and `run_emextra` as well as `run_step_` - build_engine.bat's own pattern. Over main's
+    `out\test_custom_hook.obj`, the arrangement before this, the old pattern matches nothing and
+    the new one matches the seven.
+
+**BEFORE AND AFTER**, CUDA 12.9.86, every unit at ptxas's -O3, every ptxas sampled for its peak
+working set. "Before" is the lead's gate of 2026-10-03 (`build_extras.bat` at 1a1fb66, whose source
+is b937164's): the project object with all seven kernels in it took **49.4 minutes of ptxas at
+26.3 GB** for either project (26,289 and 26,307 MB; V210 measured 44.8 minutes at 20.7 GB under
+P19, and P20 has grown the Binary and light-ion kernels since). "Engine" is the same gate's
+`transport_run_int_*` units, the same source and the same night: the brief's measure, that the
+after must be the engine's per-unit numbers to within the hook's own cost.
+
+| kernel | engine unit: frame, ptxas, peak | before: frame in the project object (QFS / CellTap) | after: frame, ptxas, peak (QFS) | after (CellTap) |
+|---|--:|--:|--:|--:|
+| `run_interaction<kFtfp>` | 23,408 B, 244 s, 9.0 GB | 23,552 / 23,552 | 23,392 B, 232 s, 8.1 GB | 23,408 B, 241 s, 9.1 GB |
+| `run_interaction<kBertini>` | 39,472 B, 365 s, 11.3 GB | 39,136 / 39,152 | 39,472 B, 344 s, 11.9 GB | 39,472 B, 376 s, 11.3 GB |
+| `run_interaction<kBinary>` | 90,576 B, 592 s, 25.4 GB | **82,736 / 82,736** | 90,576 B, 572 s, 25.3 GB | 90,576 B, 572 s, 25.2 GB |
+| `run_interaction<kLightIon>` | 82,416 B, 578 s, 21.7 GB | 82,416 / 82,416 | 82,416 B, 552 s, 23.9 GB | 82,416 B, 549 s, 21.7 GB |
+| `run_interaction<kAtRest>` | 41,232 B, 748 s, 23.9 GB | 40,976 / 40,992 | 41,216 B, 711 s, 24.0 GB | 41,232 B, 752 s, 23.9 GB |
+| `run_emextra_drain<kPhotoNuclear>` | 11,936 B, 486 s, 15.7 GB | **18,672 / 18,704** | **11,920 B**, 463 s, 15.1 GB | **11,936 B**, 487 s, 15.7 GB |
+| `run_emextra_drain<kLeptoNuclear>` | 4,112 B, 430 s, 11.2 GB | **19,424 / 19,456** | **4,112 B**, 396 s, 11.2 GB | **4,112 B**, 426 s, 11.1 GB |
+
+Every after-frame is the engine's to the byte or 16 bytes under it; every ptxas time is inside 8% of
+the engine's (QualityFactorScoring's ran earlier the same evening and are 3-8% faster, CellTap's
+are inside 5%); and `cmem[0]` is the engine's 1,624 bytes less the hook's own cost: 1,616 for
+`QualityFactorScoring`, a 32-byte argument where `StepTap<double>` is 40, and 1,608 for `CellTap`'s
+24. (The CellTap Binary unit was compiled twice: the harness's two-hour limit on a background
+command killed the first build 503 s into it, and the table has the second, complete one.)
+
+**What that buys.**
+
+  * **The drains stop raising the stack.** Before, both projects printed "STACK: the driver raised
+    the device stack to 19424 B" (19456 B) "at a photo-/lepto-nuclear drain launch" on every run -
+    V196's driver raise, for the whole card, from a kernel that runs every iteration of a photon
+    run. After, the drains are under the 16,384-byte stepping stack and the line is gone.
+  * **The project's own object compiles in seconds**: it holds the five utility kernels and
+    nothing else, 20 s for either project against 50.5 and 49.8 minutes of nvcc in b937164's own
+    build. That object is the one a project's author rebuilds after every edit to their own code;
+    the hook archive is rebuilt only when the hook header or `src\` changes.
+  * **The kernels are the engine's.** The Binary cascade's frame is 90,576 bytes as it is in the
+    stock engine, so a hook project's first queued interaction reserves what the engine reserves,
+    98,304 bytes a thread (V218), where it reserved 90,112 under the module's 82,736.
+
+**What it costs.** A full build of a hook project is longer, not shorter, because each of the
+seven units costs what the engine's does and they run one after another: `QualityFactorScoring`
+61.6 minutes of serial heavy pass, then 10.2 for the eighteen stepping units six at a time, 72.3 in
+all; `CellTap` 74.4 (its pass in two pieces, above). Before, b937164's build_all took 10.2 + 50.5
+minutes and 9.8 + 49.8, with the stepping units and the project object in sequence. And the peak is
+not lower: one ptxas of the Binary unit reaches 25.3 GB, the module of all seven reached 26.3. One
+model to a unit is V189's rule for a different reason - four in one module was past ptxas - and
+what the split buys here is the engine's kernels, the engine's measurements true of them, and an
+object that compiles in seconds; not a cheaper build.
+
+**And the projects print the same results.** `test_voxel_scoring`: identical to the before run line
+for line - 147,315 steps over 2,000 events, 0 dropped, 4,155 ending at a cell boundary and 0
+through one, 64 of 64 cells, device 1398.866312 MeV against the host's exactly - except the drain
+frame line, which no longer says "ABOVE IT", and the STACK line, which is gone. `test_custom_hook`:
+the action's energy 9127.00073428261 MeV against the scorer's at rel 0, Qbar 1.4951 over 3,537
+scored events in [1, 5], 3,376 secondaries walked and reported - identical - with the same two
+lines changed, and the throttle's deferred-step count and launch count differing as they differ
+between any two runs of either binary (117,067 to 117,560 and 115 to 116 over three runs of the
+before binary; 117,062 to 117,333 and 115 to 116 of the after): the order in which tracks reach the
+pool is the atomic appends' and not the physics'.

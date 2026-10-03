@@ -36,6 +36,14 @@ rem
 rem The build_all.bat comment used to call that unit "the honest cost of the arrangement". It
 rem was honestly measured and it was never necessary: the hook is a template parameter like any
 rem other, so a project's kernels split exactly as the engine's do.
+rem
+rem AND SINCE P21 IT SPLITS ALL OF THEM, not only the stepping kernels: P15's five interaction
+rem kernels and P19's two drains are templated on the hook too, and they had been left in the
+rem project's own object - one module holding every hadronic model, which is what docs/RISK.md
+rem V189 split the ENGINE's interaction kernel to avoid. It compiled, in 49.4 minutes of ptxas at
+rem 26.3 GB on b937164's source (V210 measured 44.8 at 20.7 under P19), and gave the drains frames
+rem past the stepping stack. Those seven are compiled first and one at a time, below; the eighteen
+rem stepping kernels then go six at a time as before. docs/RISK.md V222 has the measurement.
 call "%~dp0setupenv.bat" || exit /b 1
 if "%~3"=="" (
   echo usage: build_hook_engine.bat ^<hook header^> ^<hook type^> ^<tag^>
@@ -91,7 +99,24 @@ if errorlevel 1 (
   exit /b 1
 )
 for /f "usebackq delims=" %%N in ("%HOOK_DIR%\gen.log") do set NUNITS=%%N
-echo compiling %NUNITS% kernels for %HOOK_TYPE%, 6 at a time
+
+rem THE KERNELS THAT CARRY THE HADRONIC MODELS FIRST, ONE AT A TIME, as build_engine.bat compiles
+rem the engine's own transport_run_int_*.cu and for its reason: one of them alone peaks at 8 to
+rem 25 GB of ptxas (docs/RISK.md V189, V222), so six at once is past a 64 GB machine that has
+rem other worktrees building on it. The generator names them hook_int_* - P15's five interaction
+rem kernels and P19's two drains, and anything else that is not a stepping kernel. Until P21 they
+rem had no unit here at all and were compiled into the project's own object, one module with
+rem every model in it: 49.4 minutes of ptxas at 26.3 GB, and drain frames past the stepping
+rem stack that made the driver raise the device stack at every run's first drain launch (V210).
+rem Measured on the two projects in this repository, each of these units compiles to the frame
+rem the engine's own unit of the same kernel has, to the byte or 16 under it (V222).
+set NHEAVY=0
+for %%U in ("%HOOK_DIR%\hook_int_*.cu") do set /a NHEAVY+=1
+echo compiling %NUNITS% kernels for %HOOK_TYPE%: the %NHEAVY% interaction units one at a time, then the rest 6 at a time
+for %%U in ("%HOOK_DIR%\hook_int_*.cu") do (
+  echo   %%~nU
+  call "%~dp0build_engine_unit.bat" "%%~fU" "%HOOK_DIR%"
+)
 
 set CAP=6
 call :launch_units
@@ -161,13 +186,22 @@ rem G4GPU_HOOK_LIB and G4GPU_HOOK_INC on the way out, which are the two variable
 rem came for. `cmd /c call "..."` and not `start /b "the.bat" ...` because when the string after
 rem /c begins with a quote cmd strips the first and last quote of the whole line; starting it
 rem with `call` means it does not begin with one.
+rem
+rem A unit whose .rc already exists was compiled by the serial pass above and is skipped here,
+rem and `BASE` is how many of those there were - build_engine.bat's arrangement, for its reason:
+rem without it `await_slot` counts the serial pass's units as this pass's finished ones,
+rem `INFLIGHT` goes negative and every stepping unit starts at once.
 :launch_units
 setlocal EnableDelayedExpansion
+set BASE=0
+for %%R in ("%HOOK_DIR%\*.rc") do set /a BASE+=1
 set LAUNCHED=0
 for %%U in ("%HOOK_DIR%\*.cu") do (
-  call :await_slot
-  start "" /b cmd /c call "%~dp0build_engine_unit.bat" "%%~fU" "%HOOK_DIR%"
-  set /a LAUNCHED+=1
+  if not exist "%HOOK_DIR%\%%~nU.rc" (
+    call :await_slot
+    start "" /b cmd /c call "%~dp0build_engine_unit.bat" "%%~fU" "%HOOK_DIR%"
+    set /a LAUNCHED+=1
+  )
 )
 endlocal
 exit /b 0
@@ -175,7 +209,7 @@ exit /b 0
 :await_slot
 set DONE=0
 for %%R in ("%HOOK_DIR%\*.rc") do set /a DONE+=1
-set /a INFLIGHT=!LAUNCHED!-!DONE!
+set /a INFLIGHT=!LAUNCHED!-!DONE!+!BASE!
 if !INFLIGHT! LSS %CAP% exit /b 0
 ping -n 3 127.0.0.1 >nul
 goto await_slot

@@ -1835,8 +1835,12 @@ kinetic energy on it) and the WHY rows `kPhotoNuclearQgs`, `kLeptoNuclearFtf` an
 it for them; they run in P15's slot pool, which does not grow. `run_step_gamma` 3,856 bytes against
 main's 3,776 and `run_step_lepton` 4,976 against 4,928, their wiring `__grid_constant__`. The
 lepto-nuclear drain's constant bank 2 is 65,532 of 65,536 bytes. In a custom-hook project the two drains
-compile into the project's own object with P15's five, at 18.7 and 19.9 kB - past the stepping
-stack, so the driver raises it at the first drain launch (V210 has the numbers and the fix).
+compiled into the project's own object with P15's five until P21, at 18.7 and 19.4 kB - past the
+stepping stack, so the driver raised it at the first drain launch (V210). Since P21
+`tools/gen_hook_units.ps1` makes every kernel of the engine's `extern template` block a unit of
+the hook's own, the seven that carry models compiled one at a time as the engine's are, and each
+lands on the engine's frame - the drains at 11,920 and 4,112 bytes for `QualityFactorScoring`,
+11,936 and 4,112 for `CellTap` - and the project's own object compiles in 20 s (docs/RISK.md V222).
 
 **And three things measured in the general process that this package did not change** - docs/RISK.md
 V208 (no Rayleigh scattering above 2 m_e there; the port's photon has it), V209 (the photo-nuclear
