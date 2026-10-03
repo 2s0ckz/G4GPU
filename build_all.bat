@@ -16,8 +16,9 @@ rem src/host/g4view.cu, src/host/g4builder.cu, tools/gen_hook_units.ps1 or build
 rem needs build_extras.bat green as well.
 rem
 rem For iterating, not for deciding: tools\quick.ps1 builds and runs a named subset in seconds
-rem rather than the hours this takes, most of which is rebuilding the transport engine - one
-rem kernel per translation unit, docs/RISK.md V65, V189 - and compiling a hundred tests.
+rem rather than the 33 minutes this takes when nothing changed, or the two hours when the engine
+rem rebuilds - one kernel per translation unit, docs/RISK.md V65, V189 - which since V221 happens
+rem only to the units and tests whose own dependency files say so.
 rem
 rem   tools\quick.ps1 hadron          every test matching *hadron*
 rem   tools\quick.ps1 -Check proton   the proton depth-dose comparison alone

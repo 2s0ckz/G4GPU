@@ -339,7 +339,7 @@ The point of every rule is that five people can work at once and the result can 
 1. **Branch and worktree.** Each package works in its own git worktree on `phys/<package>`,
    branched from `main`. Commit there in the house style (a title that is a finding, then the
    body; `Co-Authored-By` line). Do not push; the lead integrates.
-2. **Do not run `build_all.bat`.** It takes hours (and `build_extras.bat` two more), it uses the one GPU, and it writes
+2. **Do not run `build_all.bat`.** It takes 33 minutes when nothing changed and about two hours when the engine rebuilds (and `build_extras.bat` over two more), it uses the one GPU, and it writes
    its logs to fixed `%TEMP%\g4gpu_*.txt` names, so two at once corrupt each other. A package's
    tests are host-only translation units: build them with `build_one_test.bat <name>` or
    `nvcc -std=c++17 -O2 -I src -I src/g4 -o tests/<name>.exe tests/<name>.cu`, run them, and run

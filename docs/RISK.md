@@ -13927,3 +13927,135 @@ Geant4's order - refresh first, then `previousStepSize/currentInteractionLength`
 today (wiring.cuh's note), so it is a `TrackState` field and a re-measurement of every neutron
 row. It is named here and in docs/PORTED.md 2.1.8's row, which is P since P20: the port's
 neutron is Geant4's with the general process OFF, at every energy measured.
+
+### V220: the full gate had grown to five and a half hours, two of them compiling two user projects, and none of that was physics - so build_all.bat decides the physics now and build_extras.bat the rest
+
+THE MEASUREMENT, from the products' file times of the P20 integration gate (ba55, 2026-10-02,
+main b937164), since the log carries no clock:
+
+| stage | time |
+|---|--:|
+| the engine's 23 kernel units (seven interaction units, sixteen stepping units; ptxas up to 20 GB) | 78 min |
+| the viewer, the GUI, the dose drivers and example B1 | 14 min |
+| compiling 97 tests, one after another | 43 min |
+| the two custom-hook PROJECTS: 18 per-hook stepping kernels each, then one ptxas of the project object of about 45 min each (V210) | 2 h 0 min |
+| running the tests, one after another | 35 min |
+| the dose gates, the selftests, the generated project, the depth-dose comparison | 25 min |
+| **total** (14:17 to 19:48) | **5 h 31 min** |
+
+That is longer than the two hours the lead's tool allows a background command, which killed the
+first attempt (ba55) in the middle of the engine build; the chain runs detached since, from a
+batch wrapper started with `Start-Process`, and the wrapper stamps each stage's start and exit
+with `%TIME%` so the next measurement needs no file times.
+
+THE DECISION is the user's (2026-10-02): the gate that decides a physics commit should contain the
+physics. build_all.bat keeps the engine, g4dose, b1_gpu_sched, example B1 and proton_depth; 92
+tests - every cross section, model, final state, table, material, geometry, navigation and
+transport test, the nine that launch kernels among them; the two 2M-event dose gates and their
+sigma check; batch-vs-macro; the mesh transport comparison; "every physics switch changes the
+answer"; "the step hook sees every step"; the pool-size and run-sequence equivalences; and the
+proton depth-dose comparison. build_extras.bat, new, took VERBATIM what moved - the blocks were
+cut from build_all.bat by line range, with their own running-exe check, RUNID, NV/NVG and the
+`:hook_object_gate` label: `build_view.bat` and `build_gui.bat`; `test_ui_layout`,
+`test_float_render`, `test_wireframe`, `test_render_layers` (render and UI), `test_voxel_import`
+(the builder's importer), `test_trajectory` (the render's trajectory store), `test_voxel_materials`
+and `test_voxel_layers` (the builder's voxel scenes through the stock engine), the two hook
+projects `test_custom_hook` and `test_voxel_scoring`; example B1's vis macros and their seven
+pictures; the viewer selftest; the builder selftest with its forty-odd `findstr` proofs; the
+render-off-the-UI-frame benchmark; and the generated project's file set, build, run and
+comparison. Four things that are not physics stayed on purpose, because they are the engine's
+own or every validation's: `test_track_arena` (core/track_buffer.cuh's carving arithmetic),
+`test_gun_position` (the gun API every dual-build run goes through), `test_step_hook` with
+`-verify-step-hook` (the loop invariant that every real step is handed over exactly once), and
+`test_mesh` with the solid-against-mesh comparison (geometry, like every other solid). 92 and 10
+of the 102. `tools/quick.ps1` reads both `TESTS` lines.
+
+THE RESULT, gate ba56 on 1a1fb66 (2026-10-02 21:59 to 2026-10-03 03:15): build_all.bat 2 h 57
+min, build_extras.bat 2 h 19 min, both green. The physics half paid a full engine rebuild it did
+not need: fast-forwarding main to the P20 integration had gone through a checkout of the OLD tree
+and back, which gave P20's headers fresh timestamps, and the engine's freshness test then was
+"any header under src newer than the archive" - all twenty-three units, 78 minutes, for no
+change. main's ref is moved with `git branch -f` from the integration branch now, with no
+checkout of a different tree in between.
+
+THE RULE this adds: build_extras.bat must be green before a change lands under `src/render`,
+`src/builder`, `src/scenes`, `src/host/g4view.cu`, `src/host/g4builder.cu`,
+`tools/gen_hook_units.ps1`, `build_hook_engine.bat` or `build_vis.bat`, and before any change to
+the kernels, the drains or the interaction units a hook project instantiates - build_all.bat
+proves the stock engine, build_extras.bat proves a user's. README's pipeline section and
+HADRONIC_PLAN rules 2, 5 and 7 say so.
+
+WHAT IT DOES NOT FIX: the physics half's three hours are a from-scratch build of everything,
+every time, with the engine's all-or-nothing freshness test on top. That is V221.
+
+### V221: the physics gate rebuilt everything every time; with nvcc's own dependency files it is 33 minutes when nothing changed, and what remains is the engine's header layout
+
+BEFORE (V220's table, the physics half of ba55/ba56): the engine's 23 kernel units rebuilt whenever
+any header under src was newer than the archive (78 min), all 97 tests recompiled one after
+another on every run (43 min), and ran one after another (35 min). None of it knew what a product
+depended on: `tools/freshness.ps1` compared one object against the newest header anywhere, and
+build_all.bat's test loop had no check at all.
+
+WHAT CHANGED (lead/incremental 0e29eef, 2026-10-03). Every compile passes `-MD -MF`, so nvcc
+writes - in make syntax, forward slashes, spaces escaped - the list of every file it read: the
+source, every header reached through every include, the toolkit's and MSVC's own. That list is
+the product's dependency file (`out\<unit>.d`, `out\deps\<test>.d`), and `tools/freshness.ps1`
+calls the product stale when the exe or object is missing, the dependency file is missing or
+unreadable, any listed file is missing or newer than the product, or the recipe - the arch flags
+plus which nvcc is on the PATH - differs from the one stored beside it when it was built. Every
+doubt recompiles; nothing is skipped on a guess; there is no "newer than anything under src"
+fallback and no environment variable that says "trust it" (S4). `build_engine.bat` asks per unit
+and writes a fresh unit's `.rc` up front, so the serial and parallel passes compile only the
+stale ones and the archive step still sees all 23; `build_engine_unit.bat` writes the `.d` and,
+after a success, the recipe. `tools/build_tests.ps1`, new, builds the TESTS lists through the same
+check - six host-only tests at a time, the kernel-launching ones one at a time, each a ptxas of 5
+to 12 GB - and runs them the same way (no test writes a file, which is what makes that safe),
+printing each compile's output as it finishes, the tally build_all.bat always printed, and the
+tail of a failing test's output, which the old loop sent to nul. `build_vis.bat` and
+`build_hook_engine.bat` still ask the older question and still get it answered; they over-rebuild
+and never under-rebuild. The drivers are not incremental (minutes), and the hook projects' own
+objects are P21's (V210).
+
+AFTER, gate ba57 on 0e29eef (2026-10-03), the wrapper stamping each stage:
+
+| run | what it compiled | tests built | tests ran | total |
+|---|---|--:|--:|--:|
+| cold (no dependency files yet) | all 23 units, 92 of 92 tests | 1262 s | 1503 s | **2 h 08 min** |
+| warm (nothing changed) | 0 units, 0 of 92 tests (decided in 10 s) | 10 s | 1493 s | **33 min 00 s** |
+| one header touched (`bic/cascade_void.cuh`), build only | all 23 units, 7 of 92 tests | 615 s | - | 1 h 34 min |
+| build_extras.bat, cold | the viewer, the GUI, 5 of 5 host tests, both hook projects | - | - | **2 h 19 min** |
+
+The seven tests the cascade header reaches are the seven that should: `test_bic_1h1`,
+`test_bic_void`, `test_bic_imr`, `test_bic_apply`, `test_inelastic_transport`,
+`test_emextra_wiring`, `test_emextra_transport`. The warm physics gate is 33 minutes against
+2 h 57 min for the same gate the day before (ba56), and the cold one 2 h 08 against the same
+2 h 57, the test compiles alone 21 minutes against 43.
+
+THE FLOOR. The run phase is 25 minutes in every row, and it is one test: `test_bic_apply`'s
+campaign (147 cases at 20,000 events, V148 onwards) runs for about 25 minutes on one core, so
+six-at-a-time cannot bring the phase below it; it is also the slowest compile, 665 s. The dose
+gates themselves - 2M events through b1_gpu_sched and exampleB1, the sigma check, batch against
+macro, the mesh, switch, pool and sequence comparisons, the depth-dose - are about two minutes
+on the GPU, not the 25 V220's table charged to "gates": those were the builder selftest and the
+generated project, which are build_extras.bat's now.
+
+THE FINDING, which the dependency files make exact: touching one cascade header made all 23
+engine units stale, and the reason is one include chain. Every unit, stepping and interaction
+alike, includes `host/transport_run_impl.cuh`; it includes `host/transport_run.cuh`; that includes
+`physics/hadronic/interaction_apply.cuh`, which includes every hadronic model - because
+`run_interaction`'s and the drains' bodies live in the same implementation header as the stepping
+kernels', and the host side reads the models' workspace sizes for the slot pool. So the gamma
+stepping unit depends on `FillVoidNucleusProducts`. V65 and V189 split the KERNELS one per unit;
+the HEADERS were never split, and before this entry nothing could have shown it. The fix is a
+header split, not a build-script one: the interaction and drain kernel bodies into a header only
+their units include, and the workspace sizes the host needs into a sizes-only header, after which
+a cascade change rebuilds the Binary unit (about 25 minutes) and its seven tests, and a stepper
+change still rebuilds everything, as it should. It waits for P21, whose generator reads the same
+macros out of `transport_run_impl.cuh`.
+
+WHAT TO KNOW WHEN READING A VERDICT. "stale: no dependency file" is the first run after this
+change, or a product built by something else; "stale: missing <path>" after a toolkit or MSVC
+move is correct, not a bug, because those headers are in the list too; "stale: recipe changed"
+is a different nvcc or different arch flags; `out\deps` and the `.d`/`.recipe` files beside the
+objects are build products and gitignored with `out\`. `tests built in` and `tests ran in` are
+wall time of the parallel stage, not CPU time.

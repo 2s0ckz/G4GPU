@@ -199,7 +199,11 @@ the dose drivers and example B1; builds and runs 92 tests - every cross section,
 state, table, material, geometry and transport test; runs example B1 against a 2M-event Geant4
 reference with a σ gate; runs the proton depth-dose comparison; checks batch-vs-macro
 equivalence and mesh import, that every physics switch changes the answer and that the pool
-size does not. Nothing lands on `main` without it green.
+size does not. Nothing lands on `main` without it green. Since RISK V221 it rebuilds only what
+changed - nvcc's own dependency file per engine unit and per test - and compiles and runs the
+tests six at a time: 33 minutes when nothing changed, about two hours when the engine rebuilds,
+which a change to any hadronic model header still forces (the header layout, not the tracking:
+V221).
 
 `build_extras.bat` is the rest, split off on 2026-10-02 (RISK V220) because none of it is
 physics and the two custom-hook projects alone cost two hours of ptxas: the viewer and the
