@@ -14149,6 +14149,20 @@ between any two runs of either binary (117,067 to 117,560 and 115 to 116 over th
 before binary; 117,062 to 117,333 and 115 to 116 of the after): the order in which tracks reach the
 pool is the atomic appends' and not the physics'.
 
+**And on P21's final source** (7e6a9de: Rayleigh out of zone 2, table 9's pointer in the wiring)
+both projects were built again in build_extras.bat's way, against the engine's own build of the
+same source the same day. Every hook frame is the engine's: `CellTap`'s seven to the byte (the
+drains 11,952 and 4,128), `QualityFactorScoring`'s to the byte or 16 under (the drains 11,936 and
+4,128). Every ptxas is inside 9% of the engine unit's - the two drains 400 and 462 s for one hook
+and 405 and 468 for the other against the engine's 390 and 460, the at-rest unit 707 and 716
+against 730, the Binary cascade 565 and 569 against 557 at 25.3, 25.2 and 25.4 GB - and the builds
+are as long as on b937164's source: 71.7 minutes for `QualityFactorScoring` (61.2 of serial heavy
+pass, 10.0 of stepping units, 20 s of project object) and 72.4 for `CellTap` (61.9, 10.1, 20 s).
+Both pass, on the physics P21 moved: `test_custom_hook` 9128.9119752776 MeV from the action and
+the scorer alike, Qbar 1.4954 over 3,537 scored events, 3,377 secondaries walked and reported;
+`test_voxel_scoring` 147,387 steps, 0 dropped, 4,159 ending at a cell boundary and 0 through, 64 of
+64 cells, device 1399.111825 MeV against the host's exactly; neither prints a STACK line.
+
 ### V223: from 2 m_e up QBBC's photon has no Rayleigh term, and since P21 neither has the port's - the gate moved by -0.004 +/- 0.004 pGy, Rayleigh's whole effect on it is +0.003 +/- 0.005, and with Rayleigh off in both builds they agree to ten digits
 
 docs/RISK.md V208, closed. `G4GammaGeneralProcess::BuildPhysicsTable` sums `sigR` into zone 0

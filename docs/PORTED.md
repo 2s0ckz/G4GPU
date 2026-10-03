@@ -1844,7 +1844,9 @@ stepping stack, so the driver raised it at the first drain launch (V210). Since 
 `tools/gen_hook_units.ps1` makes every kernel of the engine's `extern template` block a unit of
 the hook's own, the seven that carry models compiled one at a time as the engine's are, and each
 lands on the engine's frame - the drains at 11,920 and 4,112 bytes for `QualityFactorScoring`,
-11,936 and 4,112 for `CellTap` - and the project's own object compiles in 20 s (docs/RISK.md V222).
+11,936 and 4,112 for `CellTap` on b937164's source, and on P21's final one 11,936 and 4,128 and
+the engine's own 11,952 and 4,128 - and the project's own object compiles in 20 s (docs/RISK.md
+V222).
 
 **And three things measured in the general process that this package did not change** - docs/RISK.md
 V208 (no Rayleigh scattering above 2 m_e there; the port's photon has it), V209 (the photo-nuclear
