@@ -14148,3 +14148,132 @@ lines changed, and the throttle's deferred-step count and launch count differing
 between any two runs of either binary (117,067 to 117,560 and 115 to 116 over three runs of the
 before binary; 117,062 to 117,333 and 115 to 116 of the after): the order in which tracks reach the
 pool is the atomic appends' and not the physics'.
+
+### V223: from 2 m_e up QBBC's photon has no Rayleigh term, and since P21 neither has the port's - the gate moved by -0.004 +/- 0.004 pGy, Rayleigh's whole effect on it is +0.003 +/- 0.005, and with Rayleigh off in both builds they agree to ten digits
+
+docs/RISK.md V208, closed. `G4GammaGeneralProcess::BuildPhysicsTable` sums `sigR` into zone 0
+(`sigComp + sigR`) and zone 1 (`sigComp + sigR + sigPE`) and into nothing above: zones 2 and 3
+are `sigComp + sigConv + sigPE (+ sigN)`, and `TotalCrossSectionPerVolume` puts a photon in zone 2
+once `preStepKinEnergy < minEEEnergy` is false, so 2 m_e itself has none. P1's photon evaluated
+`Rayl` at every energy, which is Geant4 with the general process OFF.
+
+**THE FIX IS V208's ONE CONDITION.** `em::gamma_macroscopic_xs` takes `general_process` and
+leaves Rayleigh out of the sum from `em::gamma_general_min_ee` - `minEEEnergy`, which
+`had::gamma_general_min_ee` now returns rather than restating, so the two edges cannot be two
+numbers - and `step_gamma` passes `had->gamma_general == kOn`. The total, the length and the walk
+all lose the term; the other three are the same doubles. A null wiring - `b1_gpu_sched`'s call,
+which has neither the general process nor photonNuclear - keeps P1's photon, Rayleigh at every
+energy, and is unchanged to the bit: 427.699 pGy and 26,057,780 track-steps before and after.
+One line came with it: a selection walk that a rounding residue carries past its last slice took
+Rayleigh unconditionally, in both copies of the walk (`em::select_gamma_process` and
+`had::select_gamma_process_at`), which with no Rayleigh in the sum would scatter a photon by a
+process it does not have. `em::gamma_walk_last_slice` takes the last process that IS in the sum -
+Rayleigh whenever it is there, so nothing else changes, and the photoelectric effect in zone 2,
+where `PostStepDoIt`'s case 2 ends its EM arms too. `run_step_gamma` is 3,856 bytes of frame
+before and after.
+
+**THE PROBE AGREES.** First interactions, `ref/gammagp` in the running Geant4 against
+`step_gamma` in a box nothing leaves (`tests/test_emextra_transport.cu` section 7), each process
+as two binomial samples. Geant4's side is FORTY million photons a point, so that it is not the
+noise of the comparison; the port's is a million:
+
+| 1.5 MeV | water: Geant4 (40M) | port (1M) | z | compact bone: Geant4 (40M) | port (1M) | z |
+|---|--:|--:|--:|--:|--:|--:|
+| Compton | 0.9983452 | 0.998417 | +1.75 | 0.9975137 | 0.997534 | +0.40 |
+| conversion | 1.6238e-3 | 1.561e-3 | -1.54 | 2.2633e-3 | 2.248e-3 | -0.32 |
+| photoelectric | 3.10e-5 | 2.2e-5 | -1.61 | 2.230e-4 | 2.18e-4 | -0.33 |
+| **Rayleigh** | **0** | **0** | | **0** | **0** | |
+| photonNuclear | 0 | 0 | | 0 | 0 | |
+
+With the general process OFF the cross section's Rayleigh share is 4.323e-4 in water and 7.712e-4
+in bone - 17,293 and 30,846 of Geant4's forty million - and the port's photon with the general
+process off scatters by Rayleigh at it: 416 in a million, z -0.78 (the converse the zero needs).
+
+**The conversion row is not Rayleigh's, and it is why Geant4's side is forty million.** At a
+million photons the probe counted 1,710 conversions in water, and the port's 1,561 sat 2.6 sigma
+under it. Forty million settle it: Geant4 converts 1.6238e-3 of them, its own table 7's
+`P7 = 1.6239e-3` to z -0.03, which is 1.7% above the cross sections' share, 1.5965e-3 (+4.3
+sigma); the million was 2.1 sigma over its own table. Bone is the same: 2.2633e-3 against its
+`P7 = 2.2664e-3` (z -0.42), 1.6% above the cross sections' 2.2303e-3. That 1.7% is the general
+process's EM fractions being tables - V225's subject, not this entry's - and at a million photons
+it is 0.7 sigma of the port's own count.
+
+**THE GATE**, B1's 6 MeV gamma at 2,000,000 events, at the default seed and `/random/setSeeds 1..4`
+(V96's method): main at b937164 (before) against main's engine objects with this branch's
+`transport_run_gamma.cu` (after) - the only unit whose code the change touches, since
+`step_gamma` is instantiated nowhere else and no shared struct moved. The engine's random streams
+are per track, so a history no Rayleigh scatter above 2 m_e and no rescaled length touches replays
+exactly, and the two runs at one seed are a PAIR:
+
+| seed | before, pGy | after, pGy | after - before | track-steps |
+|--:|--:|--:|--:|--:|
+| default | 425.939 | 425.921 | -0.018 | -91 |
+| 1 | 426.128 | 426.125 | -0.003 | +1,295 |
+| 2 | 426.950 | 426.944 | -0.006 | +272 |
+| 3 | 427.526 | 427.535 | +0.009 | +2,030 |
+| 4 | 427.511 | 427.510 | -0.001 | -959 |
+
+**The gate moved by -0.0038 +/- 0.0044 pGy** (-0.0009%), against its own statistical 0.868 pGy:
+1.1765 sigma from Geant4 at the default seed before, 1.1914 after.
+
+**Rayleigh's share, and no more.** `g4dose` runs the same scene with any process switched off, so
+the same five seeds were run four ways - before and after, Rayleigh on and Rayleigh off
+(`-off rayleigh`), 2,000,000 events each:
+
+| seed | Rayleigh's whole effect (before: on - off) | P21's change (on: after - before) | Rayleigh off: after - before |
+|--:|--:|--:|--:|
+| default | +0.0153 | -0.0042 | **0** |
+| 1 | +0.0125 | -0.0053 | **0** |
+| 2 | -0.0099 | +0.0163 | **0** |
+| 3 | -0.0038 | +0.0081 | **0** |
+| 4 | +0.0030 | -0.0010 | **0** |
+
+pGy. Rayleigh at EVERY energy moves this gate by +0.0034 +/- 0.0048 pGy - a coherent scatter
+deposits nothing and turns a photon by tens of milliradians; switching it off removes 98,834 of
+the default run's 26,059,835 track-steps - and the part P21 removed moved it by +0.0028 +/-
+0.0041: both zero, to 1e-5 of the dose. And with Rayleigh off in both builds the two agree in
+every digit `-machine` prints - the dose, its sigma, the deposit and the track-steps, 25,961,001
+at the default seed - at all five seeds: whatever moved, moved through Rayleigh. What was
+redistributed is Rayleigh's share of the interactions above 2 m_e, 5.7e-5 of a 6 MeV photon's in
+water and 4.3e-4 of a 1.5 MeV photon's, given to Compton, conversion and the photoelectric effect
+in proportion.
+
+**WHAT THE REFERENCE IS, AND WHY IT DOES NOT MOVE - REGENERATED.** The gate compares against
+Geant4's own B1 at 2,000,000 events, 427.385 +/- 0.870 pGy in `examples/B1/src/RunAction.cc`
+and `b1_gpu_sched.cu`, made by `ref/run/runb1.bat ref2M.mac` on `ref/B1build` - the stock 11.1.1
+`examples/basic/B1`, whose `exampleB1.cc` builds `QBBC`, whose `G4EmStandardPhysics` constructor
+calls `SetGeneralProcessActive(true)`. So Geant4's side of the gate has had no Rayleigh above 2 m_e
+all along, and nothing on it changed. Regenerated anyway, the way it was made - the same binary,
+`ref2M.mac` and runb1.bat's data set, run from scratch rather than from main's `ref\run` - it prints
+"Use general process 1" and 85.4769 nGy, rms 173.943 pGy, over its 20 threads' 2,000,000 events:
+**427.385 +/- 0.870 pGy scaled to 10k, the stored number to every digit**. The reference is not
+edited. What P21 adds to `ref/oracle/run.bat` is the probe's two files, `gammagp_tables.csv` and
+`gammagp_counts.csv`, which the photon tests read.
+
+**Tests, each assertion run once with its fix removed:**
+
+  * `tests/test_gamma_xs.cu`: for the four materials at ten energies across 2 m_e - its last double
+    below and itself included - Rayleigh is positive without the general process, the same below
+    2 m_e with it and exactly 0 from 2 m_e up; Compton, conversion and photoelectric are the same
+    doubles either way and the total their sum; a walk past its last slice selects no Rayleigh
+    that is not in the sum. Condition removed: 2 failures; `>=` made `>`: 2 (2 m_e itself is zone
+    2); the walk's last line back to Rayleigh: 1; the condition made independent of the flag: 1.
+  * `tests/test_emextra_wiring.cu`: `em::gamma_general_min_ee` and the general process's
+    `minEEEnergy` are one number (written as 1.022: 3 failures, the zone edge's two included);
+    `select_gamma_process_at` also walks sums with no Rayleigh term and the fall-through product
+    q = 1, and agrees with P1's walk over 280,056 selections with no Rayleigh from a sum without
+    one (its last line back to Rayleigh: "14 of 280056 selections differ; 14 Rayleigh selections
+    from a sum with no Rayleigh term", 2 failures).
+  * `tests/test_emextra_transport.cu`: section 1's photon below 2 m_e is still P1's to the bit
+    with the wiring, and the general process OFF is still the no-wiring photon at 1.5, 6 and 22
+    MeV; at 1.5 and 6 MeV in water the wiring now MUST move every step, 20,000 of 20,000;
+    section 2 replays the selection on the host with the general flag; section 7 is the table
+    above. `step_gamma` passing `false`: 14 failures - both must-differ cells, eight replay
+    cells, and section 7's 421 and 758 Rayleigh scatters against Geant4's 0 with Compton at
+    -8.6 and -15.3 sigma. The condition made independent of the flag: 3 - the must-differ cells
+    and the converse.
+
+`build_all.bat`'s gate section on these binaries: `b1_gpu_sched` 427.699 pGy as before; B1
+1.1914 sigma; batch and macro 0.05 sigma; B1 against B1mesh 0.01 sigma; every switch still
+changes the answer (Rayleigh off: -0.0038 pGy, -0.41% of the steps, at 200,000 events); the step
+hook; the three pools identical; two runs and the replay as Geant4's.

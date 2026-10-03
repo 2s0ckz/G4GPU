@@ -304,9 +304,11 @@ __host__ __device__ __noinline__ Vec3<real_t> urban_hadron_scatter(
 /// @param rep what the step did, beyond depositing energy: the true path length, the process
 ///        that ended it, the material, the safety. See core/step_report.cuh. Every field on it
 ///        is a value this function already computes; nothing here is calculated for its sake.
-/// @param had P19: the hadronic wiring, for `photonNuclear`. Null - the default, and what
-///        `src/host/b1_gpu_sched.cu` passes - is a photon with no nuclear process, which is
-///        this function exactly as it was before P19.
+/// @param had P19: the hadronic wiring, for `photonNuclear`, and since P21 for the state of
+///        `G4GammaGeneralProcess`, whose zones decide whether Rayleigh is in the sum. Null - the
+///        default, and what `src/host/b1_gpu_sched.cu` passes - is a photon with no nuclear
+///        process and no general process, Rayleigh at every energy: this function exactly as it
+///        was before P19.
 /// @param queued set true when the step ended in a photo-nuclear interaction, which goes to
 ///        `HadronicWiring::emx_queue` and is applied by `run_emextra_drain`. The caller must
 ///        then neither append the photon nor call the step hook - see `step_hadron`'s own
@@ -334,11 +336,20 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
 
   const int mat = geom::material_at(s.geometry, p.volume, p.pos);
   rep.material = mat;
+  // P21: THE GENERAL PROCESS'S ZONES DECIDE WHETHER RAYLEIGH IS IN THE SUM.
+  // `G4GammaGeneralProcess` sums `sigR` into zones 0 and 1 only, so from 2 m_e up a QBBC photon
+  // never Rayleigh-scatters - 0 of forty million first interactions at 1.5 MeV in water and in
+  // bone in the running Geant4, where the cross section's share is 17,293 and 30,846 of them
+  // (docs/RISK.md V208, V223). The general process's state is the wiring's, so a null `had` -
+  // `src/host/b1_gpu_sched.cu`'s call - keeps P1's photon, Rayleigh at every energy, which is
+  // `/process/em/UseGeneralProcess false`.
+  const bool general_on =
+      (had != nullptr && had->gamma_general == had::GammaGeneralProcess::kOn);
   const auto xs =
       em::gamma_macroscopic_xs(s.materials[mat], p.ekin,
                                s.processes.photoelectric ? s.photoelectric : nullptr,
                                s.processes.rayleigh ? s.rayleigh : nullptr,
-                               s.processes.compton, s.processes.pair_production);
+                               s.processes.compton, s.processes.pair_production, general_on);
 
   int next_volume = geom::kOutsideWorld;
   const real_t d_boundary =
@@ -354,11 +365,12 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   // returns zero, having evaluated nothing, below 2 m_e (zones 0 and 1 sum no photo-nuclear
   // term), at or below the material's threshold, and with the process off.
   //
-  // AND WHEN IT IS ZERO THIS STEP IS THE STEP IT WAS BEFORE P19, TO THE BIT. The total is the
-  // same double (`xs.total`, not `xs.total + 0`), the length uniform is the same draw, and the
+  // AND WHEN IT IS ZERO THIS STEP IS THE STEP WITHOUT IT, TO THE BIT. The total is the same
+  // double (`xs.total`, not `xs.total + 0`), the length uniform is the same draw, and the
   // selection is P1's own `select_gamma_process` on the same uniform. No uniform is added
   // anywhere. `tests/test_emextra_transport.cu` asserts it on the device for photons below
-  // 2 m_e and in water below oxygen's 11.5 MeV threshold.
+  // 2 m_e and in water below oxygen's 11.5 MeV threshold - against the same wiring with
+  // photonNuclear off, since P21's Rayleigh (above) is the general process's too.
   //
   // THE ZONE AND THE MATERIAL'S THRESHOLD ARE TESTED HERE, INLINE, and `photon_nuclear_xs`
   // tests them again. That is not redundancy: the function is `__noinline__` (its reason is

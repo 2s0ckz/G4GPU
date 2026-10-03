@@ -76,21 +76,20 @@
 // sub-process of the general process cannot be inactivated) and it is kept as a study switch,
 // because it is the one in which Bertini's photon arm and the QGS refusal become reachable.
 //
-// THE REST OF THE PHOTON'S STEP IS NOT TOUCHED, AND THAT IS A DECISION WITH A NUMBER ON IT.
-// The port's photon is P1's: four cross sections evaluated from the models every step, one
-// length uniform and one selection uniform walked as Compton, conversion, photoelectric,
-// Rayleigh. The general process differs from that in two more ways than photonNuclear -
-// Rayleigh is ABSENT above 2 m_e (zones 2 and 3 sum no `sigR`), and its shares are its own
-// tables, interpolated linearly between 51 nodes from 2 m_e to 100 MeV - and neither is P19's
-// to change. The first moves a photon in water by 4.3e-4 of its interactions at 1.5 MeV and
-// 5.7e-5 at 6 MeV (the running Geant4 counts no Rayleigh scatter above 2 m_e in a million where
-// its share is 432 and 57, docs/RISK.md V208), and the brief's bit-identity is exactly the
-// property that forbids moving it in a package about nuclei. The second is where the
-// photo-nuclear share itself parts from its cross section: across the giant resonance the
-// interpolated share is 16% under sigN/sum at 22 MeV in bone and 8% over at 20 MeV in water,
-// the running Geant4 follows the table to within statistics, and this port follows the cross
-// section, which is what the P19 brief specifies (docs/RISK.md V209 has both and the recipe for
-// the table).
+// THE REST OF THE PHOTON'S STEP. The port's photon is P1's: four cross sections evaluated from
+// the models every step, one length uniform and one selection uniform walked as Compton,
+// conversion, photoelectric, Rayleigh. The general process differs from that in two more ways
+// than photonNuclear - Rayleigh is ABSENT above 2 m_e (zones 2 and 3 sum no `sigR`), and its
+// shares are its own tables, interpolated linearly between 51 nodes from 2 m_e to 100 MeV. P19
+// changed neither. The first is transcribed since P21: the running Geant4 counts no Rayleigh
+// scatter above 2 m_e in forty million where its share is 17,293 (water) and 30,846 (bone) at
+// 1.5 MeV (docs/RISK.md V208, V223), and `em::gamma_macroscopic_xs` takes the general process's
+// state and leaves the term out from `minEEEnergy` up - the total, the length and the walk all.
+// The second is where the photo-nuclear share itself parts from its cross section: across the
+// giant resonance the interpolated share is 16% under sigN/sum at 22 MeV in bone and 8% over at
+// 20 MeV in water, the running Geant4 follows the table to within statistics, and this port
+// follows the cross section, which is what the P19 brief specified (docs/RISK.md V209 has both
+// and the recipe for the table).
 // The photo-nuclear slice is placed where the general process places it RELATIVE TO THE ONE
 // UNIFORM: it is the TOP slice of `q` in zone 2 in both codes (`q > P9` there, `q*total >=
 // total_em` here), so for a given `q` the two agree on whether the photon reacts with a
@@ -222,12 +221,14 @@ __host__ __device__ inline ProcessId emextra_process_id(EmExtraProcess p) {
 enum class GammaGeneralProcess : int { kOff = 0, kOn = 1 };
 
 /// `minPEEnergy`, `minEEEnergy` and `minMMEnergy` from `G4GammaGeneralProcess`'s constructor:
-/// `150*CLHEP::keV`, `2*CLHEP::electron_mass_c2`, `100*CLHEP::MeV`. The zone edges.
+/// `150*CLHEP::keV`, `2*CLHEP::electron_mass_c2`, `100*CLHEP::MeV`. The zone edges. The middle
+/// one is `em::gamma_general_min_ee`'s, where `gamma_macroscopic_xs` drops Rayleigh, so that
+/// the two edges cannot be two numbers.
 template <typename real_t>
 __host__ __device__ inline constexpr real_t gamma_general_min_pe() { return real_t(0.150); }
 template <typename real_t>
 __host__ __device__ inline constexpr real_t gamma_general_min_ee() {
-  return real_t(2) * units::electron_mass_c2<real_t>();
+  return em::gamma_general_min_ee<real_t>();
 }
 template <typename real_t>
 __host__ __device__ inline constexpr real_t gamma_general_min_mm() { return real_t(100); }
@@ -284,7 +285,7 @@ __host__ __device__ inline em::GammaProcess select_gamma_process_at(const em::Ga
   if (r < xs.pair) { return em::GammaProcess::kPair; }
   r -= xs.pair;
   if (r < xs.photoelectric) { return em::GammaProcess::kPhotoelectric; }
-  return em::GammaProcess::kRayleigh;
+  return em::gamma_walk_last_slice(xs);
 }
 
 // =============================================================================================

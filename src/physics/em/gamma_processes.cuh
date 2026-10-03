@@ -12,6 +12,10 @@
 //             deflection. See data/rayleigh_data.cuh. It transfers no energy, so it moves a dose
 //             only by changing where the photon goes next - which is not nothing at 6 MeV in a
 //             centimetre-scale phantom, and is why it is here rather than dropped.
+//             UNDER G4GammaGeneralProcess IT STOPS AT 2 m_e (P21): `BuildPhysicsTable` sums
+//             `sigR` into zones 0 and 1 and into nothing above, so QBBC's photon - the general
+//             process is on in every list built on G4EmStandardPhysics - never Rayleigh-scatters
+//             from `minEEEnergy` up. `gamma_macroscopic_xs`'s `general_process` is that zone.
 #pragma once
 #include <cmath>
 #include "core/units.cuh"
@@ -137,14 +141,30 @@ struct GammaXS {
   real_t total;
 };
 
+/// `G4GammaGeneralProcess`'s `minEEEnergy`, `2*CLHEP::electron_mass_c2` (its constructor): the
+/// edge between zone 1, whose sum has a Rayleigh term, and zone 2, whose sum does not.
+/// `had::gamma_general_min_ee` is this number, and `tests/test_emextra_wiring.cu` holds the two
+/// equal.
+template <typename real_t>
+__host__ __device__ constexpr real_t gamma_general_min_ee() {
+  return real_t(2) * units::electron_mass_c2<real_t>();
+}
+
 /// @param pe Livermore photoelectric table. Pass nullptr to omit the process.
+/// @param general_process `/process/em/UseGeneralProcess`: true leaves Rayleigh out of the sum
+///        from 2 m_e up, where `G4GammaGeneralProcess` has none (its zones 2 and 3, P21). The
+///        test is `gamma_energy >= minEEEnergy` because `TotalCrossSectionPerVolume` puts a photon
+///        in zone 1 on `preStepKinEnergy < minEEEnergy`, so 2 m_e itself is zone 2. Nothing else
+///        in the sum changes - the other three terms are the same doubles either way, which
+///        `tests/test_gamma_xs.cu` asserts - and below 2 m_e nothing changes at all.
 template <typename real_t>
 __host__ __device__ inline GammaXS<real_t> gamma_macroscopic_xs(
     const data::Material<real_t>& m, real_t gamma_energy,
     const data::PhotoElectricTable<real_t>* pe = nullptr,
     const data::RayleighTable<real_t>* ray = nullptr, bool want_compton = true,
-    bool want_pair = true) {
+    bool want_pair = true, bool general_process = false) {
   GammaXS<real_t> xs{real_t(0), real_t(0), real_t(0), real_t(0), real_t(0)};
+  if (general_process && gamma_energy >= gamma_general_min_ee<real_t>()) { ray = nullptr; }
   for (int i = 0; i < m.n_elements; ++i) {
     if (want_compton) { xs.compton += m.n_atoms[i] * compton_xs_per_atom(gamma_energy, m.z[i]); }
     if (want_pair) { xs.pair += m.n_atoms[i] * pair_xs_per_atom(gamma_energy, m.z[i]); }
@@ -161,6 +181,24 @@ __host__ __device__ inline GammaXS<real_t> gamma_macroscopic_xs(
   return xs;
 }
 
+/// What a selection walk takes when the product falls past its last slice - which only rounding
+/// can do, `rand01 * total` being at most a few ulps over `compton + pair + photoelectric` - the
+/// last process the walk has that IS in the sum.
+///
+/// It was Rayleigh unconditionally, which was right while Rayleigh was in every sum this walk
+/// saw. It is not since P21 - a photon from 2 m_e up under the general process has no Rayleigh
+/// term - and a residue of rounding must not scatter a photon by a process its sum does not
+/// contain. In zone 2 that last process is the photoelectric effect, which is also where
+/// `G4GammaGeneralProcess::PostStepDoIt` ends its EM walk (`q <= P9` selects `phot`). With
+/// Rayleigh in the sum nothing changes: it is still the answer.
+template <typename real_t>
+__host__ __device__ inline GammaProcess gamma_walk_last_slice(const GammaXS<real_t>& xs) {
+  if (xs.rayleigh > real_t(0)) { return GammaProcess::kRayleigh; }
+  if (xs.photoelectric > real_t(0)) { return GammaProcess::kPhotoelectric; }
+  if (xs.pair > real_t(0)) { return GammaProcess::kPair; }
+  return GammaProcess::kCompton;
+}
+
 /// Selects the interacting process from the per-process cross sections.
 template <typename real_t>
 __host__ __device__ inline GammaProcess select_gamma_process(const GammaXS<real_t>& xs,
@@ -172,7 +210,7 @@ __host__ __device__ inline GammaProcess select_gamma_process(const GammaXS<real_
   if (r < xs.pair) { return GammaProcess::kPair; }
   r -= xs.pair;
   if (r < xs.photoelectric) { return GammaProcess::kPhotoelectric; }
-  return GammaProcess::kRayleigh;
+  return gamma_walk_last_slice(xs);
 }
 
 }  // namespace g4gpu::em

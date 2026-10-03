@@ -4,9 +4,15 @@
 //  - the same formula reduces to the Thomson limit as E -> 0
 //  - pair production respects the 2*m_e threshold exactly
 //  - resulting mass attenuation coefficients land on tabulated values
+//  - P21: under G4GammaGeneralProcess the sum has NO Rayleigh term from 2 m_e up - its zones 2
+//    and 3 are `sigComp + sigConv + sigPE (+ sigN)` - and below 2 m_e it has the same one as
+//    without the general process; the edge is `minEEEnergy` itself, which is zone 2
 #include <cstdio>
 #include <cmath>
+#include <string>
+#include <vector>
 #include "data/materials.cuh"
+#include "host/g4data.cuh"
 #include "physics/em/gamma_processes.cuh"
 
 using namespace g4gpu;
@@ -96,6 +102,76 @@ int main() {
   const real_t frac = real_t(n_compton) / 100000.0;
   printf("  bone: selected Compton %.4f of the time, XS fraction %.4f\n", frac, b.compton / b.total);
   check(std::fabs(frac - b.compton / b.total) < 1e-3, "selection frequency tracks XS ratio");
+
+  // ---- P21: Rayleigh and the general process's zones (docs/RISK.md V208 and the P21 entry).
+  //
+  // `G4GammaGeneralProcess::BuildPhysicsTable` sums `sigComp + sigR` in zone 0 and
+  // `sigComp + sigR + sigPE` in zone 1, and NO `sigR` in zones 2 and 3; `TotalCrossSectionPerVolume`
+  // puts a photon in zone 2 when `preStepKinEnergy < minEEEnergy` is false, so 2 m_e itself has
+  // no Rayleigh term. Counted in the running Geant4 (ref/gammagp): 0 Rayleigh scatters in forty
+  // million first interactions at 1.5 MeV in water and in bone, where the cross section's share
+  // is 17,293 and 30,846 of them. Below the edge the general process changes nothing here, and
+  // above it the other three terms are the same doubles - the condition is on Rayleigh alone.
+  printf("== Rayleigh under G4GammaGeneralProcess ==\n");
+  {
+    const std::string phot_dir = host::g4emlow_subdir("epics2017/phot", "pe-cs-1.dat");
+    const std::string rayl_dir = host::g4emlow_subdir("epics2017/rayl", "re-cs-1.dat");
+    const int zl[] = {1, 6, 7, 8, 12, 15, 16, 18, 20};
+    const int nzl = static_cast<int>(sizeof(zl) / sizeof(zl[0]));
+    static data::PhotoElectricTable<real_t> pe{};
+    static std::vector<real_t> pte, ptv;
+    static data::RayleighTable<real_t> rt{};
+    static std::vector<real_t> rte, rtv;
+    const bool pe_ok = data::load_photoelectric<real_t>(phot_dir, zl, nzl, pe, pte, ptv);
+    const bool ra_ok = data::load_rayleigh<real_t>(rayl_dir, zl, nzl, rt, rte, rtv);
+    check(pe_ok && ra_ok, "the photoelectric and Rayleigh tables load");
+    if (pe_ok && ra_ok) {
+      pe.table_e = pte.data();
+      pe.table_v = ptv.data();
+      rt.table_e = rte.data();
+      rt.table_v = rtv.data();
+      const real_t ee = em::gamma_general_min_ee<real_t>();
+      check(ee == 2.0 * units::electron_mass_c2<real_t>(), "minEEEnergy is 2 m_e");
+      // The edge from both sides, the zone-1 and zone-2 interiors, and zone 3.
+      const real_t es[] = {0.2, 0.8, ee * (1.0 - 1e-12), ee, 1.5, 6.0, 22.0, 99.9, 100.0, 500.0};
+      int bad_on = 0, bad_off = 0, bad_rest = 0, bad_sel = 0;
+      for (int m = 0; m < data::kNumMaterials; ++m) {
+        for (const real_t e : es) {
+          const auto off = em::gamma_macroscopic_xs<real_t>(mats[m], e, &pe, &rt, true, true, false);
+          const auto on = em::gamma_macroscopic_xs<real_t>(mats[m], e, &pe, &rt, true, true, true);
+          const bool zone01 = (e < ee);
+          // Rayleigh: present in both below the edge, absent with the general process from it.
+          if (!(off.rayleigh > 0)) { ++bad_off; }
+          if (zone01 ? (on.rayleigh != off.rayleigh) : (on.rayleigh != 0.0)) { ++bad_on; }
+          // The other three are the same doubles, and the total is their sum.
+          if (on.compton != off.compton || on.pair != off.pair
+              || on.photoelectric != off.photoelectric
+              || on.total != on.compton + on.pair + on.photoelectric + on.rayleigh
+              || (zone01 && on.total != off.total)) {
+            ++bad_rest;
+          }
+          // A walk that falls past the photoelectric slice - a rounding residue at q -> 1 - takes
+          // the last process IN the sum, never one the sum does not have.
+          if (!zone01 && em::select_gamma_process(on, 1.0) == em::GammaProcess::kRayleigh) {
+            ++bad_sel;
+          }
+          if (zone01 && em::select_gamma_process(off, 1.0) != em::GammaProcess::kRayleigh) {
+            ++bad_sel;
+          }
+          if (m == data::kWater && (e == 1.5 || e == 6.0)) {
+            printf("  water %4.1f MeV: Rayleigh %.4e /mm is %.3e of the sum without the general "
+                   "process, and %.4e /mm with it\n", e, off.rayleigh, off.rayleigh / off.total,
+                   on.rayleigh);
+          }
+        }
+      }
+      check(bad_off == 0, "Rayleigh is positive at every energy without the general process");
+      check(bad_on == 0, "with it, Rayleigh is the same below 2 m_e and exactly 0 from 2 m_e up");
+      check(bad_rest == 0, "Compton, conversion and photoelectric are untouched, and the total "
+                           "is their sum");
+      check(bad_sel == 0, "a walk past the last slice never selects a Rayleigh not in the sum");
+    }
+  }
 
   printf("\n%s (%d failures)\n", fails ? "FAILED" : "ALL PASS", fails);
   return fails;

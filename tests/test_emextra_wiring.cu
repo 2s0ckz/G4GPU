@@ -268,6 +268,12 @@ int main() {
       }
     }
 
+    // The EM half of the same edge: `em::gamma_macroscopic_xs` drops Rayleigh at
+    // `em::gamma_general_min_ee` (P21), and it has to be this file's `minEEEnergy` to the bit.
+    if (em::gamma_general_min_ee<real_t>() != had::gamma_general_min_ee<real_t>()) {
+      fail("the EM zone edge and the general process's minEEEnergy are different numbers");
+    }
+
     // (c) THE ZONE-3 BRANCH, REPLAYED. `G4GammaGeneralProcess::BuildPhysicsTable` fills tables
     //     10-14 from the four cross sections and `PostStepDoIt`'s case 3 walks them with one
     //     uniform. Built here from THIS PORT's cross sections at the node energies Geant4 would
@@ -592,27 +598,37 @@ int main() {
   // ============================================================================================
   std::printf("== 5. select_gamma_process_at and fill_result_into against P1's and P5's ==\n");
   {
-    long long n = 0, bad = 0;
+    // With a Rayleigh term and, since P21, without one - the general process's zones 2 and 3 sum
+    // none - and with q = 1 as well as the interior: the product is then the whole total, past
+    // every slice by a rounding, which is the one place the two walks' last line is reached.
+    long long n = 0, bad = 0, ghost = 0;
     for (int m = 0; m < data::kNumMaterials; ++m) {
       for (real_t e : {0.01, 0.1, 0.5, 1.0, 3.0, 10.0, 50.0}) {
-        em::GammaXS<real_t> xs{};
-        xs.compton = em::compton_xs_per_atom<real_t>(e, mats[m].z[0]) * mats[m].n_atoms[0];
-        xs.pair = em::pair_xs_per_atom<real_t>(e, mats[m].z[0]) * mats[m].n_atoms[0];
-        xs.photoelectric = 0.37 * xs.compton;
-        xs.rayleigh = 0.11 * xs.compton;
-        xs.total = xs.compton + xs.pair + xs.photoelectric + xs.rayleigh;
-        for (int k = 0; k < 5000; ++k) {
-          const real_t q = (k + 0.25) / 5000.0;
-          ++n;
-          if (em::select_gamma_process<real_t>(xs, q)
-              != had::select_gamma_process_at<real_t>(xs, q * xs.total)) {
-            ++bad;
+        for (const real_t rayleigh_frac : {0.11, 0.0}) {
+          em::GammaXS<real_t> xs{};
+          xs.compton = em::compton_xs_per_atom<real_t>(e, mats[m].z[0]) * mats[m].n_atoms[0];
+          xs.pair = em::pair_xs_per_atom<real_t>(e, mats[m].z[0]) * mats[m].n_atoms[0];
+          xs.photoelectric = 0.37 * xs.compton;
+          xs.rayleigh = rayleigh_frac * xs.compton;
+          xs.total = xs.compton + xs.pair + xs.photoelectric + xs.rayleigh;
+          for (int k = 0; k <= 5000; ++k) {
+            const real_t q = (k < 5000) ? (k + 0.25) / 5000.0 : 1.0;
+            ++n;
+            const em::GammaProcess a = em::select_gamma_process<real_t>(xs, q);
+            const em::GammaProcess b = had::select_gamma_process_at<real_t>(xs, q * xs.total);
+            if (a != b) { ++bad; }
+            if (xs.rayleigh == 0
+                && (a == em::GammaProcess::kRayleigh || b == em::GammaProcess::kRayleigh)) {
+              ++ghost;
+            }
           }
         }
       }
     }
-    std::printf("   select_gamma_process_at: %lld of %lld selections differ\n", bad, n);
+    std::printf("   select_gamma_process_at: %lld of %lld selections differ; %lld Rayleigh "
+                "selections from a sum with no Rayleigh term\n", bad, n, ghost);
     if (bad != 0) { fail("select_gamma_process_at disagrees with P1's select_gamma_process"); }
+    if (ghost != 0) { fail("a walk selected Rayleigh from a sum that has none"); }
 
     // fill_result_into against fill_result on random final states, every field.
     Lcg g;

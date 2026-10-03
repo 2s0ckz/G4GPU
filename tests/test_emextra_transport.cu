@@ -2,15 +2,18 @@
 // the device - the half `tests/test_emextra_wiring.cu` cannot reach, because `step_gamma` and
 // `step_lepton` are device-only.
 //
-// Six sections:
+// Seven sections:
 //
 //  1. BIT-IDENTITY WHERE THE PROCESS IS UNREACHABLE. One step of 20,000 photons through
-//     `step_gamma` with the wiring and without it (the pre-P19 call), every output field
-//     compared with tolerance ZERO: below 2 m_e in all four of B1's materials, and in water up
-//     to oxygen's 11.499 MeV threshold - the 6 MeV gamma gate's photons among them. The same
-//     for electrons and positrons in water below oxygen's electro-nuclear 7.296 MeV. And the
-//     converse, so that the comparison is shown able to fail: at 6 MeV in air, where argon is
-//     open from 0.5 MeV, and for a 50 MeV electron in water, the steps differ.
+//     `step_gamma` against a step where photonNuclear is off or absent, every output field
+//     compared with tolerance ZERO: below 2 m_e in all four of B1's materials against the call
+//     with no wiring (the pre-P19 call), and in water up to oxygen's 11.499 MeV threshold - the
+//     6 MeV gamma gate's photons among them - against the wiring with photonNuclear off, since
+//     P21 took Rayleigh out of the general process's sum from 2 m_e up. The general process OFF
+//     against no wiring at every energy. The same for electrons and positrons in water below
+//     oxygen's electro-nuclear 7.296 MeV. And the converse, so that the comparison is shown able
+//     to fail: at 6 MeV in air, where argon is open from 0.5 MeV; the general process against no
+//     wiring above 2 m_e (Rayleigh); and a 50 MeV electron in water - the steps differ.
 //  2. THE PHOTON'S SLICE, AT ITS RATE, IN EACH ZONE. First (a): the four processes' cross
 //     sections evaluated on the device equal the host's - the evaluation the host test holds
 //     against Geant4 - to 1e-12, at 1,760 points. Then a million first interactions per cell in
@@ -36,6 +39,11 @@
 //     because a model in a test kernel costs ptxas 6-20 GB (docs/RISK.md V189).
 //  6. A FULL QUEUE is refused by name - `kInelasticQueueFull` and the `kPhotoNuclear` SIZE row -
 //     with the conservative disposal, and nothing is lost silently.
+//  7. P21: THE PORT AGAINST THE RUNNING GEANT4. A million first interactions a point through
+//     `step_gamma`, counted by process against `ref/gammagp`'s count of the same in QBBC's
+//     G4GammaGeneralProcess: no Rayleigh at 1.5 MeV in water and in bone in either - forty
+//     million photons on Geant4's side there - every other process inside 3 sigma, and the
+//     general process off scattering by Rayleigh at its share.
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -445,38 +453,74 @@ int main() {
   // ============================================================================================
   // 1. Bit-identity where the process is unreachable, and its converse
   // ============================================================================================
+  //
+  // WHAT A PHOTON STEP IS COMPARED WITH CHANGED IN P21. Until then the general process changed a
+  // photon's step only through photonNuclear, so "the wiring against no wiring" isolated
+  // photonNuclear at every energy. Since P21 the general process also takes Rayleigh out of the
+  // sum from 2 m_e up (docs/RISK.md V208), so a photon above 2 m_e with the wiring is a different
+  // step from one without it whether a nucleus is reachable or not. The photo-nuclear identity
+  // is therefore taken AT FIXED GENERAL-PROCESS STATE - the wiring with photonNuclear on against
+  // the same wiring with it off (`vs`) - and two identities take its place:
+  //   * the general process OFF and photonNuclear off is the pre-P19 photon, the no-wiring call
+  //     `b1_gpu_sched` makes, to the bit, at every energy (`vs = kNoGeneral`);
+  //   * below 2 m_e the general process ON is that photon too (zones 0 and 1 have Rayleigh).
+  // And the converse that shows the Rayleigh change acts: the general process on against the
+  // no-wiring call at 1.5 and 6 MeV in water must differ - in EVERY step, since the total each
+  // length is drawn from has lost a term.
   std::printf("-- 1. one step with the wiring against one without, tolerance zero --\n");
   {
     constexpr int kN = 20000;
-    struct Cell { int kind; int m; real_t e; bool must_match; const char* why; };
+    // What the first pass (always the wiring as QBBC has it, unless `kNoGeneral`) is compared
+    // with in the second.
+    enum Vs { kNoWiring, kNuclearOff, kNoGeneral };
+    struct Cell { int kind; int m; real_t e; Vs vs; bool must_match; const char* why; };
     // kind: 0 gamma, 1 e-, 2 e+
     const Cell cells[] = {
         // Air at 0.8 MeV is the sharp one: argon's cross section is POSITIVE from 0.5 MeV, so
         // only the general process's zones - no photo-nuclear term below 2 m_e - keep it off.
-        {0, data::kAir, 0.8, true, "below 2 m_e, above argon's 0.5: zones 0-1 sum no sigN"},
-        {0, data::kWater, 1.0, true, "below 2 m_e"},
-        {0, data::kA150Tissue, 0.9, true, "below 2 m_e"},
-        {0, data::kBoneCompact, 1.02, true, "below 2 m_e"},
-        {0, data::kWater, 1.5, true, "zone 2, below oxygen's 11.499 MeV"},
-        {0, data::kWater, 6.0, true, "the gamma gate's energy, below 11.499"},
-        {0, data::kWater, 11.49, true, "a hair under 11.499"},
-        {1, data::kWater, 5.0, true, "below oxygen's electro-nuclear 7.296 MeV"},
-        {2, data::kWater, 7.2, true, "below 7.296"},
-        {0, data::kAir, 6.0, false, "argon is open from 0.5 MeV, so the steps MUST differ"},
-        {1, data::kWater, 50.0, false, "open, so the extra uniform MUST move the steps"},
+        {0, data::kAir, 0.8, kNoWiring, true,
+         "below 2 m_e, above argon's 0.5: zones 0-1 sum no sigN and keep Rayleigh"},
+        {0, data::kWater, 1.0, kNoWiring, true, "below 2 m_e"},
+        {0, data::kA150Tissue, 0.9, kNoWiring, true, "below 2 m_e"},
+        {0, data::kBoneCompact, 1.02, kNoWiring, true, "below 2 m_e"},
+        {0, data::kWater, 1.5, kNuclearOff, true, "zone 2, below oxygen's 11.499 MeV"},
+        {0, data::kWater, 6.0, kNuclearOff, true, "the gamma gate's energy, below 11.499"},
+        {0, data::kWater, 11.49, kNuclearOff, true, "a hair under 11.499"},
+        {0, data::kWater, 1.5, kNoGeneral, true, "general process off = the no-wiring photon"},
+        {0, data::kWater, 6.0, kNoGeneral, true, "general process off = the no-wiring photon"},
+        {0, data::kBoneCompact, 22.0, kNoGeneral, true, "... with photonNuclear off, at 22 MeV"},
+        {1, data::kWater, 5.0, kNoWiring, true, "below oxygen's electro-nuclear 7.296 MeV"},
+        {2, data::kWater, 7.2, kNoWiring, true, "below 7.296"},
+        {0, data::kAir, 6.0, kNuclearOff, false,
+         "argon is open from 0.5 MeV, so the steps MUST differ"},
+        {0, data::kWater, 1.5, kNoWiring, false,
+         "Rayleigh left the sum at 2 m_e: every step MUST differ"},
+        {0, data::kWater, 6.0, kNoWiring, false,
+         "Rayleigh left the sum at 2 m_e: every step MUST differ"},
+        {1, data::kWater, 50.0, kNoWiring, false, "open, so the extra uniform MUST move the steps"},
     };
     for (const Cell& c : cells) {
       const Scene<real_t> s = scene_for(c.m);
       const unsigned int key0 = 0xC0FFEEu + 977u * static_cast<unsigned>(c.m);
+      had::HadronicWiring<real_t> second = had;
+      if (c.vs == kNuclearOff) { second.photon_nuclear = false; }
       for (int pass = 0; pass < 2; ++pass) {
         reset();
-        const bool use = (pass == 0);
+        // `kNoGeneral`: the FIRST pass is the wiring with the general process and photonNuclear
+        // off, the second the no-wiring call.
+        had::HadronicWiring<real_t> first = had;
+        if (c.vs == kNoGeneral) {
+          first.gamma_general = had::GammaGeneralProcess::kOff;
+          first.photon_nuclear = false;
+        }
+        const bool use = (pass == 0) || (c.vs == kNuclearOff);
+        const had::HadronicWiring<real_t>& w = (pass == 0) ? first : second;
         if (c.kind == 0) {
-          k_gamma<<<blocks(kN), kT>>>(s, had, use, c.e, kN, key0, d_out);
+          k_gamma<<<blocks(kN), kT>>>(s, w, use, c.e, kN, key0, d_out);
         } else if (c.kind == 1) {
-          k_lepton<false><<<blocks(kN), kT>>>(s, had, use, c.e, kN, key0, d_out);
+          k_lepton<false><<<blocks(kN), kT>>>(s, w, use, c.e, kN, key0, d_out);
         } else {
-          k_lepton<true><<<blocks(kN), kT>>>(s, had, use, c.e, kN, key0, d_out);
+          k_lepton<true><<<blocks(kN), kT>>>(s, w, use, c.e, kN, key0, d_out);
         }
         if (!get(pass == 0 ? a : b, kN)) { return 1; }
       }
@@ -485,9 +529,12 @@ int main() {
         if (!same(a[i], b[i])) { ++differ; }
         queued += a[i].queued;
       }
-      std::printf("   %-2s %-6s %6.2f MeV  %5d of %d steps differ, %3d queued  (%s)\n",
-                  c.kind == 0 ? "g" : (c.kind == 1 ? "e-" : "e+"), mat_name(c.m), c.e, differ,
-                  kN, queued, c.why);
+      const char* vs_name = (c.vs == kNoWiring)     ? "wiring vs none"
+                            : (c.vs == kNuclearOff) ? "photonNuclear on vs off"
+                                                    : "general off vs none";
+      std::printf("   %-2s %-6s %6.2f MeV  %-23s %5d of %d steps differ, %3d queued  (%s)\n",
+                  c.kind == 0 ? "g" : (c.kind == 1 ? "e-" : "e+"), mat_name(c.m), c.e, vs_name,
+                  differ, kN, queued, c.why);
       if (c.must_match && differ != 0) {
         fail("%s %.2f MeV: %d steps differ where the process is unreachable", mat_name(c.m), c.e,
              differ);
@@ -614,7 +661,10 @@ int main() {
       h2.gamma_general =
           c.general_on ? had::GammaGeneralProcess::kOn : had::GammaGeneralProcess::kOff;
       reset();
-      const auto xs = em::gamma_macroscopic_xs<real_t>(mats[c.m], c.e, &pe, &rt);
+      // The EM sum exactly as `step_gamma` forms it: with the general process on, no Rayleigh
+      // from 2 m_e up (P21).
+      const auto xs =
+          em::gamma_macroscopic_xs<real_t>(mats[c.m], c.e, &pe, &rt, true, true, c.general_on);
       const real_t sn =
           had::photon_nuclear_xs<real_t>(htab, h2.gamma_general, c.m, mats[c.m], c.e);
       const real_t xs_total = (sn > real_t(0)) ? xs.total + sn : xs.total;
@@ -1021,6 +1071,162 @@ int main() {
         || std::fabs(re[static_cast<int>(had::HadronicRefusal::kInelasticQueueFull)]
                      - e0 * full) > 1e-6) {
       fail("the refusal rows' energy is not the refused photons' energy");
+    }
+  }
+
+  // ============================================================================================
+  // 7. P21: the port's first interactions against the running Geant4's
+  // ============================================================================================
+  //
+  // `ref/gammagp/gammagp.cc` counts which sub-process of QBBC's G4GammaGeneralProcess takes the
+  // first interaction of a million photons a point (`gammagp_counts.csv`) - forty million at
+  // 1.5 MeV, so that Geant4's side of the Rayleigh comparison is not its own noise (docs/RISK.md
+  // V223) - and here the port's stepper does the same with a million first steps, general
+  // process on, in a box nothing leaves; each process's count is compared with Geant4's as two
+  // binomial samples. Rayleigh above 2 m_e is not a rate: it is zero, in both, and asserted so.
+  // Everything else is asserted inside 3 sigma (every z is printed; docs/RISK.md has them).
+  std::printf("-- 7. first interactions against the running G4GammaGeneralProcess --\n");
+  {
+    struct G4Count { int mat; double e; long long n; std::string process; long long count; };
+    std::vector<G4Count> g4;
+    {
+      const char* env = std::getenv("G4GPU_ORACLE");
+      const std::string path =
+          std::string((env != nullptr && env[0] != '\0') ? env : "ref/oracle") +
+          "/gammagp_counts.csv";
+      FILE* f = std::fopen(path.c_str(), "r");
+      if (f == nullptr) {
+        fail("cannot read %s - run ref/oracle/run.bat", path.c_str());
+      } else {
+        static char line[4096];
+        const char* g4mat[data::kNumMaterials] = {"G4_AIR", "G4_WATER", "G4_A-150_TISSUE",
+                                                  "G4_BONE_COMPACT_ICRU"};
+        while (std::fgets(line, sizeof line, f) != nullptr) {
+          char mname[64] = {}, proc[64] = {};
+          double e = 0;
+          long long n = 0, k = 0;
+          if (std::sscanf(line, "%63[^,],%lf,%lld,%63[^,],%lld,", mname, &e, &n, proc, &k) != 5) {
+            continue;
+          }
+          for (int m = 0; m < data::kNumMaterials; ++m) {
+            if (std::string(mname) == g4mat[m]) { g4.push_back({m, e, n, proc, k}); }
+          }
+        }
+        std::fclose(f);
+      }
+    }
+    auto g4_count = [&](int m, double e, const char* process, long long& n) -> long long {
+      for (const G4Count& c : g4) {
+        if (c.mat == m && std::fabs(c.e - e) < 1e-9 && c.process == process) {
+          n = c.n;
+          return c.count;
+        }
+      }
+      n = -1;
+      return -1;
+    };
+    struct Point { int m; real_t e; };
+    // P21 deliverable 1 (docs/RISK.md V208): no Rayleigh from 2 m_e up, in water and in bone.
+    const Point points[] = {{data::kWater, 1.5}, {data::kBoneCompact, 1.5}};
+    const char* procs[5] = {"compt", "conv", "phot", "Rayl", "photonNuclear"};
+    constexpr int kN7 = 200000;
+    constexpr int kBatches7 = 5;
+    for (const Point& pt : points) {
+      const Scene<real_t> s = scene_for(pt.m);
+      long long port[5] = {}, boundary = 0;
+      for (int batch = 0; batch < kBatches7; ++batch) {
+        reset();
+        const unsigned int key0 = 0x2100000u + 0x10000000u * static_cast<unsigned>(pt.m)
+                                  + static_cast<unsigned>(batch * kN7);
+        k_gamma<<<blocks(kN7), kT>>>(s, had, true, pt.e, kN7, key0, d_out);
+        if (!get(a, kN7)) { return 1; }
+        for (int i = 0; i < kN7; ++i) {
+          if (a[i].status == static_cast<int>(StepStatus::fGeomBoundary)) { ++boundary; }
+          if (a[i].queued || a[i].process == static_cast<int>(ProcessId::fPhotoNuclear)) {
+            ++port[4];
+          } else if (a[i].process == static_cast<int>(ProcessId::fCompton)) {
+            ++port[0];
+          } else if (a[i].process == static_cast<int>(ProcessId::fGammaConversion)) {
+            ++port[1];
+          } else if (a[i].process == static_cast<int>(ProcessId::fPhotoelectric)) {
+            ++port[2];
+          } else if (a[i].process == static_cast<int>(ProcessId::fRayleigh)) {
+            ++port[3];
+          }
+        }
+      }
+      const long long n_port = static_cast<long long>(kN7) * kBatches7 - boundary;
+      long long n_g4_point = 0;
+      g4_count(pt.m, pt.e, "compt", n_g4_point);
+      std::printf("   %-6s %6.2f MeV, %lld photons here and %lld in Geant4:", mat_name(pt.m), pt.e,
+                  n_port, n_g4_point);
+      for (int k = 0; k < 5; ++k) {
+        long long n_g4 = 0;
+        const long long k_g4 = g4_count(pt.m, pt.e, procs[k], n_g4);
+        if (k_g4 < 0) {
+          fail("%s %.2f MeV: no Geant4 count for %s in gammagp_counts.csv", mat_name(pt.m),
+               pt.e, procs[k]);
+          continue;
+        }
+        // Two binomial samples of one probability: the pooled estimate's standard error.
+        const double p = double(port[k] + k_g4) / double(n_port + n_g4);
+        const double se = std::sqrt(std::fmax(p * (1 - p) * (1.0 / n_port + 1.0 / n_g4), 1e-300));
+        const double z = (double(port[k]) / n_port - double(k_g4) / n_g4) / se;
+        std::printf("  %s %lld/%lld", procs[k], port[k], k_g4);
+        if (port[k] + k_g4 >= 20) { std::printf(" (z %+.2f)", z); }
+        if (k == 3) {
+          if (pt.e >= double(had::gamma_general_min_ee<real_t>()) && (port[k] != 0 || k_g4 != 0)) {
+            fail("%s %.2f MeV: a Rayleigh scatter above 2 m_e (port %lld, Geant4 %lld)",
+                 mat_name(pt.m), pt.e, port[k], k_g4);
+          }
+        } else if (port[k] + k_g4 >= 20 && std::fabs(z) > 3.0) {
+          fail("%s %.2f MeV: %s is %.2f sigma from Geant4's count", mat_name(pt.m), pt.e,
+               procs[k], z);
+        }
+      }
+      std::printf("\n");
+      if (boundary != 0) { fail("%lld first steps reached the boundary", boundary); }
+    }
+    // The converse, so that the zero above is shown able to be anything else: the general process
+    // OFF scatters by Rayleigh at 1.5 MeV in water, at its share of the summed cross section.
+    {
+      static data::RayleighTable<real_t> rt7{};
+      static std::vector<real_t> rte7, rtv7;
+      static data::PhotoElectricTable<real_t> pe7{};
+      static std::vector<real_t> pte7, ptv7;
+      const bool ok = data::load_rayleigh<real_t>(host::default_rayl_dir(), zs.data(),
+                                                  static_cast<int>(zs.size()), rt7, rte7, rtv7)
+                      && data::load_photoelectric<real_t>(host::default_phot_dir(), zs.data(),
+                                                          static_cast<int>(zs.size()), pe7, pte7,
+                                                          ptv7);
+      rt7.table_e = rte7.data();
+      rt7.table_v = rtv7.data();
+      pe7.table_e = pte7.data();
+      pe7.table_v = ptv7.data();
+      had::HadronicWiring<real_t> off = had;
+      off.gamma_general = had::GammaGeneralProcess::kOff;
+      const Scene<real_t> s = scene_for(data::kWater);
+      long long rayl = 0;
+      for (int batch = 0; batch < kBatches7; ++batch) {
+        reset();
+        k_gamma<<<blocks(kN7), kT>>>(s, off, true, 1.5, kN7,
+                                     0x2700000u + static_cast<unsigned>(batch * kN7), d_out);
+        if (!get(a, kN7)) { return 1; }
+        for (int i = 0; i < kN7; ++i) {
+          if (a[i].process == static_cast<int>(ProcessId::fRayleigh)) { ++rayl; }
+        }
+      }
+      const auto xs = em::gamma_macroscopic_xs<real_t>(mats[data::kWater], 1.5, &pe7, &rt7);
+      const double share = double(xs.rayleigh) / double(xs.total);
+      const double n = double(kN7) * kBatches7;
+      const double z = (double(rayl) - n * share) / std::sqrt(n * share * (1 - share));
+      std::printf("   water   1.50 MeV, general process OFF: %lld Rayleigh scatters against its "
+                  "share %.4e (z %+.2f)\n", rayl, share, z);
+      if (!ok) { fail("could not load the Rayleigh / photoelectric tables for the converse"); }
+      if (rayl == 0 || std::fabs(z) > 5) {
+        fail("with the general process off Rayleigh is not at its share - the zero above "
+             "would be blind");
+      }
     }
   }
 
