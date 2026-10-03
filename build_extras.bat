@@ -607,8 +607,12 @@ rem A subroutine rather than the same six lines twice, and a subroutine rather t
 rem body, because a `rem` containing a closing parenthesis inside a parenthesised block ends
 rem the block there.
 :hook_object_gate
-for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\%~1.obj" ^| findstr /c:"run_step_"`) do (
-  echo FATAL: out\%~1.obj carries a stepping kernel:
+rem `run_interaction` and `run_emextra` since P21, which is when the generator began splitting
+rem them: until then all seven were compiled into this object by design, and the pattern could
+rem only name the kernels that were not meant to be here. They are build_engine.bat's own
+rem pattern, for its reason - those seven carry the hadronic models (docs/RISK.md V189, V210).
+for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\%~1.obj" ^| findstr /c:"run_step_" /c:"run_interaction" /c:"run_emextra"`) do (
+  echo FATAL: out\%~1.obj carries a stepping or interaction kernel:
   echo        %%N
   echo        A launch was added without a matching declaration in the generated
   echo        hook_kernels.cuh, so that kernel is compiled into the project's own
