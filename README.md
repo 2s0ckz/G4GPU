@@ -39,7 +39,11 @@ open question 7). The photon's,
 interactions are wired since P19 - the photon's inside `G4GammaGeneralProcess` on Geant4's own
 selection uniform, the leptons' as discrete processes - and the sweep's photon and electron beams
 run with nothing inactivated on the Geant4 side; Geant4 itself never selects photo-nuclear at or
-above 100 MeV inside that general process (RISK V207), and the port does the same. The [status
+above 100 MeV inside that general process (RISK V207), and the port does the same. Since P21 the
+photon's selection inside that process is Geant4's own in two more places - no Rayleigh term from
+2 m_e up, and the photo-nuclear share read from Geant4's table 9 at its 51 nodes - and what the
+general process still is not, its zone totals and EM fractions as tables 0.4-0.9% off the models,
+is named (RISK V223-V225). The [status
 tables](#physics) below say exactly what is there and what is not.
 
 ---
@@ -329,7 +333,8 @@ processes, V185-V187 for the Gaussian every one of them draws, V188-V202 for the
 wiring and the like-for-like sweep, V203 for the compiler that could not compile the ion kernel,
 V204-V206 for the hydrogen target, V207-V211 for the photon's and leptons' nuclear processes, and
 V212-V219 for the destroyed-nucleus branch and what measuring the alpha beams around it found in
-Geant4's neutron general process.
+Geant4's neutron general process, V220-V221 for the gate's split and its incremental build, and
+V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9.
 
 #### Tables, materials and framework
 
@@ -383,7 +388,7 @@ closed - the same question has the mechanism.
 
 | | status |
 |---|---|
-| γ, e⁻, e⁺ | **transported**; the photon's nuclear process inside the general process and the leptons' as discrete processes act (P19) |
+| γ, e⁻, e⁺ | **transported**; the photon's nuclear process inside the general process and the leptons' as discrete processes act (P19), and inside that process the photon Rayleigh-scatters only below 2 m_e and goes to a nucleus at Geant4's own table-9 rate, as QBBC's does (P21) |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name. **`<species>Inelastic` acts since P15** for π± and K± (the Binary cascade below 1.5 GeV, Bertini above 1, FTFP above 3, chosen as `G4EnergyRangeManager` chooses) and for d and t (the light-ion reaction: its fusion arm below 50 MeV per nucleon and, since P9e, `Interact` above it). The antiproton has no inelastic process either, and for the same reason as its elastic one: `BuildAntiLightIonsFTFP` gives it `G4ComponentAntiNuclNuclearXS`, which P2 refuses. A stopped μ⁻, π⁻ or K⁻ is **captured** rather than decayed, which is what `G4HadronStoppingProcess` does — its at-rest interaction length is zero and pre-empts `G4Decay`; `muonNuclear` acts on μ± (P19) |
 | neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). **The inelastic sub-process ACTS since P15** - the same three models a proton's does, reached through the interaction queue instead of refused by name, which closes what was this port's largest named hole (18% of the interactions in water at 10 MeV, 39% in air, 25% in bone, 51% in lead). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once **Since P20 one thing is known NOT to match (RISK V219, open question 7)**: `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` refreshes the cross section for the material the neutron is now in and only then charges the step just taken, so a step that ends on a boundary is charged at the NEXT material's mean free path, where `G4HadronicProcess` and `G4GammaGeneralProcess` charge it at the one it was taken with; the port draws a fresh length every step, which is the latter order. Against QBBC as it ships the port's 1 GeV neutron B1 dose reads -36.7% and its 100 MeV one -40.8%; against Geant4 with the general process off, which is what every neutron row so far was compared with, +0.5% and +0.7%; against Geant4 with that one ordering reversed (`ref/b1ngp`, P20) +1.9% (1.2 sigma) and -0.3%. Carrying the interaction length on the neutron's track is a package of its own |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
@@ -403,6 +408,7 @@ closed - the same question has the mechanism.
 | the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it |
 | the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and P15 calls it |
 | `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; everything below those energies is wired (2.1.16), and a QBBC photon never reaches QGS through its general process in any case (RISK V207) | Phase 3, remaining; QGS is not in this port |
+| `G4GammaGeneralProcess`'s own zone totals and EM fractions (`LambdaGeneral0/2/6/10`, `ProbGeneral1/3/4/7/8/11-13`) | the tables the general process reads instead of its models, which differ from them by up to 0.43% below 2 MeV and 0.93% across the giant resonance | not read: the port reads the models, and Geant4's table 9 since P21; a scratch read of the totals alone moved the B1 gate by +0.036% (RISK V225) |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
 | `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | absent. It returns immediately unless a step loses ≥ 5% of the energy, so it is a correction on the long steps of a slowing ion; the recoil ions stop in one step |
 | `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead |
@@ -707,8 +713,10 @@ then `rm->SetStepHook(QualityFactorScoring(d_w, d_p, n, slot));` before `BeamOn`
 The fourth line is P8e's, and the hook class moves into a header to go with it
 (`include/QualityFactorScoring.hh`, where a Geant4 project's action class lives anyway).
 `build_hook_engine.bat <header> <type> <tag>` reads the engine's own kernel list, writes one
-translation unit per stepping kernel for that hook type, compiles them six at a time and
-archives them into `out/hook_<tag>.lib`, which the project links. Without it the project's own
+translation unit per kernel for that hook type - the stepping kernels six at a time and, since
+P21, the five interaction kernels and the two drains one at a time, as the engine's own build
+does - and archives them into `out/hook_<tag>.lib`, which the project links.
+Without it the project's own
 `.cu` instantiates all eighteen kernels — which took three and a half minutes until the Urban
 ion branch went live and then stopped compiling at all, with the same `ptxas died with status
 0xC0000005` that RISK **V65** split the engine to cure. The hook is a template parameter like
@@ -735,6 +743,15 @@ which is fewer seconds of CPU and was the wrong trade twice over: it rebuilt all
 kernels when `main()` changed, and once the Urban ion branch went live ptxas would not compile
 it at all. Now editing the hook class rebuilds the kernels and editing the rest of the project
 rebuilds 18 seconds.
+
+P21 (RISK V222) found that the seven kernels carrying the hadronic models - the five interaction
+kernels and the two drains - had no unit of their own, so a project's object instantiated all
+seven: 49.4 minutes of ptxas at 26.3 GB for either project in this repository, with the drains'
+frames (18,672 and 19,424 B) past the 16,384-byte stepping stack, so every run raised the device
+stack. Split per kernel, every frame is the engine's to the byte or 16 under it, each ptxas is
+within 9% of the engine unit's, the project's own object compiles in **20 s**, and the stack is
+never raised; a full hook build is about 72 minutes against 60 before, because seven heavy units
+now compile per hook instead of one object with all seven inside.
 
 Note what is *not* affected: a project using the **stock** hook links the prebuilt object and
 compiles in seconds, paying one predicated load per step. The slow path is opt-in, and only for
