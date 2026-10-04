@@ -1,5 +1,6 @@
 // Example B1 on QBBC, with G4NeutronGeneralProcess's interaction-length bookkeeping as a switch -
-// the program docs/RISK.md V219 was measured with.
+// the program docs/RISK.md V219 was measured with, and since P22 the instrument for both of the
+// port's orders (`had::NeutronGeneralOrder`).
 //
 // WHAT IT ASKS. `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` (11.1.1, and the
 // same in 11.5.0) calls `CurrentCrossSection(track)` FIRST - which sets
@@ -18,11 +19,28 @@
 //
 //   B1NGP_PATCH=0  the stock class. This is the CONTROL, and it is exact: the constructor list
 //                  below is QBBC's, so the run reads what ref/B1build's exampleB1.exe reads, to
-//                  every digit (the same random stream - measured on two beams in V219).
+//                  every digit (the same random stream - measured on two beams in V219). It is
+//                  the port's default order since P22, `kGeant4_11_1_1`.
 //   B1NGP_PATCH=1  the same class with the step charged at the mean free path it was TAKEN
 //                  with: the base is called with previousStepSize = 0, which refreshes the cross
 //                  section and samples a new length if none is carried and subtracts nothing,
-//                  and the decrement is then made at the previous call's length.
+//                  and the decrement is then made at the previous call's length. It is the
+//                  port's `G4GPU_NEUTRON_GP_ORDER=reordered`, `kReordered`.
+//
+// WHAT IT COUNTS, IN BOTH SETTINGS (P22). Three numbers, printed at the end of the run, and none
+// of them draws a random number or changes one, so B1NGP_PATCH=0 still reads exampleB1 to every
+// digit with the counting in:
+//
+//   carried    steps that began with a count carried from the step before - the steps whose
+//              charge the two orders disagree about, and all of them under either setting;
+//   changed    of those, the ones whose mean free path the refresh changed: a boundary into
+//              another material, which is where the two orders give different counts;
+//   used up    of those, the ones whose count the charge took to zero, so that the general
+//              process limits the step to zero length and the neutron interacts where it
+//              stands - on the boundary it just crossed. V219's mechanism, counted. Under the
+//              reordered charge a count reaches zero only if the step used exactly all of it,
+//              which a step limited by geometry cannot, so this is ~0 there by construction and
+//              thousands under the stock class.
 //
 // HOW THE CLASS GETS IN. `G4PhysListUtil::FindNeutronGeneralProcess` looks the process up on the
 // neutron's manager by subtype and creates one only if it finds none, and every QBBC
@@ -34,7 +52,7 @@
 //
 // EVERYTHING ELSE IS GEANT4's OWN B1, from the source tree, as in ref/b1neutron.
 //
-// Usage:  run.bat <macro> <0|1>
+// Usage:  run.bat <macro> <0|1>      (rows.ps1 -Side g4 -Patch 0|1 runs the measured rows)
 #include "ActionInitialization.hh"
 #include "DetectorConstruction.hh"
 
@@ -64,8 +82,30 @@
 using namespace B1;
 
 namespace {
-long long g_carried = 0;  // lengths carried into a step, in the patched class
+long long g_carried = 0;  // steps that began with a count carried from the previous step
 long long g_changed = 0;  // of them, across a change of mean free path
+long long g_used_up = 0;  // of them, whose count the charge took to zero
+
+// The stock class, observed. Every line of PostStepGetPhysicalInteractionLength is the base's;
+// what is added reads `theNumberOfInteractionLengthLeft` and `currentInteractionLength` around
+// the call and touches neither, so the random stream is the stock class's.
+class CountedStock : public G4NeutronGeneralProcess {
+ public:
+  G4double PostStepGetPhysicalInteractionLength(const G4Track& track, G4double previousStepSize,
+                                                G4ForceCondition* condition) override {
+    const G4bool timed_out = (track.GetGlobalTime() >= 10.0 * CLHEP::microsecond);
+    const G4bool carrying = (theNumberOfInteractionLengthLeft >= 0.0);
+    const G4double before = currentInteractionLength;
+    const G4double x = G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength(
+        track, previousStepSize, condition);
+    if (!timed_out && carrying) {
+      ++g_carried;
+      if (before != currentInteractionLength) { ++g_changed; }
+      if (theNumberOfInteractionLengthLeft <= 0.0) { ++g_used_up; }
+    }
+    return x;
+  }
+};
 
 class ChargedAtTakenMfp : public G4NeutronGeneralProcess {
  public:
@@ -86,6 +126,7 @@ class ChargedAtTakenMfp : public G4NeutronGeneralProcess {
       if (taken_with != currentInteractionLength) { ++g_changed; }
       theNumberOfInteractionLengthLeft -= previousStepSize / taken_with;
       theNumberOfInteractionLengthLeft = std::max(theNumberOfInteractionLengthLeft, 0.0);
+      if (theNumberOfInteractionLengthLeft <= 0.0) { ++g_used_up; }
       x = theNumberOfInteractionLengthLeft * currentInteractionLength;
     }
     return x;
@@ -100,7 +141,7 @@ class NeutronGeneralFirst : public G4VPhysicsConstructor {
   void ConstructProcess() override {
     G4NeutronGeneralProcess* p =
         patched_ ? static_cast<G4NeutronGeneralProcess*>(new ChargedAtTakenMfp())
-                 : new G4NeutronGeneralProcess();
+                 : static_cast<G4NeutronGeneralProcess*>(new CountedStock());
     G4Neutron::Neutron()->GetProcessManager()->AddDiscreteProcess(p);
   }
 
@@ -144,7 +185,8 @@ int main(int argc, char** argv) {
   runManager->SetUserInitialization(new ActionInitialization());
   G4UImanager::GetUIpointer()->ApplyCommand(G4String("/control/execute ") + argv[1]);
   std::printf("b1ngp: %lld interaction lengths carried into a step, %lld of them across a "
-              "change of mean free path\n", g_carried, g_changed);
+              "change of mean free path, %lld of them used up by the charge (the neutron "
+              "interacts where the step begins)\n", g_carried, g_changed, g_used_up);
   delete runManager;
   return 0;
 }
