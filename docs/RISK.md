@@ -14841,3 +14841,101 @@ registers with no spill. On a run with no neutron in it - B1's 2,000,000-event g
 sigma from Geant4's 427.385) and the event loop is 1,399, 1,347 and 1,337 ms before against
 1,359, 1,335 and 1,347 after, three pairs interleaved in one session: 1,361 against 1,347 ms, no
 cost a run can see. `b1_gpu_sched`, which shares only the buffer, reads 427.699 pGy both ways.
+
+### V232: after P22 five of the six beams are within 1.04 sigma of QBBC as it ships - the neutron rows from -74 and -33 sigma to +1.0 and -0.7, alpha_4000 from -5.6 to -1.0 - and V219 is closed; alpha_840 stays at -3.2 sigma for a reason that is not the general process's
+
+The six rows of V230 at the same counts and settings (`ref\b1ngp\rows.ps1 -Side port`), the port
+at this branch in its default order, 11.1.1's (V231). The Geant4 columns were RE-RUN here on the
+instrument with P22's counters in (726d475): `B1NGP_PATCH=0` is QBBC as it ships and read every
+number V219 printed to the last digit, which is the check that counting moved no random number;
+`B1NGP_PATCH=1` is the reordered process, and adds the two rows P20 did not measure (He3 and
+alpha_840). Doses in nGy (µGy for alpha_840), B1's printed rms, sigma on the quadrature sum:
+
+| beam | events | port before (V230) | **port after** | Geant4 as QBBC ships | before | **after** | Geant4 reordered |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 500,000 | 133.066 ± 0.754 | **226.392 ± 0.989** | 224.945 ± 0.985 | -40.85%, -74.1 σ | **+0.64%, +1.0 σ** | 133.458 ± 0.757 |
+| neutron 1000 MeV | 100,000 | 78.435 ± 0.837 | **122.759 ± 1.069** | 123.873 ± 1.079 | -36.68%, -33.3 σ | **-0.90%, -0.7 σ** | 76.996 ± 0.830 |
+| deuteron 2000 MeV | 100,000 | 269.699 ± 1.364 | **278.780 ± 1.402** | 279.007 ± 1.403 | -3.34%, -4.8 σ | **-0.08%, -0.1 σ** | 272.207 ± 1.383 |
+| alpha 4000 MeV | 100,000 | 646.783 ± 2.160 | **661.007 ± 2.193** | 664.032 ± 2.206 | -2.60%, -5.6 σ | **-0.46%, -1.0 σ** | 647.871 ± 2.177 |
+| He3 3000 MeV | 100,000 | 592.169 ± 1.954 | **601.955 ± 1.969** | 600.455 ± 1.952 | -1.38%, -3.0 σ | **+0.25%, +0.5 σ** | 586.284 ± 1.932 |
+| alpha 840 MeV | 300,000 | 4.87999 ± 0.00915 | **4.89442 ± 0.00913** | 4.93621 ± 0.00917 | -1.14%, -4.3 σ | **-0.85%, -3.2 σ** | 4.92770 ± 0.00918 |
+
+**THE ORDER IS WORTH IN THE PORT WHAT IT IS WORTH IN GEANT4.** The port's after/before against
+Geant4's shipped/reordered, the same ratio on both sides: neutron_100 +70.1% against +68.6%,
+neutron_1000 +56.5% against +60.9%, deuteron +3.4% against +2.5%, alpha_4000 +2.2% against +2.5%,
+He3 +1.7% against +2.4%, alpha_840 +0.30% against +0.17%. And the mechanism is counted on the
+Geant4 side - lengths carried into a step, and of them used up by the next material's charge so
+that the neutron interacts where the step begins (726d475):
+
+| beam | shipped: carried / used up | reordered: carried / used up |
+|---|--:|--:|
+| neutron 100 MeV | 1,391,824 / 75,288 | 1,385,053 / 0 |
+| neutron 1000 MeV | 354,363 / 13,690 | 340,124 / 0 |
+| deuteron 2000 MeV | 265,609 / 4,847 | 265,943 / 0 |
+| alpha 4000 MeV | 462,376 / 8,610 | 463,082 / 0 |
+| He3 3000 MeV | 335,988 / 6,111 | 336,452 / 0 |
+| alpha 840 MeV | 712,157 / 17,058 | 719,444 / 0 |
+
+Every carried length crosses a change of material in both settings, and in each row the
+used-up fraction is 1.8 to 5.4% of the carried ones - the neutrons V219's argument said the
+trapezoid gains. The port's own run says the same in its own terms: queued inelastic interactions
+174,618 -> 195,603 on neutron_100 and 51,090 -> 58,542 on neutron_1000, and the time cut's kills
+42,484 -> 49,307 and 8,038 -> 9,758.
+
+**alpha_840 STAYS OUTSIDE THE BAND, AND IT IS NOT THE GENERAL PROCESS's.** The order is worth
++0.17% (+0.7 σ) of that row in Geant4 and +0.30% in the port, so of V219's -1.14% it explains a
+quarter; the -0.85% left is -0.68% (-2.6 σ) against Geant4 reordered as well. V217 has where it
+is: with the five ion inelastic processes held off on both sides the row agrees to -0.09%
+(-0.5 σ), so what remains is in the ion-inelastic chain at 210 MeV per nucleon, the energy at
+which an alpha's reactions are the Binary light-ion cascade and its de-excitation, and not in the
+neutron's bookkeeping. Refused here by name; it is the next package's row.
+
+**THE GATES DID NOT MOVE.** B1's 2,000,000-event gamma gate - stage 1, no general process -
+reads 425.921 ± 0.868 pGy, 1.19 sigma from Geant4's 427.385, before and after to every digit,
+three interleaved pairs each (V231 has the event loops); `b1_gpu_sched` 427.699 pGy both ways.
+The proton depth-dose comparison - the final stage, so its secondary neutrons do run the new
+order - 6,000 events against `ref/oracle/proton_depth.csv`, main's binary then this branch's:
+
+| | before (b40c836) | after | limit check |
+|---|--:|--:|---|
+| contained, port/Geant4 - 1 | -0.165% | -0.171% | OK |
+| plateau, port/Geant4 per proton | +0.133% | +0.127% | OK |
+| R80 | -0.025 mm (77.695 against 77.720) | -0.027 mm (77.692) | OK |
+| 80-20 width | +0.029 mm (1.198 against 1.169) | +0.031 mm (1.200) | OK |
+
+Inside a water phantom every boundary is water to water, where the two orders charge the same,
+and the last step out of it is charged at the world's mean free path - which only lets the
+neutron leave - so the order has little to act on, and the four numbers move by a few
+thousandths.
+
+**WHAT 11.1.1's ORDER EXPOSES, AND IT IS THE NAVIGATOR's.** The 100 MeV row's batch ran 786
+iterations against 451 before, and a neutron was alive in every one of them. Instrumented once
+(a print in `run_step_neutral`, never committed; same dose to every digit): two neutrons of
+500,000 events were CRAWLING along a face in push-only steps - every step a boundary step of
+exactly `kPushDistance` (1e-7 mm), volume 3 -> 3, energy and clock frozen. One sat on the bone
+trapezoid's slanted +y face with a direction tangent to it to 1e-6 (dy/dz = 0.5000, the face's
+slope) and crawled past step 600; the other on the z = 40 mm face with dz = -4.7e-5, gone before
+step 600. A track ON a face and leaving it at a grazing angle gets distance 0 from
+`geom::step_to_boundary`, and the 1e-7 mm push moves it off the face by 1e-7 times the sine of
+that angle - 1e-13 mm for the first, inside the 1e-9 mm tolerance - so `resolve_after_step`, which
+relocates by the point, finds the same volume and the next step starts on the same face. Geant4
+relocates a geometry-limited step by its own exiting flag (G4Navigator's fExiting), not by the
+point, and counts zero steps besides: at 10 in a row it pushes by 100 kCarTolerance, at 25 it
+abandons the track and aborts the event (G4Navigator::ComputeStep, GeomNav0003). This transport
+has neither. Under the reordered order a neutron reaches
+a face only by flying into it; under 11.1.1's it INTERACTS on faces (Geant4 counts 75,288 such
+lengths in this row), and a scatter there can leave it on the face pointing along it. No track
+was abandoned in any row (BeamOn's bound is 1,000 iterations, and every other row's iteration
+count is what it was before - 491, 464, 779, 633, 643); the crawl is 6e-5 mm of path and the dose
+moved by nothing a run can see. It is named here, not fixed: it is the navigator's tangent case,
+and a crawl longer than 1,000 iterations would be booked as an abandoned track.
+
+**THE LEDGERS** are V230's in kind and size: no interaction without a final state; 24 to 76
+inelastic secondaries of a species `core/particle.cuh` has no row for on the four beams that
+make them (1,915 to 8,799 MeV), 1 to 9 GenericIons outside AME2012, 6 to 11 ion delta-ray steps.
+
+**V219 IS CLOSED BY THIS ENTRY.** The port's neutron is `G4NeutronGeneralProcess` as 11.1.1 ships
+it, step for step (V231), and B1's neutron rows sit against QBBC as it ships at +1.0 and -0.7
+sigma where they sat at -74 and -33. The rows V219 attributed to it - deuteron, alpha_4000 and
+He3 - land at -0.1, -1.0 and +0.5 sigma. The order every neutron number before P22 was taken in
+is `G4GPU_NEUTRON_GP_ORDER=reordered`, and it reproduces them to the digit.

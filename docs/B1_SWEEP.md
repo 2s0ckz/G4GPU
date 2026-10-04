@@ -524,3 +524,69 @@ lands on the port.
 been compared against QBBC as it ships**: ref/b1neutron, the P15 and P18 reference, is Geant4
 with the general process off. Reproducing 11.1.1's order means carrying the interaction length on
 the neutron's track (`step_neutral`, a `TrackState` field); P20 does not, and names it.
+
+## The neutron's interaction length carried, after P22 (2026-10-04)
+
+P22 transcribes the line P20 found (docs/RISK.md V219): `G4NeutronGeneralProcess` keeps
+`theNumberOfInteractionLengthLeft` across a neutron's steps and charges the step just taken at the
+mean free path of the material the neutron is in NOW, so a step that ended on a boundary is
+charged at the NEXT material's. The count rides on the neutron's track since P22 and that order is
+the port's default; the order every neutron row above was measured in - each step charged at the
+length it was taken with, which drawing every length afresh reproduces - stays selectable as
+`G4GPU_NEUTRON_GP_ORDER=reordered` (docs/RISK.md V231).
+
+**THE NEUTRON ROWS ARE COMPARED WITH QBBC AS IT SHIPS FOR THE FIRST TIME.** Until P20 every neutron
+reference here was Geant4 with the general process OFF (`ref/b1neutron`, the 132.135 nGy of the
+P15 and P18 tables), against which the reordered port agreed; QBBC as it ships was 74 and 33
+sigma away. The six beams V219 measured, at its counts and settings - which `ref\b1ngp\rows.ps1`
+now writes down, for both sides: the port at main's b40c836 ("before", docs/RISK.md V230) and at
+this branch ("after"), Geant4 re-run on `ref/b1ngp` with `B1NGP_PATCH=0` (QBBC as it ships, reading
+exampleB1's own numbers to every digit) and `=1` (the reordered process). Doses in nGy (µGy for
+alpha_840), B1's printed rms:
+
+| beam | events | port before | port after | Geant4 as QBBC ships | before | after | Geant4 reordered |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 500,000 | 133.066 ± 0.754 | **226.392 ± 0.989** | 224.945 ± 0.985 | -40.85%, -74.1 σ | **+0.64%, +1.0 σ** | 133.458 ± 0.757 |
+| neutron 1000 MeV | 100,000 | 78.435 ± 0.837 | **122.759 ± 1.069** | 123.873 ± 1.079 | -36.68%, -33.3 σ | **-0.90%, -0.7 σ** | 76.996 ± 0.830 |
+| deuteron 2000 MeV | 100,000 | 269.699 ± 1.364 | 278.780 ± 1.402 | 279.007 ± 1.403 | -3.34%, -4.8 σ | -0.08%, -0.1 σ | 272.207 ± 1.383 |
+| alpha 4000 MeV | 100,000 | 646.783 ± 2.160 | 661.007 ± 2.193 | 664.032 ± 2.206 | -2.60%, -5.6 σ | -0.46%, -1.0 σ | 647.871 ± 2.177 |
+| He3 3000 MeV | 100,000 | 592.169 ± 1.954 | 601.955 ± 1.969 | 600.455 ± 1.952 | -1.38%, -3.0 σ | +0.25%, +0.5 σ | 586.284 ± 1.932 |
+| alpha 840 MeV | 300,000 | 4.87999 ± 0.00915 | 4.89442 ± 0.00913 | 4.93621 ± 0.00917 | -1.14%, -4.3 σ | **-0.85%, -3.2 σ** | 4.92770 ± 0.00918 |
+
+The neutron row is neutron_100 on P15's macro (`ionElastic` inactivated alone) and every other row
+on this sweep's `$emOnly` list for a hadron beam; the port side is the final stage and 32 live
+tracks an event, as for every hadron beam above.
+
+**Five of six are inside 1.04 sigma**, and the order moves each row in the port by what it moves
+it in Geant4 - shipped over reordered +68.6% and +60.9% on the two neutron beams, against the
+port's after over before +70.1% and +56.5%; +2.5% against +2.2% on alpha_4000. The ion rows V219
+traced to the neutron close with it: alpha_4000 from -5.6 sigma to -1.0, deuteron from -4.8 to
+-0.1, He3 from -3.0 to +0.5.
+
+**alpha_840 is the one outside, at -3.2 sigma, and not for this reason**: the order is worth
++0.17% of it in Geant4 and +0.30% in the port, and with the five ion inelastic processes held off
+on both sides it agrees to -0.09% (docs/RISK.md V217) - so what is left is in the ion-inelastic
+chain at 210 MeV per nucleon. Named in docs/RISK.md V232 and left to the package that owns that
+chain.
+
+**The reordered switch reproduces the before column to every digit** - 133.066 ± 0.754 and
+78.435 ± 0.837 nGy, with the same interactions queued and the same ledgers - so a comparison
+against `ref/b1neutron` (`ref/b1hadron/p15_neutron.mac`'s partner sets the variable) or any number
+in the tables above can be repeated exactly. Every run in which the general process acts prints
+the order it ran in (`neutron general process: 11.1.1 order, ...`).
+
+**What Geant4 counts**, the instrument's three numbers per run (lengths carried into a step,
+across a change of material, used up by the charge so the neutron interacts where the step
+begins): 75,288 lengths of the 100 MeV beam's 1,391,824 used up under the shipped process, 13,690
+of the 1 GeV beam's 354,363, and 4,847 to 17,058 on the ion beams - and none under the reordered
+one in any row. Every carried length in B1 crosses a change of material.
+
+**The port's clock**, loop time before and after (one run each, not paired): neutron_100 333 s
+to 350 s, neutron_1000 136 to 149, deuteron 258 to 263, alpha_4000 506 to 479, He3 458 to 393,
+alpha_840 1128 to 864. The neutron beams pay for more interactions (195,603 queued against
+174,618 at 100 MeV); the ion beams ran FASTER, which the order cannot do, so those three are the
+machine's four hours apart and not a measurement. The 100 MeV batch ran 786 iterations against
+451 because two neutrons crawled along a
+bone face in 1e-7 mm pushes - the navigator's tangent case, which 11.1.1's order reaches by making
+neutrons interact on faces; nothing was abandoned and no other row's iteration count moved
+(docs/RISK.md V232).
