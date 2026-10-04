@@ -13985,10 +13985,13 @@ checkout of a different tree in between.
 
 THE RULE this adds: build_extras.bat must be green before a change lands under `src/render`,
 `src/builder`, `src/scenes`, `src/host/g4view.cu`, `src/host/g4builder.cu`,
-`tools/gen_hook_units.ps1`, `build_hook_engine.bat` or `build_vis.bat`, and before any change to
-the kernels, the drains or the interaction units a hook project instantiates - build_all.bat
-proves the stock engine, build_extras.bat proves a user's. README's pipeline section and
-HADRONIC_PLAN rules 2, 5 and 7 say so.
+`tools/gen_hook_units.ps1`, `build_hook_engine.bat` or `build_vis.bat`, and before a change to the
+hook INTERFACE: `core/step_hook.cuh`, a kernel's signature or the `extern template` block in
+`host/transport_run_impl.cuh`, `TransportEngine`'s template surface. A model change behind an
+unchanged kernel signature compiles in a hook project exactly as it compiles in the stock engine,
+so build_all.bat proves it; the first integration read that way was P23b's (2026-10-04), whose
+species table grew by ten rows and whose decay tables and Bertini interface changed with no kernel
+signature touched. README's pipeline section and HADRONIC_PLAN rules 2, 5 and 7 say so.
 
 WHAT IT DOES NOT FIX: the physics half's three hours are a from-scratch build of everything,
 every time, with the engine's all-or-nothing freshness test on top. That is V221.

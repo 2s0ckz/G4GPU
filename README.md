@@ -27,7 +27,11 @@ whole Bertini cascade, and the at-rest captures. A proton, a neutron, a pion, a 
 a triton, a He3, an alpha and a real nuclide each draw an inelastic interaction length from the
 cross sections, pick a model as `G4EnergyRangeManager` picks one, and get a final state; a
 stopped μ⁻, π⁻, K⁻ or negative hyperon is captured rather than decayed. What is still refused is
-named and counted with its rate. The largest hole P15 had - `G4BinaryLightIonReaction::Interact`,
+named and counted with its rate. The strange and heavy species QBBC transports - the neutral kaons,
+the hyperons and anti-hyperons, the charmed and bottom hadrons QBBC's FTF does produce - have their
+data on main since P23b: cross sections, decay tables and the two cascades' acceptance of them, 65
+species measured against the running QBBC (RISK V226-V229); their transport is P23a's.
+The largest hole P15 had - `G4BinaryLightIonReaction::Interact`,
 every ion at or above 50 MeV per nucleon, which is where a therapeutic alpha beam lives - is closed
 by P9e's cascade since the second pass, and the hydrogen target (`Propagate1H1`) since P18, which
 took the 1 GeV proton beam from +14% to -0.6% of Geant4, and the destroyed-nucleus branch
@@ -199,7 +203,7 @@ between the two runs is the transport.
 ### The pipeline
 
 `build_all.bat` is what decides whether the PHYSICS is correct. It builds the transport engine,
-the dose drivers and example B1; builds and runs 92 tests - every cross section, model, final
+the dose drivers and example B1; builds and runs 93 tests - every cross section, model, final
 state, table, material, geometry and transport test; runs example B1 against a 2M-event Geant4
 reference with a σ gate; runs the proton depth-dose comparison; checks batch-vs-macro
 equivalence and mesh import, that every physics switch changes the answer and that the pool
@@ -334,7 +338,8 @@ wiring and the like-for-like sweep, V203 for the compiler that could not compile
 V204-V206 for the hydrogen target, V207-V211 for the photon's and leptons' nuclear processes, and
 V212-V219 for the destroyed-nucleus branch and what measuring the alpha beams around it found in
 Geant4's neutron general process, V220-V221 for the gate's split and its incremental build, and
-V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9.
+V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9,
+and V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles.
 
 #### Tables, materials and framework
 
@@ -396,7 +401,7 @@ closed - the same question has the mechanism.
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
-| hyperons, K⁰L/K⁰S, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species, fatal as a primary |
+| hyperons, K⁰L/K⁰S, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species, fatal as a primary. Since P23b their cross sections, decay tables and the cascades' acceptance of them are on main (RISK V226-V229), so what is left for them is the transport itself: P23a |
 
 ### Not implemented
 
@@ -404,7 +409,7 @@ closed - the same question has the mechanism.
 |---|---|---|
 | `G4NeutronGeneralProcess`'s order of charging a step | 11.1.1 refreshes the neutron's cross section for the material it is now in and THEN charges the step just taken, so a step that ends on a boundary is charged at the next material's mean free path; the port draws a fresh length every step and charges nothing (RISK V219) | Phase 3, remaining, and a package of its own: the interaction length carried on the neutron's track in `step_neutral`, then every neutron row re-measured. Worth -36.7% and -40.8% of the 1 GeV and 100 MeV neutron beams' B1 dose against QBBC as it ships, and the alpha rows' full-count residual |
 | the light-ion reaction's 128-entry final state | what the Binary cascade still refuses, by capacity: 39 of 20,000 Fe56-on-Fe56 events at 1 GeV per nucleon (0.2%), one 1400 MeV neutron on Pb208 in 20,000 past the secondary buffer, and no event of either alpha beam | Phase 3, nearly closed: the destroyed-nucleus branch `FillVoidNucleusProducts` is transcribed and taped since P20 ([`docs/PORTED.md`](docs/PORTED.md) 2.1.10), neither ion campaign refuses an event by any name, and what a 4 GeV alpha beam still books is 0.058% of its interactions - secondaries of a species the particle table has no row for, and ions outside AME2012 |
-| Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in), `generateSCMmuonAbsorption`, the anti-hyperon decay tables, K0S and K0L as Bertini projectiles | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the pieces named | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
+| Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in) and `generateSCMmuonAbsorption` | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the two entries named. K0S and K0L as projectiles run since P23b (RISK V227 reverses V139: Geant4 mixes them back to K0 or anti-K0 on a coin), and the anti-hyperon decay tables are on main | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
 | the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it |
 | the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and P15 calls it |
 | `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; everything below those energies is wired (2.1.16), and a QBBC photon never reaches QGS through its general process in any case (RISK V207) | Phase 3, remaining; QGS is not in this port |
@@ -591,7 +596,7 @@ capability 8.6 by default; `G4GPU_ARCH` in `setupenv.bat` picks the card, or two
 
 ```
 setupenv.bat        # MSVC + CUDA on PATH
-build_all.bat       # the physics gate: engine, dose drivers, example B1, 92 tests, the dose checks
+build_all.bat       # the physics gate: engine, dose drivers, example B1, 93 tests, the dose checks
 build_extras.bat    # the rest: viewer, GUI, hook projects, 10 tests, both selftests, the generated project
 ```
 
@@ -800,7 +805,7 @@ src/
   g4/         the Geant4-shaped API: G4Box, G4LogicalVolume, G4RunManager, ...
   host/       the transport engine, the dose driver, the viewer and builder hosts
   render/     OpenGL viewer and trajectory store
-tests/        102 tests - 92 in build_all.bat, 10 in build_extras.bat; test_custom_hook is a whole project, built as a user would build one
+tests/        103 tests - 93 in build_all.bat, 10 in build_extras.bat; test_custom_hook is a whole project, built as a user would build one
 tools/        extractors, generators, comparison scripts, quick.ps1
 ref/          the Geant4-linked oracle dumper and reference programs
 examples/B1/  Geant4's example B1, unmodified in shape
