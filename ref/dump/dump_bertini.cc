@@ -103,7 +103,14 @@
 #include "G4Nucleus.hh"
 #include "G4KaonMinus.hh"
 #include "G4KaonPlus.hh"
+#include "G4KaonZeroLong.hh"
+#include "G4KaonZeroShort.hh"
 #include "G4Lambda.hh"
+#include "G4OmegaMinus.hh"
+#include "G4SigmaMinus.hh"
+#include "G4SigmaPlus.hh"
+#include "G4XiMinus.hh"
+#include "G4XiZero.hh"
 #include "G4PionMinus.hh"
 #include "G4PionPlus.hh"
 #include "G4Proton.hh"
@@ -1054,6 +1061,26 @@ void dump_apply() {
       cases.push_back({"kaon-", km_, ke, t.a, t.z, false});
     }
     cases.push_back({"lambda", lam_, 1000., t.a, t.z, false});
+  }
+  // P23b - the rest of what QBBC gives the kaon/hyperon instance, APPENDED after the original
+  // 95 so that their rows, and the seed each case resets to, are unchanged. K0S and K0L reach
+  // the cascade as a kaonZero or a kaonZeroBar bullet chosen by a coin (the end of
+  // G4InuclElementaryParticle::type), and the five hyperons the first grid skipped are the
+  // projectiles of G4HadParticles::sHyperons that had never been run end to end.
+  G4ParticleDefinition* k0l_ = G4KaonZeroLong::KaonZeroLong();
+  G4ParticleDefinition* k0s_ = G4KaonZeroShort::KaonZeroShort();
+  struct Named { const char* name; G4ParticleDefinition* pd; };
+  const Named hyperons[] = {{"sigma+", G4SigmaPlus::SigmaPlus()},
+                            {"sigma-", G4SigmaMinus::SigmaMinus()},
+                            {"xi0", G4XiZero::XiZero()},
+                            {"xi-", G4XiMinus::XiMinus()},
+                            {"omega-", G4OmegaMinus::OmegaMinus()}};
+  for (const AZ& t : targets) {
+    for (double ke : kaonKE) {
+      cases.push_back({"kaon0L", k0l_, ke, t.a, t.z, false});
+      cases.push_back({"kaon0S", k0s_, ke, t.a, t.z, false});
+    }
+    for (const Named& h : hyperons) { cases.push_back({h.name, h.pd, 1000., t.a, t.z, false}); }
   }
 
   // Two instances, because `usePreCompoundDeexcitation()` is a one-way switch on the object and

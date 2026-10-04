@@ -264,6 +264,20 @@ __host__ __device__ inline int inucl_type_from_pdg_weak_kaon(int pdg, double u) 
   return inucl_type_from_pdg(pdg);
 }
 
+/// G4InuclElementaryParticle::type(const G4ParticleDefinition*), the whole of it: the pure map
+/// for every code but the two weak neutral kaons, and ONE deviate drawn for those two and for
+/// nothing else - `G4UniformRand()` is inside the K0S/K0L branch, so a proton's call draws
+/// nothing and a K0L's draws exactly one. The last line of the Geant4 function (P23b; until
+/// then docs/RISK.md V139 read it as absent and the port refused K0S and K0L as projectiles).
+/// `ref/oracle/strange_k0type.csv` holds both outcomes and the draw count under a fixed deviate.
+template <typename Rng>
+__host__ __device__ inline int inucl_type_from_pdg_draw(int pdg, Rng& rng) {
+  if (pdg == 310 || pdg == 130) {
+    return inucl_type_from_pdg_weak_kaon(pdg, static_cast<double>(rng.uniform()));
+  }
+  return inucl_type_from_pdg(pdg);
+}
+
 // =============================================================================================
 // G4InuclSpecialFunctions
 // =============================================================================================

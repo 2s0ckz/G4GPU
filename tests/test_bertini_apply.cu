@@ -228,7 +228,26 @@ int pdg_of(const std::string& name) {
   if (name == "kaon+") { return 321; }
   if (name == "kaon-") { return -321; }
   if (name == "lambda") { return 3122; }
+  // P23b: the rest of QBBC's third instance. The two weak neutral kaons, which docs/RISK.md
+  // V139 had refused, and the five hyperons of G4HadParticles::sHyperons the first grid did
+  // not carry - the instance is built for all of them and none had ever been run end to end.
+  if (name == "kaon0L") { return 130; }
+  if (name == "kaon0S") { return 310; }
+  if (name == "sigma+") { return 3222; }
+  if (name == "sigma-") { return 3112; }
+  if (name == "xi0") { return 3322; }
+  if (name == "xi-") { return 3312; }
+  if (name == "omega-") { return 3334; }
   return 0;
+}
+
+/// The projectile's PDG mass in MeV, through the INUCL table the cascade itself uses. A K0S or
+/// K0L has no INUCL code of its own - it becomes a kaonZero or a kaonZeroBar bullet - and
+/// G4KaonZeroLong, G4KaonZeroShort and G4KaonZero are all built with `0.497614*GeV`, so the
+/// kaonZero row IS its mass, to the bit.
+double projectile_mass_MeV(int pdg) {
+  if (pdg == 130 || pdg == 310) { return bert::inucl_particle_mass(bert::kKaonZero) * 1000.0; }
+  return bert::inucl_particle_mass(bert::inucl_type_from_pdg(pdg)) * 1000.0;
 }
 
 /// One case's oracle row, plus the per-species rows that belong to it.
@@ -251,7 +270,7 @@ struct Case {
 
 /// The projectile's lab momentum in MeV - the scale the momentum balance is a balance of.
 double proj_momentum_MeV(const Case& c) {
-  const double m = bert::inucl_particle_mass(bert::inucl_type_from_pdg(c.pdg)) * 1000.0;
+  const double m = projectile_mass_MeV(c.pdg);
   return std::sqrt(c.ke * (c.ke + 2.0 * m));
 }
 
@@ -523,7 +542,7 @@ int main() {
     for (long long ev = 0; ev < n_ev; ++ev) {
       HadProjectile<double> proj;
       proj.pdg = c.pdg;
-      proj.mass = bert::inucl_particle_mass(bert::inucl_type_from_pdg(c.pdg)) * 1000.0;
+      proj.mass = projectile_mass_MeV(c.pdg);
       proj.kin_energy = c.ke;
       HadNucleus nuc;
       nuc.a = c.a;
@@ -814,23 +833,103 @@ int main() {
     pin(bert::qbbc_bertini_range(-321).ok && bert::qbbc_bertini_range(3122).ok,
         "K- and lambda have windows too - the three species the kaon instance is built for");
 
-    // **A WINDOW WITH NO MODEL BEHIND IT.** `G4HadParticles::sKaons` is {321, -321, 310, 130} and
-    // G4HadronicBuilder gives a Bertini instance to all four, so a K0S or K0L in a QBBC run has
-    // this model registered on it from 0 to 6 GeV. `IsApplicable` then refuses both, because
-    // `G4InuclElementaryParticle::type` is a chain of pointer comparisons that names
-    // G4KaonZero and G4AntiKaonZero and NOT G4KaonZeroShort or G4KaonZeroLong - the weak
-    // eigenstates have no INUCL type code at all. Every K0S and K0L handed to Bertini is
-    // NoInteraction. That is Geant4's arrangement and not a port limitation, and it is pinned
-    // HERE, as the two answers together, because neither half is wrong on its own and no code in
-    // Geant4 compares them. docs/RISK.md V139.
-    pin(bert::qbbc_bertini_range(310).ok && !bert::interface_is_applicable(310),
-        "K0S: QBBC gives Bertini a window and Bertini's IsApplicable refuses it");
-    pin(bert::qbbc_bertini_range(130).ok && !bert::interface_is_applicable(130),
+    // **A WINDOW WITH A MODEL BEHIND IT, REACHED BY A COIN.** `G4HadParticles::sKaons` is
+    // {321, -321, 310, 130} and G4HadronicBuilder gives a Bertini instance to all four, so a K0S
+    // or K0L in a QBBC run has this model registered on it from 0 to 6 GeV - and IsApplicable
+    // says YES. These pins said the opposite until P23b: docs/RISK.md V139 read
+    // `G4InuclElementaryParticle::type` as a chain of pointer comparisons that stops at the tau
+    // neutrinos, and the function's LAST statement (G4InuclElementaryParticle.cc:165-167) is
+    //     if (pd==G4KaonZeroShort::Definition() || pd==G4KaonZeroLong::Definition())
+    //       return ((G4UniformRand() > 0.5) ? kaonZero : kaonZeroBar);
+    // The weak eigenstates have no INUCL code of their own because they are mixed back to the
+    // strong ones on the way in, as `makeDynamicParticle` mixes the other way on the way out.
+    // V226 has the correction; the pins below are its two halves.
+    pin(bert::qbbc_bertini_range(310).ok && bert::interface_is_applicable(310),
+        "K0S: QBBC gives Bertini a window and Bertini's IsApplicable accepts it");
+    pin(bert::qbbc_bertini_range(130).ok && bert::interface_is_applicable(130),
         "K0L: the same, and these two are half of QBBC's kaon set");
     pin(bert::inucl_type_from_pdg(310) == 0 && bert::inucl_type_from_pdg(130) == 0,
-        "and the reason is that neither has a G4InuclParticleNames code");
-    pin(bert::inucl_type_from_pdg(311) != 0 && bert::inucl_type_from_pdg(-311) != 0,
-        "while the STRONG K0 and anti-K0 do - which is the asymmetry V139 is about");
+        "the PURE map still has no code for either - the mixing needs a deviate");
+    pin(bert::inucl_type_from_pdg_weak_kaon(130, 0.75) == bert::kKaonZero &&
+            bert::inucl_type_from_pdg_weak_kaon(130, 0.5) == bert::kKaonZeroBar &&
+            bert::inucl_type_from_pdg_weak_kaon(310, 0.25) == bert::kKaonZeroBar,
+        "and with one: above one half a kaonZero, at or below it a kaonZeroBar");
+    {
+      // The draw COUNT, which is what keeps the stream: one deviate for a weak kaon, none for
+      // anything else - and in `apply_yourself` two, IsApplicable's and createBullet's.
+      struct CountingRng {
+        int n = 0;
+        __host__ __device__ double uniform() { ++n; return 0.75; }
+      } cr;
+      (void)bert::inucl_type_from_pdg_draw(2212, cr);
+      (void)bert::inucl_type_from_pdg_draw(-321, cr);
+      pin(cr.n == 0, "a proton and a K- cost no deviate in type()");
+      (void)bert::inucl_type_from_pdg_draw(130, cr);
+      (void)bert::interface_is_applicable_draw(310, cr);
+      pin(cr.n == 2, "a K0L costs one deviate in type() and a K0S one in IsApplicable");
+    }
+    // AND BOTH COINS AGAINST GEANT4'S OWN, exactly: ref/oracle/strange_k0type.csv (P23b's
+    // dump_strange.cc) installs an engine that returns one fixed deviate, calls
+    // G4InuclElementaryParticle::type on a K0S and a K0L - the call IsApplicable and createBullet
+    // both make - and G4CascadeInterface::makeDynamicParticle on a K0 and an anti-K0, and records
+    // the result and the number of deviates spent. The deviates straddle one half by an ulp each
+    // side and sit on it, because both Geant4 lines are `> 0.5`; the two coins send the upper half
+    // to OPPOSITE ends (kaonZero on the way in, K0L on the way out), and a port that crossed them,
+    // or wrote `>=`, fails a row.
+    {
+      const std::vector<std::string> lines = read_lines("strange_k0type.csv");
+      int n_type = 0, n_mix = 0;
+      for (std::size_t li = 1; li < lines.size(); ++li) {
+        const std::vector<std::string> f = split(lines[li]);
+        if (f.size() < 5) { continue; }
+        const int pdg_in = iv(f, 1);
+        const double u = dv(f, 2);
+        const int want = iv(f, 3);
+        char what[160];
+        std::snprintf(what, sizeof what, "%s(%d) at u=%.17g: Geant4 %d after %d deviate(s)",
+                      f[0].c_str(), pdg_in, u, want, iv(f, 4));
+        if (f[0] == "type") {
+          ++n_type;
+          struct Fixed {
+            double v;
+            int n = 0;
+            __host__ __device__ double uniform() { ++n; return v; }
+          } fx{u};
+          const int got = bert::inucl_type_from_pdg_draw(pdg_in, fx);
+          pin(got == want && fx.n == iv(f, 4), what);
+        } else if (f[0] == "mix") {
+          ++n_mix;
+          pin(bert::interface_mix_neutral_kaon(u) == want && iv(f, 4) == 1, what);
+        }
+      }
+      pin(n_type >= 10 && n_mix >= 10, "strange_k0type.csv carries both coins at every deviate");
+    }
+    // BERTINI CANNOT TELL A K0S FROM A K0L, and Geant4's own campaign says so to the last digit.
+    // Both are a fair coin between kaonZero and kaonZeroBar on the way in, the mass the bullet
+    // carries is G4KaonZero's 0.497614 GeV either way, and the dump seeds every case alike - so
+    // its kaon0L and kaon0S rows must be the SAME numbers, every column, and are. A port that
+    // let anything of the weak eigenstate through (its PDG code into a retry test, its lifetime,
+    // a different mass) would make them differ on its side; a Geant4 that did would have made
+    // them differ in the oracle. Asserted on the oracle, because it is the claim about Geant4 the
+    // port's K0S row relies on.
+    {
+      std::map<std::string, std::string> k0l, k0s;
+      for (const std::string& name : {std::string("bertini_apply.csv"),
+                                      std::string("bertini_apply_species.csv")}) {
+        const std::vector<std::string> lines = read_lines(name);
+        for (std::size_t li = 1; li < lines.size(); ++li) {
+          const std::string& l = lines[li];
+          const std::size_t comma = l.find(',');
+          if (comma == std::string::npos) { continue; }
+          const std::string who = l.substr(0, comma);
+          const std::string rest = name + ":" + l.substr(comma + 1);
+          if (who == "kaon0L") { k0l[rest] = rest; }
+          if (who == "kaon0S") { k0s[rest] = rest; }
+        }
+      }
+      pin(!k0l.empty() && k0l == k0s,
+          "the oracle's kaon0L and kaon0S rows are identical in every column of both files");
+    }
 
     // The three that need a whole call to reach.
     Philox<double> prng(7u, 8u, 9u);

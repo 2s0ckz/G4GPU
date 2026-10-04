@@ -114,15 +114,47 @@ struct ApplyResult {
   CascadeBalance balance;           ///< what checkFinalResult measured, in Bertini's GeV
 };
 
-/// G4CascadeInterface::IsApplicable(const G4ParticleDefinition*).
+/// G4CascadeInterface::IsApplicable(const G4ParticleDefinition*), as an ANSWER.
 ///
 /// "Nuclei are okay" without further test - `GetAtomicMass() > 1` returns true immediately - and
 /// everything else needs a channel table on the proton. So an alpha is applicable and a muon is
 /// not, and neither statement mentions energy.
+///
+/// K0S and K0L ARE applicable. `G4InuclElementaryParticle::type` mixes them back to kaonZero or
+/// kaonZeroBar on a coin toss (its last line, G4InuclElementaryParticle.cc:165-167), and both
+/// have a channel table on the proton, so whichever way the coin falls the answer is yes. This
+/// function returns that answer without spending the deviate; `interface_is_applicable_draw`
+/// below is what `apply_yourself` calls, because Geant4's call DOES spend it. docs/RISK.md V139
+/// said the opposite until P23b read the end of the function - see V226.
 __host__ __device__ inline bool interface_is_applicable(int pdg) {
   if (pdg > 1000000000) { return true; }          // a nucleus
+  if (pdg == 310 || pdg == 130) {
+    return channel_table(kKaonZero * kProton).valid() &&
+           channel_table(kKaonZeroBar * kProton).valid();
+  }
   const int type = inucl_type_from_pdg(pdg);
   return type != 0 && channel_table(type * kProton).valid();
+}
+
+/// The same question asked the way `G4CascadeInterface::ApplyYourself` asks it - through
+/// `IsApplicable(aTrack, theNucleus)`, whose `type()` call draws one deviate for a K0S or a K0L
+/// and none for anything else. The drawn type is thrown away, exactly as Geant4 throws it away:
+/// `createBullet` calls `type()` AGAIN and that second deviate is what decides kaonZero against
+/// kaonZeroBar for the cascade.
+template <typename Rng>
+__host__ __device__ inline bool interface_is_applicable_draw(int pdg, Rng& rng) {
+  if (pdg > 1000000000) { return true; }
+  const int type = inucl_type_from_pdg_draw(pdg, rng);
+  return type != 0 && channel_table(type * kProton).valid();
+}
+
+/// The K0/anti-K0 mixing of `G4CascadeInterface::makeDynamicParticle`: K0S unless the deviate
+/// is above one half, then K0L - `pd = G4KaonZeroShort::Definition(); if (G4UniformRand() > 0.5)
+/// pd = G4KaonZeroLong::Definition();`. The same `> 0.5` as the mixing on the way in and the
+/// OPPOSITE assignment from `G4HadronicProcess`'s, which sends the upper half to K0S; each is
+/// held to its own oracle row in `ref/oracle/strange_k0type.csv`.
+__host__ __device__ inline int interface_mix_neutral_kaon(double u) {
+  return (u > 0.5) ? 130 : 310;
 }
 
 /// G4InuclCollider::deexcite - the dispatch, plus its own ten-attempt retry.
@@ -375,7 +407,9 @@ __host__ __device__ inline ApplyResult apply_yourself(
     res.refusal = InterfaceRefusal::kHyperNucleus;
     return res;
   }
-  if (!interface_is_applicable(projectile.pdg)) {
+  // `IsApplicable(aTrack, theNucleus)` - the deviate a K0S or K0L costs here is spent and its
+  // answer discarded, as in Geant4 (see interface_is_applicable_draw).
+  if (!interface_is_applicable_draw(projectile.pdg, rng)) {
     res.refusal = InterfaceRefusal::kNotApplicable;
     res.no_interaction = true;
     return res;
@@ -390,9 +424,13 @@ __host__ __device__ inline ApplyResult apply_yourself(
 
   const NucleiModelParams nmp = nuclei_model_params(par);
 
-  // createBullet: along +z with |p| and E from the track, in GeV, then stored.
+  // createBullet: along +z with |p| and E from the track, in GeV, then stored. Its `type()` call
+  // is the SECOND coin toss for a K0S or a K0L, and this one is kept: a K0L is a kaonZero or a
+  // kaonZeroBar bullet for the whole of this call, every retry included, and the K0 the cascade
+  // sees has the K0L's mass because G4KaonZero is built with the same 0.497614*GeV. The track's
+  // four-momentum goes in as it is; inucl_store_momentum is G4InuclParticle::setMomentum.
   CascadeSetup lab;
-  lab.bullet_type = inucl_type_from_pdg(projectile.pdg);
+  lab.bullet_type = inucl_type_from_pdg_draw(projectile.pdg, rng);
   const double plab = double(projectile.momentum()) * 0.001;
   const double elab = double(projectile.total_energy()) * 0.001;
   lab.bullet = inucl_store_momentum(LV(Vec3d{0.0, 0.0, plab}, elab), lab.bullet_type);
@@ -486,7 +524,7 @@ __host__ __device__ inline ApplyResult apply_yourself(
     int pdg = inucl_type_row(type).pdg;
     if (type == kKaonZero || type == kKaonZeroBar) {
       // The K0/K0bar mixing, one deviate, AFTER the event: 310 (K0S) or 130 (K0L).
-      pdg = (rng.uniform() > 0.5) ? 130 : 310;
+      pdg = interface_mix_neutral_kaon(static_cast<double>(rng.uniform()));
     }
     s.pdg = pdg;
     s.z = static_cast<int>(inucl_type_row(type).charge);
