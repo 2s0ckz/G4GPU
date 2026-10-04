@@ -73,11 +73,11 @@ enum class FtfRefusal : int {
   kHeavyFlavourProjectile,
 
   /// The Glauber-Gribov hadron-nucleon cross section under G4FTFParameters refused the
-  /// projectile. In 11.1.1 that means one of G4HadronNucleonXsc's two unported branches -
-  /// HyperonNucleonXscNS for an s/c/b hyperon or SCBMesonNucleonXscNS for an s/c/b meson,
-  /// both `P` in docs/PORTED.md 2.1.1 - so a Lambda or a D meson gets no FTF parameters at
-  /// all. The xs-level reason is carried alongside in FtfParameters::xs_refused, because
-  /// "which of the two" is what a future agent needs.
+  /// projectile. It was raised for G4HadronNucleonXsc's two unported branches -
+  /// HyperonNucleonXscNS for an s/c/b hyperon and SCBMesonNucleonXscNS for an s/c/b meson - and
+  /// both are written now (P11c and P23b), so nothing in 11.1.1's dispatcher can raise it. The
+  /// value stays because an enumerator's number is what a refused oracle row carries, and the
+  /// xs-level reason is still carried alongside in FtfParameters::xs_refused.
   kHadronNucleonXscRefused,
 
   /// A projectile G4FTFParameters::InitForInteraction has no arm for and whose cross section

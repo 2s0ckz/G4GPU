@@ -29,7 +29,9 @@ enum class XsRefusal : int {
   /// sections. The value is kept because an enumerator's number is what a refused oracle row
   /// carries.
   kHyperonNucleonXscNS,
-  /// G4HadronNucleonXsc::SCBMesonNucleonXscNS - s/c/b meson on nucleon.
+  /// G4HadronNucleonXsc::SCBMesonNucleonXscNS - s/c/b meson on nucleon. WRITTEN since P23b,
+  /// because QBBC gives every b/c meson of G4HadParticles::sBCHadrons a Glauber-Gribov
+  /// inelastic process. Kept for the same reason as the value above.
   kSCBMesonNucleonXscNS,
   /// G4NucleiPropertiesTheoreticalTable and G4NucleiProperties::NuclearMass - a nuclide with
   /// no measured mass in AME2012. See data/nuclei_mass_ame12.hh.

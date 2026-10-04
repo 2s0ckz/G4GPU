@@ -18,24 +18,25 @@
 //     nucleon-nucleon combinations, so the nucleus cross sections are this function folded
 //     with a nuclear radius.
 //
-// WHAT IS TRANSCRIBED AND WHAT IS REFUSED
+// WHAT IS TRANSCRIBED
 //
-// p, n, pbar, nbar, pi+, pi-, K+, K-, K0S, K0L and gamma are complete. Two branches of the
-// dispatcher are refused by name in refusal.cuh:
-//   HyperonNucleonXscNS   (|pdg| > 3000 and in the hyperon list) - Lambda, Sigma, Xi, Omega
-//                         and their charm and bottom partners. Reachable in QBBC only through
-//                         a cascade emitting one, i.e. after P9/P10/P11 exist; and through
-//                         G4ComponentGGNuclNuclXsc's hypernucleus branch, which
-//                         G4HadronicParameters::EnableHyperNuclei gates off by default.
-//   SCBMesonNucleonXscNS  (|pdg| > 220 and in the s/c/b meson list) - D, B, eta, eta', J/psi.
-//                         `EnableBCParticles = 1` in 11.1.1 puts b- and c-hadrons in QBBC's
-//                         chain, so this is a real gap and not a hypothetical one; it is
-//                         reachable only above several GeV through FTF (plan section 2).
-// Sigma- is NOT in that refusal: pdg 3112 has its own row in HadronNucleonXscPDG's parameter
-// list, and the dispatcher's hyperon test catches it first, so 3112 reaches
-// HyperonNucleonXscNS and the PDG row is dead code. Transcribed as dead code, with the
+// The whole dispatcher, every branch. p, n, pbar, nbar, pi+, pi-, K+, K-, K0S, K0L and gamma
+// were P2's. Two branches were refused by name until they were needed:
+//   HyperonNucleonXscNS   (|pdg| > 3000 and in the hyperon list) - Lambda, Sigma, Xi and
+//                         their charm and bottom partners, particle and anti-particle. Written
+//                         by P11c for FTFP's lambda beam.
+//   SCBMesonNucleonXscNS  (|pdg| > 220 and in the s/c/b meson list) - D, Ds, B, Bs, Bc, eta,
+//                         eta', etac, J/psi. Written by P23b: `EnableBCParticles = 1` in 11.1.1
+//                         gives every b/c meson of G4HadParticles::sBCHadrons an inelastic and
+//                         an elastic process on the Glauber-Gribov component (measured in
+//                         ref/oracle/strange_scope.csv), so it is on QBBC's path and not a
+//                         hypothetical one.
+// Sigma- has its own row in HadronNucleonXscPDG's parameter list, and the dispatcher's hyperon
+// test catches 3112 first, so the PDG row is dead code. Transcribed as dead code, with the
 // dispatcher's order preserved, because changing the order would "fix" a branch Geant4 does
-// not take.
+// not take. The Omega- is the opposite case: 3334 is NOT in the dispatch list, so it and the
+// anti-Omega go to HadronNucleonXscPDG's "as proton ???" default rather than to the 0.64 the
+// hyperon table holds for them.
 //
 // A TYPO THAT IS PART OF THE ANSWER
 //
@@ -909,9 +910,66 @@ __host__ __device__ inline HadXs<real_t> hn_hyperon_xsc_ns(const Projectile<real
   return r;
 }
 
+/// G4HadronNucleonXsc::SCBMesonNucleonXscNS (G4HadronNucleonXsc.cc:1056-1112).
+///
+/// The meson twin of `hn_hyperon_xsc_ns`: a coefficient chosen by |PDG| applied to the PI+'s
+/// `HadronNucleonXscNS` on the same nucleon at the meson's own kinetic energy, and all three
+/// cross sections scaled - `fTotalXsc = coeff*HadronNucleonXscNS(thePiPlus, ...)`, then
+/// `fElasticXsc *= coeff; fInelasticXsc *= coeff;` on the values that call just filled in.
+///
+/// Written by P23b, because QBBC's `G4HadronicBuilder::BuildBCHadronsFTFP_BERT` gives every
+/// charm and bottom MESON of `G4HadParticles::sBCHadrons` an inelastic process whose cross
+/// section is the Glauber-Gribov component (`strange_scope.csv`), and the component sums this
+/// function over the nucleus. Until now the port refused it by name (`kSCBMesonNucleonXscNS`).
+///
+/// Three things in it are Geant4's and are kept, each measured against `strange_hnxsc.csv`:
+///
+///   * The pi+ is substituted WHOLE: its mass sets pLab and sMand, and its CHARGE (+1) opens the
+///     Coulomb factor below 100 MeV on a proton - for a neutral D0 and a negative B- alike.
+///   * The dispatch list (`HadronNucleonXsc`) and the coefficient table disagree twice. 543
+///     (B_c*+) is dispatched here and has no coefficient, so it gets 1.0; 553 (Upsilon) has a
+///     coefficient, 0.221978, and is NOT dispatched here - it goes to `HadronNucleonXscPDG` -
+///     so that coefficient has no caller in 11.1.1. Both are transcribed as written.
+///   * eta (221) and eta' (331) are in the dispatch list, with 0.76 and 0.88 - the Xi's and the
+///     Lambda's numbers from the hyperon table - so an eta on a nucleon is three quarters of a
+///     pi+, not a PDG fit.
+template <typename real_t>
+__host__ __device__ inline HadXs<real_t> hn_scb_meson_xsc_ns(const Projectile<real_t>& p,
+                                                             const Projectile<real_t>& nucleon,
+                                                             real_t ekin) {
+  const int apdg = (p.pdg < 0) ? -p.pdg : p.pdg;
+  real_t coeff = real_t(1.0);
+  if (apdg == 511 || apdg == 521) {          // B+-0 anti
+    coeff = real_t(0.610989);
+  } else if (apdg == 411 || apdg == 421) {   // D+-0 anti
+    coeff = real_t(0.676568);
+  } else if (apdg == 531) {                  // Bs, antiBs
+    coeff = real_t(0.430989);
+  } else if (apdg == 541) {                  // Bc+-
+    coeff = real_t(0.287557);
+  } else if (apdg == 431) {                  // Ds+-
+    coeff = real_t(0.496568);
+  } else if (apdg == 441 || apdg == 443) {   // etaC, J/Psi
+    coeff = real_t(0.353135);
+  } else if (apdg == 553) {                  // Upsilon - no caller, see above
+    coeff = real_t(0.221978);
+  } else if (apdg == 221) {                  // eta
+    coeff = real_t(0.76);
+  } else if (apdg == 331) {                  // eta'
+    coeff = real_t(0.88);
+  }
+  // `thePiPlus` is G4HadronNucleonXsc's own member, as `theProton` is for the hyperons.
+  HadXs<real_t> r = hn_xsc_ns<real_t>(pi_plus<real_t>(), nucleon, ekin);
+  if (!r.ok()) { return r; }
+  r.total *= coeff;
+  r.elastic *= coeff;
+  r.inelastic *= coeff;
+  return r;
+}
+
 /// The order is load-bearing: `pdg > 3000` is tested before `pdg > 220`, and both are tested
-/// on |pdg|, so an anti-hyperon takes the hyperon branch. The two refused branches are the
-/// ones named in the file header.
+/// on |pdg|, so an anti-hyperon takes the hyperon branch and an anti-D the meson one. Nothing
+/// is refused here any more: P11c wrote the hyperon branch and P23b the s/c/b-meson one.
 template <typename real_t>
 __host__ __device__ inline HadXs<real_t> hadron_nucleon_xsc(const Projectile<real_t>& p,
                                                             const Projectile<real_t>& nucleon,
@@ -940,11 +998,7 @@ __host__ __device__ inline HadXs<real_t> hadron_nucleon_xsc(const Projectile<rea
     const bool scb = (apdg == 511 || apdg == 421 || apdg == 531 || apdg == 541 ||
                       apdg == 431 || apdg == 411 || apdg == 521 || apdg == 221 ||
                       apdg == 331 || apdg == 441 || apdg == 443 || apdg == 543);
-    if (scb) {
-      HadXs<real_t> r;
-      r.refused = XsRefusal::kSCBMesonNucleonXscNS;
-      return r;
-    }
+    if (scb) { return hn_scb_meson_xsc_ns<real_t>(p, nucleon, ekin); }
     return hn_xsc_pdg<real_t>(p, nucleon, ekin);
   }
   return hn_xsc_pdg<real_t>(p, nucleon, ekin);
