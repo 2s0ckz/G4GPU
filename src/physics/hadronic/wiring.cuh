@@ -7,7 +7,9 @@
 //     changes: whether a stopped negative hadron decays.
 //   * WHAT A DISCRETE INTERACTION LENGTH IS in a transport that re-draws it every step rather
 //     than carrying `theNumberOfInteractionLengthLeft` on the track (`decay_in_flight_length`,
-//     and the note below about why that is the same distribution and not an approximation).
+//     and the note below about why that is the same distribution and not an approximation) -
+//     and the ONE process for which it is not, `G4NeutronGeneralProcess`, whose count the
+//     neutron carries since P22 (`NeutronGeneralOrder`, `neutron_general_length`).
 //   * WHAT IS ABSENT, by name and counted (`HadronicRefusal`). Inelastic final states, the
 //     stopping processes, anti-nucleus elastic. A refusal here is a hole in the answer with a
 //     number attached, not a silent zero.
@@ -95,6 +97,66 @@ __host__ __device__ inline const char* hadronic_stage_name(HadronicStage s) {
              : "final (QBBC as it ships: G4NeutronGeneralProcess with its inelastic sub-process, "
                "and the at-rest captures - both wired since P15; what each still refuses is in "
                "the ledger below)";
+}
+
+/// The order in which `G4NeutronGeneralProcess` charges a step - P22, docs/RISK.md V230.
+///
+/// A RUN-TIME SWITCH BESIDE THE STAGE, for the stage's reason (docs/RISK.md V45): the column
+/// against QBBC as it ships and the column against a Geant4 whose neutron has no general process
+/// have to come out of one binary. It acts only where the general process does - the final
+/// stage, on a neutron with the combined table uploaded; `kStage1`'s neutron has two
+/// `G4HadronicProcess`es instead and neither setting reaches it.
+///
+/// THE LINE IT IS ABOUT, `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`
+/// (11.1.1, G4NeutronGeneralProcess.cc:350; 11.5.0's is the same), after its time cut:
+///
+///     CurrentCrossSection(track);          // currentInteractionLength = 1/fLambda for the
+///                                          // material the track is in NOW
+///     if (theNumberOfInteractionLengthLeft < 0.0) {
+///       theNumberOfInteractionLengthLeft = -G4Log( G4UniformRand() );
+///     } else {
+///       theNumberOfInteractionLengthLeft -= previousStepSize/currentInteractionLength;
+///       theNumberOfInteractionLengthLeft = std::max(theNumberOfInteractionLengthLeft, 0.0);
+///     }
+///     return theNumberOfInteractionLengthLeft * currentInteractionLength;
+///
+/// The step being charged was taken in the PREVIOUS material, so a step that ended on a boundary
+/// is charged at the NEXT material's mean free path. `G4HadronicProcess::PostStepGetPhysical
+/// InteractionLength` (G4HadronicProcess.cc:268) charges it at the previous call's
+/// `currentInteractionLength` - the length it was taken with - and only then sets
+/// `currentInteractionLength = theMFP`. A neutron has no continuous process and nothing but the
+/// geometry and its own interaction limits its step, so every step it survives ends on a
+/// boundary, and in B1 every boundary changes material: V219 measured what that is worth, 41% of
+/// a 100 MeV neutron's dose in the bone trapezoid.
+enum class NeutronGeneralOrder : int {
+  /// 11.1.1's, transcribed (`neutron_general_length`): the count is carried on the track
+  /// (`TrackState::ngp_left`, with `ngp_prev_step` as `previousStepSize`), refreshed-then-
+  /// charged as above, and cleared where Geant4 clears it. THE DEFAULT, because it is what the
+  /// oracle is - ref/b1ngp with `B1NGP_PATCH=0` reads ref/B1build's exampleB1 to every digit.
+  kGeant4_11_1_1 = 0,
+  /// Each step charged at the mean free path it was TAKEN with, which is `G4HadronicProcess`'s
+  /// order and ref/b1ngp's `B1NGP_PATCH=1`. The port gets it by drawing every length afresh:
+  /// given that the count exceeded the step's share, what is left of an exponential is again
+  /// an exponential at the same rate, so the redraw IS that order and not an approximation of
+  /// it. It is `step_neutral` before P22 to the bit - the same expression, the same stream -
+  /// and it is what to run against a Geant4 with the general process OFF (ref/b1neutron, whose
+  /// three `G4HadronicProcess`es each charge at the taken length) or for an unbiased answer.
+  kReordered = 1,
+};
+
+__host__ __device__ inline const char* neutron_general_order_name(NeutronGeneralOrder o) {
+  return (o == NeutronGeneralOrder::kReordered)
+             ? "reordered (each step charged at the mean free path it was taken with, as "
+               "G4HadronicProcess charges it: every length drawn afresh, which is this port "
+               "before P22; ref/b1ngp B1NGP_PATCH=1)"
+             : "11.1.1 (G4NeutronGeneralProcess as it ships: the count carried on the track "
+               "and a step that ended on a boundary charged at the NEXT material's mean free "
+               "path; ref/b1ngp B1NGP_PATCH=0)";
+}
+
+/// The short form `G4GPU_NEUTRON_GP_ORDER` takes and the run report prints beside the name.
+__host__ __device__ inline const char* neutron_general_order_key(NeutronGeneralOrder o) {
+  return (o == NeutronGeneralOrder::kReordered) ? "reordered" : "11.1.1";
 }
 
 // =============================================================================================
@@ -616,6 +678,9 @@ __host__ __device__ inline void book_refusal(const HadronicRefusalBooks& books,
 template <typename real_t>
 struct HadronicWiring {
   HadronicStage stage = HadronicStage::kStage1;
+  /// P22: how `G4NeutronGeneralProcess` charges a step. Read by `step_neutral` in the final
+  /// stage only; see `NeutronGeneralOrder`.
+  NeutronGeneralOrder neutron_order = NeutronGeneralOrder::kGeant4_11_1_1;
   /// `G4DecayPhysics`. Off means every unstable species is transported to a stop and stays
   /// stopped, which is what this port did before P8. THE ONLY ONE OF THE THREE THAT CHANGES AN
   /// ANSWER TODAY.
@@ -830,7 +895,8 @@ __host__ __device__ inline real_t stopped_refusal_energy(ParticleType t, real_t 
 /// `subtract_interaction_lengths`) precisely so a wiring package can carry it.
 ///
 /// This transport does not carry it, for either of the two discrete processes P8 adds, and the
-/// reason is that it does not need to. Over one step lambda is a constant - Geant4 evaluates it
+/// reason is that it does not need to (with the one exception the paragraph before the
+/// sentinels names). Over one step lambda is a constant - Geant4 evaluates it
 /// at the PRE-step energy too, and `currentInteractionLength` is that value - so the probability
 /// of firing within a step of length L is `1 - exp(-L/lambda)` whether the remaining count is
 /// carried or re-drawn, because the exponential is memoryless. The two are the same
@@ -848,6 +914,15 @@ __host__ __device__ inline real_t stopped_refusal_energy(ParticleType t, real_t 
 /// The one thing that WOULD break the equivalence is a lambda that varies inside a step, and
 /// none does here: every interaction length in this stepper is computed once, from the pre-step
 /// energy, before the step is taken.
+///
+/// AND THE OTHER THING THAT BREAKS IT IS A PROCESS THAT DOES NOT CHARGE THE STEP AT THE LAMBDA IT
+/// WAS TAKEN WITH. The argument above is about `G4Decay` and `G4HadronicProcess`, which both
+/// subtract `previousStepSize/currentInteractionLength` with the PREVIOUS call's length and
+/// refresh it after. `G4NeutronGeneralProcess` refreshes FIRST (P20, docs/RISK.md V219), so its
+/// charge on a step that crossed into another material is not the step's own, no redraw can
+/// reproduce it, and P22 carries that one count on the neutron's track - the 16 bytes the
+/// paragraph above priced, paid for the one process whose answer depends on them, and loaded
+/// and stored for a neutron only. `neutron_general_length` below is the transcription.
 ///
 /// THE TWO SENTINELS ARE NOT LENGTHS. `in_flight_mean_free_path` returns DBL_MAX for a stable
 /// particle and DBL_MIN for one whose `c*tau` underflows or whose `Ekin/m` does - the second
@@ -876,6 +951,64 @@ __host__ __device__ inline real_t decay_in_flight_length(ParticleType t, real_t 
 __host__ __device__ inline bool decays_in_flight(ParticleType t) {
   const int pdg = pdg_code(t);
   return decay::decay_is_applicable(pdg) && !decay::particle_is_stable(pdg);
+}
+
+// =============================================================================================
+// The neutron general process's interaction length (P22)
+// =============================================================================================
+
+/// `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` (11.1.1,
+/// G4NeutronGeneralProcess.cc:350-387) from `CurrentCrossSection` on - the order
+/// `NeutronGeneralOrder::kGeant4_11_1_1` names, and the one 11.1.1 ships.
+///
+/// @param n_left         `theNumberOfInteractionLengthLeft`, carried on the track
+///                       (`TrackState::ngp_left`) and updated in place. Negative means there is
+///                       none - a track's first step (`StartTracking` sets -1.0) or the first
+///                       after this process's own `PostStepDoIt` (which sets -1.0 "in all
+///                       cases") - and one is drawn.
+/// @param previous_step  `previousStepSize`: `G4SteppingManager::fPreviousStepSize`, the length
+///                       of this track's previous step (`TrackState::ngp_prev_step`). Zero on a
+///                       track's first step (`SetInitialStep`), where the count is negative
+///                       and nothing is charged anyway.
+/// @param lambda         `fLambda` - the combined table's macroscopic cross section, 1/mm, for
+///                       the material the track is in NOW at its energy now. The caller computes
+///                       it BEFORE calling this, which is `CurrentCrossSection(track)` coming
+///                       first and is the whole of 11.1.1's order: on a step that ended on a
+///                       boundary, "now" is the next material.
+/// @return Geant4's step limit `theNumberOfInteractionLengthLeft * currentInteractionLength`, mm.
+///
+/// THREE THINGS ARE TRANSCRIBED RATHER THAN TIDIED, and each changes a number:
+///
+///  * `currentInteractionLength = 1.0/fLambda` and the limit is `n * currentInteractionLength`,
+///    not `n/fLambda`; the charge divides by the same double Geant4 divides by.
+///  * The clamp is `std::max(n, 0.0)`, this process's own - NOT `G4VProcess::
+///    SubtractNumberOfInteractionLengthLeft`, whose floor is `CLHEP::perMillion` and which this
+///    process does not call. A count the next material's charge used up is zero, the limit it
+///    gives is zero, and the neutron interacts where it entered the next volume: V219's
+///    mechanism, in one line. `std::max(a, b)` is `(a < b) ? b : a`, which is written out.
+///  * The draw happens whenever the count is negative, a zero cross section included - Geant4
+///    calls `G4UniformRand()` there too and carries the count into the next material. The
+///    port's stream is not Geant4's, but which steps consume a uniform is the process's
+///    structure, and every other draw in this transport keeps it.
+///
+/// A ZERO CROSS SECTION makes `currentInteractionLength` infinite, the charge
+/// `previousStepSize/inf` zero - as in Geant4 - and the limit infinite, or NaN for a count of
+/// exactly zero. `G4SteppingManager::DefinePhysicalStepLength` keeps a length only
+/// `if (physIntLength < PhysicalStep)`, which neither satisfies, so the process never limits
+/// that step; the CALLER maps both to the transport's infinity, because this transport's
+/// smallest-wins tests would read a NaN as an interaction.
+template <typename real_t, typename Rng>
+__host__ __device__ inline real_t neutron_general_length(real_t& n_left, real_t previous_step,
+                                                          real_t lambda, Rng& rng) {
+  const real_t current_interaction_length = real_t(1) / lambda;
+  if (n_left < real_t(0)) {
+    // "beggining of tracking (or just after DoIt of this process)"
+    n_left = -log(rng.uniform());
+  } else {
+    n_left -= previous_step / current_interaction_length;
+    n_left = (n_left < real_t(0)) ? real_t(0) : n_left;
+  }
+  return n_left * current_interaction_length;
 }
 
 // =============================================================================================

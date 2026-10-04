@@ -840,7 +840,7 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
   TrackState<real_t> p = q.track;
 
   // The voxel cell the step STARTED in, recomputed rather than carried: it is three integer
-  // divisions off `(volume_pre, pos_pre)` and the queue entry is already 384 bytes. The same
+  // divisions off `(volume_pre, pos_pre)` and the queue entry is already 408 bytes. The same
   // block `run_step_gamma` has, and the same reason - a per-voxel scorer wants the cell the
   // step began in, not the one it ended in.
   int vcell = -1;
@@ -1047,6 +1047,14 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
   // surviving primary that kept a stale `kFirstStepInVolume` would tell the next step's
   // multiple scattering to refresh its `fMinimal` limit at a boundary it never crossed.
   p.flags &= ~kFirstStepInVolume;
+  // P22: A NEUTRON THAT SURVIVES THIS DRAWS ITS NEXT LENGTH AFRESH. The entry is a hadronic
+  // PostStepDoIt, and `G4NeutronGeneralProcess::PostStepDoIt` clears its count before it
+  // delegates to the inelastic sub-process ("In all cases clear number of interaction lengths").
+  // `step_neutral` cleared it before queuing; it is written again here as constants so that the
+  // two fields copied out of `q.track` are dead in this kernel and cost it no registers - the
+  // primary's species is a runtime value here, so `TrackBuffer::append` cannot fold its test.
+  p.ngp_left = real_t(-1);
+  p.ngp_prev_step = srep.true_length;
   if (edep != real_t(0) && q.score_slot >= 0) {
     atomicAdd(&score[static_cast<size_t>(q.score_slot) * batch + p.event],
               static_cast<double>(edep));
@@ -1261,6 +1269,12 @@ __global__ void run_emextra_drain(Scene<real_t> scene, const had::PendingInterac
     ++p.step;
     p.advance(srep.true_length, q.ekin_pre, track_mass);
     p.flags &= ~kFirstStepInVolume;
+    // P22: no neutron reaches this kernel - its primaries are photons and leptons - so these
+    // are a new track's values, written as constants for `run_interaction`'s reason: the
+    // primary's species is a runtime value here and the copies out of `q.track` would
+    // otherwise be live to the append.
+    p.ngp_left = real_t(-1);
+    p.ngp_prev_step = real_t(0);
     if (edep != real_t(0) && q.score_slot >= 0) {
       atomicAdd(&score[static_cast<size_t>(q.score_slot) * batch + p.event],
                 static_cast<double>(edep));
@@ -2328,6 +2342,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     }
     iterations_run_ = 0;
     hadron_iterations_ = 0;
+    neutron_iterations_ = 0;
     if (primaries == nullptr || n_events <= 0) { return st; }
 
     // Every primary is checked against what a kernel can step. A primary with no kernel used
@@ -2662,6 +2677,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // `n_queued > 0`, so moving the call there changes nothing for a run that interacts.
         ++iterations_run_;
         if (any_hadron) { ++hadron_iterations_; }
+        if (nsp[kSpeciesNeutron] > 0) { ++neutron_iterations_; }
         if (any_hadron && d_queue_cursor_ != nullptr) {
           // The interaction queue holds ONE iteration's interactions and is drained at the end
           // of it, so its cursor is rewound here beside the arena's and for the same reason:
@@ -2722,6 +2738,27 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // changed from `had_stage_`. The ledger header printed `had_stage_` until V200 and said
         // "stage1" over runs whose neutrons were visibly reacting inelastically.
         had_stage_used_ = stage;
+        // P22: the neutron general process's order, overridden per launch by
+        // `G4GPU_NEUTRON_GP_ORDER` for the stage variable's reason. `reordered` (or anything
+        // starting with `r`) is the order every neutron row before P22 was measured in; `11.1.1`
+        // (or `g4`/`geant4`) is the default. Anything else is NOT ignored quietly - a misspelled
+        // override that left the default on would be a run labelled with the wrong physics -
+        // so it is reported, and the report line names what ran.
+        had::NeutronGeneralOrder neutron_order = neutron_order_;
+        if (const char* env = std::getenv("G4GPU_NEUTRON_GP_ORDER")) {
+          if (env[0] == 'r' || env[0] == 'R') {
+            neutron_order = had::NeutronGeneralOrder::kReordered;
+          } else if (env[0] == '1' || env[0] == 'g' || env[0] == 'G') {
+            neutron_order = had::NeutronGeneralOrder::kGeant4_11_1_1;
+          } else if (env[0] != '\0' && !neutron_order_env_warned_) {
+            std::printf("WARNING: G4GPU_NEUTRON_GP_ORDER=\"%s\" is neither 11.1.1 nor reordered; "
+                        "the engine's setting (%s) is used\n",
+                        env, had::neutron_general_order_key(neutron_order_));
+            neutron_order_env_warned_ = true;
+          }
+        }
+        had_wiring.neutron_order = neutron_order;
+        neutron_order_used_ = neutron_order;
         had_wiring.decay = had_decay_;
         had_wiring.hadron_elastic = had_elastic_;
         had_wiring.neutron_capture = had_capture_;
@@ -3129,6 +3166,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                     "                  (G4NeutronGeneralProcess deposits nothing here - see"
                     " step_neutral)\n",
                     st.neutron_killed_n, st.neutron_killed_energy);
+      }
+      // P22: WHICH ORDER THE NEUTRON'S STEPS WERE CHARGED IN, on every run where it could act -
+      // the final stage, the combined table on the device, a neutron stepped. 41% of a 100 MeV
+      // neutron's B1 dose moves with it (docs/RISK.md V219), so a neutron number printed
+      // without this line is not a number anyone can attribute.
+      st.neutron_order = neutron_order_used_;
+      st.neutron_order_acted = (had_stage_used_ == had::HadronicStage::kFinal
+                                && d_neutron_xs_ != nullptr && neutron_iterations_ > 0);
+      if (st.neutron_order_acted) {
+        std::printf("neutron general process: %s order, a neutron alive in %lld of %lld "
+                    "iterations - %s\n",
+                    had::neutron_general_order_key(neutron_order_used_), neutron_iterations_,
+                    iterations_run_, had::neutron_general_order_name(neutron_order_used_));
       }
       if (st.refused_total > 0) {
         // This one IS a warning, and it names what is missing. A refused secondary is energy

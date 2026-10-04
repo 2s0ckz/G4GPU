@@ -227,6 +227,12 @@ struct RunStats {
   /// reproducing it is right and reporting it is the only way anyone finds out.
   long long neutron_killed_n = 0;
   double neutron_killed_energy = 0;
+  /// P22: the order `G4NeutronGeneralProcess` charged a boundary step in on this run (after
+  /// `G4GPU_NEUTRON_GP_ORDER`), and whether it could act at all - the final stage, the combined
+  /// table uploaded, and a neutron stepped in at least one iteration. See
+  /// `TransportEngine::SetNeutronGeneralOrder`.
+  had::NeutronGeneralOrder neutron_order = had::NeutronGeneralOrder::kGeant4_11_1_1;
+  bool neutron_order_acted = false;
   long long abandoned = 0;
   int overflow = 0;
 };
@@ -399,6 +405,17 @@ class TransportEngine {
   /// built at each launch, so this can change between runs in one process.
   void SetHadronicStage(had::HadronicStage s) { had_stage_ = s; }
   had::HadronicStage GetHadronicStage() const { return had_stage_; }
+  /// P22: how `G4NeutronGeneralProcess` charges a step that ended on a boundary - 11.1.1's order
+  /// (the default: the count carried on the neutron's track and charged at the NEXT material's
+  /// mean free path) or the reordered one (each step at the length it was taken with: this
+  /// port before P22, to the bit). See `had::NeutronGeneralOrder`; docs/RISK.md V219, V230.
+  ///
+  /// Beside the stage and for the stage's reasons: a run-time setting, read at each launch, and
+  /// `G4GPU_NEUTRON_GP_ORDER=11.1.1` or `=reordered` overrides it per launch, because
+  /// `examples/B1` is Geant4's own B1 and no UI command reaches a setter. It acts only in the
+  /// final stage, the one stage with a general process.
+  void SetNeutronGeneralOrder(had::NeutronGeneralOrder o) { neutron_order_ = o; }
+  had::NeutronGeneralOrder GetNeutronGeneralOrder() const { return neutron_order_; }
   void SetHadronicProcesses(bool decay, bool elastic, bool capture) {
     had_decay_ = decay;
     had_elastic_ = elastic;
@@ -632,6 +649,15 @@ class TransportEngine {
   /// The stage the last BeamOn actually ran - `had_stage_` unless `G4GPU_HADRONIC_STAGE` said
   /// otherwise. It is what the report prints.
   had::HadronicStage had_stage_used_ = had::HadronicStage::kStage1;
+  /// P22: the neutron general process's order, as set and as the last launch USED it after
+  /// `G4GPU_NEUTRON_GP_ORDER`. The report prints the second, as it prints the stage.
+  had::NeutronGeneralOrder neutron_order_ = had::NeutronGeneralOrder::kGeant4_11_1_1;
+  had::NeutronGeneralOrder neutron_order_used_ = had::NeutronGeneralOrder::kGeant4_11_1_1;
+  /// Iterations of this run with a neutron alive, so the report says the order on a run where
+  /// it could have acted and is silent on one where no neutron was ever stepped.
+  long long neutron_iterations_ = 0;
+  /// Once per engine: an unrecognised `G4GPU_NEUTRON_GP_ORDER` is said once, not per launch.
+  bool neutron_order_env_warned_ = false;
   bool had_decay_ = true;
   bool had_elastic_ = true;
   bool had_capture_ = true;
@@ -659,8 +685,9 @@ class TransportEngine {
   ///
   /// SIZED AT THE POOL BY DEFAULT, and that is a bound rather than an estimate - one track
   /// queues at most one interaction per launch and a launch steps at most `pool_` tracks. The
-  /// same argument `sec_.capacity` uses, and it costs 384 bytes an entry against a track slot's
-  /// 248, so a full-size queue is 1.5 times the track arena. `SetInteractionQueueCapacity`
+  /// same argument `sec_.capacity` uses, and it costs 408 bytes an entry against a buffer slot's
+  /// 254 (both 16 more since P22, the neutron's carried interaction length - docs/RISK.md V231),
+  /// so a full-size queue is 1.6 times the track arena. `SetInteractionQueueCapacity`
   /// exists for a caller who wants it smaller and accepts `kInelasticQueueFull` refusals.
   had::PendingInteraction<real_t>* d_queue_ = nullptr;
   int* d_queue_cursor_ = nullptr;

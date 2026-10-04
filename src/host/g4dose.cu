@@ -95,6 +95,10 @@ struct Result {
   double mass = 0;      ///< kg
   long long steps = 0;
   double ms = 0;
+  /// P22: the order `G4NeutronGeneralProcess` charged a boundary step in, and whether it had a
+  /// neutron to act on (RunStats::neutron_order, neutron_order_acted).
+  had::NeutronGeneralOrder neutron_order = had::NeutronGeneralOrder::kGeant4_11_1_1;
+  bool neutron_order_acted = false;
   bool ok = false;
 };
 
@@ -148,6 +152,8 @@ Result RunOnce(const std::string& scene_name, int n_events, unsigned int seed,
   }
   r.steps = rm->GetLastRunStats().track_steps;
   r.ms = rm->GetLastRunStats().milliseconds;
+  r.neutron_order = rm->GetLastRunStats().neutron_order;
+  r.neutron_order_acted = rm->GetLastRunStats().neutron_order_acted;
   r.ok = true;
   return r;
 }
@@ -622,5 +628,15 @@ int main(int argc, char** argv) {
   std::printf("dose10k %.4f pGy  sigma %.4f pGy\n", r.dose10k, r.sigma10k);
   std::printf("time %.1f ms, %.4g events/s, %lld track-steps\n", r.ms,
               n_events / (r.ms * 1e-3), r.steps);
+  // P22: which order the neutron general process charges a boundary step in - 11.1.1's unless
+  // `G4GPU_NEUTRON_GP_ORDER=reordered` - and whether it acted. Printed on EVERY run, because
+  // the scenes here run in stage 1 by default, where the general process does not exist, and
+  // "it did not act" is a statement this line has to be able to make rather than leave to an
+  // absence (docs/RISK.md V230).
+  std::printf("neutron general process order: %s, %s\n",
+              had::neutron_general_order_key(r.neutron_order),
+              r.neutron_order_acted
+                  ? "acted on this run's neutrons"
+                  : "did not act (no neutron reached it - stage 1, no table, or no neutron)");
   return 0;
 }

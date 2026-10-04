@@ -345,6 +345,28 @@ struct TrackState {
   real_t msc_tlimit;
   /// Frozen alongside it: Geant4 recomputes tlimitmin at the same points.
   real_t msc_tlimitmin;
+  /// P22: `G4NeutronGeneralProcess`'s `theNumberOfInteractionLengthLeft`, which a NEUTRON
+  /// carries from step to step. Negative is "none" - drawn afresh at the next step - and -1.0
+  /// is what `G4VProcess` initialises it to, what `StartTracking` sets and what the process's own
+  /// `PostStepDoIt` sets "in all cases"; `begin()` and `seed_track_slot` are this transport's
+  /// StartTracking. `had::neutron_general_length` charges it and `step_neutral` clears it.
+  ///
+  /// THE ONE COUNT THIS TRANSPORT CARRIES, AND WHY IT HAS TO. Every other discrete length here is
+  /// re-drawn each step, which is exact for a process that charges a step at the mean free path
+  /// it was taken with (the memorylessness argument in `had::decay_in_flight_length`). This
+  /// process refreshes its mean free path for the NEXT material before charging (docs/RISK.md
+  /// V219), so its answer depends on what it carries - 41% of a 100 MeV neutron's B1 dose.
+  ///
+  /// NOT ALIASED onto `msc_tlimit`/`msc_tlimitmin`, which a neutron never uses: `ion_za`'s note
+  /// gives the rule, and the rule is that a field another species uses is not reused. Sixteen
+  /// bytes on the struct (248 -> 264 for `TrackState<double>`) and on a buffer slot, which
+  /// `TrackBuffer::load` and `append` move for a NEUTRON only - see there.
+  real_t ngp_left = real_t(-1);
+  /// P22: `G4SteppingManager::fPreviousStepSize` for that count - this track's previous step
+  /// length, which `PostStepGetPhysicalInteractionLength` receives as `previousStepSize` and
+  /// charges at the CURRENT material's mean free path. Zero for a track that has not stepped
+  /// (`SetInitialStep`). Written by `step_neutral` on every step the neutron survives.
+  real_t ngp_prev_step = real_t(0);
 
   // ---------------------------------------------------------------- G4Track state
 
@@ -400,6 +422,11 @@ struct TrackState {
                                  ProcessId creator, real_t t_global, real_t w) {
     status = TrackStatus::fAlive;
     flags = 0u;
+    // G4NeutronGeneralProcess::StartTracking and G4SteppingManager::SetInitialStep: a new track
+    // carries no interaction length and has no previous step. Outside the switch below, because
+    // it is physics and not an accessor.
+    ngp_left = real_t(-1);
+    ngp_prev_step = real_t(0);
     if (!kFullTrackState) { return; }
     parent_key = parent;
     global_time = t_global;
@@ -487,6 +514,10 @@ struct TrackBuffer {
   unsigned int* step;
   real_t* msc_tlimit;
   real_t* msc_tlimitmin;
+  /// P22: `TrackState::ngp_left` and `ngp_prev_step`. Read and written for a NEUTRON's slot
+  /// only - see `load` - so a slot holding anything else holds whatever its last neutron left.
+  real_t* ngp_left;
+  real_t* ngp_prev_step;
   // G4Track state; see TrackState.
   unsigned int* parent_key;
   real_t* global_time;
@@ -542,6 +573,22 @@ struct TrackBuffer {
     t.step = step[i];
     t.msc_tlimit = msc_tlimit[i];
     t.msc_tlimitmin = msc_tlimitmin[i];
+    // P22: THE NEUTRON'S COUNT, FOR A NEUTRON ONLY. Every other species gets the values a new
+    // track starts with, which no code path of theirs reads. The test is what keeps the sixteen
+    // bytes of GLOBAL MEMORY TRAFFIC off every other species' step: a stepping kernel is
+    // compiled for one species and sets `p.species` to that constant before its append, so in
+    // its main path the store below is folded away and these two loads are dead - only
+    // `run_step_neutral<kNeutron>` and a track the throttle writes through unstepped move them.
+    // What it cannot keep off is the struct's own width: a kernel hands `&p` to the step hook,
+    // so `p` lives in local memory and every stepping kernel's frame grew by 32 to 48 bytes
+    // with it. docs/RISK.md V231 has the numbers, kernel by kernel.
+    if (t.species == ParticleType::kNeutron) {
+      t.ngp_left = ngp_left[i];
+      t.ngp_prev_step = ngp_prev_step[i];
+    } else {
+      t.ngp_left = real_t(-1);
+      t.ngp_prev_step = real_t(0);
+    }
     t.status = static_cast<TrackStatus>(status[i]);
     t.flags = flags[i];
     if (!kFullTrackState) { return; }
@@ -583,6 +630,11 @@ struct TrackBuffer {
     step[slot] = t.step;
     msc_tlimit[slot] = t.msc_tlimit;
     msc_tlimitmin[slot] = t.msc_tlimitmin;
+    // See `load`: a neutron's slot only, so a slot is written by the species that reads it.
+    if (t.species == ParticleType::kNeutron) {
+      ngp_left[slot] = t.ngp_left;
+      ngp_prev_step[slot] = t.ngp_prev_step;
+    }
     status[slot] = static_cast<int>(t.status);
     flags[slot] = t.flags;
     if (!kFullTrackState) { return slot; }
@@ -695,6 +747,8 @@ inline cudaError_t allocate_track_buffer(TrackBuffer<real_t>& v, int capacity,
   get(reinterpret_cast<void**>(&v.step), nu);
   get(reinterpret_cast<void**>(&v.msc_tlimit), nr);
   get(reinterpret_cast<void**>(&v.msc_tlimitmin), nr);
+  get(reinterpret_cast<void**>(&v.ngp_left), nr);
+  get(reinterpret_cast<void**>(&v.ngp_prev_step), nr);
   get(reinterpret_cast<void**>(&v.status), ni);
   get(reinterpret_cast<void**>(&v.flags), nu);
   if (!kFullTrackState) {
@@ -804,6 +858,7 @@ inline void free_track_buffer(TrackBuffer<real_t>& v) {
   cudaFree(v.ekin); cudaFree(v.volume); cudaFree(v.event);
   cudaFree(v.rng_key); cudaFree(v.step);
   cudaFree(v.msc_tlimit); cudaFree(v.msc_tlimitmin);
+  cudaFree(v.ngp_left); cudaFree(v.ngp_prev_step);
   cudaFree(v.parent_key); cudaFree(v.global_time); cudaFree(v.local_time);
   cudaFree(v.proper_time); cudaFree(v.track_length);
   cudaFree(v.vx); cudaFree(v.vy); cudaFree(v.vz);
@@ -833,6 +888,11 @@ __host__ __device__ inline void seed_track_slot(TrackBuffer<real_t>& v, int slot
   v.status[slot] = static_cast<int>(TrackStatus::fAlive);
   // A primary begins its life inside a volume, so its first step is the first in that volume.
   v.flags[slot] = kFirstStepInVolume;
+  // P22: StartTracking and SetInitialStep for the neutron general process's count, as
+  // TrackState::begin does for a secondary. Written for every species, because the seeding
+  // kernel does not branch on one and a primary neutron reads it on its first step.
+  v.ngp_left[slot] = real_t(-1);
+  v.ngp_prev_step[slot] = real_t(0);
   if (!kFullTrackState) { return; }
   v.parent_key[slot] = 0u;
   v.global_time[slot] = t0;

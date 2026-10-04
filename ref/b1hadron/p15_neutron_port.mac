@@ -16,6 +16,16 @@
 # `G4GPU_ION_INELASTIC=0` was the second one until P9e's `Interact` landed; it must be UNSET
 # now, because `p15_neutron.mac` no longer inactivates the five ion processes (V192).
 #
+#   G4GPU_NEUTRON_GP_ORDER=reordered   SINCE P22, and only against THIS macro's partner. The port
+#                                 carries the general process's interaction length in 11.1.1's
+#                                 order by default (a step that ended on a boundary charged at
+#                                 the NEXT material's mean free path - docs/RISK.md V219, V230),
+#                                 which is QBBC as it ships. `p15_neutron.mac` runs Geant4 with
+#                                 the general process OFF, whose three G4HadronicProcesses charge
+#                                 each step at the length it was taken with - the reordered order,
+#                                 and the one every number this pair published before P22 was
+#                                 taken in.
+#
 # A 100 MeV NEUTRON IS THE BEAM THIS PACKAGE IS MOST EXPOSED ON. It has no charge, so there is
 # no continuous loss to dominate the answer and no Bragg peak to hide behind: essentially all of
 # the dose in B1's trapezoid comes from what the hadronic processes do, and the elastic and

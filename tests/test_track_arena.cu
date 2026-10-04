@@ -73,7 +73,8 @@ CarveResult<real_t> Carve(long long pool, size_t half_bytes, size_t base_offset)
   // there as a size that no longer matches.
   const void* ptrs[] = {
       v.species, v.x, v.y, v.z, v.dx, v.dy, v.dz, v.ekin, v.volume, v.event, v.rng_key,
-      v.step, v.msc_tlimit, v.msc_tlimitmin, v.status, v.flags, v.parent_key, v.global_time,
+      v.step, v.msc_tlimit, v.msc_tlimitmin, v.ngp_left, v.ngp_prev_step, v.status, v.flags,
+      v.parent_key, v.global_time,
       v.local_time, v.proper_time, v.track_length, v.vx, v.vy, v.vz, v.vdx, v.vdy, v.vdz,
       v.vertex_ekin, v.vertex_volume, v.creator_process, v.weight, v.polx, v.poly, v.polz,
       v.user_data, v.count, v.overflow,

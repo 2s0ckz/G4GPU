@@ -183,8 +183,8 @@ __host__ __device__ inline InteractionBucket bucket_of_model(InelasticModel m) {
 /// IT CARRIES THE TRACK BY VALUE AND THE STEPPER DOES NOT APPEND IT. The alternative - append
 /// the primary to the output pool and queue its slot index - would need the interaction kernel
 /// to be able to KILL a track already in the pool, and `TrackBuffer` has no tombstone. Copying
-/// 248 bytes once per interaction is the cheaper of the two, and it keeps `core/track_buffer.cuh`
-/// (P1's) untouched.
+/// 264 bytes once per interaction is the cheaper of the two (248 until P22 gave the neutron its
+/// carried interaction length), and it keeps `core/track_buffer.cuh` (P1's) untouched.
 ///
 /// THE PRE-STEP SNAPSHOT IS HERE BECAUSE THE HOOK IS. `run_interaction` calls the step hook for
 /// this step, so it needs what `run_step_hadron` would have put in `DeviceStep`: the pre-step

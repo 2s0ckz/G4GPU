@@ -58,7 +58,9 @@
 using namespace g4gpu;
 using real_t = double;
 #ifndef G4GPU_PENDING_BYTES
-#define G4GPU_PENDING_BYTES 392
+// 408 since P22: the TrackState it carries grew by the neutron general process's two doubles
+// (docs/RISK.md V231). 392 before.
+#define G4GPU_PENDING_BYTES 408
 #endif
 namespace hp = g4gpu::physics::hadronic;
 namespace stop = g4gpu::physics::hadronic::stopping;

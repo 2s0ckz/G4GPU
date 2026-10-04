@@ -14715,3 +14715,129 @@ channel, which is counted per step):
 | alpha 4000 MeV | 148,687 | 22,326 | 77 (8,913 MeV) | 9 | 25 |
 | He3 3000 MeV | 123,783 | 17,932 | 61 (5,786 MeV) | 4 | 9 |
 | alpha 840 MeV | 290,298 | 51,478 | - | 5 | 11 |
+
+### V231: the neutron carries `G4NeutronGeneralProcess`'s count in 11.1.1's order - a step that ended on a boundary is charged at the NEXT material's mean free path, asserted to the bit at a water/bone face - and what the sixteen bytes cost
+
+V219 named the line and V230 measured where it leaves the port. This is the transcription, the
+switch that keeps the old order, the test, and the price on `TrackState`.
+
+**WHAT IS TRANSCRIBED.** `G4NeutronGeneralProcess` (11.1.1) and the stepping manager around it,
+line for line, in `had::neutron_general_length` (`physics/hadronic/wiring.cuh`) and
+`step_neutral`:
+
+| Geant4 11.1.1 | this port |
+|---|---|
+| `theNumberOfInteractionLengthLeft` on the process object, one per track in turn (`G4VProcess.hh:335`, initialised -1.0) | `TrackState::ngp_left`, default -1 - carried on the neutron's track, because a process object here is not one track's |
+| `G4SteppingManager::fPreviousStepSize = fStep->GetStepLength()` after every step, 0 at `SetInitialStep` | `TrackState::ngp_prev_step`, written by `step_neutral` on every step the neutron survives (`rep.true_length`, which in this transport includes the 1e-7 mm push the track really moved) and 0 for a new track |
+| `PostStepGetPhysicalInteractionLength`: time cut, then `CurrentCrossSection(track)` FIRST - `currentInteractionLength = 1.0/fLambda` for the material and energy NOW | `step_neutral`: the time cut is unchanged and first; `sigma = xs->total(mat, ekin, loge)` for the volume the step starts in; `neutron_general_length` takes `1/sigma` as `currentInteractionLength` |
+| `if (n < 0) n = -G4Log(G4UniformRand()); else { n -= previousStepSize/currentInteractionLength; n = std::max(n, 0.0); }` - the clamp is this process's own, not `G4VProcess::SubtractNumberOfInteractionLengthLeft`'s `perMillion`, which it does not call | the same three statements, `std::max` written out as `(n < 0) ? 0 : n`; a draw at a zero cross section too, as Geant4 draws there |
+| `return n * currentInteractionLength` | the same product; inf or NaN only at a zero cross section, where `physIntLength < PhysicalStep` keeps neither, mapped to the transport's infinity |
+| `StartTracking`: `n = -1.0` | `TrackState::begin` (every secondary) and `seed_track_slot` (every primary) |
+| `PostStepDoIt`: `n = -1.0` "in all cases", then the sub-process choice; NOT on the time-cut branch, which returns first, and not when transportation limited the step, since this process's PostStepDoIt does not run then | `step_neutral`: cleared immediately before `select()`'s uniform, so an elastic survivor and a queued inelastic one both carry -1; the interaction kernel writes -1 again for a primary that survives P15's queue. The boundary branch does not touch the count |
+
+**STAGE 1 IS NOT CHANGED, AND IT IS NOT AN OMISSION.** There the neutron's elastic and capture
+are two `G4HadronicProcess`es, whose `PostStepGetPhysicalInteractionLength`
+(G4HadronicProcess.cc:268-311) charges `previousStepSize/currentInteractionLength` with the
+PREVIOUS call's length and only then sets `currentInteractionLength = theMFP`: the step at the
+length it was taken with, which the memoryless redraw reproduces exactly. `step_neutral` says so
+beside the expression.
+
+**THE SWITCH**, `had::NeutronGeneralOrder` beside `HadronicStage`: `kGeant4_11_1_1` (the
+default, because it is the oracle) and `kReordered` - the expression `step_neutral` had until P22,
+unchanged to the bit, a fresh `-log(u)/sigma` every step, which is ref/b1ngp's `B1NGP_PATCH=1`
+order and what to run against a Geant4 with the general process OFF (ref/b1neutron; the comment
+in `ref/b1hadron/p15_neutron_port.mac` says to). `TransportEngine::SetNeutronGeneralOrder`, and
+`G4GPU_NEUTRON_GP_ORDER=11.1.1|reordered` per launch, as the stage has both; an unrecognised value
+is reported rather than ignored. Every run on which the process could act prints
+`neutron general process: <order> order, a neutron alive in N of M iterations - ...`, and g4dose
+prints the order on every run, with whether it acted.
+
+**THE SWITCH IS THE PORT BEFORE P22, TO THE BIT.** With `G4GPU_NEUTRON_GP_ORDER=reordered` this
+branch reads 133.066 ± 0.754 and 78.435 ± 0.837 nGy on the two neutron rows - V230's numbers, every
+digit - with the same 174,618 and 51,090 interactions queued and the same ledgers. That is the
+claim the switch exists to make: a run against ref/b1neutron, or any number published before
+P22, can be reproduced exactly.
+
+**THE TEST**, `tests/test_neutron_general.cu` section 6: a water world and a bone slab whose
+face is 50 mm down +z, one 100 MeV neutron, its uniforms written by the test (the first of each
+step is G4Decay's 2.6e11 mm, the second the general process's draw when it makes one, and a
+Philox tail after that so the elastic final state's rejection loops end). Mean free paths
+371.978 mm in water and 216.605 in bone (0.58 of water's). On the host to the bit, then the same
+walk on the device against the host (lengths to 1e-9 - the device contracts the table's
+interpolation into an FMA - everything discrete exactly):
+
+| case | step 1 | step 2 in the bone, 11.1.1's order | reordered |
+|---|---|--:|--:|
+| A: count 0.25 beyond bone's charge | boundary after 50.0000001 mm, count n0 = 0.48083535764786 = -log(u), 2 uniforms | **54.151149565 mm** = max(n0 - L/216.6, 0) x 216.6 | **75.035914327 mm** = (n0 - L/372.0) x 216.6 |
+| B: count 0.05 beyond water's charge | boundary, count 0.18441651497614 | **0 mm** - used up by bone's charge, the neutron interacts on the face | 10.830229875 mm |
+
+and after the elastic scatter the next step draws afresh (259.890041724 mm, a fresh draw's).
+Under the switch the case is made exact for one sample by handing the re-draw the uniform
+exp(-(n0 - L/lambda_water)): the memoryless identity the switch rests on, written as a number.
+The assertions, by the letters the test prints: **(a)** a track's first step subtracts nothing -
+its count is the draw, although the struct it started in held another track's count 3 and step
+50 mm; **(b)** 11.1.1's order charges the 50 mm of water at bone's mean free path; **(c)** the
+switch charges it at water's; **(d)** the count after an interaction is -1 and the next step
+draws; **(e)** a count bone's charge uses up gives a zero-length step on the face. The two fields
+are also asserted through `TrackBuffer::append`/`load` (a neutron's survive, a proton's are
+neither stored nor read) and `seed_track_slot` (a primary starts with none), and the struct's
+size as arithmetic.
+
+**EACH ASSERTION RUN ONCE WITH ITS FIX REMOVED**, one instrumented build, four runs (the knobs
+and the build are gone; the committed test is the one that passed):
+
+| perturbation | failed |
+|---|---|
+| StartTracking removed - the track keeps the stale count 3 and step 50 mm it was handed | **(a)** both 11.1.1 cases: count 2.8655834850 after step 1 (3 - 50/372), one uniform not two; (b) and (e) downstream (step 2 570.70 mm); "the reordered order carried a count" in both reordered cases. 9 failures |
+| the order reverted - every case handed the other order | **(a)** (count -1), **(b)** (0.2167 mm against 54.15), **(e)** twice (not zero, not on the face), **(c)** twice (54.151 against 75.036, relative 0.278; 0 against 10.83), "the reordered order carried a count" twice. 9 failures |
+| `PostStepDoIt`'s clear removed | **(d)** twice: count 0.24999999954 and 0 after the interaction, and the next step 0 mm instead of the fresh draw's 259.89 - a used-up count interacts again at once. 4 failures |
+| `TrackBuffer`'s neutron-only test removed, and `seed_track_slot`'s reset | the proton loaded (2.5, 9), its slot WRITTEN, a seeded primary kept (4, 11). 3 failures |
+
+**WHAT IT COSTS.** `sizeof(TrackState<double>)` 248 -> **264** (the two fields at offsets 96 and
+104, after `msc_tlimitmin`; asserted). A buffer slot 238 -> **254** bytes (`track_bytes_per_slot`),
+so a pool sized from free memory holds 6.3% fewer slots; `PendingInteraction<double>` 392 ->
+**408** (`tests/test_inelastic_transport.cu` pins it, and says so). `TrackBuffer::load` and
+`append` move the two arrays for a NEUTRON only: every stepping kernel is compiled for one
+species and sets `p.species` to it before its append, so in every kernel but the neutron's the
+store folds away and the loads are dead - no other species moves the two arrays. The interaction
+and photo-/lepto-nuclear drains write the cleared values as constants for the same reason (their
+primary's species is a runtime value). Registers, frame and spill, `-Xptxas -v` off the engine's
+own units - main at b40c836 (the gate's build, `D:\g4gpu\out`) against this branch, the same
+CUDA 12.9.86 and `-arch=sm_86`, every unit at ptxas's default -O3 on both sides:
+
+| kernel | registers | stack frame, B | spill stores/loads, B | cmem[0], B |
+|---|--:|--:|--:|--:|
+| `run_step_neutral<neutron>` | 255 | 7,872 -> **7,904** | 52/24 -> **60/44** | 1,840 -> 1,880 |
+| `run_step_neutral<pi0>` | 255 | 7,872 -> 7,904 | 32/24 -> 36/44 | 1,840 -> 1,880 |
+| `run_step_gamma` | 255 | 3,840 -> 3,872 | 504/1,640 -> 520/1,656 | 1,816 -> 1,856 |
+| `run_step_lepton` (e-, e+) | 255 | 4,976 -> 5,008 | 80/44, unchanged | 1,816 -> 1,856 |
+| `run_step_hadron<proton>` | 255 | 4,336 -> 4,384 | 240/844 -> 260/884 | 1,816 -> 1,856 |
+| `run_step_hadron<pbar>` | 255 | 4,112 -> 4,160 | 248/960 -> 272/1,000 | 1,816 -> 1,856 |
+| `run_step_hadron<alpha>` | 255 | 4,176 -> 4,224 | 196/496 -> 224/540 | 1,816 -> 1,856 |
+| `run_step_hadron<He3>` | 255 | 4,176 -> 4,224 | 184/500 -> 200/540 | 1,816 -> 1,856 |
+| `run_step_hadron<GenericIon>` | 255 | 4,176 -> 4,224 | 284/680 -> 300/720 | 1,816 -> 1,856 |
+| `run_step_hadron<deuteron>`, `<triton>` | 255 | 4,480 -> 4,512 | 216/532 -> 204/492 | 1,816 -> 1,856 |
+| `run_step_hadron<mu->` | 255 | 5,072 -> 5,120 | 48/20 -> 60/44 | 1,816 -> 1,856 |
+| `run_step_hadron<mu+>`, `<pi+>`, `<pi->` | 255 | 5,072 -> 5,104 | 48-52/20 -> 60-64/44 | 1,816 -> 1,856 |
+| `run_step_hadron<K+>`, `<K->` | 255 | 5,056 -> 5,104 and 5,088 | 48-52/20 -> 60-64/44 | 1,816 -> 1,856 |
+| `run_interaction<FTFP>`, `<Binary>`, `<LightIon>` | 255 | 23,408, 90,592, 82,432 - unchanged | unchanged | 1,632 -> 1,656 |
+| `run_interaction<Bertini>` | 255 | 39,520 -> 39,488 | 568/1,112, unchanged | 1,632 -> 1,656 |
+| `run_interaction<AtRest>` | 255 | 41,216 -> 41,248 | 544/1,108, unchanged | 1,632 -> 1,656 |
+| `run_emextra_drain` (photo-, lepto-nuclear) | 255 | 11,952 and 4,128 - unchanged | 556/1,036 -> 564/1,048; 544/1,028 -> 552/1,040 | 1,632 -> 1,656 |
+| `seed_from_primaries` | 226 -> **250** | 1,120 | 0/0 | 816 -> 832 |
+
+**No register count moved** - every stepping and interaction kernel was at 255 and is - and no
+frame crosses anything: the largest stepping frame is 7,904 B against the 16,384 the engine
+reserves for them, and the interaction kernels' reservation is read off `run_interaction<Binary>`'s
+90,592, which did not move. What every stepping kernel DOES pay is 32 to 48 B of frame and 8 to
+44 B of spill, the neutron's no more than the gamma's: a kernel hands `&p` to the step hook, so
+the `TrackState` lives in local memory and its sixteen extra bytes are on every frame whatever
+the species. The neutron-only test keeps the two arrays' traffic off the other species; it
+cannot keep the struct's width off their stack. The cmem[0] growth is the argument list - each
+`TrackBuffer` carries two more pointers and `HadronicWiring` one more enum - and
+`seed_from_primaries`, which writes the two arrays for every primary, went from 226 to 250
+registers with no spill. On a run with no neutron in it - B1's 2,000,000-event gamma gate, stage
+1 - the dose is the same before and after to every printed digit (425.921 ± 0.868 pGy, 1.19
+sigma from Geant4's 427.385) and the event loop is 1,399, 1,347 and 1,337 ms before against
+1,359, 1,335 and 1,347 after, three pairs interleaved in one session: 1,361 against 1,347 ms, no
+cost a run can see. `b1_gpu_sched`, which shares only the buffer, reads 427.699 pGy both ways.

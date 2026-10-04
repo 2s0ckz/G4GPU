@@ -35,14 +35,24 @@
 //     `tests/test_step_hadron.cu` does for the charged stepper - including each secondary's
 //     species, NUCLIDE and energy, and the energy balance of every step.
 //
+// AND SINCE P22, A SIXTH: THE ORDER A STEP THAT ENDED ON A BOUNDARY IS CHARGED IN. The general
+// process carries `theNumberOfInteractionLengthLeft` across a neutron's steps and charges the
+// step just taken at the mean free path of the material the neutron is in NOW (docs/RISK.md
+// V219), and the switch `had::NeutronGeneralOrder` offers the other order. Section 6 walks one
+// neutron from water into bone with its uniforms written by hand and asserts each order's charge
+// to the bit, the clear after an interaction, the clamp, StartTracking, and the track buffer's
+// handling of the two fields - on the host, and the same walk on the device against it.
+//
 // AND THE CAPTURE CAPACITY IS MEASURED HERE. `had::kNeutronCaptureSecondaryCap` is 16 because
 // each unit costs 353 bytes of `run_step_neutral`'s frame; section 4 runs the cascade over every
 // element of B1's four materials and reports the longest one, so the capacity is a claim with a
 // number under it rather than a guess with a tripwire over it.
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <vector>
 
 #include "core/rng.cuh"
@@ -331,6 +341,107 @@ double zscore(long long observed, double p, long long n) {
   const double mean = p * double(n);
   const double sd = std::sqrt(double(n) * p * (1.0 - p));
   return std::fabs(double(observed) - mean) / sd;
+}
+
+// =============================================================================================
+// 6. P22: the order a step that ended on a boundary is charged in
+// =============================================================================================
+
+/// A uniform stream the test writes: the first `n` values are the test's, the rest are Philox,
+/// so that a final state with a rejection loop in it still terminates. `used` counts every
+/// draw, scripted or not, which is how a test sees WHICH draws a step made.
+struct ScriptRng {
+  real_t v[4] = {real_t(0.5), real_t(0.5), real_t(0.5), real_t(0.5)};
+  int n = 0;
+  int used = 0;
+  Philox<real_t> tail{0x22u, 0x22u, 0x4E7Au};
+  __host__ __device__ real_t uniform() {
+    const int i = used++;
+    return (i < n) ? v[i] : tail.uniform();
+  }
+};
+
+/// What one step left on the track: the step and the general process's carried count.
+struct OrderStep {
+  real_t length = 0;    ///< rep.true_length
+  real_t n_left = 0;    ///< p.ngp_left after the step
+  real_t prev = 0;      ///< p.ngp_prev_step after the step
+  real_t ekin = 0;
+  int status = -1, process = -1, volume = -1, alive = 0, used = 0;
+};
+
+/// One step of the two-material case, and what `run_step_neutral` does to the track after it
+/// (the step counter and the clocks), so that a second step starts where the kernel's would.
+__host__ __device__ void order_step(const Scene<real_t>& scene, TrackState<real_t>& p,
+                                    const had::NeutronGeneralXs<real_t>* xs,
+                                    const had::HadronicWiring<real_t>& had, ScriptRng rng,
+                                    OrderStep* out) {
+  StepReport<real_t> rep;
+  Outcome sink{};
+  RecordingEmitter em{&sink, p.pos, p.volume, p.event, 0u};
+  real_t edep = 0;
+  const real_t ekin_pre = p.ekin;
+  const bool alive =
+      step_neutral(scene, p, ParticleType::kNeutron, xs, had, rng, em, edep, rep);
+  ++p.step;
+  p.advance(rep.true_length, ekin_pre, particle_def<real_t>(ParticleType::kNeutron).mass);
+  out->length = rep.true_length;
+  out->n_left = p.ngp_left;
+  out->prev = p.ngp_prev_step;
+  out->ekin = p.ekin;
+  out->status = static_cast<int>(rep.status);
+  out->process = static_cast<int>(rep.process);
+  out->volume = p.volume;
+  out->alive = alive ? 1 : 0;
+  out->used = rng.used;
+}
+
+/// The same three steps on the device, one thread, with the scripts the host run used.
+__global__ void RunOrderCase(Scene<real_t> scene, TrackState<real_t> p,
+                             const had::NeutronGeneralXs<real_t>* xs,
+                             had::HadronicWiring<real_t> had, ScriptRng r1, ScriptRng r2,
+                             ScriptRng r3, int n_steps, OrderStep* out) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) { return; }
+  const ScriptRng rs[3] = {r1, r2, r3};
+  for (int k = 0; k < n_steps; ++k) {
+    out[k] = OrderStep{};
+    order_step(scene, p, xs, had, rs[k], &out[k]);
+    if (out[k].alive == 0) { break; }
+  }
+}
+
+/// `TrackBuffer::append`/`load` and `seed_track_slot` for the two fields: a neutron's survive
+/// the round trip, a proton's are neither stored nor read, a seeded primary starts with none.
+__global__ void BufferRoundTrip(TrackBuffer<real_t> buf, real_t* out) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) { return; }
+  TrackState<real_t> n{};
+  n.species = ParticleType::kNeutron;
+  n.ngp_left = real_t(1.25);
+  n.ngp_prev_step = real_t(7.5);
+  const int sn = buf.append(n);
+  TrackState<real_t> pr{};
+  pr.species = ParticleType::kProton;
+  pr.ngp_left = real_t(2.5);
+  pr.ngp_prev_step = real_t(9.0);
+  const int sp = buf.append(pr);
+  TrackState<real_t> back{};
+  buf.load(sn, back);
+  out[0] = back.ngp_left;
+  out[1] = back.ngp_prev_step;
+  buf.load(sp, back);
+  out[2] = back.ngp_left;
+  out[3] = back.ngp_prev_step;
+  out[4] = buf.ngp_left[sp];       // what the proton's slot holds: the memset sentinel
+  out[5] = buf.ngp_prev_step[sp];
+  // A primary neutron, seeded into a third slot whose arrays were dirtied first.
+  buf.ngp_left[2] = real_t(4.0);
+  buf.ngp_prev_step[2] = real_t(11.0);
+  buf.species[2] = static_cast<int>(ParticleType::kNeutron);
+  seed_track_slot(buf, 2, Vec3<real_t>{0, 0, 0}, Vec3<real_t>{0, 0, 1}, real_t(100), 0,
+                  real_t(0));
+  buf.load(2, back);
+  out[6] = back.ngp_left;
+  out[7] = back.ngp_prev_step;
 }
 
 }  // namespace
@@ -1190,6 +1301,319 @@ int main() {
       fail("G4NeutronRadCapture refused a capture - an unphysical target or 100 rejected "
            "attempts");
     }
+  }
+
+  // ================= 6. P22: the order a step that ended on a boundary is charged in
+  std::printf("\n-- 6. P22: G4NeutronGeneralProcess's count across a water/bone boundary\n");
+  {
+    // `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` refreshes its cross
+    // section for the material the track is in NOW and only then charges the step just taken
+    // (docs/RISK.md V219), so a step that ended on a boundary is charged at the NEXT material's
+    // mean free path. One neutron, hand-placed, with its uniforms written by the test, so that
+    // every number below is an exact prediction rather than a frequency:
+    //
+    //   (a) a track's first step subtracts nothing - its count is the draw, -log(u), to the
+    //       bit, although the TrackState it started in carried a stale count and step length;
+    //   (b) the default order (11.1.1's) charges the 50 mm of water at BONE's mean free path:
+    //       the next limit is max(n0 - L/lambda_bone, 0) * lambda_bone, to the bit;
+    //   (c) the switch's order charges it at WATER's: (n0 - L/lambda_water) * lambda_bone. The
+    //       switch re-draws, so this is made exact for one sample by handing the re-draw the
+    //       uniform exp(-(n0 - L/lambda_water)) - the memoryless identity the switch rests on,
+    //       written as a number rather than argued;
+    //   (d) the count after an interaction is cleared, and the next step draws afresh;
+    //   (e) a count the bone's charge uses up is zero, and the neutron interacts where it
+    //       entered the bone - V219's mechanism, in one step.
+    //
+    // A water world and a bone slab whose near face is 50 mm down +z: 4 m of bone, so the
+    // interaction the cases below arrange happens inside it and not at its far face.
+    const real_t kE = real_t(100);
+    geom::Volume<real_t> two[2] = {
+        geom::Volume<real_t>{{geom::SolidType::kBox, {real_t(5000), real_t(5000), real_t(5000)}},
+                             geom::make_translation<real_t>({0, 0, 0}), 0, data::kWater, -1},
+        geom::Volume<real_t>{{geom::SolidType::kBox, {real_t(4000), real_t(4000), real_t(2000)}},
+                             geom::make_translation<real_t>({0, 0, real_t(2050)}), 1,
+                             data::kBoneCompact, 0}};
+    geom::Volume<real_t>* d_two = nullptr;
+    cudaMalloc(&d_two, sizeof(two));
+    cudaMemcpy(d_two, two, sizeof(two), cudaMemcpyHostToDevice);
+    Scene<real_t> hs2 = hscene[0], ds2 = dscene[0];
+    hs2.geometry = geom::Geometry<real_t>{two, 2, 0};
+    ds2.geometry = geom::Geometry<real_t>{d_two, 2, 0};
+
+    // The two mean free paths, read through the accessor `step_neutral` reads them through.
+    const real_t loge = std::log(kE);
+    const real_t sig_w = h_xs.total(data::kWater, kE, loge);
+    const real_t sig_b = h_xs.total(data::kBoneCompact, kE, loge);
+    const real_t cil_w = real_t(1) / sig_w;
+    const real_t cil_b = real_t(1) / sig_b;
+    std::printf("  %g MeV: mean free path %.6f mm in water, %.6f mm in compact bone (%.4f of "
+                "water's)\n", double(kE), double(cil_w), double(cil_b), double(cil_b / cil_w));
+    // The whole test is the difference between these two numbers, so it must be one.
+    if (!(sig_b > real_t(1.2) * sig_w)) {
+      fail("bone's cross section is not well above water's - the two orders cannot be told "
+           "apart in this geometry");
+    }
+
+    // A neutron at the origin, heading for the bone, started the way the transport starts a
+    // secondary - `TrackState::begin`, this port's StartTracking - from a struct that still held
+    // another track's count and step length. (a) is about what begin() leaves behind.
+    auto fresh = [&]() {
+      TrackState<real_t> p{};
+      p.ngp_left = real_t(3);
+      p.ngp_prev_step = real_t(50);
+      p.species = ParticleType::kNeutron;
+      p.pos = Vec3<real_t>{0, 0, 0};
+      p.dir = Vec3<real_t>{0, 0, 1};
+      p.ekin = kE;
+      p.volume = 0;
+      p.event = 0;
+      p.rng_key = 0x22u;
+      p.step = 0u;
+      p.begin(p.pos, p.dir, kE, 0, 0u, ProcessId::fNotDefined, real_t(0), real_t(1));
+      return p;
+    };
+    auto script = [](std::initializer_list<real_t> v) {
+      ScriptRng r;
+      for (real_t x : v) { r.v[r.n++] = x; }
+      return r;
+    };
+    auto wiring = [&](const had::HadronicWiring<real_t>& base, had::NeutronGeneralOrder o) {
+      had::HadronicWiring<real_t> w = base;
+      w.stage = had::HadronicStage::kFinal;
+      w.neutron_order = o;
+      return w;
+    };
+    const had::NeutronGeneralOrder kG4 = had::NeutronGeneralOrder::kGeant4_11_1_1;
+    const had::NeutronGeneralOrder kRe = had::NeutronGeneralOrder::kReordered;
+    const real_t kL = real_t(50);  // to the bone's face; the push is read back, not assumed
+    auto interacted = [](const OrderStep& s) {
+      return s.process == static_cast<int>(ProcessId::fHadronElastic)
+             || s.process == static_cast<int>(ProcessId::fHadronInelastic)
+             || s.process == static_cast<int>(ProcessId::fNeutronCapture);
+    };
+    // Each step's uniforms: the first is G4Decay's in-flight length (2.6e11 mm for a neutron,
+    // so it never wins), the second the general process's draw when it makes one.
+    const real_t u_dec = real_t(0.5);
+
+    struct Case {
+      const char* name;
+      had::NeutronGeneralOrder order;
+      real_t margin;  ///< n0 - L*sigma_b for case A, n0 - L*sigma_w for case B
+      bool clamp;     ///< case B: the count survives water by `margin` and bone's charge uses it
+    };
+    const Case cases[] = {{"A, 11.1.1's order", kG4, real_t(0.25), false},
+                          {"A, reordered", kRe, real_t(0.25), false},
+                          {"B, 11.1.1's order, the clamp", kG4, real_t(0.05), true},
+                          {"B, reordered", kRe, real_t(0.05), true}};
+    real_t len2[4] = {};
+    for (int ci = 0; ci < 4; ++ci) {
+      const Case& c = cases[ci];
+      const had::HadronicWiring<real_t> hw = wiring(hhad, c.order);
+      const real_t n0_target = c.clamp ? kL * sig_w + c.margin : kL * sig_b + c.margin;
+      const ScriptRng r1 = script({u_dec, std::exp(-n0_target)});
+      TrackState<real_t> p = fresh();
+      OrderStep s1{}, s2{}, s3{};
+      order_step(hs2, p, &h_xs, hw, r1, &s1);
+      const real_t n0 = -std::log(r1.v[1]);
+      std::printf("  case %-30s step 1: %s after %.9f mm, count %.17g, previous step %.9f mm, "
+                  "%d uniforms\n", c.name,
+                  (s1.status == static_cast<int>(StepStatus::fGeomBoundary)) ? "boundary"
+                                                                               : "NOT a boundary",
+                  double(s1.length), double(s1.n_left), double(s1.prev), s1.used);
+      if (s1.status != static_cast<int>(StepStatus::fGeomBoundary) || s1.volume != 1) {
+        fail("step 1 did not end on the water/bone boundary - the case is not the one asserted");
+        continue;
+      }
+      if (s1.prev != s1.length) {
+        fail("the step length a boundary step leaves for the next charge is not the step's own "
+             "(fPreviousStepSize = fStep->GetStepLength())");
+      }
+      // (a) The first step subtracts nothing: the carried count IS the draw. Under the switch
+      // nothing is carried at all, and the field must say so.
+      if (c.order == kG4) {
+        if (s1.n_left != n0) {
+          std::printf("    count after step 1 %.17g, the draw -log(u) %.17g\n", double(s1.n_left),
+                      double(n0));
+          fail("(a) the first step of a track charged its count - the stale count or step "
+               "length it was started with reached G4NeutronGeneralProcess");
+        }
+      } else if (s1.n_left != real_t(-1)) {
+        fail("the reordered order carried a count - it re-draws every step");
+      }
+      if (s1.used != 2) {
+        fail("step 1 did not draw exactly twice (G4Decay's length and the general process's)");
+      }
+      // Step 2, in the bone. Under 11.1.1 the count is carried and no length is drawn, so its
+      // second uniform is the sub-process choice; under the switch the second is the re-draw
+      // and the third the choice. 0.999 is the elastic sub-process above 20 MeV (`select` tests
+      // `q <= P(inelastic)`), so the neutron survives the interaction and (d) has a next step.
+      const real_t prev = s1.prev;
+      const real_t r_water = n0 - prev / cil_w;  // the count charged at WATER's mean free path
+      real_t n_bone = n0 - prev / cil_b;          // and at BONE's, then Geant4's clamp
+      n_bone = (n_bone < real_t(0)) ? real_t(0) : n_bone;
+      const real_t want_g4 = n_bone * cil_b;
+      const real_t want_re = r_water * cil_b;
+      const ScriptRng r2 = (c.order == kG4)
+                               ? script({u_dec, real_t(0.999)})
+                               : script({u_dec, std::exp(-r_water), real_t(0.999)});
+      const Vec3<real_t> entry = p.pos;
+      order_step(hs2, p, &h_xs, hw, r2, &s2);
+      len2[ci] = s2.length;
+      std::printf("    step 2: %.9f mm in the bone (11.1.1 predicts %.9f, reordered %.9f), "
+                  "process %d, count after %.17g\n", double(s2.length), double(want_g4),
+                  double(want_re), s2.process, double(s2.n_left));
+      if (!interacted(s2)) {
+        fail("step 2 did not end in an interaction - the case is not the one asserted");
+        continue;
+      }
+      if (c.order == kG4) {
+        // (b) and (e), to the bit: the same three operations on the same doubles.
+        if (s2.length != want_g4) {
+          fail(c.clamp ? "(e) a count bone's charge used up did not give a zero-length step"
+                       : "(b) the boundary step was not charged at bone's mean free path");
+        }
+        if (c.clamp && (s2.length != real_t(0) || p.pos.z != entry.z)) {
+          fail("(e) the neutron did not interact where it entered the bone");
+        }
+      } else {
+        // (c), through exp and log, so to a tolerance a thousand times the round trip's.
+        const double rel = std::fabs(double(s2.length - want_re)) / double(want_re);
+        if (!(rel <= 1e-12)) {
+          std::printf("    reordered: %.17g against %.17g, relative %.3e\n", double(s2.length),
+                      double(want_re), rel);
+          fail("(c) under the switch the boundary step was not charged at water's mean free "
+               "path");
+        }
+      }
+      // ANTI-VACUITY, per case: the two predictions must differ by far more than a rounding.
+      if (!(std::fabs(double(want_g4 - want_re)) > 1e-6 * double(want_re))) {
+        fail("the two orders predict the same step 2 - the case cannot tell them apart");
+      }
+      // (d) Cleared after the interaction, whichever sub-process fired.
+      if (s2.n_left != real_t(-1)) {
+        fail("(d) the count after an interaction was not cleared");
+      }
+      // ... and the next step draws afresh. Only an elastic scatter leaves a neutron to step.
+      if (s2.alive != 0) {
+        const real_t u3 = real_t(0.3);
+        order_step(hs2, p, &h_xs, hw, script({u_dec, u3}), &s3);
+        const real_t want3 = c.order == kG4
+                                 ? -std::log(u3) * (real_t(1) / h_xs.total(data::kBoneCompact,
+                                                                            s2.ekin,
+                                                                            std::log(s2.ekin)))
+                                 : -std::log(u3) / h_xs.total(data::kBoneCompact, s2.ekin,
+                                                              std::log(s2.ekin));
+        const bool boundary3 = (s3.status == static_cast<int>(StepStatus::fGeomBoundary));
+        std::printf("    step 3 after the elastic scatter (%.6g MeV): %s, %.9f mm (a fresh draw "
+                    "predicts %.9f)\n", double(s2.ekin), boundary3 ? "boundary" : "interaction",
+                    double(s3.length), double(want3));
+        if (boundary3 ? (c.order == kG4 && s3.n_left != -std::log(u3))
+                      : (s3.length != want3)) {
+          fail("(d) the step after an interaction did not draw its count afresh");
+        }
+      }
+      // THE SAME CASE ON THE DEVICE, with the host's scripts, against the host. Lengths to the
+      // tolerance section 3 uses (the device contracts the table's interpolation into an FMA);
+      // everything discrete exactly.
+      {
+        OrderStep* d_out = nullptr;
+        cudaMalloc(&d_out, sizeof(OrderStep) * 3);
+        cudaMemset(d_out, 0, sizeof(OrderStep) * 3);
+        const had::HadronicWiring<real_t> dw = wiring(dhad, c.order);
+        RunOrderCase<<<1, 1>>>(ds2, fresh(), nown.d_general, dw, r1, r2,
+                               script({u_dec, real_t(0.3)}), (s2.alive != 0) ? 3 : 2, d_out);
+        OrderStep dev[3];
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+          fail("the device run of the two-material case failed");
+        } else {
+          cudaMemcpy(dev, d_out, sizeof(OrderStep) * 3, cudaMemcpyDeviceToHost);
+          const OrderStep* hst[3] = {&s1, &s2, &s3};
+          for (int k = 0; k < ((s2.alive != 0) ? 3 : 2); ++k) {
+            const OrderStep& h = *hst[k];
+            const OrderStep& d = dev[k];
+            auto close = [](real_t a, real_t b) {
+              return a == b || std::fabs(double(a - b)) <= 1e-9 * std::fabs(double(b));
+            };
+            if (h.status != d.status || h.process != d.process || h.volume != d.volume
+                || h.alive != d.alive || h.used != d.used || !close(h.length, d.length)
+                || !close(h.n_left, d.n_left) || !close(h.prev, d.prev)) {
+              std::printf("    step %d host: %.17g mm, count %.17g, process %d, %d uniforms; "
+                          "device: %.17g mm, count %.17g, process %d, %d uniforms\n", k + 1,
+                          double(h.length), double(h.n_left), h.process, h.used,
+                          double(d.length), double(d.n_left), d.process, d.used);
+              fail("the device's two-material case differs from the host's");
+            }
+          }
+        }
+        cudaFree(d_out);
+      }
+    }
+    std::printf("  step 2's length: case A %.6f mm (11.1.1) against %.6f (reordered); case B "
+                "%.6f against %.6f\n", double(len2[0]), double(len2[1]), double(len2[2]),
+                double(len2[3]));
+
+    // WHAT THE TWO FIELDS COST, AS ARITHMETIC. `TrackState` is register-budgeted (docs/RISK.md
+    // V22) and P22 widened it on purpose - by exactly two doubles, appended where the struct's
+    // alignment puts no padding before them. A struct that grew by more than that grew by
+    // something nobody measured.
+    {
+      using TS = TrackState<real_t>;
+      std::printf("  sizeof(TrackState<double>) = %zu (offsetof ngp_left %zu, ngp_prev_step "
+                  "%zu); a buffer slot %zu bytes; sizeof(PendingInteraction<double>) = %zu\n",
+                  sizeof(TS), offsetof(TS, ngp_left), offsetof(TS, ngp_prev_step),
+                  track_bytes_per_slot<real_t>(), sizeof(had::PendingInteraction<real_t>));
+      if (sizeof(TS) != 264) {
+        fail("TrackState<double> is not 248 + the 16 bytes P22 measured - re-measure the "
+             "stepping kernels' registers and stack before changing this number");
+      }
+      if (offsetof(TS, ngp_prev_step) != offsetof(TS, ngp_left) + sizeof(real_t)) {
+        fail("the two P22 fields are not adjacent - padding crept in between them");
+      }
+    }
+
+    // THE BUFFER CARRIES IT FOR A NEUTRON AND ONLY A NEUTRON, and a seeded primary has none.
+    {
+      TrackBuffer<real_t> buf{};
+      if (allocate_track_buffer<real_t>(buf, 4) != cudaSuccess) {
+        fail("could not allocate the four-slot track buffer");
+      } else {
+        cudaMemset(buf.count, 0, sizeof(int));
+        cudaMemset(buf.overflow, 0, sizeof(int));
+        cudaMemset(buf.ngp_left, 0x7F, sizeof(real_t) * 4);
+        cudaMemset(buf.ngp_prev_step, 0x7F, sizeof(real_t) * 4);
+        real_t sentinel = 0;
+        std::memset(&sentinel, 0x7F, sizeof(sentinel));
+        real_t* d_rt = nullptr;
+        cudaMalloc(&d_rt, sizeof(real_t) * 8);
+        BufferRoundTrip<<<1, 1>>>(buf, d_rt);
+        real_t rt[8] = {};
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+          fail("the buffer round trip failed to launch");
+        } else {
+          cudaMemcpy(rt, d_rt, sizeof(rt), cudaMemcpyDeviceToHost);
+          std::printf("  buffer: neutron back as (%g, %g); proton back as (%g, %g) with its "
+                      "slot %s; a seeded primary (%g, %g)\n", double(rt[0]), double(rt[1]),
+                      double(rt[2]), double(rt[3]),
+                      (rt[4] == sentinel && rt[5] == sentinel) ? "untouched" : "WRITTEN",
+                      double(rt[6]), double(rt[7]));
+          if (rt[0] != real_t(1.25) || rt[1] != real_t(7.5)) {
+            fail("a neutron's count did not survive TrackBuffer::append and load");
+          }
+          if (rt[2] != real_t(-1) || rt[3] != real_t(0)) {
+            fail("a proton loaded a count - load must give every other species a new track's");
+          }
+          if (rt[4] != sentinel || rt[5] != sentinel) {
+            fail("append wrote a proton's count into the buffer");
+          }
+          if (rt[6] != real_t(-1) || rt[7] != real_t(0)) {
+            fail("seed_track_slot left a primary neutron a stale count (StartTracking)");
+          }
+        }
+        cudaFree(d_rt);
+        free_track_buffer<real_t>(buf);
+      }
+    }
+    cudaFree(d_two);
   }
 
   host::free_neutron_tables<real_t>(nown);

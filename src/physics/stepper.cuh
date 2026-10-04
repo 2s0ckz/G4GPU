@@ -2565,9 +2565,34 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
                           : real_t(0);
 
   // The combined table's interaction length, in the final stage only.
+  //
+  // `sigma` IS `CurrentCrossSection(track)`: `fLambda` for the material the track is in NOW, at
+  // its energy now - which on a step that ended on a boundary is the NEXT material's, the one
+  // the step was not taken in.
+  //
+  // P22: AND BY DEFAULT THE LENGTH IS 11.1.1's, CARRIED. `G4NeutronGeneralProcess` keeps
+  // `theNumberOfInteractionLengthLeft` across the track's steps and charges the previous step
+  // at `sigma` - after the refresh, not before it (`had::NeutronGeneralOrder`, docs/RISK.md
+  // V219) - so the count rides on the track (`p.ngp_left`, `p.ngp_prev_step`) and
+  // `had::neutron_general_length` is the transcription. `kReordered` is the expression this line
+  // was until P22, unchanged to the bit: a fresh `-log(u)/sigma` every step, which by the
+  // memoryless property IS the order that charges a step at the length it was taken with.
+  //
+  // STAGE 1 KEEPS THE REDRAW BELOW, AND IT IS NOT A SHORTCUT. There the neutron's elastic and
+  // capture are two `G4HadronicProcess`es, and `G4HadronicProcess::PostStepGetPhysicalInteraction
+  // Length` (G4HadronicProcess.cc:268-311) charges `previousStepSize/currentInteractionLength`
+  // with the PREVIOUS call's length and only then sets `currentInteractionLength = theMFP` - the
+  // step at the length it was taken with, which the memoryless redraw reproduces exactly.
   const real_t sigma = has_general_process ? xs->total(mat, p.ekin, loge) : real_t(0);
-  const real_t s_int =
-      (sigma > real_t(0)) ? -log(rng.uniform()) / sigma : geom::kInfinity<real_t>();
+  real_t s_int = geom::kInfinity<real_t>();
+  if (has_general_process && had.neutron_order == had::NeutronGeneralOrder::kGeant4_11_1_1) {
+    s_int = had::neutron_general_length<real_t>(p.ngp_left, p.ngp_prev_step, sigma, rng);
+    // Infinite or NaN only at a zero cross section, where Geant4's own `physIntLength <
+    // PhysicalStep` keeps neither; see `neutron_general_length`.
+    if (!(s_int < geom::kInfinity<real_t>())) { s_int = geom::kInfinity<real_t>(); }
+  } else if (sigma > real_t(0)) {
+    s_int = -log(rng.uniform()) / sigma;
+  }
 
   // ---- stage 1: two processes, two data stores, two interaction lengths.
   //
@@ -2649,6 +2674,12 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
     p.pos = p.pos + (d_boundary + geom::kPushDistance<real_t>()) * p.dir;
     traj.add(pos_before, p.pos, type, p.event, p.rng_key);
     p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
+    // P22: the count is NOT cleared here - transportation limited the step, so the general
+    // process's PostStepDoIt never ran, and the count rides into the next volume to be charged
+    // there. What the next step charges it with is this step's length:
+    // `fPreviousStepSize = fStep->GetStepLength()` (G4SteppingManager::Stepping), which in this
+    // transport includes the 1e-7 mm push the track really moved.
+    p.ngp_prev_step = rep.true_length;
     return p.volume != geom::kOutsideWorld;
   }
 
@@ -2668,7 +2699,17 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
   // it costs ONE uniform - `G4double q = G4UniformRand()` is the second statement of
   // `G4NeutronGeneralProcess::PostStepDoIt`. In stage 1 the competition already named it and no
   // uniform is drawn, which is what having two processes means.
-  if (sub_from_general) { sub = xs->select(mat, p.ekin, loge, rng.uniform()); }
+  //
+  // P22: AND ITS FIRST STATEMENT CLEARS THE COUNT - "In all cases clear number of interaction
+  // lengths", `theNumberOfInteractionLengthLeft = -1.0` - before it picks the sub-process, so a
+  // neutron that scatters elastically, or survives an inelastic interaction, draws its next
+  // length afresh, and a queued one carries the cleared count into the interaction kernel. The
+  // time cut's branch of that function returns before the clear and so does nothing here: the
+  // track it kills has no next step.
+  if (sub_from_general) {
+    p.ngp_left = real_t(-1);
+    sub = xs->select(mat, p.ekin, loge, rng.uniform());
+  }
 
   if (sub == had::NeutronSubProcess::kInelastic) {
     // QUEUED SINCE P15. This branch used to be the port's largest named hole: the neutron was
@@ -2770,6 +2811,9 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
       p.ekin = real_t(0);
       return false;
     }
+    // `fPreviousStepSize` is set after every step, this one included; with the count cleared
+    // above the next step draws and does not read it, which is Geant4's order as well.
+    p.ngp_prev_step = rep.true_length;
     return true;
   }
 
