@@ -160,7 +160,7 @@ physics lists.
 | G4NuclearRadii (all 7 radii + both CoulombFactor) | **V** | `hadronic/xs/nuclear_radii.cuh` |
 | G4NucleiPropertiesTableAME12 / G4NucleiProperties | **P** | `data/nuclei_mass_ame12.hh`, 3353 nuclides |
 | G4PhysicsVector / LogVector / LinearVector (evaluation) | **V** | `hadronic/xs/physics_vector.cuh` |
-| G4HadronNucleonXsc (PDG, NS, all three Kaon* forms, **HyperonNucleonXscNS**) | **P** | `hadronic/xs/hadron_nucleon_xsc.cuh`. The hyperon branch was added by **P11c**, because QBBC gives FTFP a lambda beam from 3 GeV and an anti-lambda beam at every energy (`ftf_windows.csv`) and the model asks this class for its cross sections: without it six points of FTFP's 96-point generality sweep could not run. It is a coefficient per \|PDG\| - 0.88, 0.76, 0.64 for one, two and three strange quarks, and six more for the charm and bottom hyperons - applied to the PROTON's `HadronNucleonXscNS`, scaling total, elastic AND inelastic. `had_hnxsc.csv` gained ten hyperons x two nucleons x every energy already scanned, and `test_ftf_model.cu` compares the `Dispatch` rows. **Still refused:** `SCBMesonNucleonXscNS` (`kSCBMesonNucleonXscNS`), the charm and bottom MESONS, which no QBBC beam reaches |
+| G4HadronNucleonXsc (PDG, NS, all three Kaon* forms, **HyperonNucleonXscNS**, **SCBMesonNucleonXscNS**) | **V** | `hadronic/xs/hadron_nucleon_xsc.cuh`. The hyperon branch was added by **P11c**, because QBBC gives FTFP a lambda beam from 3 GeV and an anti-lambda beam at every energy (`ftf_windows.csv`) and the model asks this class for its cross sections: without it six points of FTFP's 96-point generality sweep could not run. It is a coefficient per \|PDG\| - 0.88, 0.76, 0.64 for one, two and three strange quarks, and six more for the charm and bottom hyperons - applied to the PROTON's `HadronNucleonXscNS`, scaling total, elastic AND inelastic. `had_hnxsc.csv` gained ten hyperons x two nucleons x every energy already scanned, and `test_ftf_model.cu` compares the `Dispatch` rows. *(P23b: `SCBMesonNucleonXscNS` is written too - the same shape on the PI+'s `HadronNucleonXscNS`, Coulomb factor included, for D, Ds, B, Bs, Bc, eta, eta', etac and J/psi - and "which no QBBC beam reaches" was wrong: `BuildBCHadronsFTFP_BERT` gives every b/c meson of `sBCHadrons` a Glauber-Gribov inelastic and elastic process (`strange_scope.csv`). Nothing in the dispatcher is refused any more. `tests/test_strange.cu` compares the dispatcher for every hyperon, anti-hyperon, b/c hadron and K0S/K0L on both nucleons, 93,600 values at 0.000e+00; docs/RISK.md V228)* |
 | G4ComponentGGHadronNucleusXsc | **V** | `hadronic/xs/gg_hadron_nucleus_xsc.cuh` |
 | G4ComponentGGNuclNuclXsc | **V** | `hadronic/xs/gg_nucl_nucl_xsc.cuh` |
 | G4UPiNuclearCrossSection | **V** | `hadronic/xs/upi_nuclear_xs.cuh`, `data/upi_nuclear.hh` |
@@ -244,6 +244,12 @@ before that, and this paragraph is left standing because it is what the gap was.
 
 **`G4HadronNucleonXsc` is P** for two branches nothing in QBBC reaches: `HyperonNucleonXscNS`
 (s/c/b hyperons) and `SCBMesonNucleonXscNS` (s/c/b mesons). Both are refused by name.
+*(P11c wrote the first and P23b the second, and both ARE reached: QBBC gives every hyperon,
+anti-hyperon, neutral kaon and b/c hadron of `G4HadParticles` an inelastic and an elastic process
+on the bare Glauber-Gribov component - measured, `ref/oracle/strange_scope_xs.csv`, the registered
+processes equal to the component at all 1,848 points. `tests/test_strange.cu` compares the
+component's five outputs for all 44 such species, 939,360 values, every one at 0.000e+00.
+`G4HadronNucleonXsc` is **V**; docs/RISK.md V226, V228.)*
 `G4NucleiProperties` is **P** because `G4NucleiPropertiesTheoreticalTable` and the Cameron
 formula behind it are not ported, so a nuclide outside AME2012 refuses rather than being given
 a neighbour's mass. What IS there is the whole AME2012 table: `had_masses.csv` dumps
@@ -1109,7 +1115,8 @@ stream by one.
 | G4QGSModel and the QGS string arm | **-** | refused by name: not in QBBC's FTFP chain, and 2.1.4's note on the null `GetPrimaryProjectile()` (docs/RISK.md V50) is why it must stay refused rather than half-built |
 
 Tests: `test_ftf_params.cu` - 152,576 exact comparisons, worst 4.4e-16, 4,920 rows refused by
-name. `test_ftf_lund.cu` - 70,555 comparisons, of which 26,400 are draw counts and 889 are
+name. *(P23b, measured on this tree: 179,384 comparisons and 0 rows refused - the hyperon rows
+have run since P11c wrote `HyperonNucleonXscNS`, the K0L rows with them.)* `test_ftf_lund.cu` - 70,555 comparisons, of which 26,400 are draw counts and 889 are
 statistical z-scores. `test_ftf_strings.cu` - 11,254 comparisons over the layer above it, of
 which 500 are statistical.
 
@@ -1241,6 +1248,17 @@ and V100 says why every FTFP event reaches it. `kPropagateNuclNucl`, `kAdjustNuc
 `kHadronNucleonXscRefused` have all left the sweep - the ion arm, the sub-GeV arm and the hyperon
 cross section are wired - so one gap in one other package is now the whole of what stops FTFP.
 
+*(P23b: the windows walk now also covers K0L and K0S (3 GeV - 100 TeV), sigma+, sigma-, xi0, xi-,
+omega- (3 GeV - 100 TeV) and the five other anti-hyperons (every energy), APPENDED after the
+original rows - 31 FTFP rows and **180 points: 180 ran, 0 refused, 0 silent**. And the statistical
+half gained eight cases at 20,000 events - lambda and K0L and K0S at 10 GeV, anti-lambda at 5 GeV,
+each on C and Pb - with G4FTFParameters compared exactly for each (the "model FTF parameters"
+bucket, 448 values at 0.000e+00) and every one of the thirteen histograms under the 5-sigma gate:
+worst 4.18, k0s_Pb_10's string count, which V88's rule re-ran at 200,000 events on both sides,
+where it fell under the 2.54 that is the worst 200k string-count row. The b/c hadrons have FTFP
+rows too (`strange_scope.csv`) and are not in the sweep: their projectile arm is not P23b's.
+32,566 comparisons in all. docs/RISK.md V226.)*
+
 **The ion arm's own grid.** {alpha, C12, O16, Fe56} at {3, 8, 20} GeV per nucleon on {H, C, O,
 Al, Fe, Pb} - the P11c brief's grid, and between them the beams and the targets a
 galactic-cosmic-ray transport problem is made of - 72 points x 500 events. **7,081 events
@@ -1332,14 +1350,20 @@ is P13's configuration and not this package's: `emextra::qbbc_config(22)` and
 | p, n | 1,000 - 6,000 MeV | PreCompound (P6) | yes |
 | pi+, pi- | 1,000 - 12,000 MeV | PreCompound (P6) | yes |
 | K+, K- | 0 - 6,000 MeV | the cascade's own | yes |
-| K0S, K0L | 0 - 6,000 MeV | the cascade's own | **NO** - docs/RISK.md V139 |
-| lambda, sigma+/0/-, xi0/-, omega- | 0 - 6,000 MeV | the cascade's own | yes |
-| everything else, incl. anti-nucleons, light anti-nuclei, photons, muons | - | - | no window at all |
+| K0S, K0L | 0 - 6,000 MeV | the cascade's own | **yes, by a coin** - docs/RISK.md V227 (V139 said NO and was wrong) |
+| lambda, sigma+/-, xi0/-, omega- | 0 - 6,000 MeV | the cascade's own | yes |
+| everything else, incl. sigma0, anti-nucleons, anti-hyperons, light anti-nuclei, photons, muons | - | - | no window at all |
 
 Two rows there are not what the builder alone would say. **K0S and K0L have a window and no model
 behind it**: `G4InuclElementaryParticle::type` names `G4KaonZero` and `G4AntiKaonZero` and not the
 weak eigenstates, so `IsApplicable` refuses both and every K0S or K0L handed to Bertini is
-`NoInteraction` - V139. And **a muon has no window but IS applicable**, because
+`NoInteraction` - V139. *(P23b: NOT SO. The function's last statement mixes a K0S or a K0L back to
+kaonZero or kaonZeroBar with `G4UniformRand() > 0.5`, so both are applicable - Geant4's own
+instance says 1 for both in `strange_scope.csv` - and an interaction costs two deviates before the
+cascade, IsApplicable's and createBullet's. The port spends both and runs them; V227. And the
+hyperon row named the sigma0 and should not have: it is not in `sHyperons`, QBBC gives it no
+inelastic process at all, and `qbbc_bertini_range(3212)` has always said so.)* And **a muon has
+no window but IS applicable**, because
 `G4CascadeMuMinusPChannel` exists; what keeps it out is that QBBC registers no Bertini process on
 one. "The physics list offers it" and "the model accepts it" are written in different packages and
 nothing in Geant4 compares them, so both are evaluated together in the test rather than read.
@@ -1366,7 +1390,7 @@ in `tests/test_bertini_collide.cu`.
 | **G4IntraNucleiCascader** (`collide`, `initialize`, `newCascade`, `setupCascade`, `generateCascade`, `finishCascade`, `finalize`, `processTrappedParticle`, `particleCanInteract`), **G4CascadParticle**, **G4CollisionOutput**, **G4InuclNuclei**, **G4CascadeCheckBalance**, **G4CascadeRecoilMaker**, **G4CascadeCoalescence** | yes | **P** | `bertini/intra_cascader.cuh` and `bertini/collision_output.cuh`. 861,952 comparisons against four oracle files, of which 576 whole events (`bertini_cascader.csv`) and twelve hand-built coalescence states: draw counts, multiplicities, product types, the residual's (A, Z) and excitation all **exact**, four-momenta worst 8.4e-15 per step and 1.4e-10 for a whole Pb cascade (one particle in the longest of 576 events - see the tolerance note in the test). The nuclei are 4, 9, 12, 27, 56 and 207 because G4NucleiModel has three density shapes and the first two are the only way to reach two of them; He-4 is also what found the bare-recoil-nucleon store and the three meanings of `small_ekin` - docs/RISK.md V129. `minimum_recoil_A` is dead code in 11.1.1 - V130. **`decayTrappedParticle` is ported (P10c)** onto P4's decay module, through the seven hyperon tables section 3 records: a hyperon trapped below the potential is decayed where it stands and the daughters go back on the cascade stack. Geant4's boost of those daughters is a no-op because a Bertini-GeV energy is passed to a Geant4-MeV parameter, and the port evaluates the same guard rather than assuming the answer, refusing by name above the 1,115.68 GeV where it would stop being a no-op - docs/RISK.md V136. Wiring it is also what exposed a wrong `okay()` that the refusal had masked - V137. **Refused by name:** `rescatter`/`preloadCascade`/`processSecondary`/`releaseSecondary` (the `Propagate` entry, P11's), and every buffer capacity. `G4CascadeHistory` changes no result and is not ported (`showHistory` is 0) |
 | **G4CascadeDeexcitation**, **G4NonEquilibriumEvaporator**, **G4EquilibriumEvaporator**, **G4Fissioner** (+ G4FissionStore, G4FissionConfiguration), **G4BigBanger**, **G4CascadeDeexciteBase** | yes | **V** | `bertini/deexcite.cuh`. 19,822 comparisons against `bertini_deexcite.csv` - 15 fragments x 4 exciton configurations x 5 entry points x 8 phases, each entry point dumped on its own because each is separately constructible in Geant4. Draw counts, multiplicities, product types and the residual's (A, Z) **exact**; four-momenta worst 2.2e-13, excitations 6.0e-13. Reached by the kaon/hyperon instance; p, n, pi+ and pi- de-excite through P6 (docs/RISK.md V118) and both arms are wired. **`Z*Z/A` in the fission width is INTEGER division** and it moves lead from the tabulated barrier to the liquid-drop one - a factor of 22 in the fission width and a different channel - docs/RISK.md V131. `explosion()` is two different functions with the same name, one on the base class and one on the evaporator, and they disagree in both directions. The equilibrium evaporator's recursion into its own fission fragments is flattened onto a workspace stack, depth 3 by the fission threshold. **Refused by name:** `G4FissionStore::generateConfiguration`'s off-the-end read, a big bang with more nucleons than the workspace holds, and every capacity. `G4BigBanger`'s own "No bang! Don't know why" exhaustion is Geant4's outcome, not a refusal, and is reproduced |
 | **G4CascadeInterface** (`ApplyYourself`, `IsApplicable`, `createBullet`, `createTarget`, `copyOutputToHadronicResult`, `makeDynamicParticle`, `checkFinalResult`, `retryInelasticProton`/`Nucleus`, `coulombBarrierViolation`, `NoInteraction`), **G4InuclCollider** (`collide`, `deexcite`, both de-excitation choices), **G4PreCompoundDeexcitation** | yes | **P** | `bertini/cascade_interface.cuh`, entry point `bert::apply_yourself(HadProjectile, HadNucleus, HadFinalState, ...)` with P5's shapes. Compared STATISTICALLY - three nested retry loops mean no prescribed engine survives to the top - against `bertini_apply.csv` and `bertini_apply_species.csv`: **22,531 comparisons over 95 cases and 190,000 events, every asserted bucket inside its band**, worst 3.2 sigma on the multiplicity, 4.5 on one low-count fragment yield, 4.9 on one fragment spectrum and 3.9 on one kaon angle. Energy and z-momentum are compared relatively (they are conservation identities, not random variables - docs/RISK.md V133) and agree to 6e-7; the oracle's momentum-non-conservation column is `mean_pz` minus a constant and is asserted as that identity, which holds to 3.3e-14 and checks the mass table on the way. Both de-excitation arms are wired AND both are in the grid: p, n, pi+, pi- to P6's `preco::deexcite`, K+, K-, lambda to the cascade's own evaporators, selected by `qbbc_bertini_range(pdg)` - docs/RISK.md V118. The kaon and hyperon cases were added after the first grid, which had nucleons and pions only and therefore never ran `bertini/deexcite.cuh` above the level of its own oracle - docs/RISK.md V124, and they are what measured V135 and then V137. **Refused by name:** `G4LightTargetCollider` (a photon on A < 3 - P13's; *P13: WRITTEN, in `emextra/light_target.cuh`, as a SIBLING of this entry point rather than inside it, because `G4CascadeInterface::ApplyYourself` branches to it before `createBullet` - see 2.1.14. This enumerator stays because it is still the only thing that can report a projectile reaching that branch, and nothing under `bertini/` changed*), hyper-nuclear targets, `throwNonConservationFailure` (a kernel cannot throw: `ApplyResult::would_throw` carries it out and the campaign compares the count against the oracle's `thrown` column, both zero over 190,000 events), and every capacity. `Propagate`/`rescatter` is P11's entry and is not ported. **The refusal rate over the whole grid is 11 events in 190,000** - 0.006%, all of them `kFate` from the nuclei model, none above 0.2% in any case. It was 8,095 until P10c decayed the trapped hyperons instead of refusing them (docs/RISK.md V135, V136), and that is the difference between sixteen cases that could only be reported and sixteen that are asserted and pass |
-| **G4IntraNucleiCascader::decayTrappedParticle**, and the seven hyperon `G4DecayTable`s it needs | yes | **V** | `bertini/intra_cascader.cuh` on P4's `decay::sample_decay`, through the lambda / sigma+ / sigma0 / sigma- / xi0 / xi- / omega- rows P10c added to `physics/decay/decay_tables.hh` (section 3). Those rows are compared against `ref/oracle/decay_tables.csv` like every other row there - 30 channels, **worst relative deviation 0.000e+00** on parent mass, width, lifetime, branching ratio, two-body Pmx and daughter mass and width - and `ref/dump/dump_decay.cc`'s `kSpecies` grew from eight entries to fifteen so the new species get the same six comparisons the old eight get. All eleven channels are `G4PhaseSpaceDecayChannel` with two daughters, so no sampler came with them. **Measured over the 190,000-event grid: 10,234 trapped decays** - lambda 7,999, sigma0 2,215, sigma+ 11, xi0 4, xi- 4, sigma- 1, omega- 0. The sigma0 is the only hyperon channel that emits a photon, so a trapped one puts a gamma back on the cascade stack, and lambda -> sigma0 -> lambda is a cycle the cascade runs until the nucleus empties; omega- is never trapped in this grid and its table stands on Geant4's authority rather than on measured need. **Refused by name:** the boost above 1,115.68 GeV, where Geant4's GeV-into-a-MeV-parameter stops being a no-op (`kTrappedHyperonBoost`, docs/RISK.md V136), and a daughter with no `G4InuclParticleNames` code, which Geant4 emits as a null secondary (`kTrappedDaughterNotInucl`); both unreachable for these eleven channels and both evaluated rather than assumed |
+| **G4IntraNucleiCascader::decayTrappedParticle**, and the seven hyperon `G4DecayTable`s it needs | yes | **V** | `bertini/intra_cascader.cuh` on P4's `decay::sample_decay`, through the lambda / sigma+ / sigma0 / sigma- / xi0 / xi- / omega- rows P10c added to `physics/decay/decay_tables.hh` (section 3). Those rows are compared against `ref/oracle/decay_tables.csv` like every other row there - 30 channels, **worst relative deviation 0.000e+00** on parent mass, width, lifetime, branching ratio, two-body Pmx and daughter mass and width - and `ref/dump/dump_decay.cc`'s `kSpecies` grew from eight entries to fifteen so the new species get the same six comparisons the old eight get. All eleven channels are `G4PhaseSpaceDecayChannel` with two daughters, so no sampler came with them. **Measured over the 190,000-event grid: 10,234 trapped decays** - lambda 7,999, sigma0 2,215, sigma+ 11, xi0 4, xi- 4, sigma- 1, omega- 0. The sigma0 is the only hyperon channel that emits a photon, so a trapped one puts a gamma back on the cascade stack, and lambda -> sigma0 -> lambda is a cycle the cascade runs until the nucleus empties; omega- is never trapped in this grid and its table stands on Geant4's authority rather than on measured need. *(P23b: with omega-, xi0, xi-, sigma+ and sigma- projectiles in the grid, 41,476 trapped decays over 280,000 events - xi0 1,128, xi- 778, and the first omega-, 1.)* **Refused by name:** the boost above 1,115.68 GeV, where Geant4's GeV-into-a-MeV-parameter stops being a no-op (`kTrappedHyperonBoost`, docs/RISK.md V136), and a daughter with no `G4InuclParticleNames` code, which Geant4 emits as a null secondary (`kTrappedDaughterNotInucl`); both unreachable for these eleven channels and both evaluated rather than assumed |
 | photonuclear and muon-capture entry points, hyper-nuclei | - | **-** | refused by name. `G4CascadeInterface` serves P13 and P12 through the same class, but their callers are not this package's. A **mu- is applicable** - `G4CascadeMuMinusPChannel` exists, so `IsApplicable` says yes - and what keeps it out of a QBBC run is that no Bertini process is registered on a muon at all; `tests/test_bertini_apply.cu` pins both halves, after the first version of the pin asserted the opposite and was corrected against the source rather than the other way round |
 
 Tests: `test_bertini_data.cu` - 865,049 exact comparisons, worst 0 in all 47 buckets;
@@ -1378,7 +1402,12 @@ zones, generations, the nucleon census - is exact); `test_bertini_deex.cu` - 19,
 worst 2.2e-13; `test_bertini_apply.cu` - 22,531 statistical comparisons over 95 cases and 190,000
 events, every asserted bucket inside its band, and a species-coverage bucket that walks the PORT's
 species rather than the oracle's so that a species Geant4 never made would be visible (16,711
-points, none). Device probes: `bertini_tables_probe` 68 registers / 288 bytes,
+points, none). *(P23b: 140 cases and 280,000 events, 32,169 comparisons, 0 failures - the 95
+plus K0L and K0S at 500 and 3,000 MeV and sigma+, sigma-, xi0, xi-, omega- at 1 GeV on the same
+five targets, the rest of what QBBC's kaon/hyperon instance is built for; worst new-case deviation
+4.08 sigma. Geant4's own K0L and K0S rows are identical to the last digit - Bertini sees only the
+coin - and that is asserted; both coins are compared exactly against `strange_k0type.csv`.
+docs/RISK.md V227.)* Device probes: `bertini_tables_probe` 68 registers / 288 bytes,
 `bertini_nucleus_probe` 60 / 208, `bertini_angdst_probe` 56 / 200, `bertini_collide_probe`
 158 / 416, `bertini_fate_probe` 224 / 496, `bertini_deexcite_probe` 214 / 784, all without spills,
 and `bertini_apply_probe` - the whole model in one kernel - 255 registers, 11,840-byte stack
@@ -2024,6 +2053,18 @@ histogram, spectra and closure - that the original eight get.
 The anti-hyperons stay refused and the asymmetry is deliberate: `G4InuclParticleNames` has no
 anti-hyperon type code at all, so nothing in this port can produce one, trap one, or ask for its
 decay. Tabulating them would be adding physics no caller can reach.
+
+*(P23b: they are tabulated now, and the reason above had expired - FTFP's string fragmentation
+emits anti-hyperons, K0S and K0L, and FTFP is wired. Since P23b the transcribed set is also K0S
+(2 channels), K0L (6, four of them G4KL3DecayChannel with K0L's own form factors), the seven
+anti-hyperons, the thirty b/c hadrons of `G4HadParticles::sBCHadrons` with etac, J/psi and Upsilon
+- whose tables are not in their definitions but in `G4HadronicBuilder::BuildDecayTableForBCHadrons`,
+which QBBC reaches - the twelve charmed and bottom sigmas, and the eta: 70 tables, 98 channels,
+all exact against `decay_tables.csv`, lambda_b's the first real four-body one. What stays refused
+by name is K0/anti-K0, the anti-neutron (P23c's) and the eta' (its rho0 and omega daughters need
+`DynamicalMass`). And four anti-hyperons are pre-empted at rest: G4StoppingPhysics puts
+G4HadronicAbsorptionFritiof first on the anti-lambda, anti-sigma0, anti-sigma+ and anti-xi0 with
+an at-rest length of 0, which `decay_at_rest_competitor` now names. docs/RISK.md V229.)*
 
 The at-rest branch is `V` in a narrower sense than the rest, and it is worth stating: measured
 (`ref/oracle/decay_atrest.csv`), `G4HadronicAbsorptionBertini` on pi-/K- and `G4MuonMinusCapture`

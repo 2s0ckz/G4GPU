@@ -125,7 +125,7 @@ struct ApplyResult {
 /// have a channel table on the proton, so whichever way the coin falls the answer is yes. This
 /// function returns that answer without spending the deviate; `interface_is_applicable_draw`
 /// below is what `apply_yourself` calls, because Geant4's call DOES spend it. docs/RISK.md V139
-/// said the opposite until P23b read the end of the function - see V226.
+/// said the opposite until P23b read the end of the function - see V227.
 __host__ __device__ inline bool interface_is_applicable(int pdg) {
   if (pdg > 1000000000) { return true; }          // a nucleus
   if (pdg == 310 || pdg == 130) {

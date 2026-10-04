@@ -9720,6 +9720,11 @@ nothing checks them against each other. A port that reads only the builder concl
 handled; a port that reads only the model concludes that K0S never arrives. Both are wrong, and the
 only way to see it is to evaluate the two together, which `tests/test_bertini_apply.cu` now pins.
 
+*(P23b: the instance is wrong and the rule is right. `G4InuclElementaryParticle::type` ends with
+a statement this entry did not read - a K0S or a K0L is mixed back to kaonZero or kaonZeroBar on
+a coin - so both ARE applicable, Geant4's own IsApplicable says so, and the port now runs them.
+The pin above compared the port with the port; see V227.)*
+
 ### V140: retryInelasticNucleus has two arms and only one of them has ever fired
 
 `G4CascadeInterface::retryInelasticNucleus` asks for another attempt when either of two things is
@@ -14499,3 +14504,163 @@ unchanged, on V223's build. At the five paired seeds the gate moved by +0.154, +
 a sixth of the gate's own sigma, and towards Geant4, whose reference the five seeds sit 0.58 pGy
 under on average. The EM fractions read as tables as well would add their own share, not measured
 here; at the gate's 6 MeV P7 and P8 are within 0.03% of the models' shares in all four materials.
+
+### V226: the strange and heavy species QBBC builds, measured - 65 of them, and what each of this port's entry points accepted before P23b and accepts now
+
+P23b's scope, as a measurement rather than a reading: `ref/dump/dump_strange.cc` walks the
+process manager of every kaon, hyperon, anti-hyperon and b/c hadron in the constructed QBBC and
+writes one row per (process, model) with the energy window the process asks that model for
+(`strange_scope.csv`); asks Geant4's own `G4CascadeInterface::IsApplicable` of each; and asks the
+REGISTERED processes for their per-atom cross sections beside the bare
+`G4ComponentGGHadronNucleusXsc`'s (`strange_scope_xs.csv`, equal at all 1,848 points, inelastic and
+elastic, to the last bit). `tests/test_strange.cu` prints the table and asserts the port's half.
+
+| species | Bertini (inelastic) | FTFP (inelastic) | cross sections, inel and el | at rest | decay table |
+|---|---|---|---|---|---|
+| K+, K- | 0 - 6 GeV, yes (P15) | 3 GeV - 100 TeV, yes | GG, kaon arm (P2) | K-: Bertini capture | 6 ch, T |
+| **K0S, K0L** | 0 - 6 GeV: refused (V139) -> **runs** (V227) | 3 GeV - 100 TeV: not in the sweep -> **runs** | GG kaon arm: never compared -> **exact** | - | 2 / 6 ch: refused -> **exact** (V229) |
+| lambda, sigma+, sigma-, xi0, xi-, omega- | 0 - 6 GeV, applicable; lambda campaigned -> **all six** | 3 GeV - 100 TeV: lambda swept -> **all six** | hadron-nucleon for lambda, sigma+-, xi0, xi- (P11c) -> **nucleus level, all six** (omega- is HadronNucleonXscPDG's) | sigma-, xi-, omega-: Bertini capture (P12) | T (P10c) |
+| sigma0 | - | - | - (no hadronic process) | - | 1 ch, T |
+| **anti-lambda, -sigma+, -sigma-, -xi0, -xi-, -omega-** | - (no INUCL code) | every energy: anti-lambda swept -> **all six** | GG hyperon arm on \|pdg\|: anti-lambda, -sigma+- at hadron-nucleon level (P11c) -> **all six, nucleus level, exact** | anti-lambda, -sigma+, -xi0: Fritiof (P12) | refused -> **exact** |
+| anti-sigma0 | - | - | - | Fritiof | refused -> **exact** |
+| **30 b/c hadrons** (sBCHadrons) | - (no INUCL code) | every energy, not swept: their projectile arm is not P23b's | SCB-meson arm refused -> **exact**; c/b baryons the hyperon arm -> **exact** | - | none -> **1 ch each, exact** |
+| sigma_c++/+/0, sigma_b+/0/- and antiparticles | - | - | - | - | none -> **1 ch each, exact** |
+| etac, J/psi, Upsilon | - | - | - | - | none -> **1 ch each, exact** |
+
+**Every row with an inelastic process has a hadElastic too**, `G4HadronElastic` ("hElasticLHEP")
+from 0 to 100 TeV on the same Glauber-Gribov component. That is NOT what the P23b brief expected:
+`G4HadronElasticPhysics::ConstructProcess` (11.1.1, lines 199, 200 and 204) calls
+`G4HadronicBuilder::BuildElastic` on `GetHyperons()`, `GetAntiHyperons()` and, under
+`EnableBCParticles`, `GetBCHadrons()`, and QBBC's `G4HadronElasticPhysicsXS::ConstructProcess` is
+that function. The elastic cross section is compared here (the same component); the model is P5's
+`hadron_elastic.cuh`, which nothing yet hands one of these species.
+
+**QBBC's own FTFP DOES make b/c hadrons**, and the line that decides it is
+`G4LundStringFragmentation.cc:69-71`: `if (EnableBCParticles()) { SetProbCCbar(0.0002);
+SetProbBBbar(5.0e-5); }`, read by `G4VLongitudinalStringDecay::SampleQuarkFlavor`
+(G4VLongitudinalStringDecay.cc:399-400, `if (ksi < ProbCB)`). QBBC's constructor sets the flag
+(G4HadronInelasticQBBC.cc:87). Read off the object (`strange_lund.csv`) and counted in the oracle's
+own events: 30 b/c hadrons in 640,000 FTFP events of `ftf_modelstat_species.csv` (4.7e-5 per
+event - D+-, D0, anti-D0, Ds+, lambda_c+, sigma_c0, sigma_c++ - every one of them from the 24
+non-strange cases; the eight strange beams P23b added made none). So `BuildDecayTableForBCHadrons`
+is reachable from inside the model, not only from a primary, and its tables are in V229's scope.
+
+**Three things for P23a, which puts these species on tracks:**
+
+  * `G4EnergyRangeManager::GetHadronicInteraction` calls `IsApplicable` on EVERY registered model
+    before it tests a single energy window (G4EnergyRangeManager.cc:82), and Bertini's draws a
+    deviate for a K0S or a K0L (V227). So every K0S/K0L inelastic interaction, at any energy -
+    100 GeV included, where Bertini cannot be chosen - costs one deviate before the model is
+    picked, and Bertini's own `ApplyYourself` two more.
+  * The process mixes a K0/anti-K0 secondary itself (`G4HadronicProcess.cc:446-460`), sending
+    `G4UniformRand() > 0.5` to K0S; Bertini's `makeDynamicParticle` sends the same half to K0L.
+    The port has both, each held to its own Geant4 line.
+  * At rest the four anti-hyperons G4StoppingPhysics names (charge <= 0) are annihilated by
+    Fritiof before they can decay, and sigma-, xi-, omega- are captured by Bertini;
+    `decay_at_rest_competitor` says which.
+
+For scale, what FTFP's strings make at `Scatter` (the oracle's 640,000 events, before the
+strong-decay pass): K0S 45,502 and K0L 45,600, lambda 18,982, sigma0 29,237, sigma- 14,822,
+sigma+ 10,710, anti-lambda 4,296, anti-sigma0 3,274, anti-sigma+ 1,948, anti-sigma- 1,670, xi0 160,
+xi- 161, anti-xi0 107, anti-xi- 112, omega- 2, anti-omega- 7 - the eight strange beams included.
+
+### V227: V139 is wrong - G4InuclElementaryParticle::type ends by mixing a K0S or a K0L back to K0 or anti-K0 on a coin, so QBBC's Bertini runs both, and the pin that said otherwise was the port agreeing with itself
+
+V139 read `G4InuclElementaryParticle::type(const G4ParticleDefinition*)` as a chain of pointer
+comparisons that names `G4KaonZero` and `G4AntiKaonZero` and not the weak eigenstates, concluded
+that `IsApplicable` refuses K0S and K0L, and told the port not to "fix" it. The chain does stop at
+the tau neutrinos - and then the function has one more statement (11.1.1, lines 165-167):
+
+    // Weak neutral kaons must be mixed back to strong (strangeness states)
+    if (pd==G4KaonZeroShort::Definition() || pd==G4KaonZeroLong::Definition()) {
+      return ((G4UniformRand() > 0.5) ? kaonZero : kaonZeroBar);
+    }
+
+The same statement is in the wrong-version 11.5.0 clone, so it was not a version mix-up. Both
+kaonZero and kaonZeroBar have a channel table on the proton, so IsApplicable says yes whichever
+way the coin falls, and Geant4's own instance answers 1 for both (`strange_scope.csv`). V139's
+general rule stands - a physics list registering a process is not the model accepting it - and
+its instance was the opposite of the truth.
+
+**What it costs and where.** `G4CascadeInterface::ApplyYourself` calls `IsApplicable(aTrack,
+theNucleus)` (line 283) - one deviate, its answer discarded - and then `createBullet`, whose
+`type()` call (line 473) spends a SECOND deviate and decides kaonZero against kaonZeroBar for the
+whole call, every retry included. On the way out `makeDynamicParticle` mixes every K0/anti-K0 to
+K0L when `G4UniformRand() > 0.5`. `strange_k0type.csv` holds both coins under a fixed deviate,
+straddling one half by an ulp each side: both are strict, and `0.5` itself goes to kaonZeroBar on
+the way in and to K0S on the way out.
+
+**Bertini cannot tell a K0S from a K0L, and the oracle proves it to the last digit.** The dump
+seeds every case alike, the bullet is a G4KaonZero of the same 0.497614 GeV either way, and the
+kaon0L and kaon0S rows of `bertini_apply.csv` and `bertini_apply_species.csv` are identical in every
+column - which they could not be if Geant4 let anything of the weak eigenstate into the cascade.
+`test_bertini_apply` asserts it on the oracle, and a 1e-9 change to one kaon0S number fails.
+
+**Why V139's pin did not catch it.** It asserted `inucl_type_from_pdg(310) == 0` and
+`!interface_is_applicable(310)` - the PORT's functions, which transcribed the same misreading. A
+pin that compares the port with the port is a statement about the port; the measurement that
+settles a question about Geant4 has to ask Geant4, which is what `strange_scope.csv`'s
+`bertini_applicable` column does and what `test_strange` now compares for all 65 species.
+
+Measured: 45 new cases in the Bertini campaign (K0L and K0S at 500 and 3,000 MeV, sigma+,
+sigma-, xi0, xi-, omega- at 1 GeV, on C, O, Al, Fe, Pb): 140 cases, 280,000 events, 32,169
+comparisons, worst new-case deviation 4.08 sigma; the first trapped omega- decayed in the nucleus.
+
+### V228: SCBMesonNucleonXscNS is a pi+ in disguise - Coulomb barrier included - and its dispatch list and its coefficient table disagree twice
+
+`G4HadronNucleonXsc::SCBMesonNucleonXscNS` (G4HadronNucleonXsc.cc:1056-1112) answers for a D, Ds,
+B, Bs, Bc, eta, eta', etac or J/psi with `coeff * HadronNucleonXscNS(thePiPlus, nucleon, ekin)`,
+then scales the elastic and inelastic the call just filled. The pi+ is substituted WHOLE: its mass
+sets pLab and s, and its charge (+1) opens `G4NuclearRadii::CoulombFactor` below 100 MeV on a
+proton - so a neutral D0 and a negative B- are suppressed at threshold exactly as a pi+ is. The
+hyperon branch (P11c) does the same with the proton.
+
+Two disagreements in the same file, both transcribed as written: 543 (B_c*+) is in
+`HadronNucleonXsc`'s dispatch list and has no coefficient, so it gets 1.0 - a bare pi+; 553
+(Upsilon) has a coefficient, 0.221978, and is NOT in the dispatch list, so it goes to
+`HadronNucleonXscPDG`'s "as proton ???" default and the coefficient has no caller. eta and eta'
+are dispatched here with 0.76 and 0.88, the Xi's and the Lambda's numbers from the hyperon table.
+And the omega- is the hyperon list's own exception: 3334 is not dispatched to
+`HyperonNucleonXscNS`, so the anti-omega and the omega get the PDG default, not 0.64.
+
+None of it is reachable through anything but the Glauber-Gribov component for a b/c projectile,
+and that IS on QBBC's path (V226). `test_strange`: the dispatcher for 65 species on both nucleons,
+93,600 values; the component's five outputs for 44 species, 939,360 values; the port's element
+overloads against the registered processes, 3,696 values - every one at 0.000e+00.
+
+### V229: QBBC's b/c decay tables are not in the particle definitions but in a physics-list builder, the "quickly decaying" b/c states are tracks, and lambda_b is the first real four-body channel
+
+Every charm and bottom definition in 11.1.1 passes a NULL decay table to its constructor.
+`G4HadronicBuilder::BuildDecayTableForBCHadrons` (line 294) gives the thirty of `sBCHadrons` one
+`G4PhaseSpaceDecayChannel` each with BR 1.0 - "dummy" in its own comment - and then etac, J/psi and
+Upsilon, and it skips any species that already has a table (line 350). QBBC reaches it through
+`BuildBCHadronsFTFP_BERT`. So a port that reads the particle definitions finds nothing to
+transcribe and a port that reads the builder finds it; `decay_tables.csv` is read off the running
+Geant4 and settles it - 33 tables, every one present.
+
+The six sigma_c and sigma_b states `sBCHadrons` leaves out "because they decay very quickly" are
+NOT short-lived in 11.1.1: lifetime 0.0 and `shortlived = false`, so they are tracks that G4Decay
+decays where they are made (`GetMeanFreePath` is DBL_MIN), with their own definitions' one-channel
+tables to lambda_c+ or lambda_b and a pion. So are etac, J/psi, Upsilon and the eta. Their at-rest
+length is therefore exactly zero and unopposed - not a pre-emption - and test_decay asserts that
+instead of the "positive and pre-empted" rule every other at-rest row obeys.
+
+`lambda_b -> lambda_c+ pi+ pi- pi-` and its antiparticle's are the first FOUR-body channels in any
+table this port carries: `G4PhaseSpaceDecayChannel::ManyBodyDecayIt`, validated until now against a
+synthetic kaon+ channel only, has real callers, and its 400,000 samples sit inside Geant4's own
+closure band and spectra (worst 3.74 sigma over 10,160 bins of all 99 sampled channels).
+
+K0L's insertion order is the one place the table is not the source's order: G4DecayTable::Insert's
+strict `br >` puts each 0.2027 Ke3 ahead of the 0.1952 3pi0 and the second Ke3 BEHIND the first,
+and the two 0.1352 Kmu3 between 3pi0 and the 0.1254 pi0 pi+ pi-, which was written second and is
+selected last. Its four KL3 channels carry K0L's own form factors (0.0300/-0.11, 0.034/-0.11) and a
+charged pion - the only KL3 modes in 11.1.1 whose pion is not a pi0 - and `decay_dalitz.csv` holds
+the density for them.
+
+Refused by name, each where its decay would be needed: K0/anti-K0 (G4KaonZero's two one-body
+channels; no generator emits one unmixed), the anti-neutron (a daughter of three anti-hyperons;
+its G4NeutronBetaDecayChannel table is the anti-light-ion package's, P23c), and the eta' - the
+Upsilon's daughter - whose rho0 gamma and omega gamma channels take G4PhaseSpaceDecayChannel into
+`DynamicalMass`, which this port does not have. And one oddity carried into
+`core/particle.cuh`, where it only enters squared: G4AntiOmegaMinus sets the SAME magnetic moment
+as G4OmegaMinus (-2.02 nuclear magnetons) where every other anti-hyperon flips the sign.
