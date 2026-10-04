@@ -626,6 +626,7 @@ compile beside a GPU run. The sequence:
 3. P23a with P24 beside it; then P23c with P26 beside it; P25 in any free transport slot.
 4. The performance phase once the kernel code has stopped moving; P27 last, as the acceptance.
 
-RISK numbering: P22 from V280, P23b from V300, later packages in steps of 20; the lead renumbers
-on integration. Briefs follow the P15-P22 template: measurement first, transcription from 11.1.1,
+RISK numbering: every brief starts at a provisional number - P22 was briefed from V280, P23b from
+V300, later packages in steps of 20 - and the lead renumbers on integration: P23b landed as
+V226-V229, P22 as V230-V232. Briefs follow the P15-P22 template: measurement first, transcription from 11.1.1,
 anti-vacuity, refusal by name, report format.

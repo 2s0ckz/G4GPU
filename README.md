@@ -17,9 +17,9 @@ class against the library. Phase 2 has landed single Coulomb scattering, PreComp
 closure of the negative-hadron question; decay, hadron elastic scattering, single Coulomb
 scattering and the **neutron general
 process** are wired into the transport, so a neutron interacts rather than streaming, its elastic
-and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ when Geant4's general
-process is off - against QBBC as it ships it reads -37%, for a reason that is in Geant4 and that
-P20 found (open question 7). Phase 3 is on main
+and capture final states act, and its B1 dose agrees with Geant4 to 0.01 σ with Geant4's general
+process off and, since P22 carries that process's interaction count on the track in 11.1.1's
+order, to 1.0 σ against QBBC as it ships (RISK V232). Phase 3 is on main
 and, **since P15, is reached by a particle**: the Binary cascade with its whole collision tree,
 the whole FTFP chain - the tuned parameters, the Glauber participants, the diffractive excitation
 and the annihilation, the Lund string fragmentation, the string decay and the generator - the
@@ -37,8 +37,8 @@ by P9e's cascade since the second pass, and the hydrogen target (`Propagate1H1`)
 took the 1 GeV proton beam from +14% to -0.6% of Geant4, and the destroyed-nucleus branch
 (`FillVoidNucleusProducts`) since P20, which was every refusal the cascade still made inside
 `Interact` and took the 4 GeV alpha beam from +12.1% to -3.8% of Geant4 at a tenth of the sweep's
-counts; what parts the alpha rows at the full counts is in Geant4, not in the cascade (RISK V219,
-open question 7). The photon's,
+counts; what parted the alpha rows at the full counts was Geant4's neutron bookkeeping (RISK V219),
+which P22 reproduces: the 4 GeV alpha reads -0.46% (1.0 σ) at the full counts since. The photon's,
  electron's and muon's nuclear
 interactions are wired since P19 - the photon's inside `G4GammaGeneralProcess` on Geant4's own
 selection uniform, the leptons' as discrete processes - and the sweep's photon and electron beams
@@ -100,7 +100,11 @@ The alpha rows moved with P20. At a tenth of the sweep's counts the 4 GeV alpha 
 (2.6 sigma) where it read +12.10% (3.7 sigma), the port's rms down from 2.73% of its dose to
 Geant4's own 1.06%, and the 840 MeV alpha -1.68% (2.0 sigma). At the full counts both rows sit low,
 by 1.1% and 2.6%, and with the five ion inelastic processes held off on both sides they agree to
-0.1%: the residual is Geant4's neutron bookkeeping, not the cascade's - open question 7.
+0.1%: the residual was Geant4's neutron bookkeeping (open question 7, closed by P22). With the
+neutron's interaction count carried in 11.1.1's order the 4 GeV alpha reads -0.46% (1.0 σ), the
+deuteron -0.08%, the He3 +0.25%, and the two neutron beams +0.64% and -0.90% against QBBC as it
+ships, where they read -41% and -37%. The 840 MeV alpha stays at -0.85% (3.2 σ), in the
+ion-inelastic chain (RISK V232).
 
 ### Throughput
 
@@ -339,7 +343,8 @@ V204-V206 for the hydrogen target, V207-V211 for the photon's and leptons' nucle
 V212-V219 for the destroyed-nucleus branch and what measuring the alpha beams around it found in
 Geant4's neutron general process, V220-V221 for the gate's split and its incremental build, and
 V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9,
-and V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles.
+V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles, and
+V230-V232 for the neutron's interaction count carried in 11.1.1's order.
 
 #### Tables, materials and framework
 
@@ -395,7 +400,7 @@ closed - the same question has the mechanism.
 |---|---|
 | γ, e⁻, e⁺ | **transported**; the photon's nuclear process inside the general process and the leptons' as discrete processes act (P19), and inside that process the photon Rayleigh-scatters only below 2 m_e and goes to a nucleus at Geant4's own table-9 rate, as QBBC's does (P21) |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — the antiproton is the one charged hadron with no elastic process here, because `G4AntiNuclElastic` and `G4ComponentAntiNuclNuclearXS` are refused by name. **`<species>Inelastic` acts since P15** for π± and K± (the Binary cascade below 1.5 GeV, Bertini above 1, FTFP above 3, chosen as `G4EnergyRangeManager` chooses) and for d and t (the light-ion reaction: its fusion arm below 50 MeV per nucleon and, since P9e, `Interact` above it). The antiproton has no inelastic process either, and for the same reason as its elastic one: `BuildAntiLightIonsFTFP` gives it `G4ComponentAntiNuclNuclearXS`, which P2 refuses. A stopped μ⁻, π⁻ or K⁻ is **captured** rather than decayed, which is what `G4HadronStoppingProcess` does — its at-rest interaction length is zero and pre-empts `G4Decay`; `muonNuclear` acts on μ± (P19) |
-| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). **The inelastic sub-process ACTS since P15** - the same three models a proton's does, reached through the interaction queue instead of refused by name, which closes what was this port's largest named hole (18% of the interactions in water at 10 MeV, 39% in air, 25% in bone, 51% in lead). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once **Since P20 one thing is known NOT to match (RISK V219, open question 7)**: `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength` refreshes the cross section for the material the neutron is now in and only then charges the step just taken, so a step that ends on a boundary is charged at the NEXT material's mean free path, where `G4HadronicProcess` and `G4GammaGeneralProcess` charge it at the one it was taken with; the port draws a fresh length every step, which is the latter order. Against QBBC as it ships the port's 1 GeV neutron B1 dose reads -36.7% and its 100 MeV one -40.8%; against Geant4 with the general process off, which is what every neutron row so far was compared with, +0.5% and +0.7%; against Geant4 with that one ordering reversed (`ref/b1ngp`, P20) +1.9% (1.2 sigma) and -0.3%. Carrying the interaction length on the neutron's track is a package of its own |
+| neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). **The inelastic sub-process ACTS since P15** - the same three models a proton's does, reached through the interaction queue instead of refused by name, which closes what was this port's largest named hole (18% of the interactions in water at 10 MeV, 39% in air, 25% in bone, 51% in lead). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once **Since P22 the neutron carries `G4NeutronGeneralProcess`'s interaction count across its steps in 11.1.1's order** (RISK V230-V232): the cross section is refreshed for the material the neutron is now in and the step just taken is charged at that mean free path, which is what makes QBBC's neutrons interact on the faces of denser volumes. Against QBBC as it ships the 100 MeV and 1 GeV beams read +0.64% (1.0 σ) and -0.90% (0.7 σ) where they read -41% and -37%; `G4GPU_NEUTRON_GP_ORDER=reordered` keeps the memoryless redraw for a run against a general-process-off reference, and reproduces the old numbers to every digit |
 | **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
 | proton, alpha | **transported**. Multiple scattering is WentzelVI for the proton and `G4UrbanMscModel` for the alpha, which is what QBBC gives each of them — the substitution named in open question 2 ended with P8e. **`protonInelastic` acts since P15**, through the Binary cascade below 1.5 GeV, Bertini 1-6 GeV and FTFP above 3, with the model chosen as `G4EnergyRangeManager` chooses it; the hydrogen target it refused until P18 (`G4BinaryCascade::Propagate1H1`, 31 of 256 interactions at 1 GeV in water) answers since, and the destroyed nucleus (`FillVoidNucleusProducts`) since P20. **`alphaInelastic` acts since P9e**: `G4BinaryLightIonReaction` fuses below 50 MeV per nucleon and runs `Interact` at or above it, and FTFP takes over from 3 GeV per nucleon. Until P9e reached this branch `Interact` was refused by name - 195 of 215 alpha interactions in water, and every alpha beam of the B1 sweep sits in that window - so the five ion inelastic processes were held off on BOTH sides of every like-for-like column; they are on on both now (docs/RISK.md V192, V198). With the destroyed-nucleus branch answered (P20) the 4 GeV alpha row reads -3.82% (2.6 sigma) at a tenth of the counts where it read +12.10%, and what parts the alpha rows at the full counts is the neutron's (V219) |
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
@@ -407,7 +412,6 @@ closed - the same question has the mechanism.
 
 | Geant4 | what | status |
 |---|---|---|
-| `G4NeutronGeneralProcess`'s order of charging a step | 11.1.1 refreshes the neutron's cross section for the material it is now in and THEN charges the step just taken, so a step that ends on a boundary is charged at the next material's mean free path; the port draws a fresh length every step and charges nothing (RISK V219) | Phase 3, remaining, and a package of its own: the interaction length carried on the neutron's track in `step_neutral`, then every neutron row re-measured. Worth -36.7% and -40.8% of the 1 GeV and 100 MeV neutron beams' B1 dose against QBBC as it ships, and the alpha rows' full-count residual |
 | the light-ion reaction's 128-entry final state | what the Binary cascade still refuses, by capacity: 39 of 20,000 Fe56-on-Fe56 events at 1 GeV per nucleon (0.2%), one 1400 MeV neutron on Pb208 in 20,000 past the secondary buffer, and no event of either alpha beam | Phase 3, nearly closed: the destroyed-nucleus branch `FillVoidNucleusProducts` is transcribed and taped since P20 ([`docs/PORTED.md`](docs/PORTED.md) 2.1.10), neither ion campaign refuses an event by any name, and what a 4 GeV alpha beam still books is 0.058% of its interactions - secondaries of a species the particle table has no row for, and ions outside AME2012 |
 | Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in) and `generateSCMmuonAbsorption` | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the two entries named. K0S and K0L as projectiles run since P23b (RISK V227 reverses V139: Geant4 mixes them back to K0 or anti-K0 on a coin), and the anti-hyperon decay tables are on main | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
 | the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it |
@@ -565,8 +569,9 @@ send every one of them somewhere else.
    default. docs/RISK.md V194.
 
 
- 7. **OPEN since P20: Geant4 charges a neutron's boundary step at the next material's mean free
-   path, and the port does not.** `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`
+ 7. **CLOSED by P22. Geant4 charges a neutron's boundary step at the next material's mean free
+   path, and since P22 so does the port.**
+   `G4NeutronGeneralProcess::PostStepGetPhysicalInteractionLength`
    calls `CurrentCrossSection(track)` for the material the neutron is in NOW and only then
    subtracts `previousStepSize/currentInteractionLength`, so the step just taken is charged at the
    new material's mean free path; `G4HadronicProcess` and `G4GammaGeneralProcess` charge it at the
@@ -582,6 +587,13 @@ send every one of them somewhere else.
    process OFF (`ref/b1neutron`), so none of them tested this. The order is unchanged in 11.5.0.
    Matching it means carrying the interaction length on the neutron's track in `step_neutral` and
    re-measuring every neutron row: a package of its own (RISK V219).
+   P22 did exactly that (RISK V230-V232): two fields on the neutron's track carry the count and
+   the length it was drawn with, cleared where Geant4 clears them, and a switch keeps today's
+   order. Against QBBC as it ships the 100 MeV neutron reads +0.64% (1.0 σ) and the 1 GeV one
+   -0.90% (0.7 σ); the 4 GeV alpha, the deuteron and the He3 close to inside 1.0 σ at the full
+   counts; the 840 MeV alpha stays at -0.85% (3.2 σ), which is the ion-inelastic chain, not this.
+   The track state grew from 248 to 264 bytes, the pool holds 6.3% fewer tracks, and the gamma
+   gate's event loop did not slow.
 
 
 ---
