@@ -14667,3 +14667,51 @@ Upsilon's daughter - whose rho0 gamma and omega gamma channels take G4PhaseSpace
 `DynamicalMass`, which this port does not have. And one oddity carried into
 `core/particle.cuh`, where it only enters squared: G4AntiOmegaMinus sets the SAME magnetic moment
 as G4OmegaMinus (-2.02 nuclear magnetons) where every other anti-hyperon flips the sign.
+### V230: before P22, the six beams V219 measured, on main at b40c836 - the port reads P20's numbers to the printed digit, and sits on the reordered column, 74 and 33 sigma from QBBC as it ships
+
+P22's measurement, taken FIRST and at the counts the package measures after. V219 is the
+finding; this is its table on the branch point, re-measured rather than quoted, because P21
+landed between P20 and here.
+
+**Port**: main at b40c836 (P21 merged), the `examples\B1\exampleB1.exe` the gate built, copied
+out under another name so that no `tasklist` check of a gate in another tree could see it
+running, and run through `ref\b1ngp\rows.ps1 -Side port` - new, and the one place the rows'
+settings are written down: the B1 sweep's like-for-like settings, `G4GPU_HADRONIC_STAGE=final`,
+32 live tracks an event, `G4GPU_ION_INELASTIC` cleared. **Geant4**: P20's runs, which are seeded
+and deterministic - ref/b1ngp with `B1NGP_PATCH=0` reads ref/B1build's exampleB1 to every digit,
+so "as QBBC ships" is either program - and the reordered instrument, `B1NGP_PATCH=1`, each step
+charged at the mean free path it was taken with. Every row runs its own macro: neutron_100 is
+P15's (`ionElastic` inactivated alone), every other row the sweep's `$emOnly` list for a hadron
+beam (`hBrems`, `hPairProd`, `ionElastic`). Doses in nGy (µGy for alpha_840), B1's printed rms,
+sigma on the quadrature sum:
+
+| beam | events | port, b40c836 | Geant4 as QBBC ships | diff, σ | Geant4 reordered | diff, σ | port loop |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 500,000 | 133.066 ± 0.754 | 224.945 ± 0.985 | **-40.85%, -74.1 σ** | 133.458 ± 0.757 | -0.29%, -0.4 σ | 333 s |
+| neutron 1000 MeV | 100,000 | 78.435 ± 0.837 | 123.873 ± 1.079 | **-36.68%, -33.3 σ** | 76.996 ± 0.830 | +1.87%, +1.2 σ | 136 s |
+| deuteron 2000 MeV | 100,000 | 269.699 ± 1.364 | 279.007 ± 1.40 | -3.34%, -4.8 σ | 272.207 ± 1.38 | -0.92%, -1.3 σ | 258 s |
+| alpha 4000 MeV | 100,000 | 646.783 ± 2.160 | 664.032 ± 2.21 | -2.60%, -5.6 σ | 647.871 ± 2.18 | -0.17%, -0.4 σ | 506 s |
+| He3 3000 MeV | 100,000 | 592.169 ± 1.954 | 600.455 ± 1.95 | -1.38%, -3.0 σ | - | | 458 s |
+| alpha 840 MeV | 300,000 | 4.87999 ± 0.00915 | 4.93621 ± 0.00917 | -1.14%, -4.3 σ | - | | 1128 s |
+
+**FIVE OF THE SIX PORT NUMBERS ARE P20's TO EVERY PRINTED DIGIT, AND THE SIXTH IS ONE IN THE
+SIXTH.** alpha_4000 reads 646.783 where V219 printed 646.782; the others are V219's exactly. P21
+landed in between, and its photon changes act from 2 m_e up inside the general process and move
+B1's own gate by -0.004 pGy in 427 (V223) - on these showers by at most a part in a million. So
+V219's table is the table P22 starts from, unchanged: the port is the reordered column (-0.4 and
++1.2 sigma on the two neutron beams), and QBBC as it ships is 74 and 33 sigma away.
+
+The rest of each run's report, which the after-table is read against - interactions queued
+through P15's queue, neutrons the 10 us cut killed, and the ledger, which has no interaction
+without a final state in any row, only V217's three standing bookings (inelastic secondaries of
+a species `core/particle.cuh` has no row for, GenericIons outside AME2012, and an ion's delta-ray
+channel, which is counted per step):
+
+| beam | interactions queued | killed by the time cut | no-row species | GenericIon | ion delta-ray steps |
+|---|--:|--:|--:|--:|--:|
+| neutron 100 MeV | 174,618 | 42,484 | - | - | 9 |
+| neutron 1000 MeV | 51,090 | 8,038 | 26 (2,400 MeV) | 2 | - |
+| deuteron 2000 MeV | 93,097 | 13,896 | 57 (6,077 MeV) | 5 | 3 |
+| alpha 4000 MeV | 148,687 | 22,326 | 77 (8,913 MeV) | 9 | 25 |
+| He3 3000 MeV | 123,783 | 17,932 | 61 (5,786 MeV) | 4 | 9 |
+| alpha 840 MeV | 290,298 | 51,478 | - | 5 | 11 |
