@@ -1690,7 +1690,9 @@ int main(int argc, char** argv) {
     // the same file the 20,000-event section reads - C12_C_8 is an ion and its projectile mass
     // is `G4IonTable::GetIonMass(Z, A)`, which is exactly the number the file header warns
     // against writing twice.
-    const char* kBig[] = {"n_Fe_10", "pip_Al_10", "pim_C_10", "C12_C_8"};
+    // k0s_Pb_10 is P23b's: the worst of its eight strange cases at 20,000 events (string count,
+    // 4.18 sigma), re-run here by V88's rule.
+    const char* kBig[] = {"n_Fe_10", "pip_Al_10", "pim_C_10", "C12_C_8", "k0s_Pb_10"};
     Csv cs, cm, cc2;
     if (cs.load(dir + "/ftf_modelbig_strings.csv") && cm.load(dir + "/ftf_modelbig_mult.csv") &&
         cc2.load(dir + "/ftf_modelcases.csv")) {

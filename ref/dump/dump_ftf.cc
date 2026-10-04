@@ -1982,6 +1982,21 @@ const ModelCase kModelCases[] = {
     {"pbar_C_5",  -2212, 5000.0,  12,  6},
     {"pbar_Pb_5", -2212, 5000.0,  207, 82},
     {"nbar_C_5",  -2112, 5000.0,  12,  6},
+    // P23b - the strange beams QBBC gives FTFP, on the lightest and heaviest target of the grid.
+    // The LAMBDA and the two weak neutral kaons enter FTFP at 3 GeV, so 10 GeV is inside every
+    // window; the ANTI-LAMBDA is FTFP's at every energy, like the anti-nucleons, and runs at their
+    // 5 GeV, where G4FTFAnnihilation is live for it (GetProbabilityOfAnnihilation is non-zero for
+    // an anti-baryon projectile only). K0S and K0L split into strings differently -
+    // G4DiffractiveSplitableHadron::ChooseStringEnds reads 310 as (d, s-bar) and 130 as
+    // (s, d-bar) from the code's digits, with no coin - so both are here.
+    {"lam_C_10",   3122,  10000.0, 12,  6},
+    {"lam_Pb_10",  3122,  10000.0, 207, 82},
+    {"alam_C_5",  -3122,  5000.0,  12,  6},
+    {"alam_Pb_5", -3122,  5000.0,  207, 82},
+    {"k0l_C_10",   130,   10000.0, 12,  6},
+    {"k0l_Pb_10",  130,   10000.0, 207, 82},
+    {"k0s_C_10",   310,   10000.0, 12,  6},
+    {"k0s_Pb_10",  310,   10000.0, 207, 82},
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -2608,6 +2623,10 @@ const ModelCase kBigCases[] = {
     // one case in the table where the same nuclide is the projectile AND the target, so a bias
     // in one nuclide's sampled radius would enter it twice.
     {"C12_C_8", 0, 96000.0, 12, 6, 12, 6},
+    // P23b, by the same rule: of the eight strange cases the worst row at 20,000 events is
+    // k0s_Pb_10's string count, 4.18 sigma in its 12-string bin - the K0S, whose string ends
+    // G4DiffractiveSplitableHadron reads as (d, s-bar) off the code's digits.
+    {"k0s_Pb_10", 310, 10000.0, 207, 82},
 };
 
 void dump_modelbig() {
@@ -2775,7 +2794,18 @@ void dump_ftfwindows() {
       G4Lambda::Lambda(),        G4AntiLambda::AntiLambda(),
       G4Deuteron::Deuteron(),    G4Triton::Triton(),        G4He3::He3(),
       G4Alpha::Alpha(),          G4GenericIon::GenericIon()};
-  for (const G4ParticleDefinition* pn : all) {
+  // P23b: every other strange beam QBBC gives FTFP - the two weak neutral kaons from 3 GeV, the
+  // five hyperons of G4HadParticles::sHyperons beside the lambda from 3 GeV, and the five
+  // anti-hyperons beside the anti-lambda at every energy - APPENDED after the original fifteen,
+  // so that every row the sweep ran before keeps its place and its seed. The b/c hadrons have
+  // FTFP rows too (ref/oracle/strange_scope.csv lists them); they are not here, because their
+  // projectile arm is not this package's and a sweep row is a claim that the arm runs.
+  std::vector<const G4ParticleDefinition*> beams(std::begin(all), std::end(all));
+  for (int pdg : {130, 310, 3222, 3112, 3322, 3312, 3334, -3222, -3112, -3322, -3312, -3334}) {
+    const G4ParticleDefinition* d = G4ParticleTable::GetParticleTable()->FindParticle(pdg);
+    if (d != nullptr) { beams.push_back(d); }
+  }
+  for (const G4ParticleDefinition* pn : beams) {
     G4ProcessManager* pm = pn->GetProcessManager();
     if (pm == nullptr) { continue; }
     G4ProcessVector* pv = pm->GetProcessList();
