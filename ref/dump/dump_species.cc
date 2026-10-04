@@ -46,6 +46,7 @@
 #include "G4MuonPlus.hh"
 #include "G4NistManager.hh"
 #include "G4Neutron.hh"
+#include "G4ParticleTable.hh"
 #include "G4NeutrinoE.hh"
 #include "G4NeutrinoMu.hh"
 #include "G4NeutrinoTau.hh"
@@ -91,6 +92,18 @@ static void dump_species(const DumpContext&) {
       G4KaonZeroLong::KaonZeroLong(), G4KaonZeroShort::KaonZeroShort(),
       G4Lambda::Lambda(), G4SigmaPlus::SigmaPlus(), G4SigmaMinus::SigmaMinus(),
       G4XiMinus::XiMinus(),
+      // P23b's ten, appended in core/particle.cuh's order and found by PDG code: sigma0, xi0,
+      // omega- and the seven anti-hyperons.
+      G4ParticleTable::GetParticleTable()->FindParticle(3212),
+      G4ParticleTable::GetParticleTable()->FindParticle(3322),
+      G4ParticleTable::GetParticleTable()->FindParticle(3334),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3122),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3222),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3212),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3112),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3322),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3312),
+      G4ParticleTable::GetParticleTable()->FindParticle(-3334),
   };
 
   FILE* f = std::fopen("species_tables.csv", "w");

@@ -83,21 +83,37 @@ enum class ParticleType : int {
   // refused, and so that `/gun/particle lambda` gets an answer about the lambda instead of
   // "unknown particle".
   //
-  // This is not the complete refused set. sigma0, xi0, omega-, the anti-hyperons, the light
-  // anti-nuclei and the b/c hadrons `EnableBCParticles` turns on are all reachable through a
-  // cascade and none of them is here - because nothing in this port can produce one yet, and a
-  // row nobody can reach is a row nobody checks. The MECHANISM is what P1 owes and what is
-  // finished: species_disposition refuses anything without a kernel, BufferEmitter::push counts
-  // it under its own name, and the run reports it. Whichever package first emits an omega-
-  // appends four lines - an enumerator, a name, a ParticleDef row, and a dump entry - and gets
-  // the refusal for nothing.
+  // This is not the complete refused set. The light anti-nuclei and the b/c hadrons
+  // `EnableBCParticles` turns on are reachable through a cascade and are not here. sigma0, xi0,
+  // omega- and the seven anti-hyperons were in that sentence until P23b appended them below -
+  // FTFP emits all ten, and their decay tables are written. The MECHANISM is what P1 owes and
+  // what is finished: species_disposition refuses anything without a kernel,
+  // BufferEmitter::push counts it under its own name, and the run reports it. Whichever package
+  // first emits a species appends four lines - an enumerator, a name, a ParticleDef row, and a
+  // dump entry - and gets the refusal for nothing.
   kKaonZeroLong = 24,
   kKaonZeroShort = 25,
   kLambda = 26,
   kSigmaPlus = 27,
   kSigmaMinus = 28,
   kXiMinus = 29,
-  kNumTypes = 30
+  // P23b - the rest of the strange baryons QBBC transports, rows and masses only. FTFP's string
+  // fragmentation emits every one of them (ref/oracle/ftf_modelstat_species.csv), the decay
+  // tables of all ten are in physics/decay/decay_tables.hh, and P23a puts them on tracks; until
+  // then they are refused at emission like the six above, but by their own names. The b/c
+  // hadrons have decay tables too and are NOT here: nothing yet needs a ParticleType for them,
+  // and a row nobody can reach is a row nobody checks.
+  kSigmaZero = 30,
+  kXiZero = 31,
+  kOmegaMinus = 32,
+  kAntiLambda = 33,
+  kAntiSigmaPlus = 34,
+  kAntiSigmaZero = 35,
+  kAntiSigmaMinus = 36,
+  kAntiXiZero = 37,
+  kAntiXiMinus = 38,
+  kAntiOmegaMinus = 39,
+  kNumTypes = 40
 };
 
 /// Static properties the EM models need: PDG mass, charge and spin.
@@ -276,6 +292,50 @@ __host__ __device__ inline ParticleDef<real_t> particle_def(ParticleType t) {
       return {real_t(1321.71), real_t(-1), real_t(0.5), false, false, false,
               real_t(-0.6507 * 1321.71 / 938.272013
                      * (-0.6507 * 1321.71 / 938.272013) - 1)};
+    // ---- P23b. Each from its own G4*.cc; a definition that never calls SetPDGMagneticMoment
+    // has a zero moment and therefore magMoment2 = -1, which is the sigma0 and its antiparticle.
+    case ParticleType::kSigmaZero:
+      // G4SigmaZero.cc: `1.192642*GeV`, neutral, 2*spin = 1, no moment.
+      return {real_t(1192.642), real_t(0), real_t(0.5), false, false, false, real_t(-1)};
+    case ParticleType::kXiZero:
+      // G4XiZero.cc: `1.31486*GeV`, neutral, 2*spin = 1, moment -1.250 mN.
+      return {real_t(1314.86), real_t(0), real_t(0.5), false, false, false,
+              real_t(-1.250 * 1314.86 / 938.272013 * (-1.250 * 1314.86 / 938.272013) - 1)};
+    case ParticleType::kOmegaMinus:
+      // G4OmegaMinus.cc: `1.67245*GeV`, -eplus, 2*spin = 3 - the only spin-3/2 row here, which
+      // is what sends hadron_base_particle to the anti-proton rule rather than the kaon one -
+      // and moment -2.02 mN.
+      return {real_t(1672.45), real_t(-1), real_t(1.5), false, false, false,
+              real_t(-2.02 * 1672.45 / 938.272013 * (-2.02 * 1672.45 / 938.272013) - 1)};
+    case ParticleType::kAntiLambda:
+      // G4AntiLambda.cc: the lambda's mass and spin, moment +0.613 mN.
+      return {real_t(1115.683), real_t(0), real_t(0.5), false, false, false,
+              real_t(0.613 * 1115.683 / 938.272013 * (0.613 * 1115.683 / 938.272013) - 1)};
+    case ParticleType::kAntiSigmaPlus:
+      // G4AntiSigmaPlus.cc: `1.18937*GeV`, -eplus, moment -2.458 mN.
+      return {real_t(1189.37), real_t(-1), real_t(0.5), false, false, false,
+              real_t(-2.458 * 1189.37 / 938.272013 * (-2.458 * 1189.37 / 938.272013) - 1)};
+    case ParticleType::kAntiSigmaZero:
+      // G4AntiSigmaZero.cc: `1.192642*GeV`, neutral, no moment.
+      return {real_t(1192.642), real_t(0), real_t(0.5), false, false, false, real_t(-1)};
+    case ParticleType::kAntiSigmaMinus:
+      // G4AntiSigmaMinus.cc: `1.197449*GeV`, +eplus, moment +1.160 mN.
+      return {real_t(1197.449), real_t(1), real_t(0.5), false, false, false,
+              real_t(1.160 * 1197.449 / 938.272013 * (1.160 * 1197.449 / 938.272013) - 1)};
+    case ParticleType::kAntiXiZero:
+      // G4AntiXiZero.cc: `1.31486*GeV`, neutral, moment +1.250 mN.
+      return {real_t(1314.86), real_t(0), real_t(0.5), false, false, false,
+              real_t(1.250 * 1314.86 / 938.272013 * (1.250 * 1314.86 / 938.272013) - 1)};
+    case ParticleType::kAntiXiMinus:
+      // G4AntiXiMinus.cc: `1.32171*GeV`, +eplus, moment +0.6507 mN.
+      return {real_t(1321.71), real_t(1), real_t(0.5), false, false, false,
+              real_t(0.6507 * 1321.71 / 938.272013 * (0.6507 * 1321.71 / 938.272013) - 1)};
+    case ParticleType::kAntiOmegaMinus:
+      // G4AntiOmegaMinus.cc: `1.67245*GeV`, +eplus, 2*spin = 3, and moment -2.02 mN - the SAME
+      // sign as the omega-'s in 11.1.1, where every other anti-hyperon flips it. Transcribed as
+      // written; it enters only squared here.
+      return {real_t(1672.45), real_t(1), real_t(1.5), false, false, false,
+              real_t(-2.02 * 1672.45 / 938.272013 * (-2.02 * 1672.45 / 938.272013) - 1)};
     case ParticleType::kNumTypes:
       break;
   }
@@ -336,6 +396,16 @@ __host__ __device__ inline const char* particle_name(ParticleType t) {
     case ParticleType::kSigmaPlus: return "sigma+";
     case ParticleType::kSigmaMinus: return "sigma-";
     case ParticleType::kXiMinus: return "xi-";
+    case ParticleType::kSigmaZero: return "sigma0";
+    case ParticleType::kXiZero: return "xi0";
+    case ParticleType::kOmegaMinus: return "omega-";
+    case ParticleType::kAntiLambda: return "anti_lambda";
+    case ParticleType::kAntiSigmaPlus: return "anti_sigma+";
+    case ParticleType::kAntiSigmaZero: return "anti_sigma0";
+    case ParticleType::kAntiSigmaMinus: return "anti_sigma-";
+    case ParticleType::kAntiXiZero: return "anti_xi0";
+    case ParticleType::kAntiXiMinus: return "anti_xi-";
+    case ParticleType::kAntiOmegaMinus: return "anti_omega-";
     default: return "?";
   }
 }
@@ -386,6 +456,16 @@ __host__ __device__ inline int pdg_code(ParticleType t) {
     case ParticleType::kSigmaPlus: return 3222;
     case ParticleType::kSigmaMinus: return 3112;
     case ParticleType::kXiMinus: return 3312;
+    case ParticleType::kSigmaZero: return 3212;
+    case ParticleType::kXiZero: return 3322;
+    case ParticleType::kOmegaMinus: return 3334;
+    case ParticleType::kAntiLambda: return -3122;
+    case ParticleType::kAntiSigmaPlus: return -3222;
+    case ParticleType::kAntiSigmaZero: return -3212;
+    case ParticleType::kAntiSigmaMinus: return -3112;
+    case ParticleType::kAntiXiZero: return -3322;
+    case ParticleType::kAntiXiMinus: return -3312;
+    case ParticleType::kAntiOmegaMinus: return -3334;
     case ParticleType::kNumTypes: break;
   }
   return 0;
@@ -463,6 +543,16 @@ __host__ __device__ inline ParticleType particle_type_of_pdg(int pdg) {
     case 3222: return ParticleType::kSigmaPlus;
     case 3112: return ParticleType::kSigmaMinus;
     case 3312: return ParticleType::kXiMinus;
+    case 3212: return ParticleType::kSigmaZero;
+    case 3322: return ParticleType::kXiZero;
+    case 3334: return ParticleType::kOmegaMinus;
+    case -3122: return ParticleType::kAntiLambda;
+    case -3222: return ParticleType::kAntiSigmaPlus;
+    case -3212: return ParticleType::kAntiSigmaZero;
+    case -3112: return ParticleType::kAntiSigmaMinus;
+    case -3322: return ParticleType::kAntiXiZero;
+    case -3312: return ParticleType::kAntiXiMinus;
+    case -3334: return ParticleType::kAntiOmegaMinus;
     default: break;
   }
   return ParticleType::kNumTypes;
