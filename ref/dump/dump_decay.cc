@@ -102,9 +102,30 @@ namespace {
 /// table dump, the channel sampler, the select-a-channel histogram and the boost all walk this
 /// array, so the new species get the same seven comparisons the old eight get and none of them
 /// had to be written twice.
-const char* const kSpecies[] = {"mu+", "mu-", "pi+", "pi-", "pi0", "kaon+", "kaon-", "neutron",
-                                "lambda", "sigma+", "sigma0", "sigma-", "xi0", "xi-", "omega-"};
-constexpr int kNumSpecies = 15;
+///
+/// P23b appended the neutral kaons, the seven anti-hyperons, the thirty b/c hadrons of
+/// G4HadParticles::sBCHadrons, the three quarkonia G4HadronicBuilder::BuildDecayTableForBCHadrons
+/// adds after them, the charmed and bottom sigmas that list leaves out and that G4Decay still
+/// decays, and the eta that etac decays into - APPENDED, because every sampled block
+/// seeds itself from a species' index here and an insertion would move every number after it.
+const char* const kSpecies[] = {
+    "mu+", "mu-", "pi+", "pi-", "pi0", "kaon+", "kaon-", "neutron",
+    "lambda", "sigma+", "sigma0", "sigma-", "xi0", "xi-", "omega-",
+    // P23b
+    "kaon0S", "kaon0L",
+    "anti_lambda", "anti_sigma+", "anti_sigma0", "anti_sigma-", "anti_xi0", "anti_xi-",
+    "anti_omega-",
+    "D+", "D-", "D0", "anti_D0", "Ds+", "Ds-",
+    "B+", "B-", "B0", "anti_B0", "Bs0", "anti_Bs0", "Bc+", "Bc-",
+    "lambda_c+", "anti_lambda_c+", "xi_c+", "anti_xi_c+", "xi_c0", "anti_xi_c0",
+    "omega_c0", "anti_omega_c0",
+    "lambda_b", "anti_lambda_b", "xi_b0", "anti_xi_b0", "xi_b-", "anti_xi_b-",
+    "omega_b-", "anti_omega_b-",
+    "etac", "J/psi", "Upsilon", "eta",
+    "sigma_c++", "sigma_c+", "sigma_c0", "sigma_b+", "sigma_b0", "sigma_b-",
+    "anti_sigma_c++", "anti_sigma_c+", "anti_sigma_c0", "anti_sigma_b+", "anti_sigma_b0",
+    "anti_sigma_b-"};
+constexpr int kNumSpecies = 70;
 
 G4ParticleDefinition* find(const char* name) {
   return G4ParticleTable::GetParticleTable()->FindParticle(G4String(name));
@@ -208,7 +229,8 @@ void dump_tables(FILE* f) {
                "parent_stable,n_channels,channel,kinematics,br,n_daughters,"
                "d0,d0_pdg,d0_mass_MeV,d0_width_MeV,d1,d1_pdg,d1_mass_MeV,d1_width_MeV,"
                "d2,d2_pdg,d2_mass_MeV,d2_width_MeV,sum_daughter_mass_MeV,"
-               "is_ok_with_pdg_mass,two_body_pmax_MeV,kl3_lambda,kl3_xi0\n");
+               "is_ok_with_pdg_mass,two_body_pmax_MeV,kl3_lambda,kl3_xi0,"
+               "d3,d3_pdg,d3_mass_MeV,d3_width_MeV,d4,d4_pdg,d4_mass_MeV,d4_width_MeV\n");
   for (int s = 0; s < kNumSpecies; ++s) {
     G4ParticleDefinition* p = find(kSpecies[s]);
     G4DecayTable* dt = p->GetDecayTable();
@@ -217,11 +239,15 @@ void dump_tables(FILE* f) {
       G4VDecayChannel* ch = dt->GetDecayChannel(i);
       const G4int nd = ch->GetNumberOfDaughters();
       double sum = 0.0;
-      std::string dn[3] = {"", "", ""};
-      int dpdg[3] = {0, 0, 0};
-      double dm[3] = {0, 0, 0};
-      double dw[3] = {0, 0, 0};
-      for (G4int d = 0; d < nd && d < 3; ++d) {
+      // Five slots, G4VDecayChannel's constructor arity. The fourth and fifth columns were
+      // added by P23b, whose lambda_b and anti_lambda_b tables are the first real four-body
+      // channels; they are appended after the original columns so that a reader keyed by name
+      // sees nothing move.
+      std::string dn[5] = {"", "", "", "", ""};
+      int dpdg[5] = {0, 0, 0, 0, 0};
+      double dm[5] = {0, 0, 0, 0, 0};
+      double dw[5] = {0, 0, 0, 0, 0};
+      for (G4int d = 0; d < nd && d < 5; ++d) {
         G4ParticleDefinition* dd = ch->GetDaughter(d);
         dn[d] = dd->GetParticleName();
         dpdg[d] = dd->GetPDGEncoding();
@@ -239,14 +265,16 @@ void dump_tables(FILE* f) {
       std::fprintf(f,
                    "%s,%d,%.17g,%.17g,%.17g,%d,%d,%d,%s,%.17g,%d,"
                    "%s,%d,%.17g,%.17g,%s,%d,%.17g,%.17g,%s,%d,%.17g,%.17g,"
-                   "%.17g,%d,%.17g,%.17g,%.17g\n",
+                   "%.17g,%d,%.17g,%.17g,%.17g,"
+                   "%s,%d,%.17g,%.17g,%s,%d,%.17g,%.17g\n",
                    p->GetParticleName().c_str(), p->GetPDGEncoding(), pm / MeV,
                    p->GetPDGWidth() / MeV, p->GetPDGLifeTime() / ns,
                    p->GetPDGStable() ? 1 : 0, dt->entries(), i,
                    ch->GetKinematicsName().c_str(), ch->GetBR(), nd, dn[0].c_str(), dpdg[0],
                    dm[0], dw[0], dn[1].c_str(), dpdg[1], dm[1], dw[1], dn[2].c_str(), dpdg[2],
                    dm[2], dw[2], sum, ch->IsOKWithParentMass(pm) ? 1 : 0,
-                   two_body_pmax(pm, ch) / MeV, lambda, xi0);
+                   two_body_pmax(pm, ch) / MeV, lambda, xi0, dn[3].c_str(), dpdg[3], dm[3],
+                   dw[3], dn[4].c_str(), dpdg[4], dm[4], dw[4]);
     }
   }
 }
@@ -274,10 +302,16 @@ void dump_dalitz(FILE* f) {
   std::fprintf(f, "parent,lepton,lambda,xi0,mass_k_MeV,mass_pi_MeV,mass_l_MeV,mass_nu_MeV,"
                   "epi_MeV,el_MeV,enu_MeV,density\n");
   struct Mode { const char* parent; const char* pion; const char* lepton; const char* nu; };
+  // P23b added K0L's four, which carry K0L's own form factors (0.0300/-0.11 and 0.034/-0.11)
+  // and a CHARGED pion - the only KL3 modes in 11.1.1 whose pion is not a pi0.
   const Mode modes[] = {{"kaon+", "pi0", "e+", "nu_e"},
                         {"kaon+", "pi0", "mu+", "nu_mu"},
                         {"kaon-", "pi0", "e-", "anti_nu_e"},
-                        {"kaon-", "pi0", "mu-", "anti_nu_mu"}};
+                        {"kaon-", "pi0", "mu-", "anti_nu_mu"},
+                        {"kaon0L", "pi-", "e+", "nu_e"},
+                        {"kaon0L", "pi+", "e-", "anti_nu_e"},
+                        {"kaon0L", "pi-", "mu+", "nu_mu"},
+                        {"kaon0L", "pi+", "mu-", "anti_nu_mu"}};
   constexpr int kSteps = 16;
   for (const Mode& mode : modes) {
     KL3Probe probe(mode.parent, 1.0, mode.pion, mode.lepton, mode.nu);

@@ -201,10 +201,14 @@ const Perturbation kPerturbations[] = {
     {"width", "pi0's width, +1e-3 relative"},
     {"lifetime", "kaon+'s lifetime, +1e-7 relative"},
     {"stable", "the neutron is flagged stable"},
-    {"refuse", "the neutron's table is relabelled as K0L's, a refused species"},
+    {"refuse", "the neutron's table is relabelled as the strong K0's, a refused species"},
     {"kl3-lambda", "Ke3's form factor slope becomes K0L's 0.0300"},
     {"kl3-xi0", "Ke3's f+(0)/f- becomes K0L's -0.11"},
     {"select-normalise", "channel selection normalises over the OPEN channels only"},
+    {"k0l-formfactor", "K0L's first Ke3 channel takes K+'s form-factor slope 0.0286"},
+    {"k0l-order", "K0L's pi0 pi+ pi- channel moves ahead of its two Kmu3 channels"},
+    {"bc-daughter", "lambda_b's fourth daughter becomes a pi+"},
+    {"antihyperon-br", "anti_omega-'s second branching ratio, +1e-10 relative"},
 };
 
 
@@ -261,11 +265,31 @@ void apply_perturbation() {
   if (perturbing("stable")) { prow[particle_index(kPdgNeutron)].stable = true; }
   if (perturbing("refuse")) {
     for (int i = 0; i < kNumTables; ++i) {
-      if (trow[i].parent_pdg == kPdgNeutron) { trow[i].parent_pdg = 130; }
+      if (trow[i].parent_pdg == kPdgNeutron) { trow[i].parent_pdg = 311; }
     }
   }
   if (perturbing("kl3-lambda")) { crow[kp.first + 3].kl3_lambda = 0.0300; }
   if (perturbing("kl3-xi0")) { crow[kp.first + 3].kl3_xi0 = -0.11; }
+  // P23b's four. Each reaches a different block: the form factor the table and Dalitz blocks,
+  // the order the table and selection blocks, the daughter the table block and the sampled
+  // slot spectra, and the anti-hyperon BR the table block.
+  const DecayTableRow kl = decay_table_for(kPdgKaonZeroLong);
+  const DecayTableRow lb = decay_table_for(kPdgLambdab);
+  const DecayTableRow ao = decay_table_for(kPdgAntiOmegaMinus);
+  if (kl.count != 6 || lb.count != 1 || ao.count != 3) {
+    std::printf("  FAIL: K0L, lambda_b or anti_omega- changed shape; the P23b perturbations are "
+                "stale\n");
+    ++g_fails;
+    return;
+  }
+  if (perturbing("k0l-formfactor")) { crow[kl.first].kl3_lambda = 0.0286; }
+  if (perturbing("k0l-order")) {
+    const ChannelRow t = crow[kl.first + 5];
+    crow[kl.first + 5] = crow[kl.first + 3];
+    crow[kl.first + 3] = t;
+  }
+  if (perturbing("bc-daughter")) { crow[lb.first].daughter[3] = kPdgPiPlus; }
+  if (perturbing("antihyperon-br")) { crow[ao.first + 1].br *= 1.0 + 1e-10; }
 }
 
 /// The `select-normalise` perturbation, which is a code path and not a datum: the cumulative
@@ -548,11 +572,17 @@ int main(int argc, char** argv) {
     const int c_pmx = tables.col("two_body_pmax_MeV");
     const int c_lam = tables.col("kl3_lambda");
     const int c_xi = tables.col("kl3_xi0");
-    const int c_dpdg[3] = {tables.col("d0_pdg"), tables.col("d1_pdg"), tables.col("d2_pdg")};
-    const int c_dm[3] = {tables.col("d0_mass_MeV"), tables.col("d1_mass_MeV"),
-                         tables.col("d2_mass_MeV")};
-    const int c_dw[3] = {tables.col("d0_width_MeV"), tables.col("d1_width_MeV"),
-                         tables.col("d2_width_MeV")};
+    // Five daughter slots: P23b's lambda_b and anti_lambda_b are four-body, and the dump writes
+    // d3 and d4 columns after the original ones. A missing column is -1, and a channel that
+    // needs one then fails on the daughter count rather than being compared on three.
+    const int c_dpdg[5] = {tables.col("d0_pdg"), tables.col("d1_pdg"), tables.col("d2_pdg"),
+                           tables.col("d3_pdg"), tables.col("d4_pdg")};
+    const int c_dm[5] = {tables.col("d0_mass_MeV"), tables.col("d1_mass_MeV"),
+                         tables.col("d2_mass_MeV"), tables.col("d3_mass_MeV"),
+                         tables.col("d4_mass_MeV")};
+    const int c_dw[5] = {tables.col("d0_width_MeV"), tables.col("d1_width_MeV"),
+                         tables.col("d2_width_MeV"), tables.col("d3_width_MeV"),
+                         tables.col("d4_width_MeV")};
 
     Cell mass, width, life, br, pmxc, dmass, dwidth, kl3;
     int rows_seen = 0;
@@ -588,7 +618,12 @@ int main(int argc, char** argv) {
       br.note(reldev(ch.br, tables.num(r, c_br)), buf);
       require(ch.n_daughters == tables.i32(r, c_nd), "%s: %d daughters, Geant4 has %d", buf,
               ch.n_daughters, tables.i32(r, c_nd));
-      for (int d = 0; d < ch.n_daughters && d < 3; ++d) {
+      for (int d = 0; d < ch.n_daughters && d < 5; ++d) {
+        if (c_dpdg[d] < 0) {
+          require(false, "%s: daughter %d has no column in decay_tables.csv - regenerate the "
+                         "oracle with P23b's dump_decay.cc", buf, d);
+          continue;
+        }
         require(ch.daughter[d] == tables.i32(r, c_dpdg[d]),
                 "%s: daughter %d is %d in the port and %d in Geant4", buf, d, ch.daughter[d],
                 tables.i32(r, c_dpdg[d]));
@@ -778,10 +813,11 @@ int main(int argc, char** argv) {
     {
       const char* generic = decay_refusal_reason(987654321);
       // The seven PARTICLE hyperons came off this list when P10c gave them tables - a species
-      // with a table is not refused and has no refusal message to name it by. Their
-      // ANTIparticles stay, and so do K0L, K0S, the strong K0 pair and the tau.
-      const int named[] = {130, 310, 311, -311, -3122, -3222, -3212, -3112,
-                           -3322, -3312, -3334, 15, -15};
+      // with a table is not refused and has no refusal message to name it by. K0L, K0S and the
+      // seven anti-hyperons came off it when P23b gave them theirs. What stays is the strong
+      // K0 pair, the tau, and two daughters P23b's tables made reachable without tabulating:
+      // the anti-neutron (P23c's) and the eta' (its rho0 and omega need DynamicalMass).
+      const int named[] = {311, -311, -2112, 331, 15, -15};
       for (int pdg : named) {
         const char* why = decay_refusal_reason(pdg);
         require(std::strcmp(why, generic) != 0,
@@ -976,7 +1012,12 @@ int main(int argc, char** argv) {
         // The parameters the density was evaluated with must be the ones the port's channel
         // row carries, or the grid would be checking the formula against itself with
         // Geant4's numbers handed in.
-        const int kpdg = (dalitz.get(r, d_par) == "kaon+") ? kPdgKaonPlus : kPdgKaonMinus;
+        // P23b added K0L's four modes, which carry K0L's own form factors; the parent column is
+        // what says whose table the parameters must match.
+        const std::string& par = dalitz.get(r, d_par);
+        const int kpdg = (par == "kaon+")   ? kPdgKaonPlus
+                         : (par == "kaon0L") ? kPdgKaonZeroLong
+                                             : kPdgKaonMinus;
         const bool is_mu = dalitz.get(r, d_lep) == "mu+" || dalitz.get(r, d_lep) == "mu-";
         const DecayTableRow tab = decay_table_for(kpdg);
         int found = -1;
@@ -1036,6 +1077,12 @@ int main(int argc, char** argv) {
     require(n_bertini == 5, "%d species carry hBertiniCaptureAtRest, expected 5 "
                             "(pi-, kaon-, Sigma-, Xi-, Omega-)", n_bertini);
     require(n_mucap == 1, "%d species carry muMinusCaptureAtRest, expected 1 (mu-)", n_mucap);
+    // And Fritiof on every anti-baryon and anti-nucleus with charge <= 0 the list names - so its
+    // count depends on how many light anti-ions the dumper's run has built, and it is the four
+    // anti-hyperons with a table here, matched one by one below, that are asserted.
+    require(n_fritiof >= 6, "%d species carry hFritiofCaptureAtRest, expected at least the six "
+                            "named (anti-proton, anti-neutron, anti-lambda, anti-sigma0, "
+                            "anti-sigma+, anti-xi0)", n_fritiof);
 
     // Now the port's hook, species by species, against that queue.
     for (int t = 0; t < kNumTables; ++t) {
@@ -1061,12 +1108,26 @@ int main(int argc, char** argv) {
         theirs = AtRestCompetitor::kHadronicAbsorptionBertini;
       } else if (competitor == "muMinusCaptureAtRest") {
         theirs = AtRestCompetitor::kMuonMinusCapture;
+      } else if (competitor == "hFritiofCaptureAtRest") {
+        theirs = AtRestCompetitor::kHadronicAbsorptionFritiof;
       }
       require(found, "pdg %d has no row in decay_atrest.csv: QBBC built it no process "
                      "manager, so the port's hook is unverified for it", pdg);
       require(ours == theirs,
               "pdg %d: the port names competitor %d, Geant4's at-rest queue has '%s'", pdg,
               static_cast<int>(ours), competitor.empty() ? "(only Decay)" : competitor.c_str());
+      // A LIFETIME OF ZERO is the one case where G4Decay's own at-rest length is zero too -
+      // `theNumberOfInteractionLengthLeft * 0` - and it is not a pre-emption but the decay
+      // itself happening at once. The eta, etac, J/psi and Upsilon P23b tabulated are that case,
+      // and none of them has a competitor, so the pair is asserted exactly instead.
+      if (particle_lifetime(pdg) == 0.0) {
+        require(decay_len == 0.0 && competitor.empty(),
+                "pdg %d: lifetime zero, so G4Decay's at-rest length must be exactly zero and "
+                "unopposed - it is %.17g against '%s'", pdg, decay_len, competitor.c_str());
+        require(at_rest_interaction_length<double>(pdg, 1.0) == 0.0,
+                "pdg %d: the port's at-rest length for a zero lifetime is not zero", pdg);
+        continue;
+      }
       require(decay_len > 0.0,
               "pdg %d: G4Decay's own at-rest length is %.17g, so 'zero pre-empts it' is not a "
               "statement about anything", pdg, decay_len);
@@ -1574,16 +1635,17 @@ int main(int argc, char** argv) {
   {
     std::printf("== refusals ==\n");
     // A species with no table must come back kNoTable with a message, whatever mass and
-    // energy it is handed. K0L (130) is the one the plan names.
+    // energy it is handed.
     //
     // The PARTICLE hyperons left this list when P10c transcribed their tables for
-    // `G4IntraNucleiCascader::decayTrappedParticle`; their ANTIparticles are still here, and the
-    // asymmetry is the point. `G4InuclParticleNames` has no anti-hyperon type code, so nothing in
-    // this port can make one, trap one or ask it to decay - tabulating them would add physics no
-    // caller can reach. Testing the anti-hyperons here is what keeps "refused" a decision rather
-    // than an oversight: if a later package starts producing them, this is where it finds out.
-    const int refused[] = {130, 310, -3122, -3222, -3334, -3212, -3112, -3322, -3312, -15,
-                           999999};
+    // `G4IntraNucleiCascader::decayTrappedParticle`. K0L, K0S and the seven ANTI-hyperons left it
+    // with P23b, and the reason the earlier version gave for keeping them - "nothing in this port
+    // can make one" - had stopped being true: FTFP's string fragmentation makes anti-hyperons and
+    // K0S/K0L, and FTFP is wired. What stays refused is the strong K0 pair (no generator emits
+    // one unmixed), the anti-neutron and the eta' - daughters of P23b's tables whose own tables
+    // are not here - and the tau. The two daughters are the point of listing: a table that
+    // makes a species nothing can decay must say so where the decay would have happened.
+    const int refused[] = {311, -311, -2112, 331, -15, 999999};
     DecayProducts<real_t> out;
     const real_t dir[3] = {0, 0, 1};
     for (int pdg : refused) {
@@ -1620,6 +1682,17 @@ int main(int argc, char** argv) {
             "mu- has no at-rest competitor");
     require(decay_at_rest_competitor(kPdgPiPlus) == AtRestCompetitor::kNone,
             "pi+ should have no at-rest competitor: nothing captures a positive hadron");
+    // The anti-hyperons split on G4StoppingPhysics' charge gate and its explicit list: the four
+    // with charge <= 0 it names are annihilated by Fritiof at rest, the three with charge +1
+    // get nothing. Also checked against Geant4's own at-rest queues in block 3c.
+    for (int pdg : {kPdgAntiLambda, kPdgAntiSigmaZero, kPdgAntiSigmaPlus, kPdgAntiXiZero}) {
+      require(decay_at_rest_competitor(pdg) == AtRestCompetitor::kHadronicAbsorptionFritiof,
+              "pdg %d should be pre-empted by G4HadronicAbsorptionFritiof at rest", pdg);
+    }
+    for (int pdg : {kPdgAntiSigmaMinus, kPdgAntiXiMinus, kPdgAntiOmegaMinus, kPdgKaonZeroLong}) {
+      require(decay_at_rest_competitor(pdg) == AtRestCompetitor::kNone,
+              "pdg %d has no at-rest process but Decay in QBBC", pdg);
+    }
     std::printf("  at-rest competition: pi- and kaon- -> %s\n",
                 decay_at_rest_competitor_name(AtRestCompetitor::kHadronicAbsorptionBertini));
     std::printf("                       mu-           -> %s\n",

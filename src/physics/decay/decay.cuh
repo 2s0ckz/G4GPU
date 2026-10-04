@@ -289,7 +289,7 @@ __host__ __device__ inline real_t at_rest_interaction_length(int pdg, real_t n_l
 ///
 /// `G4StoppingPhysics::ConstructProcess` in 11.1.1 registers G4HadronicAbsorptionBertini on
 /// pi-, kaon-, Sigma-, Xi-, Omega- and G4HadronicAbsorptionFritiof on the antibaryons, plus
-/// G4MuonMinusCapture on mu-. Only three of those are species this port transports.
+/// G4MuonMinusCapture on mu-.
 enum class AtRestCompetitor : int {
   kNone = 0,
   /// G4HadronicAbsorptionBertini, an at-rest process with a zero interaction length: capture
@@ -299,6 +299,11 @@ enum class AtRestCompetitor : int {
   /// not a race. The capture-versus-decay split happens inside it, in G4MuonMinusBoundDecay,
   /// against its own bound Michel spectrum. P12.
   kMuonMinusCapture,
+  /// G4HadronicAbsorptionFritiof (P23b), on the four anti-hyperons with a decay table that
+  /// G4StoppingPhysics puts it on: anti-lambda, anti-sigma0, anti-sigma+ and anti-xi0. Also a
+  /// G4HadronStoppingProcess, so also a zero at-rest length and a pre-emption. Appended LAST so
+  /// that the two values above keep their numbers.
+  kHadronicAbsorptionFritiof,
 };
 
 __host__ __device__ inline AtRestCompetitor decay_at_rest_competitor(int pdg) {
@@ -319,6 +324,15 @@ __host__ __device__ inline AtRestCompetitor decay_at_rest_competitor(int pdg) {
       return AtRestCompetitor::kHadronicAbsorptionBertini;
     case kPdgMuMinus:
       return AtRestCompetitor::kMuonMinusCapture;
+    // G4StoppingPhysics' Fritiof list, less the anti-proton and the anti-neutron (no decay table
+    // here) and the anti-nuclei: the four anti-hyperons with charge <= 0 that it NAMES. The
+    // anti-sigma-, anti-xi- and anti-omega- carry charge +1 and get nothing, as a K+ does.
+    // Measured, not read: decay_atrest.csv puts hFritiofCaptureAtRest first on exactly these.
+    case kPdgAntiLambda:
+    case kPdgAntiSigmaZero:
+    case kPdgAntiSigmaPlus:
+    case kPdgAntiXiZero:
+      return AtRestCompetitor::kHadronicAbsorptionFritiof;
     default:
       return AtRestCompetitor::kNone;
   }
@@ -334,6 +348,9 @@ __host__ __device__ inline const char* decay_at_rest_competitor_name(AtRestCompe
       return "G4MuonMinusCapture (P12): at-rest length zero, so capture always wins and this "
              "decay must not fire either - the capture-versus-bound-decay split is inside "
              "G4MuonMinusBoundDecay, with its own K-shell Michel spectrum";
+    case AtRestCompetitor::kHadronicAbsorptionFritiof:
+      return "G4HadronicAbsorptionFritiof (P12): annihilation of a stopped anti-hyperon on a "
+             "nucleus, at-rest length zero - this decay must not fire";
   }
   return "unknown";
 }
