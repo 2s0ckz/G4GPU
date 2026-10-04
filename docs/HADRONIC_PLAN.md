@@ -569,3 +569,63 @@ Wire `G4DecayStrongResonances::Propagate` - the `hitCount == GetMassNumber()` ex
 `G4TheoFSGenerator::ApplyYourself`, which QBBC reaches on hydrogen and on any target whose every
 nucleon was hit - to the shared engine, delete `kDecayStrongResonances`, and re-run the 96-point
 sweep. On the numbers above that is the last refusal in it.
+
+---
+
+## 10. Phase 4 - the rest of QBBC
+
+Decided with the user on 2026-10-03, after P21 landed (main b40c836, RISK V225). The target is
+every capability of QBBC in 11.1.1, for any user and any beam, not only the ion and neutron
+beams the sweep has carried so far. Measured against QBBC's constructor list, what main has and
+what each remaining package closes:
+
+| constructor | on main (b40c836) | package that closes the rest |
+|---|---|---|
+| G4EmStandardPhysics (option 0) | complete; the gamma general process's zones and table 9 are Geant4's (P21) | P26: the zone totals and EM fractions as tables (V225), the ion along-step charge correction, ion spin, delta rays above 17 GeV/u, the e+- residual above 100 MeV |
+| G4EmExtraPhysics | gamma-, electro- and muon-nuclear wired (P19, P21) | P26: the lepton models' FTF arm from 10 GeV. QGS for photons above 3 GeV stays out: no 11.1.1 QBBC photon reaches it (V207) |
+| G4DecayPhysics | complete for every transported species | P23b: the decay tables of K0S, K0L, the anti-hyperons and, if QBBC reaches them, the b/c hadrons |
+| G4HadronElasticPhysicsXS | every charged hadron and the neutron | P23c: the antiproton and the anti-light ions (`G4ComponentAntiNuclNuclearXS`, `G4AntiNuclElastic`) |
+| G4HadronInelasticQBBC | Binary, Bertini and FTFP in Geant4's windows for p, n, pi, K+-; hydrogen target; destroyed nucleus | P23b: hyperon, anti-hyperon and neutral-kaon projectiles and cross sections; P23a: those species on tracks; P23c: the anti-nucleon family |
+| G4IonPhysicsXS | the light-ion reaction below 3 GeV/u, FTF above, every target | P24: the 128-entry final state, FTF's 512-track list, Bertini's secondary buffer, the AME2012 fallback |
+| G4StoppingPhysics | every arm | P23c: the anti-nucleus hand-over behind Fritiof |
+| G4IonElasticPhysics | both halves ported | P25: wired for GenericIon |
+| G4NeutronTrackingCut | complete | - |
+| the neutron general process | wired; the 11.1.1 charging order is P22 (V219) | P22 |
+
+### The packages
+
+| package | scope | validation | after |
+|---|---|---|---|
+| **P22** | the neutron's interaction length on its track, 11.1.1's charging order, today's order selectable | the two neutron beams against shipped QBBC; the four ion beams at full counts | - |
+| **lead: header split** | the interaction and drain kernel bodies out of `host/transport_run_impl.cuh` into a header only their units include; a sizes-only header for what the host reads | the one-header rebuild drops from 23 units to 1 (V221) | P22 |
+| **P23b** | hyperon and s/c/b-meson cross-section branches; K0S/K0L/anti-hyperon (and b/c, if reached) decay tables; Bertini accepting K0L/K0S; FTF's hyperon, anti-hyperon and neutral-kaon rows | tapes and campaigns against the oracle, as P9d and P13 did; host-only | none (model-only) |
+| **P23a** | the strange species on tracks: rows, ionisation and ranges for the charged ones, decay in flight, the neutral step, interaction lengths from P23b's cross sections | tapes against the loss tables and `G4Decay`; beams: 10 GeV protons and pions, where they are made | P22, P23b |
+| **P23c** | the anti-nucleon family: `G4ComponentAntiNuclNuclearXS`, `G4AntiNuclElastic`, FTF's anti-nucleus arm, the Fritiof at-rest hand-over, the antiproton's processes | campaigns against FTF and the at-rest oracle; an antiproton beam | P23b |
+| **P24** | no capacity refusals: the light-ion reaction's final state, FTF's track list, Bertini's secondary buffer, the AME2012 fallback mass formula | Fe56 on Fe56 at 1 GeV/u and Fe56 on Pb at 20 GeV/u refuse nothing; memory cost measured | none |
+| **P25** | ionElastic wired for GenericIon | an ion beam's recoil spectrum against Geant4 | P22 |
+| **P26** | the EM remainders listed above | the gamma gate, the ion beams, a 10 GeV electron beam | none |
+| **P27** | the acceptance sweep: every transported species as a primary, 100 MeV to 10 GeV, in water, bone, air, aluminium, polyethylene and lead | every row inside 3 sigma against shipped QBBC; every ledger at zero except the documented unreachable items | all above |
+| **performance phase** | the transport-loop plan (persistent drain, per-model slot pools, warp-cooperative cascade, batch refill) | throughput against Geant4 on the sweep; results within statistics | P23, P24 |
+
+Two things stay out on purpose and are recorded, not forgotten: QGS for photons above 3 GeV
+(unreachable in 11.1.1's QBBC, V207; the Geant4-version-update plan picks it up when a later
+release is the target) and the EM families that are not QBBC (Penelope, PAI, DNA, optical,
+adjoint, PIXE).
+
+### Order and load
+
+Integration stays serial, one gate per landing, the lead restacking each branch onto main. The
+machine takes one heavy job at a time (section 6, rule 2, and the user's rule since P15), and the
+packages are of two kinds: model-only packages (P23b, P24, P26) compile host-only tests and run
+nothing on the GPU, transport packages (P22, P23a, P23c, P25) compile engine units and run beams.
+One of each kind may run side by side; never two transport packages, never two ptxas, never a
+compile beside a GPU run. The sequence:
+
+1. P22 with P23b beside it (started 2026-10-03).
+2. The header split as soon as P22 lands, so every gate after costs one unit, not 23.
+3. P23a with P24 beside it; then P23c with P26 beside it; P25 in any free transport slot.
+4. The performance phase once the kernel code has stopped moving; P27 last, as the acceptance.
+
+RISK numbering: P22 from V280, P23b from V300, later packages in steps of 20; the lead renumbers
+on integration. Briefs follow the P15-P22 template: measurement first, transcription from 11.1.1,
+anti-vacuity, refusal by name, report format.
