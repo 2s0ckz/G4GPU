@@ -1313,7 +1313,7 @@ bool WriteProject(const Model& model, const std::string& dir) {
       << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
       << "set(CMAKE_CUDA_STANDARD 17)\n"
       << "if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)\n"
-      << "  set(CMAKE_CUDA_ARCHITECTURES 86)\n"
+      << "  set(CMAKE_CUDA_ARCHITECTURES \"70;86\")\n"
       << "endif()\n\n"
       << "# Every source is compiled as CUDA: they include headers with __host__ __device__\n"
       << "# functions in them, which the host compiler alone cannot parse.\n"

@@ -615,8 +615,11 @@ send every one of them somewhere else.
 Windows, CUDA 12.9 - the tree is built and gated with nvcc and ptxas 12.9.86, as the portable toolkit
 `setupenv.bat` looks for under `D:\cuda129` (docs/RISK.md V203: CUDA 11.6's ptxas crashed on the
 stepping kernels and could only compile one of them unoptimised) - and an NVIDIA GPU of compute
-capability 8.6 by default; `G4GPU_ARCH` in `setupenv.bat` picks the card, or two cards as
--gencode pairs.
+capability 7.0 or above. Every unit is compiled for the gating machine's two cards by default, the
+Titan V (7.0) and the RTX 3070 (8.6), with the compute_70 PTX embedded so that any other card from
+Volta up JITs it at its first launch (docs/RISK.md V234: measured on the Titan V, with its cost);
+`G4GPU_ARCH` in `setupenv.bat` narrows it to one card. Volta is the floor: the kernels take
+`__grid_constant__` parameters.
 
 ```
 setupenv.bat        # MSVC + CUDA on PATH

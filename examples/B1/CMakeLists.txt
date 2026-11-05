@@ -36,15 +36,16 @@ option(G4GPU_USE_PREBUILT_ENGINE
 #----------------------------------------------------------------------------
 # Compiler settings.
 #
-# sm_86 is this machine's GPU (RTX 3070). CMAKE_CUDA_ARCHITECTURES is the portable way to say
-# it; override it on the command line for a different card.
+# 70 and 86 are the gating machine's two cards (the Titan V and the RTX 3070; docs/RISK.md V234),
+# the same pair setupenv.bat's G4GPU_ARCH defaults to. CMAKE_CUDA_ARCHITECTURES is the portable
+# way to say it; override it on the command line for a different card.
 #
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 86)
+  set(CMAKE_CUDA_ARCHITECTURES "70;86")
 endif()
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)

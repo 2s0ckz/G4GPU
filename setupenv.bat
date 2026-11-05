@@ -10,13 +10,21 @@ if defined VSINSTALLDIR exit /b 0
 rem ---------------------------------------------------------------- the GPU architecture
 rem
 rem Every nvcc line that builds device code says %G4GPU_ARCH% (build_all.bat, build_engine_unit.bat,
-rem the drivers, examples/B1 and the projects the model builder writes), so the card is chosen
-rem here once. The default is the RTX 3070 this tree is gated on. For two cards, or a card of
-rem another generation - the Titan V is compute capability 7.0 - set it to the -gencode pairs
-rem before calling any build script, for instance
-rem   set "G4GPU_ARCH=-gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86"
-rem and every unit is compiled for both, at twice the ptxas time.
-if not defined G4GPU_ARCH set "G4GPU_ARCH=-arch=sm_86"
+rem the drivers, examples/B1 and the projects the model builder writes), so the cards are chosen
+rem here once. THE DEFAULT IS BOTH CARDS OF THE GATING MACHINE since docs/RISK.md V234: the RTX
+rem 3070 (compute capability 8.6, CUDA device 0, where every gate runs) and the Titan V (7.0,
+rem device 1, 12 GB of HBM2 and FP64 at half rate), as two -gencode pairs, so every unit is
+rem compiled for both at twice the ptxas time and one binary runs on either card - the Titan V
+rem under CUDA_VISIBLE_DEVICES=1 for the whole tree, or G4GPU_DEVICE=titan for the engine and
+rem the drivers. AND THE compute_70 PTX IS EMBEDDED BESIDE THE sm_70 SASS, which costs no ptxas
+rem time (the PTX is generated on the way to the SASS) and makes the same binary run on ANY
+rem NVIDIA card from Volta up under this driver: a card neither pair names - Turing, Ada,
+rem Hopper, Blackwell - JITs the PTX at its first launch and the driver caches the result.
+rem Volta is the floor because the kernels take `__grid_constant__` parameters (compute 7.0),
+rem not because of the toolkit. A tree for one card sets this to its -arch before calling any
+rem build script, for instance -arch=sm_86, and tools\freshness.ps1 rebuilds everything the
+rem recipe no longer matches.
+if not defined G4GPU_ARCH set "G4GPU_ARCH=-gencode arch=compute_70,code=[sm_70,compute_70] -gencode arch=compute_86,code=sm_86"
 rem ---------------------------------------------------------------- the CUDA toolkit
 rem
 rem CUDA 12.9.2 (nvcc and ptxas 12.9.86), as a PORTABLE toolkit under D:\cuda129: NVIDIA's own
@@ -37,7 +45,11 @@ rem -static-global-template-stub=true, will break exactly that, so the build say
 if exist "D:\cuda129\bin\nvcc.exe" (
   set "PATH=D:\cuda129\bin;%PATH%"
   set "CUDA_PATH=D:\cuda129"
-  set "NVCC_APPEND_FLAGS=-static-global-template-stub=false"
+  rem -Wno-deprecated-gpu-targets: nvcc 12.9 warns on every compile that offline compilation
+  rem for architectures before sm_75 "will be removed in a future release". It is the Titan V's
+  rem sm_70, it is deliberate (V234), and CUDA 12.x is the toolkit this tree stays on (V203:
+  rem 13.x dropped Volta), so the warning says nothing a build log needs forty times.
+  set "NVCC_APPEND_FLAGS=-static-global-template-stub=false -Wno-deprecated-gpu-targets"
 ) else (
   echo setupenv: D:\cuda129 not found - using the nvcc on the PATH ^(see docs/RISK.md V203^)
 )
