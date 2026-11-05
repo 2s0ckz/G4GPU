@@ -22,11 +22,12 @@
 #include "host/level_upload.cuh"
 #include "host/neutron_upload.cuh"
 #include "host/pe_upload.cuh"
-// P15's interaction kernel body. The ONE header in this engine that pulls in Bertini, the
-// Binary cascade, FTFP and the at-rest chain - see docs/RISK.md V188 for why it is here and
-// not in `physics/stepper.cuh`, and `host/transport_run_interaction.cu` for the one translation
-// unit that instantiates the kernel it defines.
-#include "physics/hadronic/interaction_apply.cuh"
+// P15's interaction pool as the host sees it: declared types, sizes, a builder - and no model
+// header. Until docs/RISK.md V233 this line included `interaction_apply.cuh`, the one header
+// that pulls in Bertini, the Binary cascade, FTFP and the at-rest chain, and through it every
+// translation unit of the engine read every model (V221). The kernel bodies are
+// `host/transport_run_int_impl.cuh`, included by the seven `transport_run_int_*.cu` units only.
+#include "physics/hadronic/interaction_pool.cuh"
 #include "physics/source.cuh"
 #include "physics/stepper.cuh"
 #include "render/trajectory.cuh"
@@ -709,18 +710,13 @@ class TransportEngine {
   /// A STATED, PRINTED, MEASURED CAPACITY. One slot is 2,020,152 bytes and the queue is drained
   /// in chunks of this many, so a shortage costs launches and not interactions - docs/RISK.md
   /// V188 has the argument and V189 the throughput measurement behind the default.
-  void* d_slots_ = nullptr;
+  /// Since docs/RISK.md V233 the slots, the channel table, FTFP's pool and the Fermi break-up
+  /// pool are built and freed through `had::build_interaction_pool`, and this is what it
+  /// returned: the device view's address, the sizes, and what it allocated, opaque.
+  had::InteractionPoolOwner<real_t> interaction_pool_{};
   int n_interaction_slots_ = 0;
   int interaction_slots_request_ = 0;
   std::size_t interaction_bytes_ = 0;
-  /// `bic::imr::build_concrete_channels`' 306 channels: read-only, identical for every thread,
-  /// one device copy for the whole run.
-  void* d_bic_channels_ = nullptr;
-  int n_bic_channels_ = 0;
-  /// FTFP's pool, from `ftf::entry::build`.
-  g4gpu::hadronic::ftf::entry::Owner<g4gpu::hadronic::ftf::entry::Workspace> ftf_pool_{};
-  /// P3's Fermi break-up pool on the device, which every arm's de-excitation tail walks.
-  FermiPoolOwner fermi_pool_{};
   /// Has the device stack been raised to what the interaction kernels need?
   ///
   /// FALSE UNTIL AN INTERACTION IS QUEUED (until P19, until a hadron was live - docs/RISK.md

@@ -9,7 +9,7 @@
 // the frame is the number that matters most here: this kernel launches on every iteration of a
 // photon run, so a frame past the stepping kernels' 16,384 bytes would make the driver raise
 // the device stack for the whole card (V196) at the gamma gate's expense (V190).
-#include "host/transport_run_impl.cuh"
+#include "host/transport_run_int_impl.cuh"
 
 namespace g4gpu::host {
 

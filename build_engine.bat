@@ -32,7 +32,7 @@ rem right within one pipeline run and wrong the moment anyone sets the variable 
 rem which point the build links an engine compiled before the change under test and the run
 rem prints a plausible number for physics that was never compiled. See docs/RISK.md S4.
 rem
-rem freshness.ps1 is asked once PER UNIT, which costs twenty-three PowerShell starts - about
+rem freshness.ps1 is asked once PER UNIT, which costs twenty-four PowerShell starts - about
 rem eight seconds - on every call, and since 2026-10-02 it answers for that unit alone, from the
 rem unit's own dependency file (docs/RISK.md V221).
 call "%~dp0setupenv.bat" || exit /b 1
@@ -181,6 +181,16 @@ for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run.
   echo        A launch was added without a matching `extern template` in
   echo        src\host\transport_run_impl.cuh, so that kernel is compiled into the engine's
   echo        own translation unit again. See docs/RISK.md V65.
+  popd
+  exit /b 1
+)
+rem THE POOL UNIT MUST CARRY NO KERNEL EITHER. src\host\transport_run_pool.cu holds the interaction
+rem pool's builder - the one object with the models' HOST code (docs/RISK.md V233) - and no launch;
+rem a kernel in it would be a model instantiated where only its host side belongs.
+for /f "usebackq delims=" %%N in (`cuobjdump -res-usage "%~dp0out\transport_run_pool.obj" 2^>nul ^| findstr /c:"run_step_" /c:"run_interaction" /c:"run_emextra"`) do (
+  echo FATAL: out\transport_run_pool.obj carries a kernel:
+  echo        %%N
+  echo        That unit is the interaction pool's builder and launches nothing; see docs/RISK.md V233.
   popd
   exit /b 1
 )

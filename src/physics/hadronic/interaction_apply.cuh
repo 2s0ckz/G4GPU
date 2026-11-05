@@ -63,6 +63,7 @@
 #include "physics/hadronic/emextra_wiring.cuh"
 #include "physics/hadronic/ftf/ftf_entry.cuh"
 #include "physics/hadronic/interaction_queue.cuh"
+#include "physics/hadronic/interaction_pool.cuh"
 #include "physics/hadronic/stopping/stopping_process.cuh"
 #include "physics/hadronic/wiring.cuh"
 
