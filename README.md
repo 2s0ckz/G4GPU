@@ -615,11 +615,9 @@ send every one of them somewhere else.
 Windows, CUDA 12.9 - the tree is built and gated with nvcc and ptxas 12.9.86, as the portable toolkit
 `setupenv.bat` looks for under `D:\cuda129` (docs/RISK.md V203: CUDA 11.6's ptxas crashed on the
 stepping kernels and could only compile one of them unoptimised) - and an NVIDIA GPU of compute
-capability 7.0 or above. Every unit is compiled for the gating machine's two cards by default, the
-Titan V (7.0) and the RTX 3070 (8.6), with the compute_70 PTX embedded so that any other card from
-Volta up JITs it at its first launch (docs/RISK.md V234: measured on the Titan V, with its cost);
-`G4GPU_ARCH` in `setupenv.bat` narrows it to one card. Volta is the floor: the kernels take
-`__grid_constant__` parameters.
+capability 7.0 or above, which `setupenv.bat` detects and compiles for (see "A fresh clone" below;
+`G4GPU_ARCH` set beforehand overrides it). Volta is the floor: the kernels take `__grid_constant__`
+parameters.
 
 ```
 setupenv.bat        # MSVC + CUDA on PATH
@@ -640,6 +638,43 @@ tools\quick.ps1 -List       what the targeted test runner can run
 
 To regenerate the oracle you need a Geant4 11.1.1 install; point `ref/oracle/run.bat` at it,
 then `ref\dump\build.bat && ref\oracle\run.bat`.
+
+### A fresh clone, on another machine
+
+What the build needs: Windows 10 or 11 (the build is batch files and PowerShell; only example
+B1 has a CMake file); Visual Studio 2019 or 2022 with "Desktop development with C++"
+(`setupenv.bat` finds either through vswhere and prefers 2019, the compiler this tree is gated
+with; CUDA 12.9 accepts MSVC 14.29 through 14.4x); a CUDA 12.x toolkit with `nvcc` on the PATH
+(12.9 is what every number here was made with; 11.x cannot compile the stepping kernels,
+docs/RISK.md V203, and 13.x dropped Volta); an NVIDIA driver that supports CUDA 12 (R525 or
+later); an NVIDIA GPU of compute capability 7.0 or above; and 32 GB of RAM, because the seven
+interaction units' ptxas peaks between 6 and 20 GB each (they are compiled one at a time).
+`setupenv.bat` asks `nvidia-smi` which cards are present and compiles for exactly those - an
+H100 gets sm_90 and nothing else - plus the compute_70 PTX, so the same binary also runs on any
+other card from Volta up (docs/RISK.md V234 measured what that first-launch JIT costs). A card
+this tree has never been compiled for is a ptxas run nobody has gated: `build_engine_unit.bat`'s
+-O ladder catches a ptxas that dies and says so.
+
+What a run needs: five Geant4 11.1.1 datasets, which are not in this repository - G4EMLOW8.2,
+PhotonEvaporation5.7, G4PARTICLEXS4.0, G4ENSDFSTATE2.3 and RadioactiveDecay5.6, from Geant4's
+dataset downloads (geant4-data.web.cern.ch/datasets) - unpacked into one folder named by
+`G4GPU_DATA_DIR`. The Geant4 variables (`G4LEDATA`, `G4LEVELGAMMADATA`, `G4PARTICLEXSDATA`,
+`G4ENSDFSTATEDATA`, `G4RADIOACTIVEDATA`) work too, and a Geant4 install's `share/Geant4/data` is
+such a folder. A run that cannot find a file says which and where it looked.
+
+Then:
+
+```
+setupenv.bat
+build_engine.bat                 # the 24 engine units; about 80 minutes of ptxas per card
+examples\B1\build.bat
+examples\B1\exampleB1.exe -n 100000
+```
+
+The gate, `build_all.bat`, needs one more thing: `ref/oracle`, 217 MB of tables dumped from a
+Geant4 11.1.1 install by `ref/dump`, which every test compares against (`ref/oracle/run.bat` is
+how). Without a Geant4 install the engine, the drivers and the examples build and run; the tests
+do not.
 
 ## Running
 
