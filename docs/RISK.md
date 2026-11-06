@@ -15068,3 +15068,165 @@ type. A test that wants the pool on the host includes `host/interaction_pool_bui
 instantiates what it uses. The three tests that include `interaction_apply.cuh` directly
 (`test_inelastic_transport`, `test_emextra_wiring`, `test_emextra_transport`) still do, and still
 read every model, as they should.
+### V234: P24's scope, measured - every capacity refusal the four model entry points can book, what each campaign needed of it in Geant4's own run, and what is left
+
+Geant4 bounds none of the lists below; every one is a std::vector there. The port's are fixed
+arrays in a slot, so each is a stated bound with its overflow refused by name, and P24's rule is
+that the bound is READ OFF A DISTRIBUTION - Geant4's own events, from the dumps, beside the
+port's - not chosen. Four dumps write the distributions, on the campaigns' own seeds and events
+where a campaign exists: `bic_capacity.csv` (ref/dump/dump_bic.cc: the final-state count and the
+size of `Propagate`'s result, per event, read through a `G4BinaryCascade` whose `Propagate` is
+Geant4's - the four campaign files it rides on came out BYTE-IDENTICAL to main's regeneration of
+the same day), `bertini_capacity.csv` (dump_bertini.cc: the campaign's 280,000 events plus 2,000
+each at the top of QBBC's Bertini window), `ftf_capacity.csv` (dump_ftf.cc: QBBC's own GenericIon
+FTFP at the ion grid's five heaviest points), and `nuclei_mass_levels.csv` (dump_nuclei_mass.cc).
+
+| refusal, by name | constant (file) | before | campaign rate before | Geant4's largest event | the port's | after | rate after |
+|---|---|--:|---|--:|--:|--:|---|
+| `BlirRefusal::capacity` -> `kBinaryRefused` | `bic::kBlirMaxSecondaries` (bic/light_ion_reaction.cuh) | 128 | 39 of 20,000 ic_Fe56_1000_Fe56 (0.195%), 0 of the other 960,000 ion events | 134 (36 events past 128) | 136 | **168** | 0 of 980,000 |
+| `BicRefusal::capacity` (PreCompound list) | the TEST's 64; the slot's `bic::kSlotPrecoCap` 256 | 64 | 1 of 20,000 camp_n1400_Pb208 (a 65-product event) | 72 final-state products | 68 | 256 (the slot's) | 0 of 1.29 million |
+| `BicRefusal::capacity` (final state) | `bic::kBicMaxSecondaries` (bic/binary_cascade.cuh) | 128 | 0 | 72 (camp_p1400_Pb208) | 68 | 128, kept | 0 |
+| `CascadeRefusal::capacity` (`Propagate`'s products) | `bic::kSlotProductCap` | 512 (test's nucleon list 256) | 0 | 134 | 136 | 512 | 0 |
+| `KineticDecayRefusal::list_full` -> `kDecayEngineRefused` | `ftf::entry::kIonMaxTracks` (ftf/ftf_entry.cuh) | 512 | 63 of 500 at Fe56 on Pb207, 20 GeV/n (63 of the grid's 36,000) | 663 tracks after the decay pass, 543 string products (2,000 events; 142 past 512) | 652, 536 | **832** | 0 of 36,000 |
+| the slot's `HadFinalState` overflow -> `kInelasticSecondaryOverflow` | `had::kInteractionSecondaryCap` (interaction_apply.cuh) | 256 | NEVER MEASURED: the FTF ion test used its own width of 512 | 680 at the corner; past 256 in 863 of 2,000 there, 183 of 500 at Fe56-Pb207 8 GeV/n, 119 O16-Pb207, 80 C12-Pb207, 54 Fe56-Fe56 (20 GeV/n) | 640 (156 of 500 past 256) | **856** | 0 |
+| `InterfaceRefusal::kSecondaryOverflow` (Bertini's final state) | the slot's, as above | 256 | 0 of 280,000 | 124 in the campaign, 136 at 12 GeV pi+ on Pb207 | 130, 145 | 856 (the slot's) | 0 |
+| `CascadeOverflow::kOutgoingParticles` | `bert::kMaxOutgoingParticles` (bertini/workspace.cuh) | 512 | 0 | (bounded by the final state, 136) | 113 held in one `CollisionOutput` | **184** | 0 |
+| `kIonWithoutNuclide` / `XsRefusal::kNuclearMassNotTabulated` | `data::nuclear_mass` (data/nuclei_mass_ame12.hh) | levels 1-2 | 1 to 9 GenericIons per ion beam (V217, V232) | - | - | all four levels | only Z > A, A < 1 |
+
+`tests/test_bic_void.cu` (191 taped events) and `tests/test_ftf_entry.cu` (16 points, 20,300
+calls) book no capacity refusal before or after; the hadron campaigns of FTFP (the 96- and
+180-point sweeps) none either.
+
+### V235: the light-ion reaction answers every Fe56-on-Fe56 event at 1 GeV per nucleon - its final state holds 168, read off Geant4's own run, where 128 refused 39
+
+`kBlirMaxSecondaries` was 128, "generous", and P20's destroyed-nucleus branch made it short: in
+such an event each nucleon of the iron target becomes its own product, and 39 of 20,000 events of
+ic_Fe56_1000_Fe56 overflowed it - every one a destroyed-nucleus event, every one by one product
+(`final state 128 (+1 over 128)`, `Propagate` having returned 129 to 133). Geant4's own run of the
+same campaign, the events `bic_blirapply.csv` summarises, needs at most 134 there and more than 128
+in 36 of 20,000 - the port's 39 is the same tail, not a port defect. No other of the 49 ion cases
+needs more than 112 (ic_Fe56_200_Fe56). 134 with a quarter more, to a multiple of 8, is 168; past it
+`BlirRefusal::capacity` still refuses by name.
+
+`tests/test_bic_apply.cu` now runs both campaigns through the slot's own lists (`bic::kSlot*`, which
+`had::InteractionSlot` is built from) and holds both final states and `Propagate`'s product list
+above the larger of Geant4's and the port's largest event, case by case over all 127 campaign
+cases, with no overflow:
+
+    capacity bic_apply      final state 128: Geant4 needs  72 (camp_p1400_Pb208), the port  68; products 512: Geant4  72, the port  68
+    capacity bic_blirapply  final state 168: Geant4 needs 134 (ic_Fe56_1000_Fe56), the port 136; products 512: Geant4 134, the port 136
+    overflowed 0 (was 40)
+
+The 39 events run to a final state and are compared as every other event is: the per-event balance
+`IonBalance` reads 1.000 of its bound over 978,017 ion events (977,978 before, plus the 39), the
+destroyed-nucleus rate on the case is 147 against Geant4's 152 (0.29 sigma, unchanged - V213 counts
+it before the overflow), and the campaign's worst species yield, kinetic energy and multiplicity
+are where they were (4.12, 3.65 and 3.01 sigma, none on this case). Anti-vacuity: 168 back to 128
+fails the new capacity row with the 39 `OVERFLOW` lines restored.
+
+### V236: FTFP's ion arm at the corner of the grid - 832 tracks and an 856-secondary final state, both read off QBBC's own FTFP; and the port's ion arm leaves a quarter to a third fewer secondaries than Geant4's
+
+`kMaxTracks` = 512 refused 63 of the 500 events of tests/test_ftf_model.cu's ion grid at Fe56 on
+Pb207 at 20 GeV per nucleon (`list_full`). The grid has no oracle - it is held to conservation -
+so what an event NEEDS had never been measured on Geant4's side. ref/dump/dump_ftf.cc's
+`dump_capacity` runs the GenericIon `ionInelastic` process's own "FTFP" (G4IonPhysicsXS ->
+G4FTFBuilder), with its transport swapped for a `G4GeneratorPrecompoundInterface` on the same
+precompound model that counts the list it is handed, runs `G4DecayKineticTracks` and counts again,
+then hands the decayed list to Geant4's `PropagateNuclNucl`, whose own decay pass then has nothing
+left to decay. Two runs give the same file to the byte.
+
+| point (GeV/n) | Geant4: N | strings | tracks | fs | <fs> | port: N | strings | tracks | fs | <fs> |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Fe56 on Pb207, 20 | 2,000 | 543 | 663 | 680 | 256.5 | 500 | 536 | 652 | 640 | 191.2 |
+| Fe56 on Pb207, 8 | 500 | 396 | 456 | 483 | 202.3 | 500 | 395 | 449 | 433 | 137.0 |
+| Fe56 on Fe56, 20 | 500 | 289 | 363 | 364 | 138.2 | 500 | 307 | 377 | 378 | 103.7 |
+| O16 on Pb207, 20 | 500 | 262 | 311 | 373 | 158.2 | 500 | 285 | 342 | 334 | 104.2 |
+| C12 on Pb207, 20 | 500 | 218 | 243 | 329 | 141.2 | 500 | 214 | 252 | 244 | 86.4 |
+
+`entry::kIonMaxTracks` = 832 (663 with a quarter more, to a multiple of 8) bounds the string
+products, the decayed list and the escaped and coalesced lists; `entry::kMaxSecondaries` = 856 (680
+likewise) is the final state an ion interaction needs, and through `had::kInteractionSecondaryCap`
+the slot's. `entry::Workspace` grew by 132,160 bytes, 413 a track: 539,096 -> 671,256, V167's pin
+and the sizing table in ftf_entry.cuh's header rewritten from `sizeof`; a 1 GB budget buys 1,599
+slots where it bought 1,991, and the pool's default 128 slots of it are 85.9 MB where they were
+69.0 MB. `HadronWorkspace` keeps 512 tracks (458,088 bytes). The grid runs 36,000 of 36,000 through
+the transport's own types, and both bounds are asserted to cover both sides' largest event.
+Anti-vacuity: 512 and 600 fail both ("refused 63 events (63 of them list_full)", "tracks 663 of
+512, final state 680 of 600").
+
+**THE SLOT'S FINAL STATE HAD NEVER MET AN ION.** P11d part 2 raised the test's own final state to
+512 "for whoever sizes the transport's own", and nobody did: the slot held 256, which Geant4
+exceeds in 43% of the corner's events and the port in 31%. Every such interaction in a transport
+run was refused as `kInelasticSecondaryOverflow` - a hole in exactly the beam a galactic-cosmic-ray
+problem is made of. V237 has what it costs to close.
+
+**AN OPEN DIFFERENCE, NOT THIS PACKAGE'S.** The table's last column: the port's FTFP ion arm leaves
+25% to 39% fewer secondaries than QBBC's, at every one of the five points, while the string products
+and the decayed list agree to a few per cent in their maxima. Whatever is missing is after the
+decay pass - `PropagateNuclNucl`'s capture into the two residuals or their de-excitation - and in
+Geant4 the final state exceeds the decayed list by up to 86 at C12 on Pb207 where the port's is
+below it. Nothing before P24 compared the ion arm with Geant4 (it is asserted on baryon number and
+charge, which a residual that keeps what should have evaporated still satisfies). It wants a
+package of its own, with the per-species rows `ftf_modelstat` gives the hadron arm.
+
+### V237: the secondary buffers and the slot - what the 1400 MeV neutron was, Bertini's lists sized from the window's top, and one slot's bytes before and after
+
+**The 1400 MeV neutron on Pb208** that V213's ledger counted as an overflow was the TEST's buffer:
+`final state 65 (+0 over 128), model capacity set, propagate products 65`, with a PreCompound list
+of 64 - test_bic_apply.cu's nucleon campaign ran a smaller envelope than the transport (512 tracks,
+2,048 collisions, 256 products, 64 PreCompound products against the slot's 1,024 / 8,192 / 512 /
+256). It runs through the slot's lists now and the event runs; Geant4's largest nucleon-campaign
+event is 72 secondaries, inside `kBicMaxSecondaries` = 128, which is kept.
+
+**Bertini.** Geant4's largest event over the campaign's 280,000 is 124 secondaries (pi+ at 8 GeV on
+Pb207), and the campaign's top energy is 8 GeV - QBBC gives Bertini pions to 12 GeV and nucleons to
+6, so the dump also runs those four points on lead (2,000 events each, `fs_top` rows): 136. The
+port's largest is 130 in the campaign and 145 at the top, and no `CollisionOutput` ever holds more
+than 113 particles. `kMaxOutgoingParticles` goes from 512 to 184 (145 with a quarter more); the
+campaign's 32,169 comparisons are unchanged to the digit at 184, and at 112 the capacity assertion
+fails (138 needed) - restored.
+
+**THE SLOT.** `had::kInteractionSecondaryCap` = `ftf::entry::kMaxSecondaries` = 856, with
+static_asserts that it holds both Binary-cascade final states; `sizeof(InteractionSlot<double>)` is
+pinned:
+
+| | before | after | |
+|---|--:|--:|---|
+| `fs`, `nuclear_fs`, `filled`, `pdg_mass` | 63,704 | 212,504 | 256 -> 856 secondaries, 248 B each |
+| `blir_fs` | 10,304 | 13,504 | 128 -> 168 |
+| Bertini's four `CollisionOutput`s and `BertiniWorkspace` | 209,608 | 143,024 | 512 -> 184 particles |
+| `InteractionSlot<double>` | **1,481,056** | **1,566,472** | +85,416 |
+| `ftf::entry::Workspace` | 539,096 | 671,256 | +132,160 |
+| one slot, both | **2,020,152** | **2,237,728** | +217,576 (10.8%) |
+| 128 slots (the pool's default) | 258.6 MB | 286.4 MB | out of the 0.95 GB V190 leaves beside the 86,016-byte stack |
+
+So the default pool still fits with 0.66 GB to spare for the track pool, the queue and the scene,
+where it had 0.69. The stack is untouched: every array here is in the slot, none on a frame.
+
+### V238: G4NucleiProperties is one copy with all four levels - a GenericIon past AME2012 has Geant4's mass, exact over 49,225 nuclides
+
+P2's `data/nuclei_mass_ame12.hh` carried `GetNuclearMass`'s particle-table and AME2012 levels with
+its own transcription of the AME2012 table and returned zero past it; the stepper refused such a
+GenericIon by name (`kIonWithoutNuclide`, 1 to 9 per ion beam, V217, V232) and the ion-ion
+Coulomb barrier refused it as `kNuclearMassNotTabulated`. P3's `deexcitation/nuclear_masses.cuh`
+had all four levels and a second AME2012 transcription (PORTED 2.1.3 had said the two wanted
+unifying). The two AME tables were compared entry by entry - 3,353 Z codes, 296 `shortTable`
+entries, 3,353 mass excesses, identical as text and as numbers - P2's was deleted, P3's four levels
+moved into `data::` unchanged, and `deex::` re-exports them. `data::nuclear_mass<real_t>` is
+Geant4's G4double answer converted once; `nuclear_mass_known` is "GetNuclearMass > 0".
+
+`nuclei_mass_levels.csv` is `GetNuclearMass`, `GetBindingEnergy` and `G4IonTable::GetIonMass` over
+every 1 <= A <= 400, 0 <= Z <= min(A, 150), with the level Geant4's own `IsInTable` calls chose (the
+theoretical table's is private, reached by explicit instantiation): 6 particle-table, 3,273
+AME2012, 5,797 theoretical, 148 Z == A, 399 Z == 0, 39,602 formula. tests/test_hadronic_xs.cu
+holds the level, the mass and the binding energy EXACTLY - 49,225 points, worst 0 - and Geant4's
+`GetIonMass` equals its `GetNuclearMass` on every row, which is what lets the port give a GenericIon
+this function. No formula mass on the grid is below zero, so what is still refused is what Geant4
+answers with zero: Z > A, A < 1. One coefficient is now written as Geant4 writes it, `1.55468*1e-6`
+where P3 had `1.55468e-6`; tests/test_deex_nuclear.cu asserts the two are the same double, and its
+exact buckets still read 0. Anti-vacuity: Weizsaecker's surface term 17.23 -> 17.24, and the
+theoretical table's A bound 339 -> 338, each fail it.
+
+tests/test_ion_transport.cu (a GPU test, not run here) asserted (Z=8, A=40) had no mass; it now
+asserts the formula's 37,493.505693394261 MeV, and Z > A none. `kIonWithoutNuclide` stays in the
+ledger as the tripwire for a track with no (Z, A) at all.
