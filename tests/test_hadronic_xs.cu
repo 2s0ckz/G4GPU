@@ -170,25 +170,22 @@ int check_radii(const std::string& dir, Cell* cells) {
     cmp(cells[7], nr_radius_nd<real_t>(a), nd, "RadiusND A=%d", a);
     cmp(cells[8], nr_radius_cb<real_t>(z, a), cb, "RadiusCB Z=%d A=%d", z, a);
 
-    // The mass table is the one place a refusal is expected and correct: G4NucleiProperties
-    // falls back to G4NucleiPropertiesTheoreticalTable outside AME2012, which is not ported.
-    // `in_ame` is Geant4's own IsInStableTable, so this checks that the port refuses exactly
-    // the nuclides Geant4 computes rather than measures - not one more and not one fewer.
-    const bool known = data::nuclear_mass_known(a, z);
-    if (known != (in_ame != 0)) {
+    // `in_ame` is Geant4's own IsInStableTable, which the port must answer for the same
+    // nuclides. Until P24 this was also the test of what the port REFUSED, because it carried
+    // no mass past AME2012; it carries all four of GetNuclearMass's levels now (data/
+    // nuclei_mass_ame12.hh, compared over 46,000 nuclides in `check_mass_levels`), so every row
+    // here has a mass and the membership is asked of the membership function.
+    const bool in_table = data::is_in_stable_table(a, z);
+    if (in_table != (in_ame != 0)) {
       char buf[160];
       std::snprintf(buf, sizeof buf,
                     "AME12 coverage Z=%d A=%d: port says %s, G4 IsInStableTable says %s", z, a,
-                    known ? "known" : "refused", in_ame ? "known" : "not in table");
+                    in_table ? "in table" : "not in table", in_ame ? "in table" : "not in table");
       note(cells[10], 1.0, buf);
     } else {
       ++cells[10].n;
     }
-    if (known) {
-      cmp(cells[9], data::nuclear_mass<real_t>(a, z), mass, "NuclearMass Z=%d A=%d", z, a);
-    } else {
-      ++cells[9].refused;
-    }
+    cmp(cells[9], data::nuclear_mass<real_t>(a, z), mass, "NuclearMass Z=%d A=%d", z, a);
   }
   std::fclose(f);
   return 0;
@@ -218,10 +215,11 @@ int check_masses(const std::string& dir, Cell& value, Cell& membership) {
     double mass = 0;
     if (std::sscanf(line, "%d,%d,%lf", &z, &a, &mass) != 3) { continue; }
     if (a >= 0 && a <= 295 && z >= 0 && z <= 120) { in_oracle[a][z] = true; }
-    if (!data::nuclear_mass_known(a, z)) {
+    if (!data::is_in_stable_table(a, z)) {
       char buf[160];
       std::snprintf(buf, sizeof buf,
-                    "Z=%d A=%d is in G4's stable table and the port refuses it", z, a);
+                    "Z=%d A=%d is in G4's stable table and the port's is_in_stable_table says "
+                    "not", z, a);
       note(membership, 1.0, buf);
       continue;
     }
@@ -229,18 +227,85 @@ int check_masses(const std::string& dir, Cell& value, Cell& membership) {
     cmp(value, data::nuclear_mass<real_t>(a, z), mass, "NuclearMass Z=%d A=%d", z, a);
   }
   std::fclose(f);
-  // The other direction, over the whole domain the port's own bounds admit.
+  // The other direction, over the whole domain the table's own bounds admit.
   for (int a = 1; a <= 295; ++a) {
     for (int z = 0; z <= a && z <= 120; ++z) {
-      if (data::nuclear_mass_known(a, z) && !in_oracle[a][z]) {
+      if (data::is_in_stable_table(a, z) && !in_oracle[a][z]) {
         char buf[160];
         std::snprintf(buf, sizeof buf,
-                      "Z=%d A=%d: the port claims a mass (%.17g MeV) that G4's stable table "
-                      "does not have", z, a, data::nuclear_mass<real_t>(a, z));
+                      "Z=%d A=%d: the port puts it in AME2012 and G4's stable table does not "
+                      "have it", z, a);
         note(membership, 1.0, buf);
       }
     }
   }
+  return 0;
+}
+
+// --------------------------------------------- 1c. ALL FOUR LEVELS of GetNuclearMass (P24)
+//
+// nuclei_mass_levels.csv is G4NucleiProperties::GetNuclearMass over every 1 <= A <= 400,
+// 0 <= Z <= min(A, 150) (ref/dump/dump_nuclei_mass.cc): the particle-table masses, AME2012, the
+// Moller-Nix theoretical table, `Z == A`, `Z == 0` and Weizsaecker's formula, with the level
+// Geant4's own IsInTable calls chose. Compared EXACTLY - the same double, not a tolerance -
+// because it is the same arithmetic in the same order, and a level boundary that is off by one
+// nuclide would show as a level mismatch before it showed as a mass. `ion_mass` is
+// G4IonTable::GetIonMass, what a GenericIon is created with; Geant4's own column is required to
+// equal its GetNuclearMass, which is what lets the port give a GenericIon this function.
+int check_mass_levels(const std::string& dir, Cell* cells, long long* per_level) {
+  FILE* f = open_oracle(dir, "nuclei_mass_levels.csv");
+  if (f == nullptr) { return 1; }
+  char line[512];
+  while (std::fgets(line, sizeof line, f) != nullptr) {
+    int a = 0, z = 0, level = 0;
+    double mass = 0, ion_mass = 0, binding = 0;
+    if (std::sscanf(line, "%d,%d,%d,%lf,%lf,%lf", &a, &z, &level, &mass, &ion_mass,
+                    &binding) != 6) {
+      continue;
+    }
+    const int mine = static_cast<int>(data::nuclear_mass_level(a, z));
+    if (level >= 0 && level < 7) { ++per_level[level]; }
+    char buf[200];
+    if (mine != level) {
+      std::snprintf(buf, sizeof buf, "level A=%d Z=%d: port %d, Geant4 %d", a, z, mine, level);
+      note(cells[0], 1.0, buf);
+    } else {
+      ++cells[0].n;
+    }
+    const double m = data::get_nuclear_mass(a, z);
+    if (m != mass) {
+      std::snprintf(buf, sizeof buf, "GetNuclearMass A=%d Z=%d level %d (ours %.17g, G4 %.17g)",
+                    a, z, level, m, mass);
+      note(cells[1], 1.0, buf);   // exact: any difference at all fails
+    } else {
+      ++cells[1].n;
+    }
+    if (ion_mass != mass) {
+      std::snprintf(buf, sizeof buf, "Geant4's GetIonMass A=%d Z=%d is %.17g, its "
+                    "GetNuclearMass %.17g", a, z, ion_mass, mass);
+      note(cells[2], 1.0, buf);
+    } else {
+      ++cells[2].n;
+    }
+    if (data::nuclear_mass<real_t>(a, z) != static_cast<real_t>(mass) ||
+        !data::nuclear_mass_known(a, z)) {
+      std::snprintf(buf, sizeof buf, "nuclear_mass<real_t> A=%d Z=%d is %.17g (known %d), "
+                    "Geant4 %.17g", a, z, static_cast<double>(data::nuclear_mass<real_t>(a, z)),
+                    data::nuclear_mass_known(a, z) ? 1 : 0, mass);
+      note(cells[3], 1.0, buf);
+    } else {
+      ++cells[3].n;
+    }
+    const double b = data::get_binding_energy(a, z);
+    if (b != binding) {
+      std::snprintf(buf, sizeof buf, "GetBindingEnergy A=%d Z=%d (ours %.17g, G4 %.17g)", a, z,
+                    b, binding);
+      note(cells[4], 1.0, buf);   // exact
+    } else {
+      ++cells[4].n;
+    }
+  }
+  std::fclose(f);
   return 0;
 }
 
@@ -479,10 +544,12 @@ int main() {
   const char* env = std::getenv("G4GPU_ORACLE");
   const std::string dir = (env != nullptr) ? env : "ref/oracle";
 
-  Cell radii[11], coul[3], hn[6], gg[2], bgg[5], mass_value, mass_member;
+  Cell radii[11], coul[3], hn[6], gg[2], bgg[5], mass_value, mass_member, levels[5];
+  long long per_level[7] = {};
   int io = 0;
   io += check_radii(dir, radii);
   io += check_masses(dir, mass_value, mass_member);
+  io += check_mass_levels(dir, levels, per_level);
   io += check_coulomb(dir, coul);
   io += check_hnxsc(dir, hn);
   io += check_ggcomp(dir, gg);
@@ -505,6 +572,20 @@ int main() {
                 "        G4NucleiPropertiesTableAME12's A <= 273 / Z <= 110 bounds\n",
                 mass_value.n);
     ++fails;
+  }
+  const char* lnames[5] = {"level chosen (exact)", "GetNuclearMass (exact)",
+                           "G4 GetIonMass == mass", "nuclear_mass<real_t>, known",
+                           "GetBindingEnergy (exact)"};
+  for (int i = 0; i < 5; ++i) { fails += report("G4NucleiProperties", lnames[i], levels[i]); }
+  std::printf("  nuclei_mass_levels.csv by Geant4's level: particle table %lld, AME2012 %lld, "
+              "theoretical %lld, Z==A %lld, Z==0 %lld, formula %lld\n", per_level[1],
+              per_level[2], per_level[3], per_level[4], per_level[5], per_level[6]);
+  // Every level must be on the grid, or a level is compared nowhere.
+  for (int l = 1; l <= 6; ++l) {
+    if (per_level[l] == 0) {
+      std::printf("  FAIL: nuclei_mass_levels.csv has no nuclide at level %d\n", l);
+      ++fails;
+    }
   }
   const char* cnames[3] = {"CoulombFactor(Z,A,p,E)", "CoulombFactor(p,nucleon,E)",
                            "HadronNucleonXsc barrier"};
@@ -613,36 +694,40 @@ int main() {
     }
   }
 
-  // THE REFUSAL ARM OF THE MASS TABLE
+  // WHAT IS STILL REFUSED, AND WHAT IS NOT (P24)
   //
-  // had_radii.csv cannot exercise it: every (Z, A) with a G4PARTICLEXS file is inside AME2012,
-  // so `refused` above is zero and that is correct. The refusal still has to be tested, because
-  // a data::nuclear_mass that answered for everything would be a theoretical mass table this
-  // port does not have - and the value it returned would be whatever the lookup found next to
-  // the missing entry. So it is asserted directly, on both sides.
+  // Until P24 the three nuclides past AME2012 below were asserted REFUSED - zero mass and
+  // `nuclear_mass_known` false - because the port had no theoretical table or formula behind
+  // AME2012. It has all four of GetNuclearMass's levels now, and those three are answered by
+  // levels 3 and 4 exactly as Geant4 answers them (`check_mass_levels` holds every one to the
+  // oracle). What is left of the refusal is what Geant4 itself answers with zero: A < 1, Z < 0,
+  // Z > A. Those must still return zero and not a neighbour's mass, because every caller that
+  // refuses on `nuclear_mass_known` relies on it.
   {
-    struct Probe { int z, a; bool known; const char* why; };
+    struct Probe { int z, a; int level; const char* why; };
     const Probe probes[] = {
-        {26, 56, true, "Fe56, the middle of the table"},
-        {1, 1, true, "the proton"},
-        {92, 238, true, "U238, the heaviest nuclide with a data file"},
-        {1, 20, false, "Z=1 A=20 - twenty neutrons and one proton, not a nuclide"},
-        {92, 150, false, "U150 - far proton-rich of the drip line"},
-        {110, 290, false, "Z=110 A=290 - past the top of AME2012"},
+        {26, 56, 2, "Fe56, the middle of AME2012"},
+        {1, 1, 1, "the proton, from the particle table"},
+        {92, 238, 2, "U238, the heaviest nuclide with a data file"},
+        {1, 20, 6, "Z=1 A=20 - Weizsaecker's formula, as in Geant4"},
+        {92, 150, 6, "U150 - far proton-rich, past both tables: the formula"},
+        {110, 290, 3, "Z=110 A=290 - past AME2012, inside the theoretical table"},
+        {0, 7, 5, "seven neutrons - Z == 0, A * m_n"},
+        {5, 5, 4, "five protons - Z == A, A * m_p"},
+        {7, 5, 0, "Z > A - Geant4 returns 0"},
+        {0, 0, 0, "A = 0 - Geant4 returns 0"},
     };
     for (const Probe& pr : probes) {
-      const bool got = data::nuclear_mass_known(pr.a, pr.z);
-      if (got != pr.known) {
-        std::printf("  FAIL: nuclear_mass_known(%d,%d) is %s, expected %s (%s)\n", pr.a, pr.z,
-                    got ? "true" : "false", pr.known ? "true" : "false", pr.why);
+      const bool known = data::nuclear_mass_known(pr.a, pr.z);
+      const int level = static_cast<int>(data::nuclear_mass_level(pr.a, pr.z));
+      if (level != pr.level || known != (pr.level != 0)) {
+        std::printf("  FAIL: (Z=%d, A=%d) answered at level %d, known %d; expected level %d "
+                    "(%s)\n", pr.z, pr.a, level, known ? 1 : 0, pr.level, pr.why);
         ++fails;
       }
-      // A refused nuclide must also return zero rather than a neighbour's mass: every caller
-      // in this package tests nuclear_mass_known and a non-zero value there would let a wrong
-      // mass through anything that forgot to.
-      if (!pr.known && data::nuclear_mass<real_t>(pr.a, pr.z) != real_t(0)) {
-        std::printf("  FAIL: nuclear_mass(%d,%d) is %.17g, not 0, for a nuclide outside "
-                    "AME2012\n", pr.a, pr.z, data::nuclear_mass<real_t>(pr.a, pr.z));
+      if (pr.level == 0 && data::nuclear_mass<real_t>(pr.a, pr.z) != real_t(0)) {
+        std::printf("  FAIL: nuclear_mass(%d,%d) is %.17g, not 0, where Geant4 returns 0\n",
+                    pr.a, pr.z, static_cast<double>(data::nuclear_mass<real_t>(pr.a, pr.z)));
         ++fails;
       }
     }

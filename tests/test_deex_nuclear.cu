@@ -289,6 +289,20 @@ int main() {
     report(pen, 1e-15, "BarrierPenetrationFactor");
   }
 
+  // P24 moved the four levels of G4NucleiProperties into data/nuclei_mass_ame12.hh and wrote the
+  // electron-binding coefficient as Geant4 writes it, `1.55468*1e-6`, where P3 had folded it to
+  // the literal `1.55468e-6`. Every mass this file compares is unchanged only if the two are the
+  // same double, so that is asserted rather than assumed: volatile, so the product is formed at
+  // run time the way Geant4's is, and not folded by the compiler into the literal.
+  {
+    volatile double c = 1.55468;
+    volatile double e = 1e-6;
+    const double product = c * e;
+    const bool same = (product == 1.55468e-6);
+    std::printf("1.55468*1e-6 %s 1.55468e-6 (%.17g)\n", same ? "==" : "!=", product);
+    if (!same) { ++fails; }
+  }
+
   std::printf("%s\n", fails == 0 ? "ALL OK" : "FAILURES ABOVE");
   return fails == 0 ? 0 : 1;
 }

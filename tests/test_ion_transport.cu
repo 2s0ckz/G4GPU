@@ -376,10 +376,19 @@ int main() {
         fail("(%d, %d) should map to %s", l.z, l.a, l.name);
       }
     }
-    // A nuclide outside AME2012 has no mass, and `step_hadron` refuses it by name rather than
-    // stepping a massless nucleus. (Z=8, A=40) is not a nuclide.
-    if (data::nuclear_mass_known(40, 8) || em::ion_particle_def<real_t>(8, 40).mass != real_t(0)) {
-      fail("(Z=8, A=40) is outside AME2012 and must come back with no mass");
+    // A nuclide outside AME2012 has the mass Geant4 gives it. Until P24 it had none, and
+    // `step_hadron` refused it by name (`kIonWithoutNuclide`); data/nuclei_mass_ame12.hh now
+    // carries G4NucleiProperties' theoretical table and Weizsaecker's formula, and (Z=8, A=40)
+    // is the formula's 37,493.505693394261 MeV in Geant4 and here (tests/test_hadronic_xs.cu
+    // holds every 1 <= A <= 400 to the oracle exactly). What is still refused is what Geant4
+    // itself gives zero, a "nuclide" with Z > A.
+    if (!data::nuclear_mass_known(40, 8) ||
+        em::ion_particle_def<real_t>(8, 40).mass != data::nuclear_mass<real_t>(40, 8) ||
+        em::ion_particle_def<real_t>(8, 40).mass != real_t(37493.505693394261)) {
+      fail("(Z=8, A=40) is past AME2012 and must come back with Geant4's formula mass");
+    }
+    if (data::nuclear_mass_known(8, 9) || em::ion_particle_def<real_t>(9, 8).mass != real_t(0)) {
+      fail("(Z=9, A=8) has Z > A, Geant4's mass is zero, and it must come back with none");
     }
   }
 

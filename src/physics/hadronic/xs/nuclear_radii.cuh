@@ -250,8 +250,9 @@ __host__ __device__ inline real_t nr_coulomb_factor(const Projectile<real_t>& p,
 /// G4NuclearRadii::CoulombFactor(Z, A, particle, ekin) - the hadron-on-nucleus form, used by
 /// all four BGG classes below their table's lower edge.
 ///
-/// The nuclear mass comes from data::nuclear_mass; a nuclide that table does not carry gives
-/// zero, and the caller must have tested data::nuclear_mass_known rather than let a zero mass
+/// The nuclear mass comes from data::nuclear_mass, all four of GetNuclearMass's levels since
+/// P24; a "nuclide" Geant4 itself gives no mass (Z > A) gives zero, and the caller must have
+/// tested data::nuclear_mass_known rather than let a zero mass
 /// through - a zero target mass makes totTcm zero and the factor zero, i.e. it silently turns
 /// a cross section off instead of reporting that the mass is missing.
 template <typename real_t>

@@ -422,8 +422,10 @@ __host__ __device__ inline real_t hadron_charge_sq_ratio(const data::Material<re
 /// mass  `G4IonTable::GetNucleusMass(Z, A)` = `G4NucleiProperties::GetNuclearMass(A, Z)`, which
 ///       is `data::nuclear_mass` - the same function the elastic recoil's kinematics were
 ///       computed with, so a transported recoil and the recoil that was emitted are the same
-///       particle. Zero for a nuclide outside AME2012; `data::nuclear_mass_known` is the test
-///       and the caller must make it, because a zero mass is a particle with beta exactly 1.
+///       particle. All four of GetNuclearMass's levels since P24, so a nuclide past AME2012 has
+///       the theoretical table's or the formula's mass as in Geant4; zero only where Geant4's
+///       own answer is zero (Z > A, A < 1). `data::nuclear_mass_known` is the test and the
+///       caller must make it, because a zero mass is a particle with beta exactly 1.
 /// charge  `G4double(Z)*eplus`.
 /// is_ion  `charge > eplus`, which is `G4BetheBlochModel::Initialise`'s own condition. True for
 ///       every nuclide this can be called for: (1,1), (1,2), (1,3), (2,3), (2,4) are the five

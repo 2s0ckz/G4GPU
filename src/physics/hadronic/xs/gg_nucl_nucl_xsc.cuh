@@ -36,8 +36,9 @@
 //
 // `if (cB > 0.)` wraps the whole calculation, and all five cross sections are set to exactly
 // zero when it is not. cB is ComputeCoulombBarier, which needs the target's nuclear mass; a
-// nuclide outside data/nuclei_mass_ame12.hh is refused by name rather than given a zero mass,
-// which would produce a barrier that is never passed and a cross section that is always zero.
+// nuclide data/nuclei_mass_ame12.hh gives no mass (only where Geant4 gives none: Z > A) is
+// refused by name rather than given a zero mass, which would produce a barrier that is never
+// passed and a cross section that is always zero.
 #pragma once
 #include <cmath>
 

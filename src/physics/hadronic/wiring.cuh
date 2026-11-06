@@ -282,17 +282,17 @@ enum class HadronicRefusal : int {
   /// something this transport is throwing away, and it says so instead of the stack quietly
   /// being too small.
   kElasticDropped,
-  /// A `kGenericIon` track with no nuclide, or with one outside AME2012.
+  /// A `kGenericIon` track with no nuclide, or with one whose mass Geant4 gives as zero.
   ///
-  /// `data::nuclear_mass` answers from the particle table for the six light nuclei and from
-  /// G4NucleiPropertiesTableAME12 for everything else, and refuses `G4NucleiProperties`'
-  /// remaining two levels - the Moller-Nix theoretical table and the Cameron/Weizsaecker
-  /// formula - by returning zero (data/nuclei_mass_ame12.hh). Nothing a QBBC elastic recoil can
-  /// be reaches them: the target is one of Geant4's elements and its isotopes are the naturally
-  /// occurring ones, all of which AME2012 carries. So this counter is the tripwire on that
-  /// claim, and it is also where a primary ion would land if one ever got past
-  /// `G4RunManager::CheckSpecies`. The track is killed with its energy deposited locally, which
-  /// is the conservative disposal for a particle whose mass is not known.
+  /// Until P24 `data::nuclear_mass` carried two of `G4NucleiProperties::GetNuclearMass`'s four
+  /// levels and returned zero past AME2012, and this counter booked 1 to 9 GenericIons per ion
+  /// beam - projectile and target fragments off the AME edge (docs/RISK.md V217, V232). It
+  /// carries all four now - the particle table, AME2012, the Moller-Nix theoretical table and
+  /// `Z == A` / `Z == 0` / Weizsaecker's formula, exact against Geant4 over every
+  /// 1 <= A <= 400 (docs/RISK.md V238) - so a real fragment always has its Geant4 mass, and what
+  /// is left here is a track with no (Z, A) at all, or Z > A: a bug in whatever emitted it, or a
+  /// primary ion past `G4RunManager::CheckSpecies`. Killed with its energy deposited locally, the
+  /// conservative disposal for a particle whose mass is not known.
   kIonWithoutNuclide,
   /// A real nucleus whose delta-ray transfer window is open.
   ///
@@ -549,8 +549,8 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "an elastic final state with more than one secondary - G4HadronElasticProcess "
              "keeps only GetSecondary(0)";
     case HadronicRefusal::kIonWithoutNuclide:
-      return "a GenericIon track with no (Z, A), or one outside AME2012 - killed with its "
-             "energy deposited";
+      return "a GenericIon track with no (Z, A), or one Geant4 gives no mass (Z > A) - killed "
+             "with its energy deposited";
     case HadronicRefusal::kIonDeltaRay:
       return "an ion's delta-ray channel (G4ionIonisation above ~147 MeV/u) - counted PER STEP, "
              "not per interaction";

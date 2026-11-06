@@ -33,8 +33,10 @@ enum class XsRefusal : int {
   /// because QBBC gives every b/c meson of G4HadParticles::sBCHadrons a Glauber-Gribov
   /// inelastic process. Kept for the same reason as the value above.
   kSCBMesonNucleonXscNS,
-  /// G4NucleiPropertiesTheoreticalTable and G4NucleiProperties::NuclearMass - a nuclide with
-  /// no measured mass in AME2012. See data/nuclei_mass_ame12.hh.
+  /// A nuclide whose `G4NucleiProperties::GetNuclearMass` is zero. Until P24 that was every
+  /// nuclide past AME2012, because the theoretical table and the formula were not ported here;
+  /// since P24 all four levels are (data/nuclei_mass_ame12.hh), and this is booked only where
+  /// Geant4's own answer is zero - Z > A or A < 1, not a nuclide.
   kNuclearMassNotTabulated,
   /// G4PhotoNuclearCrossSection - the CHIPS photonuclear parameterisation, which
   /// G4GammaNuclearXS needs above its data files' top energy and for hydrogen.
