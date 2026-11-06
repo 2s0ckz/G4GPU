@@ -213,9 +213,10 @@ reference with a σ gate; runs the proton depth-dose comparison; checks batch-vs
 equivalence and mesh import, that every physics switch changes the answer and that the pool
 size does not. Nothing lands on `main` without it green. Since RISK V221 it rebuilds only what
 changed - nvcc's own dependency file per engine unit and per test - and compiles and runs the
-tests six at a time: 33 minutes when nothing changed, about two hours when the engine rebuilds,
-which a change to any hadronic model header still forces (the header layout, not the tracking:
-V221).
+tests six at a time: 33 minutes when nothing changed, about two hours when the engine rebuilds.
+Since RISK V233 a change to a hadronic model header rebuilds the eight units that carry the
+models - the seven interaction units and the pool builder's - and not the sixteen stepping units:
+83 minutes for a touched cascade header where V221 measured 1 h 34 min.
 
 `build_extras.bat` is the rest, split off on 2026-10-02 (RISK V220) because none of it is
 physics and the two custom-hook projects alone cost two hours of ptxas: the viewer and the
@@ -344,7 +345,8 @@ V212-V219 for the destroyed-nucleus branch and what measuring the alpha beams ar
 Geant4's neutron general process, V220-V221 for the gate's split and its incremental build, and
 V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9,
 V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles, and
-V230-V232 for the neutron's interaction count carried in 11.1.1's order.
+V230-V232 for the neutron's interaction count carried in 11.1.1's order, and V233 for the header
+split that keeps the models out of the stepping units.
 
 #### Tables, materials and framework
 
@@ -615,7 +617,8 @@ build_extras.bat    # the rest: viewer, GUI, hook projects, 10 tests, both selft
 Individual pieces:
 
 ```
-build_engine.bat            out\transport_run.lib - one translation unit per stepping kernel
+build_engine.bat            out\transport_run.lib - one translation unit per kernel, plus the
+                            interaction pool's builder (the one unit with the models' host code)
 build_view.bat              the OpenGL viewer
 build_gui.bat               the geometry builder
 examples\B1\build.bat       example B1
@@ -732,7 +735,11 @@ The fourth line is P8e's, and the hook class moves into a header to go with it
 `build_hook_engine.bat <header> <type> <tag>` reads the engine's own kernel list, writes one
 translation unit per kernel for that hook type - the stepping kernels six at a time and, since
 P21, the five interaction kernels and the two drains one at a time, as the engine's own build
-does - and archives them into `out/hook_<tag>.lib`, which the project links.
+does - and archives them into `out/hook_<tag>.lib`, which the project links. Since RISK V233 it
+also writes the one unit that carries the interaction pool's builder, so the project's own `.cu`
+reads no hadronic model header: the model-carrying kernels are declared in
+`host/transport_run_impl.cuh` and defined in `host/transport_run_int_impl.cuh`, which only their
+units include.
 Without it the project's own
 `.cu` instantiates all eighteen kernels — which took three and a half minutes until the Urban
 ion branch went live and then stopped compiling at all, with the same `ptxas died with status

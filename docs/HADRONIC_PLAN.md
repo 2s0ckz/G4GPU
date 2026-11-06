@@ -597,7 +597,7 @@ what each remaining package closes:
 | package | scope | validation | after |
 |---|---|---|---|
 | **P22** | the neutron's interaction length on its track, 11.1.1's charging order, today's order selectable | the two neutron beams against shipped QBBC; the four ion beams at full counts | - |
-| **lead: header split** | the interaction and drain kernel bodies out of `host/transport_run_impl.cuh` into a header only their units include; a sizes-only header for what the host reads | the one-header rebuild drops from 23 units to 1 (V221) | P22 |
+| **lead: header split** | the interaction and drain kernel bodies out of `host/transport_run_impl.cuh` into a header only their units include; a sizes-only header for what the host reads | **done, V233** (2026-11-05): a stepping unit reads 43 hadronic headers where it read 133; a touched cascade header rebuilds 8 of 24 units in 83 min where it rebuilt 23 in 1 h 34 | P22 |
 | **P23b** | hyperon and s/c/b-meson cross-section branches; K0S/K0L/anti-hyperon (and b/c, if reached) decay tables; Bertini accepting K0L/K0S; FTF's hyperon, anti-hyperon and neutral-kaon rows | tapes and campaigns against the oracle, as P9d and P13 did; host-only | none (model-only) |
 | **P23a** | the strange species on tracks: rows, ionisation and ranges for the charged ones, decay in flight, the neutral step, interaction lengths from P23b's cross sections | tapes against the loss tables and `G4Decay`; beams: 10 GeV protons and pions, where they are made | P22, P23b |
 | **P23c** | the anti-nucleon family: `G4ComponentAntiNuclNuclearXS`, `G4AntiNuclElastic`, FTF's anti-nucleus arm, the Fritiof at-rest hand-over, the antiproton's processes | campaigns against FTF and the at-rest oracle; an antiproton beam | P23b |
@@ -622,7 +622,9 @@ One of each kind may run side by side; never two transport packages, never two p
 compile beside a GPU run. The sequence:
 
 1. P22 with P23b beside it (started 2026-10-03).
-2. The header split as soon as P22 lands, so every gate after costs one unit, not 23.
+2. The header split as soon as P22 lands, so every gate after costs one unit, not 23 - landed
+   2026-11-05 as V233: eight model-carrying units, not one (see the entry for why), and no
+   stepping unit.
 3. P23a with P24 beside it; then P23c with P26 beside it; P25 in any free transport slot.
 4. The performance phase once the kernel code has stopped moving; P27 last, as the acceptance.
 

@@ -14939,3 +14939,132 @@ it, step for step (V231), and B1's neutron rows sit against QBBC as it ships at 
 sigma where they sat at -74 and -33. The rows V219 attributed to it - deuteron, alpha_4000 and
 He3 - land at -0.1, -1.0 and +0.5 sigma. The order every neutron number before P22 was taken in
 is `G4GPU_NEUTRON_GP_ORDER=reordered`, and it reproduces them to the digit.
+
+### V233: the header split - a stepping unit reads 43 hadronic headers where it read 133, the models' host code lives in one unit, and a touched cascade header rebuilds the units that reach it
+
+V221 found the chain and left the fix for after P21 and P22: every engine unit included
+`host/transport_run_impl.cuh`, which included `host/transport_run.cuh`, which included
+`physics/hadronic/interaction_apply.cuh` - the one header that includes every hadronic model - so
+a touched cascade header made all twenty-three units stale, 78 minutes, for a change that reaches
+one of them. The kernels had been split one per unit (V65, V189); the headers never were.
+
+**WHAT CARRIED THE MODELS, MEASURED BEFORE ANYTHING MOVED.** `nvcc -M` on
+`src/host/transport_run_proton.cu` at 6c19224 lists 240 headers under `src/`, 133 of them under
+`physics/hadronic/`, and among those every file of `bertini/`, `bic/`, `ftf/`, `precompound/`,
+`stopping/`, `emextra/` and `deexcitation/` - 100 model-side headers in a unit that steps a
+proton. Three things put them there, and the first two were not in V221's account:
+
+1. `transport_run.cuh` included `interaction_apply.cuh` for four host-side needs: `sizeof` of a
+   `had::InteractionSlot` and one constructed image of it, `bic::imr::build_concrete_channels`,
+   `ftf::entry::build`, and `had::InteractionPool` BY VALUE as a kernel parameter.
+2. `host/hadronic_upload.cuh`, which every unit and every driver includes, included
+   `emextra/lepton_vd.cuh` for one data table (`MuVdTable` and its host builder) - and that header
+   includes `bertini/cascade_interface.cuh`, the gamma chain and the light-target collider - and
+   `deexcitation/fermi_breakup.cuh` for the Fermi pool's upload, which only the interaction
+   kernels read.
+3. The bodies of `run_interaction` and `run_emextra_drain` were in `transport_run_impl.cuh`.
+
+Moving the bodies alone changed nothing - measured, because it was the first thing done: with
+both kernels' bodies in a header of their own and the include line of item 1 still in
+`transport_run.cuh`, the proton unit read 133 hadronic headers, exactly as before. The include
+line and the upload header carried the models; the bodies were the reason the include line was
+there.
+
+**WHAT MOVED.**
+
+* `host/transport_run_int_impl.cuh`, new: the two kernel bodies, verbatim, after
+  `transport_run_impl.cuh` and `interaction_apply.cuh`. The seven `transport_run_int_*.cu` units
+  include it; `transport_run_impl.cuh` DECLARES the two kernels, which is all the launches in
+  `BeamOn`, `RaiseStackForInteractions`'s `cudaFuncGetAttributes` and the `extern template`
+  block need. A launching unit compiles against the declaration and links against the unit that
+  instantiated the body.
+* `physics/hadronic/interaction_pool.cuh`, new, the sizes-only header: `InteractionSlot` and
+  `InteractionPool` declared and not defined; `InteractionPoolOwner` (the device view's address,
+  the sizes the run prints, what was allocated as `void*`); `build_interaction_pool` and
+  `free_interaction_pool` declared, with `extern template` for double so that `Upload` and `Free`
+  instantiate neither. `host/interaction_pool_build.cuh` defines them - the constructed slot
+  image (never a memset, V104), the channel table, FTFP's pool through its own contract, the
+  Fermi pool's upload moved here from `hadronic_upload.cuh` - and ONE unit instantiates them:
+  `src/host/transport_run_pool.cu` in the engine, and `hook_pool.cu`, which
+  `tools/gen_hook_units.ps1` now writes, in every hook project's archive, because a hook project
+  links its own archive and not the engine's. The pool unit carries no kernel and
+  `build_engine.bat`'s object gate checks that it carries none.
+* The kernels take `const had::InteractionPool<real_t>*` - one device copy of the view, written
+  by the builder - instead of the view by value: a by-value parameter needs the complete type in
+  every launching translation unit, and the complete type is the models. Both macros in the
+  `extern template` block changed with the signatures, and `hook_kernels.cuh` is written against
+  the macros, so a hook project's declarations followed without a change to the generator's
+  parse (its count check still holds every `extern template` line to a parsed kernel).
+* `physics/hadronic/emextra/mu_vd_table.cuh`, new: the muon model's sampling table, its
+  constants and its host builder, out of `lepton_vd.cuh`, which includes it. `hadronic_upload.cuh`
+  includes the table and not the model.
+
+**AFTER**, the same `nvcc -M`:
+
+| unit | headers under `src/` | under `physics/hadronic/` | of the model side |
+|---|--:|--:|--:|
+| `transport_run_proton.cu` before | 240 | 133 | 100 |
+| `transport_run_proton.cu` after | 145 | 43 | 9 |
+| `transport_run_gamma.cu`, `transport_run.cu` after | 145 | 43 | 9 |
+| `transport_run_int_lightion.cu` after | 242 | 134 | 100 |
+| `transport_run_pool.cu` after | 177 | 134 | 100 |
+
+The nine that remain in a stepping unit are the two models' parameter headers
+(`bertini/cascade_params.cuh`, `bic/bic_params.cuh`: the stepper chooses the model by their
+windows), the neutron capture chain's `deexcitation/photon_evaporation.cuh` and the four small
+de-excitation headers it reads (`corrections`, `coulomb_barrier`, `deex_params`, `fragment`,
+`nuclear_masses`), and `emextra/mu_vd_table.cuh`. Every one is read by code the stepping kernels
+execute or by a table they upload; none is a cascade.
+
+**THE KERNELS THEMSELVES, LIKE FOR LIKE** - the same tree compiled without the split by gate
+ba59 (integ/neutron_gp at 6c19224, 2026-11-05) and with it, alone, by the same nvcc line: the
+proton stepping kernel 4,384 bytes of frame and 1,856 of parameter space on both sides, to the
+byte; `run_interaction<kLightIon>` 82,432 bytes of frame and 1,656 of parameter space before,
+82,288 and 1,520 after - the view left the parameter space and the frame lost 144 bytes with it.
+Nothing grew. The seven interaction frames ba59 built, for the record and for V190's table:
+FTFP 23,408, Bertini 39,504, Binary 90,592, light-ion 82,432, at-rest 41,248, photo-nuclear
+11,952, lepto-nuclear 4,112 bytes.
+
+**MEASURED AFTER THE GATE** (ba60, then `out/lead/exp_one_header.bat`: a warm build-only
+`build_all.bat`, then `bic/cascade_void.cuh` touched and the same again):
+
+Gate ba60 on integ/split (02f6c22), the same chain as ba59 on the tree without the split the
+same day: tables 1 h 16; build_all 2 h 05 with all twenty-four units rebuilt, 93 passed, ALL OK
+(ba59: 2 h 06, twenty-three units); the tests that the touched headers reached rebuilt in 767 s
+against ba59's 1,202 for the same 93, because `hadronic_upload.cuh`, `lepton_vd.cuh` and the
+engine headers reach fewer of them than `interaction_apply.cuh` did.
+
+The one-header experiment, `out/lead/exp_one_header.bat` on the same tree after ba60, the machine
+idle: a warm build-only `build_all.bat` first (0 units, 0 of 93 tests, 6 min 30 s, the drivers
+relinked as always), then `bic/cascade_void.cuh` touched and the same again. The dependency files
+called EIGHT of the twenty-four units stale - the seven `transport_run_int_*` units and
+`transport_run_pool` - and the sixteen stepping units and the engine's host unit fresh; 7 of
+93 tests rebuilt. The pass took 83 minutes, 67 of them the seven interaction units one
+after another, against V221's 1 h 34 min for the same touch with all twenty-three units stale.
+
+| what one touched cascade header rebuilds | V221 (before) | V233 (after) |
+|---|--:|--:|
+| engine units | 23 of 23 | 8 of 24 |
+| of them stepping units | 16 | 0 |
+| tests | 7 of 92 | 7 of 93 |
+| build-only wall time | 1 h 34 min | 83 min |
+
+WHY EIGHT AND NOT ONE. V221 expected the Binary unit alone, and that would need
+`interaction_apply.cuh` split per model as well: it is the one header that includes all four
+inelastic entry points, because `run_inelastic` dispatches to every arm and `InteractionSlot`
+carries every arm's buffers, so each interaction unit reads every model whatever bucket it
+instantiates. Splitting it per bucket is possible - a slot definition shared by all, one
+header per arm for the dispatch - and would take a cascade touch from eight units to three (the
+Binary, light-ion and at-rest units, since the at-rest chain calls Bertini and FTFP and the slot
+is shared). It is not done here; the sixteen stepping units were the cost that mattered, and the
+seven interaction units compile one at a time in any case.
+
+**WHAT TO KNOW WHEN CHANGING THE ENGINE.** A new kernel that carries a model goes in
+`transport_run_int_impl.cuh` with a declaration in `transport_run_impl.cuh` and a line in the
+`extern template` block, and gets a `transport_run_int_*.cu` unit; `gen_hook_units.ps1` splits it
+for a hook project on the day it is added, as before. A new per-run table the interaction kernels
+read goes on `InteractionPool` and into `build_interaction_pool`, and the host never sees its
+type. A test that wants the pool on the host includes `host/interaction_pool_build.cuh` and
+instantiates what it uses. The three tests that include `interaction_apply.cuh` directly
+(`test_inelastic_transport`, `test_emextra_wiring`, `test_emextra_transport`) still do, and still
+read every model, as they should.
