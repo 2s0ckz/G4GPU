@@ -462,8 +462,8 @@ class TransportEngine {
   /// How many interactions may run AT ONCE, which is the number of workspace slots the run
   /// allocates. Set before Upload; 0 asks for the default.
   ///
-  /// ONE SLOT IS 2,020,152 BYTES (1,604,928 before P9e's ion arm) -
-  /// `had::InteractionSlot` plus one `ftf::entry::Workspace` -
+  /// ONE SLOT IS 2,237,728 BYTES since P24 (2,020,152 before it, 1,604,928 before P9e's ion arm) -
+  /// `had::InteractionSlot` plus one `ftf::entry::Workspace`, both pinned by static_assert (V237) -
   /// and the engine prints the total. A shortage costs launches and not interactions: the queue
   /// is drained in chunks of this many, so every queued interaction runs whatever this is set
   /// to. docs/RISK.md V188 is why the capacity works that way round, and V189 is the
@@ -707,7 +707,7 @@ class TransportEngine {
   /// The workspace pool the interaction kernel runs in: `n_interaction_slots_` slots of
   /// `had::InteractionSlot` plus FTFP's own pool of the same count, through its own contract.
   ///
-  /// A STATED, PRINTED, MEASURED CAPACITY. One slot is 2,020,152 bytes and the queue is drained
+  /// A STATED, PRINTED, MEASURED CAPACITY. One slot is 2,237,728 bytes (V237) and the queue is drained
   /// in chunks of this many, so a shortage costs launches and not interactions - docs/RISK.md
   /// V188 has the argument and V189 the throughput measurement behind the default.
   /// Since docs/RISK.md V233 the slots, the channel table, FTFP's pool and the Fermi break-up

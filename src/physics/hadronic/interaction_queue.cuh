@@ -429,36 +429,23 @@ inline constexpr unsigned int kInteractionRngPurpose = 0x1E7Au;
 // The workspace pool
 // =============================================================================================
 
-/// Every per-thread buffer ONE interaction needs, as a view onto the pool.
-///
-/// Each member is an array of `n_slots`, and thread `i` takes element `i`. The struct is copied
-/// by value into the launch, like `had::HadronicWiring` and `ftf::entry::Handle` are.
-///
-/// WHAT A SLOT COSTS, and every number is `sizeof` rather than an estimate (the test prints the
-/// table from the types themselves):
-///
-///     ftf::entry::HadronWorkspace          458,096 B   the FTFP arm
-///     Bertini (workspace, nuclei model,    210,552 B   the Bertini arm and the at-rest one
-///       four CollisionOutput, ColliderOutput)
-///     Binary cascade (nucleons, scratch,   234,384 B   the BIC and light-ion arms
-///       fields, track pool, collisions, buffers, products)
-///     PreCompound + de-excitation arrays   536,576 B   the tail of ALL FOUR
-///     two HadFinalState<real_t, 256> and
-///       one HadronicStepResult              ~74,000 B
-///                                        -----------
-///                                        about 1.48 MB per slot
-///
-/// The de-excitation arrays are the largest item and they are shared by every arm, which is why
-/// the pool is one pool and not four: a slot that could run only FTFP would still carry them.
-/// Partitioning the queue by model would let the rarer arms have fewer slots, and is not done
-/// here because the measurement says the slot count is not the binding constraint - see
-/// docs/RISK.md V189.
-template <typename real_t>
-struct InteractionSlotCounts {
-  int n_slots = 0;
-  /// `kMaxSecondaries` of the final states in the pool. Not a template parameter, so that the
-  /// host allocator and the kernel cannot disagree about it.
-  static constexpr int kSecondaryCap = 256;
-};
+// The pool itself - every per-thread buffer ONE interaction needs - is `had::InteractionSlot` and
+// `had::InteractionPool` in physics/hadronic/interaction_apply.cuh, behind the contract
+// physics/hadronic/interaction_pool.cuh (docs/RISK.md V233): this header, which every stepping
+// kernel includes, names neither.
+//
+// WHAT A SLOT COSTS is `sizeof(had::InteractionSlot<double>)`, pinned by a static_assert beside
+// the definition: 1,566,472 bytes since P24 (V237: the four final-state arrays at 856 entries,
+// Bertini's lists at 184; 1,481,056 before), plus one `ftf::entry::Workspace` of 671,256 (V236,
+// pinned too), 2,237,728 bytes a slot, and `Upload` prints the total. A sizing table stood here
+// until P24 and had drifted from the types - as V167's had - together with an
+// `InteractionSlotCounts` whose `kSecondaryCap = 256` nothing read and which promised that the
+// host and the kernel could not disagree about a number that had become 856; both are gone, and
+// the pinned numbers cannot drift.
+//
+// The de-excitation arrays are the largest item and they are shared by every arm, which is why
+// the pool is one pool and not four: a slot that could run only FTFP would still carry them.
+// Partitioning the queue by model would let the rarer arms have fewer slots, and is not done
+// because the measurement says the slot count is not the binding constraint - docs/RISK.md V189.
 
 }  // namespace g4gpu::had

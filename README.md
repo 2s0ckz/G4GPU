@@ -345,8 +345,9 @@ V212-V219 for the destroyed-nucleus branch and what measuring the alpha beams ar
 Geant4's neutron general process, V220-V221 for the gate's split and its incremental build, and
 V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9,
 V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles, and
-V230-V232 for the neutron's interaction count carried in 11.1.1's order, and V233 for the header
-split that keeps the models out of the stepping units.
+V230-V232 for the neutron's interaction count carried in 11.1.1's order, V233 for the header
+split that keeps the models out of the stepping units, and V234-V238 for the capacities P24 read
+off Geant4's own runs, the slot they make, and the nuclear mass's four levels.
 
 #### Tables, materials and framework
 
@@ -414,9 +415,9 @@ closed - the same question has the mechanism.
 
 | Geant4 | what | status |
 |---|---|---|
-| the light-ion reaction's 128-entry final state | what the Binary cascade still refuses, by capacity: 39 of 20,000 Fe56-on-Fe56 events at 1 GeV per nucleon (0.2%), one 1400 MeV neutron on Pb208 in 20,000 past the secondary buffer, and no event of either alpha beam | Phase 3, nearly closed: the destroyed-nucleus branch `FillVoidNucleusProducts` is transcribed and taped since P20 ([`docs/PORTED.md`](docs/PORTED.md) 2.1.10), neither ion campaign refuses an event by any name, and what a 4 GeV alpha beam still books is 0.058% of its interactions - secondaries of a species the particle table has no row for, and ions outside AME2012 |
+| the Binary cascade's and the light-ion reaction's capacities | **closed by P24** (RISK V235, V237): the light-ion final state holds 168, read off Geant4's own run of the campaign (its largest event is 134), and all 20,000 Fe56-on-Fe56 events at 1 GeV per nucleon run; the one 1400 MeV neutron on Pb208 past a buffer was the test's own 64-entry list, not the transport's; over the 127 campaign cases nothing is refused by capacity. What a 4 GeV alpha beam still books is secondaries of a species the particle table has no row for (P23a) | Phase 3, closed |
 | Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in) and `generateSCMmuonAbsorption` | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the two entries named. K0S and K0L as projectiles run since P23b (RISK V227 reverses V139: Geant4 mixes them back to K0 or anti-K0 on a coin), and the anti-hyperon decay tables are on main | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
-| the anti-nucleus arm of `PropagateNuclNucl`; a 512-track list at one grid point | what the FTF model still refuses: anti-nucleus projectiles past the string stage, and 13% of Fe56-on-Pb207 events at 20 GeV per nucleon | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it |
+| the anti-nucleus arm of `PropagateNuclNucl` | what the FTF model still refuses: anti-nucleus projectiles past the string stage. The 512-track list is 832 since P24 (RISK V236, read off QBBC's own FTFP at Fe56 on Pb207 at 20 GeV per nucleon) and the ion grid runs 36,000 of 36,000 | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it; what its ion arm leaves is open question 8 |
 | the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and P15 calls it |
 | `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; everything below those energies is wired (2.1.16), and a QBBC photon never reaches QGS through its general process in any case (RISK V207) | Phase 3, remaining; QGS is not in this port |
 | `G4GammaGeneralProcess`'s own zone totals and EM fractions (`LambdaGeneral0/2/6/10`, `ProbGeneral1/3/4/7/8/11-13`) | the tables the general process reads instead of its models, which differ from them by up to 0.43% below 2 MeV and 0.93% across the giant resonance | not read: the port reads the models, and Geant4's table 9 since P21; a scratch read of the totals alone moved the B1 gate by +0.036% (RISK V225) |
@@ -596,6 +597,15 @@ send every one of them somewhere else.
    counts; the 840 MeV alpha stays at -0.85% (3.2 σ), which is the ion-inelastic chain, not this.
    The track state grew from 248 to 264 bytes, the pool holds 6.3% fewer tracks, and the gamma
    gate's event loop did not slow.
+
+ 8. **FTFP's ion arm leaves a quarter to a third fewer secondaries than QBBC's** (RISK V236,
+    found by P24). At all five heavy points of the ion grid - 86.4 per event against Geant4's
+    141.2 for C12 on Pb207, 191.2 against 256.5 for Fe56 on Pb207 at 20 GeV per nucleon - the
+    string products and the decayed list agree with Geant4's to a few per cent, so what is
+    missing comes after the decay pass, in `PropagateNuclNucl`'s capture into the two residuals
+    or their de-excitation. Nothing before P24 compared the ion arm with Geant4 beyond baryon
+    number and charge, which a residual that keeps what should have evaporated still satisfies.
+    It wants a package of its own, with the per-species rows `ftf_modelstat` gives the hadron arm.
 
 
 ---
