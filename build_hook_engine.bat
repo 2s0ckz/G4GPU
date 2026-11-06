@@ -72,7 +72,11 @@ rem identical to each other in everything but the kernel they name. An "if defin
 rem here would be docs/RISK.md S4 again: right within one pipeline run, and wrong the moment
 rem anyone sets the variable by hand, at which point the project links kernels compiled before
 rem the change under test.
-for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Obj "%G4GPU_HOOK_LIB%" -Unit "%HOOK_HDR%" -SrcDir "%~dp0src"`) do set FRESH=%%R
+rem AND AGAINST THE RECIPE - the arch flags and which nvcc - kept beside the archive since docs/RISK.md
+rem V239: an archive compiled for one card is not the one a different G4GPU_ARCH asks for, and the
+rem timestamps cannot say so. Gate ba62, the first with two -gencode pairs, found both archives "up
+rem to date" at one. The engine's units have carried a recipe since V221; this is the same file.
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Obj "%G4GPU_HOOK_LIB%" -Unit "%HOOK_HDR%" -SrcDir "%~dp0src" -Recipe "%G4GPU_HOOK_LIB%.recipe" -RecipeNow "%G4GPU_ARCH%"`) do set FRESH=%%R
 if /i "%FRESH%"=="fresh" (
   popd
   echo hook_%HOOK_TAG%.lib is up to date
@@ -174,6 +178,7 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Recipe "%G4GPU_HOOK_LIB%.recipe" -RecipeNow "%G4GPU_ARCH%" -Stamp
 popd
 echo built hook_%HOOK_TAG%.lib
 exit /b 0

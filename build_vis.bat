@@ -13,7 +13,9 @@ pushd "%~dp0"
 if not exist out mkdir out
 set G4GPU_VIS_OBJ=%~dp0out\vis_manager.obj
 set FRESH=stale
-for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Obj "%~dp0out\vis_manager.obj" -Unit "%~dp0src\render\vis_manager.cu" -SrcDir "%~dp0src"`) do set FRESH=%%R
+rem Against the recipe too, as build_hook_engine.bat since docs/RISK.md V239: the object carries
+rem device code for whatever G4GPU_ARCH said when it was compiled.
+for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Obj "%~dp0out\vis_manager.obj" -Unit "%~dp0src\render\vis_manager.cu" -SrcDir "%~dp0src" -Recipe "%~dp0out\vis_manager.obj.recipe" -RecipeNow "%G4GPU_ARCH%"`) do set FRESH=%%R
 if /i "%FRESH%"=="fresh" (
   popd
   echo vis_manager.obj is up to date
@@ -25,6 +27,7 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\freshness.ps1" -Recipe "%~dp0out\vis_manager.obj.recipe" -RecipeNow "%G4GPU_ARCH%" -Stamp
 popd
 echo built vis_manager.obj
 exit /b 0

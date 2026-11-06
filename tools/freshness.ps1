@@ -45,6 +45,12 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+function Get-RecipeString([string]$now) {
+  $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+  $path = if ($nvcc) { $nvcc.Source } else { "?" }
+  return "$now | nvcc=$path"
+}
+
 if ($Obj) {
   try {
     if (-not (Test-Path -LiteralPath $Obj)) { 'stale'; exit 0 }
@@ -55,17 +61,21 @@ if ($Obj) {
     $h = Get-ChildItem -LiteralPath $SrcDir -Recurse -File |
          Where-Object { $_.Extension -in '.cuh', '.hh', '.h', '.inc' } |
          Measure-Object -Property LastWriteTimeUtc -Maximum
-    if ($null -eq $h.Maximum) { 'stale' }
-    elseif ($h.Maximum -gt $o -or $u -gt $o) { 'stale' }
-    else { 'fresh' }
+    if ($null -eq $h.Maximum) { 'stale'; exit 0 }
+    if ($h.Maximum -gt $o -or $u -gt $o) { 'stale'; exit 0 }
+    # THE RECIPE, when the caller keeps one beside the product (docs/RISK.md V239): a hook
+    # archive or the viewer's object compiled for one card is not the one a different G4GPU_ARCH
+    # asks for, and no timestamp says so. Gate ba62, the first with two -gencode pairs, found
+    # both hook archives "up to date" at one architecture. Without -Recipe the answer is the
+    # old one, so a caller that keeps no recipe is unchanged.
+    if ($Recipe) {
+      if (-not (Test-Path -LiteralPath $Recipe)) { 'stale: no recipe'; exit 0 }
+      $stored = (Get-Content -LiteralPath $Recipe -Raw).Trim()
+      if ($stored -ne (Get-RecipeString $RecipeNow).Trim()) { 'stale: recipe changed'; exit 0 }
+    }
+    'fresh'
   } catch { 'stale' }
   exit 0
-}
-
-function Get-RecipeString([string]$now) {
-  $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
-  $path = if ($nvcc) { $nvcc.Source } else { "?" }
-  return "$now | nvcc=$path"
 }
 
 if ($Stamp) {
