@@ -15203,6 +15203,50 @@ pinned:
 So the default pool still fits with 0.66 GB to spare for the track pool, the queue and the scene,
 where it had 0.69. The stack is untouched: every array here is in the slot, none on a frame.
 
+**LEAD ADDENDUM, 2026-11-06 (integration gate ba61): the 856-entry final state tripled a
+local that was on every interaction kernel's stack, and the drains showed where.** The seven
+interaction units compiled under ba61 with this entry's slot, and the frames against ba60's (the
+same tree without P24) were:
+
+| kernel | ba60 frame | ba61 frame, P24 as briefed | ba61 frame, filled in place |
+|---|--:|--:|--:|
+| `run_interaction<kFtfp>` | 23,408 | 71,264 | 2,688 |
+| `run_interaction<kBertini>` | 39,504 | 81,248 | 12,720 |
+| `run_interaction<kBinary>` | 90,592 | 138,496 | 69,920 |
+| `run_interaction<kLightIon>` | 82,288 | 130,288 | 61,728 |
+| `run_interaction<kAtRest>` | 41,248 | 82,944 | 14,368 |
+| `run_emextra_drain<kPhotoNuclear>` | 11,952 | 11,808 | - |
+| `run_emextra_drain<kLeptoNuclear>` | 4,112 | 4,096 | - |
+
+The five kernels that call `fill_result` grew by 42 to 48 kB each - 600 secondaries of 80 bytes,
+the final state's growth from 256 to 856 - and the two drains, which fill the slot in place with
+`fill_result_into`, did not move. `fill_result` returns a named local `HadronicStepResult` by
+value; `run_interaction` placement-newed the return into `slot->filled` on the argument that
+C++17's copy elision puts the prvalue straight into the slot, and the elision does happen, but
+the callee's own `out` is not a prvalue and nvcc keeps it in the frame. It had been there since
+P15 at 20 kB (ftfp's 23,408 against FTFP's own 1,376, which V210 noticed when it wrote the drains'
+`fill_result_into` for exactly this reason); P24 made it 68,544. The device stack raise reads the
+largest frame off the kernels (V190): at 138,496 it would ask 143,360 bytes a thread, which over
+the RTX 3070's 70,656 resident threads is 10.1 GB of an 8 GB card, so the first hadron of the
+first GPU test would have exited with V190's FATAL. Gate ba61 did not get that far: its test build stopped first on the slot-size pin in
+`test_inelastic_transport.cu` (1,481,056, P24's number unupdated in a GPU test its brief kept it from
+compiling), and the frames above are from the engine it had built by then.
+
+The fix is the drains' call: `run_interaction` fills `slot->filled` in place with
+`had::fill_result_into`, which `tests/test_emextra_wiring.cu` holds equal to `fill_result` field
+for field over thousands of final states. The third column is the result, compiled alone with the
+engine's flags: every interaction kernel below its ba60 frame, because the 20 kB had been paid
+all along. The raise now asks 77,824 bytes a thread.
+
+WHAT THIS SAYS ABOUT THE OTHER CARD. The reservation is per resident thread of the device, and
+the Titan V holds 80 x 2,048 = 163,840 of them against the 3070's 46 x 1,536 = 70,656: ba60's
+86,016 bytes a thread would be 14.1 GB on a 12 GB card, and 77,824 bytes 11.9 GB.
+Hadron runs on the Titan V need the Binary cascade's own frame cut, which is the performance
+phase's; the photon and electron gates never raise the stack. An H100's 132 x 2,048 threads at
+77,824 bytes are 19.6 GB of 80. V239 carries the measurement.
+On the 3070 ba61b's raise asked 77,824 bytes a thread and reported 1.42 GB of 8.00 GB left
+(70,656 resident threads: 5.1 GB reserved).
+
 ### V238: G4NucleiProperties is one copy with all four levels - a GenericIon past AME2012 has Geant4's mass, exact over 49,225 nuclides
 
 P2's `data/nuclei_mass_ame12.hh` carried `GetNuclearMass`'s particle-table and AME2012 levels with
