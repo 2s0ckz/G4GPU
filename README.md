@@ -651,7 +651,7 @@ later); an NVIDIA GPU of compute capability 7.0 or above; and 32 GB of RAM, beca
 interaction units' ptxas peaks between 6 and 20 GB each (they are compiled one at a time).
 `setupenv.bat` asks `nvidia-smi` which cards are present and compiles for exactly those - an
 H100 gets sm_90 and nothing else - plus the compute_70 PTX, so the same binary also runs on any
-other card from Volta up (docs/RISK.md V234 measured what that first-launch JIT costs). A card
+other card from Volta up (docs/RISK.md V239 measured what that first-launch JIT costs). A card
 this tree has never been compiled for is a ptxas run nobody has gated: `build_engine_unit.bat`'s
 -O ladder catches a ptxas that dies and says so.
 

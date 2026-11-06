@@ -41,7 +41,7 @@ rem transport_run_impl.cuh (V65); nvcc 12 warns (#20279-D) that its future defau
 rem -static-global-template-stub=true, will break exactly that, so the build says false.
 rem -Wno-deprecated-gpu-targets: nvcc 12.9 warns on every compile that offline compilation for
 rem architectures before sm_75 "will be removed in a future release". That is the compute_70
-rem floor below, it is deliberate (V234), and CUDA 12.x is the toolkit this tree stays on, so the
+rem floor below, it is deliberate (V239), and CUDA 12.x is the toolkit this tree stays on, so the
 rem warning says nothing a build log needs forty times. Anything the caller had in the variable
 rem already is kept after them.
 if defined NVCC_APPEND_FLAGS (set "NVCC_APPEND_FLAGS=-static-global-template-stub=false -Wno-deprecated-gpu-targets %NVCC_APPEND_FLAGS%") else (set "NVCC_APPEND_FLAGS=-static-global-template-stub=false -Wno-deprecated-gpu-targets")
@@ -50,7 +50,7 @@ rem ---------------------------------------------------------------- the GPU arc
 rem
 rem Every nvcc line that builds device code says %G4GPU_ARCH% (build_all.bat, build_engine_unit.bat,
 rem the drivers, examples/B1 and the projects the model builder writes), so the cards are chosen
-rem here once - and since docs/RISK.md V234 they are DETECTED rather than assumed: nvidia-smi is
+rem here once - and since docs/RISK.md V239 they are DETECTED rather than assumed: nvidia-smi is
 rem asked for the compute capability of every card present, and each distinct one from 7.0 up
 rem becomes a -gencode pair with its own SASS, so a clone on another machine compiles for exactly
 rem the card it has (an H100 gets sm_90 and nothing else) and the gating machine gets its RTX 3070
@@ -58,7 +58,7 @@ rem (8.6, CUDA device 0, where every gate runs) and its Titan V (7.0, device 1).
 rem ptxas runs once per card. The compute_70 PTX is embedded as well - beside the sm_70 SASS when
 rem a Volta card is present, which costs no ptxas time, or on its own - so the same binary runs
 rem on ANY NVIDIA card from Volta up under a CUDA 12 driver: a card no pair names JITs the PTX at
-rem its first launch and the driver caches the result (V234 measured what that costs). Volta is
+rem its first launch and the driver caches the result (V239 measured what that costs). Volta is
 rem the floor because the gamma and lepton stepping kernels take `__grid_constant__` parameters
 rem (compute 7.0), not because of the toolkit: a card below it is refused by name here, and a
 rem machine whose nvidia-smi answers nothing gets the PTX pair alone and a line saying so.

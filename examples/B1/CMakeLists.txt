@@ -36,7 +36,7 @@ option(G4GPU_USE_PREBUILT_ENGINE
 #----------------------------------------------------------------------------
 # Compiler settings.
 #
-# 70 and 86 are the gating machine's two cards (the Titan V and the RTX 3070; docs/RISK.md V234),
+# 70 and 86 are the gating machine's two cards (the Titan V and the RTX 3070; docs/RISK.md V239),
 # the same pair setupenv.bat's G4GPU_ARCH defaults to. CMAKE_CUDA_ARCHITECTURES is the portable
 # way to say it; override it on the command line for a different card.
 #
