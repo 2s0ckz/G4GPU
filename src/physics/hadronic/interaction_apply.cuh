@@ -73,18 +73,31 @@ namespace bert = g4gpu::physics::hadronic::bert;
 namespace stop = g4gpu::physics::hadronic::stopping;
 namespace ftfe = g4gpu::hadronic::ftf::entry;
 
-/// `kMaxSecondaries` of the final states in a slot. 256 is what `tests/test_stopping.cu` ran
-/// 1,000,000 at-rest captures at and comfortably above the 128 `bic::kBlirMaxSecondaries` a
-/// fusion event can fill; an overflow is counted by name (`kInelasticSecondaryOverflow`), never
-/// silent.
-inline constexpr int kInteractionSecondaryCap = 256;
+/// `kMaxSecondaries` of the final states in a slot: the widest final state any arm can hand back,
+/// which is FTFP's (`ftfe::kMaxSecondaries`, 856).
+///
+/// IT WAS 256, AND 256 REFUSED A LARGE SHARE OF THE ION BEAMS' FTFP INTERACTIONS (P24, docs/RISK.md
+/// V236-V237). Nothing had measured it against an ion: FTFP's ion arm was validated with a
+/// `HadFinalState<double, 512>` of the test's own, "for whoever sizes the transport's own", and
+/// QBBC's own FTFP leaves more than 256 secondaries in 863 of 2,000 Fe56-on-Pb207 events at 20 GeV
+/// per nucleon, 183 of 500 at 8 GeV per nucleon and 54 to 119 of 500 for Fe56 on Fe56, O16 and
+/// C12 on Pb207 at 20 (ref/oracle/ftf_capacity.csv). The other arms' largest events are far
+/// inside it - the light-ion reaction's `bic::kBlirMaxSecondaries`, the nucleon cascade's
+/// `bic::kBicMaxSecondaries`, Bertini's 130 over its 280,000-event campaign - and the assertions
+/// below keep it so. An overflow is still counted by name (`kInelasticSecondaryOverflow`).
+inline constexpr int kInteractionSecondaryCap = ftfe::kMaxSecondaries;
+static_assert(kInteractionSecondaryCap >= bic::kBlirMaxSecondaries &&
+                  kInteractionSecondaryCap >= bic::kBicMaxSecondaries,
+              "the slot's final state must hold every arm's own final state - copy_final_state "
+              "counts what does not fit, but a slot narrower than an arm is a refusal by design");
 
-/// The Binary cascade's list capacities in a slot - `tests/test_bic_apply.cu`'s ION envelope,
-/// which contains the nucleon one. See `InteractionSlot`'s cascade block.
-inline constexpr int kCascadePoolCap = 1024;
-inline constexpr int kCascadeCollisionCap = 8192;
-inline constexpr int kCascadeProductCap = 512;
-inline constexpr int kCascadePrecoCap = 256;
+/// The Binary cascade's list capacities in a slot - since P24 named in `bic/light_ion_reaction.cuh`
+/// (`bic::kSlot*`), so that `tests/test_bic_apply.cu` runs both of its campaigns through exactly
+/// the lists the transport gives them. See `InteractionSlot`'s cascade block.
+inline constexpr int kCascadePoolCap = bic::kSlotPoolCap;
+inline constexpr int kCascadeCollisionCap = bic::kSlotCollisionCap;
+inline constexpr int kCascadeProductCap = bic::kSlotProductCap;
+inline constexpr int kCascadePrecoCap = bic::kSlotPrecoCap;
 
 /// Everything ONE thread inside the interaction kernel needs, by value.
 template <typename real_t>
@@ -109,10 +122,10 @@ struct InteractionSlot {
   // the campaign that takes the cascade arm reads all of it", and the nucleon arm's own
   // envelope (512 / 2,048 / 256 / 64) fits inside it. The ion arm's own arrays follow. The cost,
   // measured with `sizeof`: 411,136 bytes a slot, 1,069,920 -> 1,481,056.
-  bic::Nucleon nucleons[256];
-  deex::Vec3d nucleus_mom[256];
-  double fermi_p[256];
-  bic::NucleusSortEntry sort_sums[256];
+  bic::Nucleon nucleons[bic::kSlotNucleons];
+  deex::Vec3d nucleus_mom[bic::kSlotNucleons];
+  double fermi_p[bic::kSlotNucleons];
+  bic::NucleusSortEntry sort_sums[bic::kSlotNucleons];
   double flat_block[bic::kFlatBlock];
   double proton_field[bic::kMaxFieldTable];
   double neutron_field[bic::kMaxFieldTable];
@@ -125,10 +138,10 @@ struct InteractionSlot {
   // nucleus builds share `nucleus_mom`/`fermi_p`/`sort_sums`/`flat_block` on purpose - see
   // `bic::BlirStorage`), `SortResult`'s two lists, and `Interact`'s one-track-per-nucleon
   // secondary list, which P9e measured as a 38 kB stack local that killed its test when it was one.
-  bic::Nucleon projectile_nucleons[256];
-  bic::BlirProduct spectators[512];
-  bic::BlirProduct cascaders[512];
-  bic::CascadeTrack initial[256];
+  bic::Nucleon projectile_nucleons[bic::kSlotNucleons];
+  bic::BlirProduct spectators[bic::kSlotSpectatorCap];
+  bic::BlirProduct cascaders[bic::kSlotCascaderCap];
+  bic::CascadeTrack initial[bic::kSlotInitialCap];
 
   // ---- PreCompound and P3's de-excitation, the tail of all four arms.
   deex::Fragment evap_list[4096];
@@ -138,7 +151,7 @@ struct InteractionSlot {
   deex::DeexProduct preco_out[1024];
 
   // ---- the final states, which are far too big for a kernel stack: one
-  // HadFinalState<real_t, 256> alone is about 18 kB against `run_step_hadron`'s whole 3,936 B
+  // HadFinalState<real_t, 856> alone is 68,544 B against `run_step_hadron`'s whole 3,936 B
   // frame.
   physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap> fs;
   physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap> nuclear_fs;
@@ -155,6 +168,20 @@ struct InteractionSlot {
   bic::BicFinalState bic_fs;
   bic::BlirFinalState blir_fs;
 };
+
+/// ONE SLOT'S BYTES, pinned the way docs/RISK.md V167 pins FTFP's workspace: a capacity raised
+/// is a capacity measured, and this is the measurement. P24 (docs/RISK.md V234-V237) took it from
+/// 1,481,056 to 1,566,472 bytes: +148,800 for the four final-state arrays at 856 where they held
+/// 256 (`fs`, `nuclear_fs` and `filled` at 80 bytes a secondary, `pdg_mass` at 8), +3,200 for
+/// `blir_fs` at 168, and -66,584 for Bertini's lists at `kMaxOutgoingParticles` = 184 where they
+/// held 512 (four `CollisionOutput`s and the coalescence scratch). With FTFP's own
+/// `ftfe::Workspace` (539,096 -> 671,256) a slot is 2,237,728 bytes where it was 2,020,152, and
+/// the pool's default 128 slots 286.4 MB where they were 258.6 MB, out of the 0.95 GB V190 leaves
+/// beside the 86,016-byte device stack. A change to any array here fails the build until this
+/// number, the comment and docs/RISK.md move together.
+static_assert(sizeof(InteractionSlot<double>) == 1566472,
+              "InteractionSlot<double> changed size - update this pin, its comment and the "
+              "slot budget in docs/RISK.md (V234-V237) together. docs/RISK.md V167.");
 
 /// What a launch is handed by value.
 template <typename real_t>
@@ -195,7 +222,7 @@ __host__ __device__ inline bic::BicStorage bic_storage_of(InteractionSlot<real_t
   st.scratch.fermi_p = s.fermi_p;
   st.scratch.test_sums = s.sort_sums;
   st.scratch.flat_block = s.flat_block;
-  st.scratch.capacity = 256;
+  st.scratch.capacity = bic::kSlotNucleons;
   st.proton_field = s.proton_field;
   st.neutron_field = s.neutron_field;
   st.field_capacity = bic::kMaxFieldTable;
@@ -230,7 +257,7 @@ __host__ __device__ inline bic::BlirStorage blir_storage_of(InteractionSlot<real
   st.scratch.fermi_p = s.fermi_p;
   st.scratch.test_sums = s.sort_sums;
   st.scratch.flat_block = s.flat_block;
-  st.scratch.capacity = 256;
+  st.scratch.capacity = bic::kSlotNucleons;
   st.proton_field = s.proton_field;
   st.neutron_field = s.neutron_field;
   st.field_capacity = bic::kMaxFieldTable;
@@ -246,11 +273,11 @@ __host__ __device__ inline bic::BlirStorage blir_storage_of(InteractionSlot<real
   st.cascade.preco_products = s.preco_products;
   st.cascade.preco_capacity = kCascadePrecoCap;
   st.spectators = s.spectators;
-  st.spectator_capacity = 512;
+  st.spectator_capacity = bic::kSlotSpectatorCap;
   st.cascaders = s.cascaders;
-  st.cascader_capacity = 512;
+  st.cascader_capacity = bic::kSlotCascaderCap;
   st.initial = s.initial;
-  st.initial_capacity = 256;
+  st.initial_capacity = bic::kSlotInitialCap;
   return st;
 }
 

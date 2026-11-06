@@ -32,6 +32,7 @@
 // all three windows and both de-excitation choices, read from `bertini_params.csv`; this test
 // asserts that the cases the oracle contains are inside their window and uses the de-excitation
 // choice the window names. docs/RISK.md V118.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -493,6 +494,9 @@ int main() {
   // Which arm of retryInelasticNucleus asked - see RetryArms in cascade_interface.cuh.
   long long n_retry_elastic = 0, n_retry_balance = 0;
   int worst_mult = 0;
+  // P24: the most particles any of the four `CollisionOutput`s held after an event, refused
+  // events included - what `kMaxOutgoingParticles` has to cover.
+  int worst_outgoing = 0;
   std::vector<double> refused_frac, case_worst_sigma;
   int n_biased_cases = 0;
 
@@ -552,6 +556,8 @@ int main() {
           bert::apply_yourself(proj, nuc, *fs, win.range.deexcite, par, lim, *model, *go, *co,
                                *dx, *tp, epo, *ws, lt, pool, pws, 0, rng);
       ++n_events;
+      worst_outgoing = std::max({worst_outgoing, go->n_particles, co->n_particles,
+                                 dx->n_particles, tp->n_particles});
       if (r.n_tries > 1) { ++n_retried; }
       n_retry_elastic += r.n_retry_elastic;
       n_retry_balance += r.n_retry_balance;
@@ -979,6 +985,87 @@ int main() {
       // package invented.
       pin(r.refusal != bert::InterfaceRefusal::kNotApplicable,
           "a mu- is not refused as inapplicable - QBBC never gives Bertini one, P12 owns capture");
+    }
+  }
+
+  // THE CAPACITIES, against what an event needed on either side (P24, docs/RISK.md V237).
+  //
+  // Geant4's lists are std::vectors; the port's are `kMaxOutgoingParticles` per
+  // `CollisionOutput` and the caller's `HadFinalState` (`kApplyCap` here, the slot's
+  // `had::kInteractionSecondaryCap` in the transport). bertini_capacity.csv is the secondary count
+  // of every one of the campaign's 280,000 Geant4 events, as a histogram per case. Both bounds
+  // must cover the larger of Geant4's largest event and the port's, and nothing may overflow.
+  //
+  // AND AT THE TOP OF QBBC'S WINDOW, which the campaign does not reach: its pions stop at 8 GeV,
+  // and QBBC gives Bertini pions to 12 GeV and nucleons to 6. The dump runs Geant4 there on lead
+  // (`fs_top` rows, 2,000 events each) and the port runs the same four points here, with nothing
+  // compared but the counts - a capacity read off the campaign alone would be a bound on the
+  // wrong distribution.
+  {
+    struct Top { const char* name; int pdg; double ke; };
+    const Top tops[] = {{"pi+", 211, 12000.0}, {"pi-", -211, 12000.0},
+                        {"proton", 2212, 6000.0}, {"neutron", 2112, 6000.0}};
+    for (const Top& t : tops) {
+      Philox<double> trng(20261105u, static_cast<uint32_t>(t.pdg + 10000));
+      int top_mult = 0, top_out = 0;
+      long long top_refused = 0;
+      for (int ev = 0; ev < 2000; ++ev) {
+        HadProjectile<double> proj;
+        proj.pdg = t.pdg;
+        proj.mass = projectile_mass_MeV(t.pdg);
+        proj.kin_energy = t.ke;
+        HadNucleus nuc;
+        nuc.a = 207;
+        nuc.z = 82;
+        const bert::ApplyResult r = bert::apply_yourself(
+            proj, nuc, *fs, bert::DeexciteChoice::kPreCompound, par, lim, *model, *go, *co, *dx,
+            *tp, epo, *ws, lt, pool, pws, 0, trng);
+        top_out = std::max({top_out, go->n_particles, co->n_particles, dx->n_particles,
+                            tp->n_particles});
+        if (r.refusal == bert::InterfaceRefusal::kSecondaryOverflow) { ++n_overflow; }
+        if (r.refusal != bert::InterfaceRefusal::kNone) { ++top_refused; continue; }
+        top_mult = std::max(top_mult, fs->n_secondaries);
+      }
+      std::printf("  window top: %-7s %5.0f MeV on Pb207, 2000 events: largest final state %d, "
+                  "largest CollisionOutput %d, refused %lld\n", t.name, t.ke, top_mult, top_out,
+                  top_refused);
+      worst_mult = std::max(worst_mult, top_mult);
+      worst_outgoing = std::max(worst_outgoing, top_out);
+    }
+  }
+  {
+    int g4_worst = 0;
+    std::string g4_worst_at;
+    long long g4_rows = 0, g4_events = 0, g4_top_rows = 0;
+    const std::vector<std::string> cap = read_lines("bertini_capacity.csv");
+    for (std::size_t i = 1; i < cap.size(); ++i) {
+      const std::vector<std::string> f = split(cap[i]);
+      if (f.size() < 8) { continue; }
+      if (f[5] == "fs_top") {
+        ++g4_top_rows;
+      } else {
+        ++g4_rows;
+        g4_events += std::atoll(f[7].c_str());
+      }
+      if (iv(f, 6) > g4_worst) {
+        g4_worst = iv(f, 6);
+        g4_worst_at = f[0] + " " + f[1] + " MeV on A" + f[2] + " (" + f[5] + ")";
+      }
+    }
+    if (g4_top_rows == 0) {
+      std::printf("FAIL: bertini_capacity.csv has no fs_top rows - the window's top is unmeasured\n");
+      ++fails;
+    }
+    const int need = std::max({g4_worst, worst_mult, worst_outgoing});
+    std::printf("  capacities: kMaxOutgoingParticles %d, final state %d; Geant4's largest event "
+                "%d secondaries (%s, %lld events in %lld rows), the port's %d, the most any "
+                "CollisionOutput held %d\n", bert::kMaxOutgoingParticles, kApplyCap, g4_worst,
+                g4_worst_at.c_str(), g4_events, g4_rows, worst_mult, worst_outgoing);
+    if (g4_events == 0 || need > bert::kMaxOutgoingParticles || need > kApplyCap ||
+        n_overflow != 0) {
+      std::printf("FAIL: a Bertini capacity is under what an event needed (%d), or %lld "
+                  "events overflowed\n", need, n_overflow);
+      ++fails;
     }
   }
 

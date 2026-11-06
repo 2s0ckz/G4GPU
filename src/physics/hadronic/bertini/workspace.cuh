@@ -117,7 +117,18 @@ constexpr int kMaxCascadeParticles = 512;
 /// G4CollisionOutput's two lists. The outgoing-particle list holds everything the cascade
 /// emits plus everything de-excitation emits, and a heavy target evaporating from a few hundred
 /// MeV of excitation contributes tens of nucleons and alphas.
-constexpr int kMaxOutgoingParticles = 512;
+///
+/// 184, READ OFF THE MEASUREMENT (P24, docs/RISK.md V237) - it was 512, a round number four
+/// times anything seen. Geant4 bounds neither list (std::vectors). Over the 280,000 events of the
+/// campaign (ref/oracle/bertini_capacity.csv) and 2,000 each at the top of QBBC's Bertini window
+/// on lead - pions at 12 GeV, nucleons at 6, which the campaign's 8 GeV pions do not reach - no
+/// Geant4 event leaves more than 136 secondaries, the port's largest leaves 145 and no
+/// `CollisionOutput` of the port's ever holds more than 113 particles. 145, the largest of the
+/// three, with a quarter more, to a multiple of 8, is 184. The slot holds four of these lists, so
+/// the 328 entries cut are 62,976 bytes a slot; an event past 184 is still refused by name
+/// (`CascadeOverflow::kOutgoingParticles`). `tests/test_bertini_apply.cu` asserts it covers both
+/// sides' largest event.
+constexpr int kMaxOutgoingParticles = 184;
 constexpr int kMaxOutgoingNuclei = 64;
 /// The trailing-effect hit list. With `radiusTrailing = 0` - the dumped default - nothing is
 /// ever rejected by it, so the list is written and never read; the capacity therefore costs

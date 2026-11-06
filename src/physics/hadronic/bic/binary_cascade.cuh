@@ -156,6 +156,9 @@ struct BicReport {
   int outer_tries = 0;                   ///< `interactionCounter`
   int inner_tries = 0;                   ///< 200 - collisionLoopMaxCount, on the last outer turn
   int propagate_outcome = kPropagateOk;  ///< the last `Propagate`'s verdict
+  /// How many products the last `Propagate` returned - what `BicStorage::cascade.products` had
+  /// to hold, and on this arm what the final state holds. P24 sizes both from it.
+  int n_products = 0;
   double excitation_energy = 0.0;
   int fragment_a = 0;
   int fragment_z = 0;
@@ -185,8 +188,13 @@ struct BicReport {
 };
 
 /// The `HadFinalState` width this model instantiates. A 1.4 GeV proton on lead makes a cascade of
-/// a few tens of products plus an evaporation chain; 128 is generous and the overflow is
-/// reported, never silent.
+/// a few tens of products plus an evaporation chain; the overflow is reported, never silent.
+///
+/// MEASURED SINCE P24 (docs/RISK.md V237): over the 78 nucleon and pion cases of Geant4's own
+/// campaign (ref/oracle/bic_capacity.csv, 1.29 million events) no event leaves more than 72
+/// secondaries (camp_p1400_Pb208), so 128 holds the largest with three quarters to spare and is
+/// kept. The one nucleon "overflow" the campaign used to count was the test's own 64-entry
+/// PreCompound list, which the transport's slot does not have.
 inline constexpr int kBicMaxSecondaries = 128;
 using BicFinalState = physics::hadronic::HadFinalState<double, kBicMaxSecondaries>;
 
@@ -490,6 +498,7 @@ __host__ __device__ inline preco::PrecoStatus apply_yourself(
   }
   rep.outer_tries = interaction_counter;
   rep.propagate_outcome = pr.outcome;
+  rep.n_products = pr.n_products;
   rep.excitation_energy = pr.excitation_energy;
   rep.fragment_a = pr.fragment_a;
   rep.fragment_z = pr.fragment_z;

@@ -482,7 +482,11 @@ int main() {
   // The port, case by case
   // -------------------------------------------------------------------------------------------
   Buffers bufs;
+  // One final state for both arms, at the WIDER of the two widths: the nucleon arm fills its own
+  // `BicFinalState` and is copied in (since P24 the two widths differ - V235).
   bic::BlirFinalState result;
+  bic::BicFinalState nresult;
+  static_assert(bic::kBlirMaxSecondaries >= bic::kBicMaxSecondaries, "copy must fit");
 
   double worst_count = 0.0, worst_ekin = 0.0, worst_mult = 0.0;
   std::string worst_count_at, worst_ekin_at, worst_mult_at;
@@ -620,6 +624,11 @@ int main() {
     g4_void[sv(vrow, 1)] = {lv(vrow, 2), lv(vrow, 3), lv(vrow, 4), lv(vrow, 5)};
   }
 
+  /// P24: per campaign and case, the largest final state and `Propagate` product list an event
+  /// needed - held against Geant4's own (bic_capacity.csv) and the capacities after the loop.
+  struct CapNeed { int fs = 0; int prop = 0; };
+  std::map<std::string, std::map<std::string, CapNeed>> cap_need;
+
   for (const OracleCase& c : cases) {
     // Both ion files go through `blir_apply_yourself`; which ARM it takes is the gate's to
     // decide and the status column's to record, not this line's.
@@ -697,42 +706,42 @@ int main() {
 
     Philox<double> rng(0x51ed270bu, static_cast<unsigned>(c.pa * 1000 + c.ta),
                        static_cast<unsigned>(c.ekin_per_a * 10.0) + 1u);
-    // The cascade's own storage. Every case in this file is a nucleon below `theBCminP` or an
-    // ion below the fusion threshold, so `apply_yourself` takes its precompound branch and never
-    // reads any of this - but the parameter is not optional and a null one would be a trap for
-    // whoever adds the first case above 45 MeV. Sized for the heaviest target here.
-    static bic::Nucleon apply_nucleons[256];
-    static deex::Vec3d apply_mom[256];
-    static double apply_fermi[256];
-    static bic::NucleusSortEntry apply_sums[256];
+    // The cascade's own storage - for BOTH arms, since P24, exactly the lists one interaction slot
+    // gives them (`bic::kSlot*`, which `had::InteractionSlot` is built from). The nucleon arm ran a
+    // smaller envelope of its own until then (512 tracks, 2,048 collisions, 256 products, 64
+    // PreCompound products), so an overflow here could be the test's and not the transport's.
+    static bic::Nucleon apply_nucleons[bic::kSlotNucleons];
+    static deex::Vec3d apply_mom[bic::kSlotNucleons];
+    static double apply_fermi[bic::kSlotNucleons];
+    static bic::NucleusSortEntry apply_sums[bic::kSlotNucleons];
     static double apply_flat[bic::kFlatBlock];
     static double apply_pfield[bic::kMaxFieldTable];
     static double apply_nfield[bic::kMaxFieldTable];
-    static bic::CascadeTrack apply_pool[512];
-    static bic::imr::CollisionInitialState apply_colls[2048];
+    static bic::CascadeTrack apply_pool[bic::kSlotPoolCap];
+    static bic::imr::CollisionInitialState apply_colls[bic::kSlotCollisionCap];
     static bic::imr::ConcreteChannel apply_chans[bic::imr::kConcreteChannelCount];
     static bic::CascadeBuffers apply_buffers;
-    static bic::CascadeProduct apply_products[256];
-    static bic::CascadeProduct apply_preco[64];
+    static bic::CascadeProduct apply_products[bic::kSlotProductCap];
+    static bic::CascadeProduct apply_preco[bic::kSlotPrecoCap];
     // And the ION reaction's, which needs a second nucleus and its own product lists. Every
     // case in the campaign that takes the cascade arm reads all of it.
-    static bic::Nucleon ion_pnuc[256];
-    static bic::Nucleon ion_tnuc[256];
-    static deex::Vec3d ion_mom[256];
-    static double ion_fermi[256];
-    static bic::NucleusSortEntry ion_sums[256];
+    static bic::Nucleon ion_pnuc[bic::kSlotNucleons];
+    static bic::Nucleon ion_tnuc[bic::kSlotNucleons];
+    static deex::Vec3d ion_mom[bic::kSlotNucleons];
+    static double ion_fermi[bic::kSlotNucleons];
+    static bic::NucleusSortEntry ion_sums[bic::kSlotNucleons];
     static double ion_flat[bic::kFlatBlock];
     static double ion_pfield[bic::kMaxFieldTable];
     static double ion_nfield[bic::kMaxFieldTable];
-    static bic::CascadeTrack ion_pool[1024];
-    static bic::imr::CollisionInitialState ion_colls[8192];
+    static bic::CascadeTrack ion_pool[bic::kSlotPoolCap];
+    static bic::imr::CollisionInitialState ion_colls[bic::kSlotCollisionCap];
     static bic::imr::ConcreteChannel ion_chans[bic::imr::kConcreteChannelCount];
     static bic::CascadeBuffers ion_buffers;
-    static bic::CascadeProduct ion_products[512];
-    static bic::CascadeProduct ion_preco[256];
-    static bic::BlirProduct ion_spec[512];
-    static bic::BlirProduct ion_casc[512];
-    static bic::CascadeTrack ion_initial[256];
+    static bic::CascadeProduct ion_products[bic::kSlotProductCap];
+    static bic::CascadeProduct ion_preco[bic::kSlotPrecoCap];
+    static bic::BlirProduct ion_spec[bic::kSlotSpectatorCap];
+    static bic::BlirProduct ion_casc[bic::kSlotCascaderCap];
+    static bic::CascadeTrack ion_initial[bic::kSlotInitialCap];
     bic::BlirStorage ion_store;
     ion_store.projectile_nucleons = ion_pnuc;
     ion_store.target_nucleons = ion_tnuc;
@@ -740,28 +749,28 @@ int main() {
     ion_store.scratch.fermi_p = ion_fermi;
     ion_store.scratch.test_sums = ion_sums;
     ion_store.scratch.flat_block = ion_flat;
-    ion_store.scratch.capacity = 256;
+    ion_store.scratch.capacity = bic::kSlotNucleons;
     ion_store.proton_field = ion_pfield;
     ion_store.neutron_field = ion_nfield;
     ion_store.field_capacity = bic::kMaxFieldTable;
     ion_store.cascade.pool = ion_pool;
-    ion_store.cascade.pool_capacity = 1024;
+    ion_store.cascade.pool_capacity = bic::kSlotPoolCap;
     ion_store.cascade.collisions = ion_colls;
-    ion_store.cascade.collision_capacity = 8192;
+    ion_store.cascade.collision_capacity = bic::kSlotCollisionCap;
     ion_store.cascade.channels = ion_chans;
     ion_store.cascade.n_channels =
         bic::imr::build_concrete_channels(ion_chans, bic::imr::kConcreteChannelCount);
     ion_store.cascade.buffers = &ion_buffers;
     ion_store.cascade.products = ion_products;
-    ion_store.cascade.product_capacity = 512;
+    ion_store.cascade.product_capacity = bic::kSlotProductCap;
     ion_store.cascade.preco_products = ion_preco;
-    ion_store.cascade.preco_capacity = 256;
+    ion_store.cascade.preco_capacity = bic::kSlotPrecoCap;
     ion_store.spectators = ion_spec;
-    ion_store.spectator_capacity = 512;
+    ion_store.spectator_capacity = bic::kSlotSpectatorCap;
     ion_store.cascaders = ion_casc;
-    ion_store.cascader_capacity = 512;
+    ion_store.cascader_capacity = bic::kSlotCascaderCap;
     ion_store.initial = ion_initial;
-    ion_store.initial_capacity = 256;
+    ion_store.initial_capacity = bic::kSlotInitialCap;
 
     bic::BicStorage store;
     store.nucleons = apply_nucleons;
@@ -769,22 +778,22 @@ int main() {
     store.scratch.fermi_p = apply_fermi;
     store.scratch.test_sums = apply_sums;
     store.scratch.flat_block = apply_flat;
-    store.scratch.capacity = 256;
+    store.scratch.capacity = bic::kSlotNucleons;
     store.proton_field = apply_pfield;
     store.neutron_field = apply_nfield;
     store.field_capacity = bic::kMaxFieldTable;
     store.cascade.pool = apply_pool;
-    store.cascade.pool_capacity = 512;
+    store.cascade.pool_capacity = bic::kSlotPoolCap;
     store.cascade.collisions = apply_colls;
-    store.cascade.collision_capacity = 2048;
+    store.cascade.collision_capacity = bic::kSlotCollisionCap;
     store.cascade.channels = apply_chans;
     store.cascade.n_channels =
         bic::imr::build_concrete_channels(apply_chans, bic::imr::kConcreteChannelCount);
     store.cascade.buffers = &apply_buffers;
     store.cascade.products = apply_products;
-    store.cascade.product_capacity = 256;
+    store.cascade.product_capacity = bic::kSlotProductCap;
     store.cascade.preco_products = apply_preco;
-    store.cascade.preco_capacity = 64;
+    store.cascade.preco_capacity = bic::kSlotPrecoCap;
     for (long long ev = 0; ev < c.n; ++ev) {
       bic::BlirRefusal bref;
       bic::BlirReport brep;
@@ -796,7 +805,26 @@ int main() {
         st = bic::blir_apply_yourself(proj, tgt, lt, pool, ws, ion_store, rng, result, bref,
                                       brep);
       } else {
-        st = bic::apply_yourself(proj, tgt, lt, pool, ws, store, rng, result, nref, nrep);
+        st = bic::apply_yourself(proj, tgt, lt, pool, ws, store, rng, nresult, nref, nrep);
+        result.clear();
+        result.status = nresult.status;
+        result.energy_change = nresult.energy_change;
+        result.momentum_change = nresult.momentum_change;
+        result.local_energy_deposit = nresult.local_energy_deposit;
+        result.weight = nresult.weight;
+        result.secondary_overflow = nresult.secondary_overflow;
+        for (int k = 0; k < nresult.n_secondaries; ++k) {
+          result.add_secondary(nresult.secondaries[k]);
+        }
+      }
+      // P24: what this event NEEDED - its final state, counting what did not fit, and the product
+      // list `Propagate` returned - recorded before any refusal can skip the event.
+      {
+        const int need_fs = result.n_secondaries + result.secondary_overflow;
+        const int need_prop = is_ion ? brep.propagate.n_products : nrep.n_products;
+        CapNeed& cn = cap_need[c.model == "bic_apply" ? "bic_apply" : "bic_blirapply"][c.name];
+        cn.fs = std::max(cn.fs, need_fs);
+        cn.prop = std::max(cn.prop, need_prop);
       }
       // Did the event reach `Propagate`? The ion arm's cascade branch always does; the nucleon
       // arm does whenever its inner loop ran, which is every event at or above `theBCminP`.
@@ -877,6 +905,19 @@ int main() {
       if ((is_ion ? bref.capacity : nref.capacity) || result.secondary_overflow > 0) {
         ++n_overflow;
         if (went_void) { ++port_void_overflow; }
+        // WHICH buffer, by name, for every overflow: P24 found the last nucleon overflow was the
+        // test's own PreCompound list and not anything the transport has.
+        if (n_overflow <= 50) {
+          std::printf("  OVERFLOW %s ev %lld: final state %d (+%d over %d)%s, propagate products "
+                      "%d of %d, PreCompound capacity %d, void %d\n", c.name.c_str(), ev,
+                      result.n_secondaries, result.secondary_overflow,
+                      is_ion ? bic::BlirFinalState::kCapacity : bic::BicFinalState::kCapacity,
+                      (is_ion ? bref.capacity : nref.capacity) ? ", model capacity set" : "",
+                      is_ion ? brep.propagate.n_products : nrep.n_products,
+                      is_ion ? ion_store.cascade.product_capacity : store.cascade.product_capacity,
+                      is_ion ? ion_store.cascade.preco_capacity : store.cascade.preco_capacity,
+                      went_void ? 1 : 0);
+        }
         // An event that overflowed the secondary buffer is MISSING products, so it cannot be in
         // the energy balance - and it is not a small effect: four such events out of 1.96
         // million put `BalanceNoIC` 55.9 GeV out on camp_n1400_Pb208, where every other case in
@@ -1931,6 +1972,60 @@ int main() {
     if (bad && r.tol > 0.0) { ++fails; }
     std::printf("%-30s %8lld %12.4g  %s%s\n", r.name, r.n, r.worst, bad ? "FAIL " : "",
                 r.at.c_str());
+  }
+  // THE CAPACITIES (P24, docs/RISK.md V235, V237). Geant4 bounds none of these lists; its own run
+  // of both campaigns - the same seeds and events bic_apply.csv and bic_blirapply.csv summarise -
+  // records what every event needed (bic_capacity.csv, written through a `G4BinaryCascade` whose
+  // `Propagate` is Geant4's and only reads the size of its result). Every final state and every
+  // product list must fit, on both sides, and nothing may overflow: until P24, 39 Fe56-on-Fe56
+  // events at 1 GeV per nucleon overflowed `kBlirMaxSecondaries` = 128 and one 1400 MeV neutron on
+  // Pb208 overflowed the test's own 64-entry PreCompound list.
+  {
+    std::map<std::string, std::map<std::string, CapNeed>> g4;
+    long long g4_rows = 0;
+    for (const auto& row : read_csv("bic_capacity.csv")) {
+      CapNeed& cn = g4[sv(row, 0)][sv(row, 1)];
+      const int v = iv(row, 4);
+      if (sv(row, 3) == "fs") { cn.fs = std::max(cn.fs, v); }
+      if (sv(row, 3) == "propagate") { cn.prop = std::max(cn.prop, v); }
+      ++g4_rows;
+    }
+    int bad = 0;
+    long long cases_seen = 0;
+    for (const char* model : {"bic_apply", "bic_blirapply"}) {
+      const int fs_cap = (std::string(model) == "bic_apply") ? bic::kBicMaxSecondaries
+                                                              : bic::kBlirMaxSecondaries;
+      CapNeed worst_g4, worst_port;
+      std::string at_g4, at_port;
+      for (const auto& kv : g4[model]) {
+        ++cases_seen;
+        if (kv.second.fs > worst_g4.fs) { worst_g4.fs = kv.second.fs; at_g4 = kv.first; }
+        worst_g4.prop = std::max(worst_g4.prop, kv.second.prop);
+        const auto it = cap_need[model].find(kv.first);
+        if (it == cap_need[model].end()) {
+          std::printf("  FAIL: bic_capacity.csv's %s %s was not run here\n", model,
+                      kv.first.c_str());
+          ++bad;
+          continue;
+        }
+        if (it->second.fs > worst_port.fs) { worst_port.fs = it->second.fs; at_port = kv.first; }
+        worst_port.prop = std::max(worst_port.prop, it->second.prop);
+      }
+      std::printf("  capacity %-14s final state %3d: Geant4 needs %3d (%s), the port %3d (%s); "
+                  "products %3d: Geant4 %3d, the port %3d\n", model, fs_cap, worst_g4.fs,
+                  at_g4.c_str(), worst_port.fs, at_port.c_str(), bic::kSlotProductCap,
+                  worst_g4.prop, worst_port.prop);
+      if (std::max(worst_g4.fs, worst_port.fs) > fs_cap ||
+          std::max(worst_g4.prop, worst_port.prop) > bic::kSlotProductCap) {
+        ++bad;
+      }
+    }
+    if (g4_rows == 0 || cases_seen != 127 || n_overflow != 0 || bad != 0) {
+      std::printf("  FAIL: capacities - %lld Geant4 rows over %lld cases (127 expected), %d "
+                  "overflows, %d capacities under what an event needed\n", g4_rows, cases_seen,
+                  n_overflow, bad);
+      ++fails;
+    }
   }
   std::printf("  worst residue left by the flat m_e correction: %.3g MeV per conversion "
               "electron\n", worst_pe);

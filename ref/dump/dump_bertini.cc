@@ -1020,6 +1020,11 @@ void dump_apply() {
                   "mean_de_MeV,mean_dp_MeV,max_abs_de_MeV,max_abs_dp_MeV,thrown\n");
   std::fprintf(s, "projectile,ke_MeV,A,Z,events,pdg,count,mean_ke_MeV,mean_ke2_MeV2,"
                   "mean_cos,mean_cos2\n");
+  // P24: how many secondaries each event NEEDED, as a histogram per case - what the port's
+  // `HadFinalState` and `bert::CollisionOutput` (`kMaxOutgoingParticles`) have to hold. Geant4
+  // bounds neither, its lists are std::vectors, so a capacity is read off this distribution.
+  FILE* cap = std::fopen("bertini_capacity.csv", "w");
+  if (cap != nullptr) { std::fprintf(cap, "projectile,ke_MeV,A,Z,events,quantity,value,count\n"); }
 
   // `preco` selects which of QBBC's two Bertini CONFIGURATIONS runs the case, and it is not a
   // property of the case: `G4HadronInelasticQBBC` calls `usePreCompoundDeexcitation()` on the
@@ -1102,6 +1107,7 @@ void dump_apply() {
     long thrown = 0;
     std::map<int, long> count;
     std::map<int, double> ke1, ke2, c1, c2;
+    std::map<int, long> cap_fs;   // P24: bertini_capacity.csv
 
     for (int ev = 0; ev < kN; ++ev) {
       G4DynamicParticle dp(c.pd, G4ThreeVector(0., 0., 1.), c.ke_MeV);
@@ -1125,6 +1131,7 @@ void dump_apply() {
 
       const int nsec = fs->GetNumberOfSecondaries();
       sum_mult += nsec;
+      ++cap_fs[nsec];
 
       double etot = 0., pz = 0.;
       for (int i = 0; i < nsec; ++i) {
@@ -1167,9 +1174,50 @@ void dump_apply() {
                    c.a, c.z, kN, kv.first, n, ke1[kv.first] / n, ke2[kv.first] / n,
                    c1[kv.first] / n, c2[kv.first] / n);
     }
+    if (cap != nullptr) {
+      for (const auto& kv : cap_fs) {
+        std::fprintf(cap, "%s,%.17g,%d,%d,%d,fs,%d,%ld\n", c.name, c.ke_MeV, c.a, c.z, kN,
+                     kv.first, kv.second);
+      }
+    }
+  }
+  // P24: the TOP of QBBC's Bertini window, which the campaign above does not reach. Its pions
+  // stop at 8 GeV and QBBC gives Bertini pions to 12 GeV (`emaxBertPions`) and nucleons to 6
+  // (`GetMaxEnergyTransitionFTF_Cascade`), so a capacity read off the campaign alone would be a
+  // bound on the wrong distribution. On lead, the heaviest target, 2,000 events each, only the
+  // secondary count kept - as `fs_top` rows, so that nothing reads them as campaign cases.
+  if (cap != nullptr) {
+    struct Top { const char* name; G4ParticleDefinition* pd; double ke_MeV; };
+    const Top tops[] = {{"pi+", G4PionPlus::PionPlus(), 12000.0},
+                        {"pi-", G4PionMinus::PionMinus(), 12000.0},
+                        {"proton", G4Proton::Proton(), 6000.0},
+                        {"neutron", G4Neutron::Neutron(), 6000.0}};
+    for (const Top& t : tops) {
+      CLHEP::HepRandom::setTheSeed(20261105);
+      std::map<int, long> h;
+      for (int ev = 0; ev < kN; ++ev) {
+        G4DynamicParticle dp(t.pd, G4ThreeVector(0., 0., 1.), t.ke_MeV);
+        G4HadProjectile proj(dp);
+        G4Nucleus nucleus(207, 82);
+        G4HadFinalState* fs = nullptr;
+        try {
+          fs = bert.ApplyYourself(proj, nucleus);
+        } catch (...) {
+          continue;
+        }
+        if (!fs) { continue; }
+        ++h[fs->GetNumberOfSecondaries()];
+        fs->Clear();
+      }
+      for (const auto& kv : h) {
+        std::fprintf(cap, "%s,%.17g,207,82,%d,fs_top,%d,%ld\n", t.name, t.ke_MeV, kN, kv.first,
+                     kv.second);
+      }
+    }
   }
   std::fclose(f);
   std::fclose(s);
+  if (cap != nullptr) { std::fclose(cap); }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1899,5 +1947,5 @@ G4GPU_REGISTER_DUMP("bertini",
                     "bertini_angdst.csv bertini_3bodydst.csv bertini_momchoice.csv "
                     "bertini_epcollide.csv "
                     "bertini_initcascad.csv bertini_fate.csv bertini_cascader.csv bertini_coalescence.csv bertini_deexcite.csv "
-                    "bertini_apply.csv bertini_apply_species.csv",
+                    "bertini_apply.csv bertini_apply_species.csv bertini_capacity.csv",
                     dump_bertini);

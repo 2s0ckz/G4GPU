@@ -776,10 +776,40 @@ __host__ __device__ inline void blir_deexcite_spectator(
   }
 }
 
-/// The `HadFinalState` width this model instantiates. A 50 MeV/nucleon C12 on Pb208 fuses into
-/// a compound of A = 220 and E* of a few hundred MeV, and P3's evaporation cascade on that emits
-/// tens of fragments and gammas; 128 is generous and the overflow is reported, never silent.
-inline constexpr int kBlirMaxSecondaries = 128;
+// ---------------------------------------------------------------------------------------------
+// THE LISTS ONE INTERACTION SLOT GIVES THE TWO ENTRY POINTS (P24)
+//
+// `had::InteractionSlot` holds one set of the cascade's arrays for both entry points, sized to
+// the larger (the ion) envelope, and these are its numbers - here, beside the two models, so
+// that `tests/test_bic_apply.cu` runs BOTH of its campaigns through exactly the lists the
+// transport gives them. Until P24 the nucleon campaign ran a smaller envelope of its own (512
+// tracks, 2,048 collisions, 256 products, 64 PreCompound products), and the one nucleon event it
+// counted as an overflow - a 1400 MeV neutron on Pb208 - was the test's buffer and not the
+// transport's (docs/RISK.md V237).
+//
+// Geant4 bounds none of them; every one is a std::vector there. The two the campaigns measure
+// against Geant4's own run - the final state and `Propagate`'s product list - are read off
+// ref/oracle/bic_capacity.csv; the rest are P9e's envelope, inside which "every case in the
+// campaign that takes the cascade arm reads all of it" with no refusal.
+inline constexpr int kSlotNucleons = 256;        ///< a nucleus's nucleons: Pb208 and U238 fit
+inline constexpr int kSlotPoolCap = 1024;        ///< `CascadeTrack`s, targets and secondaries
+inline constexpr int kSlotCollisionCap = 8192;   ///< scheduled collisions
+inline constexpr int kSlotProductCap = 512;      ///< what `Propagate` returns
+inline constexpr int kSlotPrecoCap = 256;        ///< a fragment's PreCompound products
+inline constexpr int kSlotSpectatorCap = 512;    ///< `SortResult`'s two lists
+inline constexpr int kSlotCascaderCap = 512;
+inline constexpr int kSlotInitialCap = 256;      ///< one track per projectile nucleon
+
+/// The `HadFinalState` width this model instantiates.
+///
+/// 168, READ OFF GEANT4'S OWN CAMPAIGN (P24, docs/RISK.md V235). It was 128 ("generous"), and 39
+/// of the 20,000 Fe56-on-Fe56 events at 1 GeV per nucleon overflowed it, every one a
+/// destroyed-nucleus event in which each nucleon of the target leaves as its own product. Geant4's
+/// own run of the same campaign (ref/oracle/bic_capacity.csv, the events bic_blirapply.csv
+/// summarises) needs at most 134 there, and more than 128 in 36 of the 20,000 - the port's 39 is
+/// the same tail. No other of the 49 ion cases needs more than 112. 134 with a quarter more, to a
+/// multiple of 8, is 168; past it the overflow is still refused by name (`BlirRefusal::capacity`).
+inline constexpr int kBlirMaxSecondaries = 168;
 using BlirFinalState = physics::hadronic::HadFinalState<double, kBlirMaxSecondaries>;
 
 /// `G4BinaryLightIonReaction::ApplyYourself`, both arms.

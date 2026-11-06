@@ -463,6 +463,69 @@ void void_rates_close() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// bic_capacity.csv - what the two campaigns NEEDED, per event, read off Geant4's own run (P24)
+// ---------------------------------------------------------------------------------------------
+//
+// Geant4 bounds none of the lists the port gives a capacity: `theFinalResult`, the
+// `G4ReactionProductVector` `Propagate` returns and the `G4HadFinalState` the entry point fills
+// are std::vectors. So the port's capacities have to be read off a distribution, and the right
+// distribution is the one the campaign's own events have - the same seeds and the same events
+// `bic_apply.csv` and `bic_blirapply.csv` summarise. Two quantities, as a histogram per case:
+//
+//   fs         `G4HadFinalState::GetNumberOfSecondaries()` of a stopAndKill event - what the
+//              port's `BicFinalState` / `BlirFinalState` and the slot's `HadFinalState` hold
+//   propagate  the size of the vector `G4BinaryCascade::Propagate` returned, the largest over
+//              the event's calls (`Interact` calls again on an empty result) - what the
+//              slot's `products` list holds
+//
+// Read through `CountingCascade`, a `G4BinaryCascade` whose `Propagate` is Geant4's and which
+// only looks at the size of what it returns: `ApplyYourself` and `Interact` call it through the
+// virtual, so every statement that runs is Geant4's on the same stream. The light-ion reaction's
+// own cascade is replaced by one through `BlirModelTag`, constructed exactly as its constructor
+// constructs its own (`new G4BinaryCascade(theProjectileFragmentation)`). Measured that it
+// changes nothing: bic_apply*.csv and bic_blirapply*.csv are byte-identical with and without.
+class CountingCascade : public G4BinaryCascade {
+ public:
+  explicit CountingCascade(G4VPreCompoundModel* ptr) : G4BinaryCascade(ptr) {}
+  G4ReactionProductVector* Propagate(G4KineticTrackVector* secondaries,
+                                     G4V3DNucleus* nucleus) override {
+    G4ReactionProductVector* r = G4BinaryCascade::Propagate(secondaries, nucleus);
+    const int n = (r != nullptr) ? static_cast<int>(r->size()) : 0;
+    if (n > event_max) { event_max = n; }
+    return r;
+  }
+  int event_max = 0;   ///< reset by the caller before each event
+};
+
+FILE*& capacity_handle() {
+  static FILE* f = nullptr;
+  return f;
+}
+FILE* capacity_file() {
+  FILE*& f = capacity_handle();
+  if (f == nullptr) {
+    f = std::fopen("bic_capacity.csv", "w");
+    std::fprintf(f, "model,case,N,quantity,value,count\n");
+  }
+  return f;
+}
+void capacity_write(const char* model, const char* name, int n, const char* quantity,
+                    const std::map<int, long long>& h) {
+  for (const auto& kv : h) {
+    std::fprintf(capacity_file(), "%s,%s,%d,%s,%d,%lld\n", model, name, n, quantity, kv.first,
+                 kv.second);
+  }
+  std::fflush(capacity_file());
+}
+void capacity_close() {
+  FILE*& f = capacity_handle();
+  if (f != nullptr) {
+    std::fclose(f);
+    f = nullptr;
+  }
+}
+
 void write_limits() {
   FILE* f = std::fopen("bic_limits.csv", "w");
   std::fprintf(f, "model,name,emin_MeV,emax_MeV,ep_relative,ep_absolute_MeV,model_id\n");
@@ -955,7 +1018,8 @@ void write_blir() {
 void write_bic_apply() {
   auto* handler = new G4ExcitationHandler();
   auto* preco = new G4PreCompoundModel(handler);
-  auto* bic = new G4BinaryCascade(preco);
+  // P24: a CountingCascade, which is G4BinaryCascade with the size of `Propagate`'s result read.
+  auto* bic = new CountingCascade(preco);
   bic->SetMaxEnergy(1.5 * CLHEP::GeV);
 
   struct NCase { int pdg; double ekin; int tz, ta; const char* name; int n; };
@@ -1082,13 +1146,16 @@ void write_bic_apply() {
     bool za_varies = false;
     double sum_tot_e = 0.0, sum_tot_pz = 0.0;
     long long n_void = 0, n_propagated = 0;   // P20: see `void_fired`
+    std::map<int, long long> cap_fs, cap_prop;   // P24: bic_capacity.csv
 
     for (int n = 0; n < kN; ++n) {
       G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin * MeV);
       G4HadProjectile proj(dp);
       G4Nucleus nucleus(c.ta, c.tz);
       void_arm(bic);
+      bic->event_max = 0;
       G4HadFinalState* r = bic->ApplyYourself(proj, nucleus);
+      ++cap_prop[bic->event_max];
       if ((bic->*void_peek(BicOuterRadiusTag{})) != -1.0) { ++n_propagated; }
       if (void_fired(bic, r)) { ++n_void; }
       if (r == nullptr) { continue; }
@@ -1099,6 +1166,7 @@ void write_bic_apply() {
       G4LorentzVector tot(0., 0., 0., 0.);
       const std::size_t ns = r->GetNumberOfSecondaries();
       n_sec += static_cast<long long>(ns);
+      ++cap_fs[static_cast<int>(ns)];
       for (std::size_t i = 0; i < ns; ++i) {
         const G4HadSecondary* s = r->GetSecondary(i);
         const G4DynamicParticle* p = s->GetParticle();
@@ -1134,6 +1202,8 @@ void write_bic_apply() {
                  sum_tot_pz / nk, double(n_sec) / nk);
     std::fprintf(void_rates_file(), "bic_apply,%s,%d,%lld,%lld,%lld\n", c.name, kN, n_kill,
                  n_void, n_propagated);
+    capacity_write("bic_apply", c.name, kN, "fs", cap_fs);
+    capacity_write("bic_apply", c.name, kN, "propagate", cap_prop);
     for (const auto& kv : count) {
       std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, pz, pa,
                    c.ekin, c.tz, c.ta, kN, kv.first, kv.second,
@@ -4290,6 +4360,11 @@ void write_blir_apply() {
   auto* blir = new G4BinaryLightIonReaction(preco);
   blir->SetMinEnergy(0.0);
   blir->SetMaxEnergy(6.0 * CLHEP::GeV);
+  // P24: the reaction's own cascade, swapped for one that reads the size of what `Propagate`
+  // returns - built as the constructor builds its own, `new G4BinaryCascade(ptr)`, and the
+  // constructor's copy leaked like every model here. bic_capacity.csv's header says why.
+  auto* counting = new CountingCascade(preco);
+  blir->*void_peek(BlirModelTag{}) = counting;
   G4IonTable* ions = G4IonTable::GetIonTable();
 
   struct ACase { int pz, pa; double ekin_per_a; int tz, ta; const char* name; };
@@ -4369,13 +4444,19 @@ void write_blir_apply() {
     // momentum - a constant per case - so that the variance is a sum of small numbers and not
     // the difference of two large ones.
     double sft_e = 0.0, sft_e2 = 0.0, sft_pz = 0.0, sft_pz2 = 0.0;
+    std::map<int, long long> cap_fs, cap_prop;   // P24: bic_capacity.csv
 
     for (int n = 0; n < kN; ++n) {
       G4DynamicParticle dp(part, G4ThreeVector(0, 0, 1), c.ekin_per_a * c.pa * MeV);
       G4HadProjectile proj(dp);
       G4Nucleus nucleus(c.ta, c.tz);
       void_arm(model);
+      counting->event_max = 0;
       G4HadFinalState* r = blir->ApplyYourself(proj, nucleus);
+      ++cap_prop[counting->event_max];
+      if (r != nullptr && r->GetStatusChange() != isAlive) {
+        ++cap_fs[static_cast<int>(r->GetNumberOfSecondaries())];
+      }
       if ((model->*void_peek(BicOuterRadiusTag{})) != -1.0) { ++n_propagated; }
       if (void_fired(model, r)) { ++n_void; }
       if (r == nullptr) { ++n_null; continue; }
@@ -4434,6 +4515,8 @@ void write_blir_apply() {
     std::fprintf(void_rates_file(), "bic_blirapply,%s,%d,%lld,%lld,%lld\n", c.name, kN, n_kill,
                  n_void, n_propagated);
     std::fflush(void_rates_file());
+    capacity_write("bic_blirapply", c.name, kN, "fs", cap_fs);
+    capacity_write("bic_blirapply", c.name, kN, "propagate", cap_prop);
     for (const auto& kv : count) {
       std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%d,%lld,%.17g,%.17g,%.17g\n", c.name, c.pz,
                    c.pa, c.ekin_per_a, c.tz, c.ta, kN, kv.first, kv.second,
@@ -5080,6 +5163,18 @@ void write_blir_swap() {
 }
 
 void dump_bic(const DumpContext&) {
+  // The two campaigns alone, for a package that needs only their files - P24 regenerated
+  // bic_capacity.csv this way, and checked that bic_apply*.csv and bic_blirapply*.csv came out
+  // byte-identical to a full run's: each case reseeds the engine, so nothing that runs before
+  // it moves its events. The registry still checks every promised file, so a run that sets this
+  // reports the other files missing and exits non-zero, which is right for a partial run.
+  if (std::getenv("G4GPU_BIC_CAMPAIGN_ONLY") != nullptr) {
+    write_bic_apply();
+    write_blir_apply();
+    void_rates_close();
+    capacity_close();
+    return;
+  }
   write_limits();
   write_density();
   write_fermi();
@@ -5124,6 +5219,7 @@ void dump_bic(const DumpContext&) {
   write_bic_void();
   write_blir_swap();
   void_rates_close();
+  capacity_close();
   // LAST, always: it destroys a G4Scatterer on purpose and empties the static channel list
   // every other sweep in this file depends on. See its own header and docs/RISK.md V155.
   write_imr_scatterlife();
@@ -5160,5 +5256,5 @@ G4GPU_REGISTER_DUMP("bic",
                     "bic_1h1_status.csv bic_1h1_parent.csv bic_1h1_scan.csv "
                     "bic_void_rates.csv bic_void_tape.csv bic_void_tapeval.csv "
                     "bic_void_tapefs.csv bic_void_tapecases.csv bic_void_tapepr.csv "
-                    "bic_blir_swap.csv",
+                    "bic_blir_swap.csv bic_capacity.csv",
                     dump_bic);

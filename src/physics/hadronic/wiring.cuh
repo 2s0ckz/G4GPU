@@ -360,12 +360,12 @@ enum class HadronicRefusal : int {
   /// sends the Binary cascade only nucleons and charged pions and the light-ion reaction only
   /// ions, so a species refusal here means the model table and `inelastic_models` have drifted.
   ///
-  /// NOT a tripwire for the light-ion reaction's final-state capacity since P20: the
-  /// destroyed-nucleus branch it now answers gives every nucleon of a destroyed target its own
-  /// product, and MEASURED on P9e's campaign 39 of 20,000 Fe56 on Fe56 at 1 GeV per nucleon
-  /// (0.195%) overflow the reaction's buffers - its final state holds `kBlirMaxSecondaries`, 128
-  /// - which are events Geant4 answers and this port refuses as `capacity`, landing here
-  /// (docs/RISK.md V213).
+  /// The light-ion reaction's final-state capacity books here too, and between P20 and P24 it
+  /// did: the destroyed-nucleus branch gives every nucleon of a destroyed target its own product,
+  /// and 39 of 20,000 Fe56 on Fe56 at 1 GeV per nucleon (0.195%) overflowed
+  /// `kBlirMaxSecondaries` = 128 (docs/RISK.md V213). It is 168 since P24, read off Geant4's own
+  /// run of that campaign (at most 134), and none of the 980,000 ion events overflows
+  /// (docs/RISK.md V235) - so this is a tripwire again, on every one of its causes.
   kBinaryRefused,
   /// `G4EnergyRangeManager::GetHadronicInteraction` found no model covering the energy, or more
   /// than two competing, or two fully nested. Geant4 prints its model table and returns
