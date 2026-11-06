@@ -24,8 +24,6 @@
 // instantiating a body it cannot see is that it cannot see it.
 #pragma once
 
-#include <new>  // placement new; see `run_interaction`'s note on fill_result's 18 kB return
-
 #include "host/transport_run_impl.cuh"
 #include "physics/hadronic/interaction_apply.cuh"
 
@@ -177,13 +175,20 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
   } else if (outc.ran && slot != nullptr) {
     // FillResult, then the primary and the secondaries.
     //
-    // PLACEMENT NEW AND NOT AN ASSIGNMENT. `fill_result` returns a
-    // `HadronicStepResult<real_t, 256>` BY VALUE, which is about 18 kB; assigning it to
-    // `slot->filled` would materialise that temporary on the kernel's own stack, where 18 kB a
-    // thread over the resident set is hundreds of megabytes of local memory for a struct that
-    // has a home in the pool already. C++17's guaranteed copy elision initialises the prvalue
-    // directly into the storage a placement new names, so nothing is copied and nothing is on
-    // the stack.
+    // FILLED IN PLACE, in the slot, by `had::fill_result_into` - the drains' way since P19 - and
+    // not by `fill_result` returned by value into a placement new. The placement new stood here
+    // from P15 to P24 on the argument that C++17's copy elision puts the prvalue straight into the
+    // slot, and the elision does happen; what it cannot elide is the callee's own `out`, a named
+    // local that `fill_result` returns, and nvcc keeps that in the kernel's frame. The frames say
+    // so: at 256 entries every interaction kernel carried about 20 kB above its model
+    // (`run_interaction<kFtfp>` 23,408 bytes against FTFP's own few), and the day P24 widened
+    // the final state to 856 entries the four frames that had compiled grew by 42 to 48 kB each -
+    // ftfp 23,408 -> 71,264, binary 90,592 -> 138,496 - which is 600 secondaries of 80 bytes,
+    // and would have made the device stack raise ask for 143,360 bytes a thread, more than the
+    // 3070 has for its resident threads (V190's arithmetic). `fill_result_into` writes the same
+    // fields into `slot->filled` and nothing into the frame; `tests/test_emextra_wiring.cu`
+    // holds it equal to `fill_result` field for field. docs/RISK.md V237's addendum has the
+    // frames before and after.
     //
     // THE DIRECTION IT ROTATES INTO IS `p.dir` FOR AN IN-FLIGHT INTERACTION AND +z FOR AN
     // AT-REST ONE, and the second is not a shortcut.
@@ -204,12 +209,10 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     const Vec3<real_t> fill_dir = (q.kind == had::InteractionKind::kAtRest)
                                       ? Vec3<real_t>{real_t(0), real_t(0), real_t(1)}
                                       : p.dir;
-    ::new (&slot->filled)
-        physics::hadronic::HadronicStepResult<real_t, had::kInteractionSecondaryCap>(
-            physics::hadronic::fill_result<real_t, had::kInteractionSecondaryCap,
-                                           had::kInteractionSecondaryCap>(
-                slot->fs, fill_dir, p.global_time, p.weight,
-                /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), slot->pdg_mass));
+    had::fill_result_into<real_t, had::kInteractionSecondaryCap, had::kInteractionSecondaryCap>(
+        slot->fs, fill_dir, p.global_time, p.weight,
+        /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), slot->pdg_mass,
+        slot->filled);
     edep += slot->filled.local_energy_deposit;
     srep.non_ionizing += slot->filled.non_ionizing_energy_deposit;
     em.pos = p.pos;

@@ -175,13 +175,15 @@ static void section_sizes() {
     std::printf("    %5d slots: %8.1f MB\n", n, double(n) * double(per) / 1048576.0);
   }
   // PINNED, for the reason docs/RISK.md V167 gives: the numbers above appear in P15's commit
-  // messages, in docs/RISK.md V189 and in `interaction_apply.cuh`'s own header, and a table
-  // that only a comment carries drifts. A change to any array in `InteractionSlot` fails the
-  // build here with the new figure in the message. Update the assertion and the prose together,
-  // or not at all.
-  static_assert(sizeof(had::InteractionSlot<double>) == 1481056,
+  // messages, in docs/RISK.md V189 and V237 and in `interaction_apply.cuh`'s own static_assert,
+  // and a table that only a comment carries drifts. A change to any array in `InteractionSlot`
+  // fails the build here with the new figure in the message. Update the assertion and the prose
+  // together, or not at all. 1,481,056 until P24; 1,566,472 since (V237), and P24 pinned it in
+  // interaction_apply.cuh but not here - a GPU test its brief kept it from compiling, which gate
+  // ba61 found in eight seconds.
+  static_assert(sizeof(had::InteractionSlot<double>) == 1566472,
                 "had::InteractionSlot changed size. interaction_apply.cuh's header table, "
-                "docs/RISK.md V189 and this assertion all carry the number - update all three.");
+                "docs/RISK.md V189 and V237 and this assertion all carry the number - update them together.");
   static_assert(sizeof(had::PendingInteraction<double>) == G4GPU_PENDING_BYTES,
                 "had::PendingInteraction changed size. The queue's byte cost is quoted in "
                 "interaction_queue.cuh and in the engine's own printout.");
