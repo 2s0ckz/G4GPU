@@ -77,6 +77,26 @@ function Show-File([string]$path, [int]$tail = 0) {
 # A scheduler: launches from $queue while slots are free - a GPU item only when no other GPU item
 # is in flight - and calls $onDone for each finished process. Returns the number of failures;
 # stops launching after the first failure when $failFast.
+# EVERY LAUNCH GOES THROUGH .NET's Process.Start, NOT Start-Process -PassThru. The difference is
+# who holds the process handle: Process.Start owns it from creation, so ExitCode is always the
+# child's; Start-Process creates the process and opens a handle to it afterwards, and a child
+# that has already exited by then - test_core runs in under a second - reads back ExitCode
+# $null, which gate ba62t (2026-11-06) logged as "test_core FAILED (exit )" under a test that had
+# printed ALL PASS, the first time in some four hundred test runs and enough to stop build_all
+# before the dose gates. Reading .Handle right after Start-Process narrows that window to the
+# scheduler's whim; this closes it. The redirections are cmd's, so no stream is pumped here; the
+# exit code is the child's, which cmd /c returns for a single command.
+function Start-Proc([string]$File, [string]$ArgLine, [string]$Out, [string]$Err, [string]$Cwd) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $env:ComSpec
+  $psi.Arguments = '/d /c ""' + $File + '" ' + $ArgLine + ' > "' + $Out + '" 2> "' + $Err + '""'
+  $psi.WorkingDirectory = $Cwd
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  return [System.Diagnostics.Process]::Start($psi)
+}
+
+
 function Invoke-Scheduled($queue, [scriptblock]$launch, [scriptblock]$onDone, [bool]$failFast) {
   $pending = [System.Collections.ArrayList]@($queue)
   $running = [System.Collections.ArrayList]@()
@@ -91,8 +111,8 @@ function Invoke-Scheduled($queue, [scriptblock]$launch, [scriptblock]$onDone, [b
         $pending.RemoveAt($i)
         $it.Started = Get-Date
         $it.Proc = & $launch $it
-        # Reading Handle once makes the Process object cache it, without which ExitCode reads
-        # back as null after the process has gone - a documented PowerShell quirk of -PassThru.
+        # Start-Proc's Process object holds its handle from creation (see the function); the read
+        # stays as a no-op guard for any launch that still goes through Start-Process -PassThru.
         $null = $it.Proc.Handle
         [void]$running.Add($it)
         if ($it.Gpu) { $gpuBusy = $true }
@@ -121,8 +141,7 @@ if ($Mode -eq "build" -or $Mode -eq "all") {
     param($it)
     foreach ($f in @($it.Out, $it.Err)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     if (Test-Path -LiteralPath $it.Exe) { Remove-Item -LiteralPath $it.Exe -Force }
-    return Start-Process -FilePath "nvcc" -ArgumentList $it.Args -WorkingDirectory $Root -NoNewWindow -PassThru `
-      -RedirectStandardOutput $it.Out -RedirectStandardError $it.Err
+    return Start-Proc "nvcc" $it.Args $it.Out $it.Err $Root
   }
   $onDone = {
     param($it, $code)
@@ -151,8 +170,7 @@ if ($Mode -eq "run" -or $Mode -eq "all") {
   $launch = {
     param($it)
     foreach ($f in @($it.RunOut, $it.RunErr)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-    return Start-Process -FilePath $it.Exe -WorkingDirectory $Root -NoNewWindow -PassThru `
-      -RedirectStandardOutput $it.RunOut -RedirectStandardError $it.RunErr
+    return Start-Proc $it.Exe "" $it.RunOut $it.RunErr $Root
   }
   $onDone = {
     param($it, $code)
