@@ -22,14 +22,15 @@
 // distinction is the whole of the sizing problem, because the two numbers differ by four orders
 // of magnitude:
 //
-//   entry::kWorkspaceBytes       539,096   ion beams included (kMaxProjA = 64)
+//   entry::kWorkspaceBytes       671,256   ion beams included (kMaxProjA = 64, 832 tracks)
 //   entry::kHadronWorkspaceBytes 458,088   projectile is a single hadron (kMaxProjA = 1)
 //
 //   slots      Workspace      HadronWorkspace
-//       64       32.9 MB           28.0 MB
-//      256      131.6 MB          111.9 MB
-//    1,024      526.5 MB          447.4 MB
-//   65,536       33.7 GB           28.6 GB     <- what a per-TRACK reading would cost
+//       64       41.0 MB           28.0 MB
+//      128       81.9 MB           55.9 MB     <- the interaction pool's default
+//      256      163.9 MB          111.9 MB
+//    1,024      655.5 MB          447.4 MB
+//   65,536       42.0 GB           28.6 GB     <- what a per-TRACK reading would cost
 //
 // THOSE TWO CONSTANTS ARE `sizeof`, AND A static_assert PINS THEM (see below, and docs/RISK.md
 // V167): this table was prose once, it drifted by 24%, and a caller budgeted from it and came up
@@ -48,7 +49,13 @@
 // from 14 secondaries to 35.93 and 323 of 36,000 heavy-ion events overflowed the old list
 // (docs/RISK.md V160). The numbers above are `tests/test_ftf_entry.cu`'s own printout.
 //
-// A 65,536-track batch does not need 65,536 workspaces and could not have them: 33.7 GB is past
+// `Workspace` grew a third time in P24, by 132,160 bytes (539,096 -> 671,256, 413 bytes a
+// track): `kMaxTracks` 512 -> 832 (`kIonMaxTracks` below), read off QBBC's own FTFP at the grid's
+// heaviest corner, where 512 refused 63 of 500 events (docs/RISK.md V236). `HadronWorkspace`
+// keeps 512 - its campaigns never came near it. A 1 GB budget buys 1,599 `Workspace` slots
+// where it bought 1,991.
+//
+// A 65,536-track batch does not need 65,536 workspaces and could not have them: 42 GB is past
 // every card this project targets. What it needs is as many as the launch runs concurrently, and
 // since a thread cannot portably learn its own residency, the contract is the other way round:
 // **the caller states `n_slots`, a thread takes slot `tid`, and a thread whose `tid` is past the
@@ -85,11 +92,37 @@
 
 namespace g4gpu::hadronic::ftf::entry {
 
+/// The hadron lists of ONE ion interaction: `FtfWorkspace`'s `kMaxTracks`, which bounds the
+/// string products (`StringsWorkspace::kMaxOut`), the same list after `G4DecayKineticTracks`
+/// (`decay_list`, `tracks`) and the escaped and coalesced lists - all `G4KineticTrackVector`s in
+/// Geant4, which bounds none of them.
+///
+/// 832, AND IT IS READ OFF GEANT4'S OWN RUN (P24, docs/RISK.md V236). It was 512, and 63 of the
+/// ion grid's 500 events at Fe56 on Pb207 at 20 GeV per nucleon - the heaviest corner of
+/// tests/test_ftf_model.cu's 36,000 - refused as `list_full`. QBBC's own FTFP at that point
+/// (ref/oracle/ftf_capacity.csv, 2,000 events) needs at most 543 string products and 663 tracks
+/// after the decay pass; the port, with lists too large to refuse, needs 536 and 652 over the
+/// grid's 500. 663 with a quarter more, to a multiple of 8, is 832. An event past it is still
+/// refused by name (`KineticDecayRefusal::list_full`, `track_capacity`), never truncated.
+inline constexpr int kIonMaxTracks = 832;
+
+/// What ONE FTFP interaction can hand back: the `HadFinalState` width a caller of `apply` needs
+/// for an ion beam, and through `had::kInteractionSecondaryCap` the slot's.
+///
+/// 856, READ OFF THE SAME RUN. Fe56 on Pb207 at 20 GeV per nucleon leaves at most 680
+/// secondaries in Geant4 (2,000 events) and 640 in the port (500); 680 with a quarter more, to a
+/// multiple of 8, is 856. The slot held 256, which Geant4 exceeds in 863 of those 2,000 events -
+/// and in 54 of 500 at Fe56 on Fe56, 119 at O16 on Pb207 and 80 at C12 on Pb207, all at 20 GeV
+/// per nucleon - so the transport's FTFP ion arm was refusing a large share of exactly the
+/// interactions a galactic-cosmic-ray iron beam makes. Past 856 the final state's
+/// `secondary_overflow` refuses by name.
+inline constexpr int kMaxSecondaries = 856;
+
 /// The workspace for a run that can have an ION beam: `kMaxProjA = 64` covers every projectile a
 /// galactic-cosmic-ray problem contains, and `kWorkspaceBytes` below is what it costs. The
 /// template arguments are the ones `test_ftf_model.cu`'s device probe is measured with, so
 /// PORTED 2.1.11b's 255 registers and 1,376-byte frame are this type's numbers.
-using Workspace = FtfWorkspace<250, 64, 1024, 512, 512, 96>;
+using Workspace = FtfWorkspace<250, 64, 1024, 512, kIonMaxTracks, 96>;
 
 /// The workspace for a run whose projectile is always a single hadron - P12's at-rest captures,
 /// P13's photons, and any beam of p, n, pi, K, anti-nucleon or hyperon. `kMaxProjA = 1` removes
@@ -119,7 +152,7 @@ inline constexpr std::size_t kHadronWorkspaceBytes = sizeof(HadronWorkspace);
 /// The one table shared by every slot, whatever the type.
 inline constexpr std::size_t kLundTableBytes = sizeof(LundTables<double>);
 
-static_assert(kWorkspaceBytes == 539096,
+static_assert(kWorkspaceBytes == 671256,
               "entry::Workspace changed size. The header's sizing table, docs/PORTED.md 2.1.11b "
               "and this assertion all carry the number - update all three. docs/RISK.md V167.");
 static_assert(kHadronWorkspaceBytes == 458088,

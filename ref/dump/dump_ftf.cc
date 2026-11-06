@@ -61,6 +61,10 @@
 
 #include "G4AntiNeutron.hh"
 #include "G4AntiProton.hh"
+#include "G4DecayKineticTracks.hh"
+#include "G4GeneratorPrecompoundInterface.hh"
+#include "G4TheoFSGenerator.hh"
+#include "G4VPreCompoundModel.hh"
 #include "G4Deuteron.hh"
 #include "G4DynamicParticle.hh"
 #include "G4DiffractiveExcitation.hh"
@@ -2834,7 +2838,134 @@ void dump_ftfwindows() {
   std::fclose(f);
 }
 
+// ---------------------------------------------------------------------------------------------
+// ftf_capacity.csv - what QBBC's own FTFP needs, per event, at the heavy corner of the ion grid
+// (P24)
+//
+// The port's `FtfWorkspace` holds its hadron lists in `kMaxTracks` slots - the string products,
+// the same list after `G4DecayKineticTracks`, the escaped and coalesced lists - and Geant4 bounds
+// none of them: they are `G4KineticTrackVector`s. tests/test_ftf_model.cu's ion grid ({alpha,
+// C12, O16, Fe56} at {3, 8, 20} GeV/nucleon on {H, C, O, Al, Fe, Pb}, 500 events a point) has no
+// Geant4 row at all, because the ion arm is held to conservation rather than to an oracle; so
+// what an event NEEDS was never measured on Geant4's side, and `kMaxTracks` = 512 refused 66 of
+// the 500 events at Fe56 on Pb207 at 20 GeV/nucleon. This measures it, on QBBC's own model: the
+// GenericIon `ionInelastic` process's "FTFP" (G4IonPhysicsXS -> G4FTFBuilder), called through
+// `ApplyYourself` with its transport swapped for `CountingPrecoInterface`, a
+// `G4GeneratorPrecompoundInterface` on the same precompound model that counts the list it is
+// handed (`strings`: what `G4ExcitedStringDecay` made), then runs `G4DecayKineticTracks` over
+// it and counts again (`decayed`: the list the port's `decay_list` and `tracks` hold), then hands
+// the decayed list to Geant4's own `PropagateNuclNucl`. That function's first statement after
+// its bookkeeping is the same decay pass, which on a list already decayed decays nothing unless
+// a resonance could not be decayed the first time - so this is a measurement of the same
+// distribution and not a tape of the same events. `fs` is the final state's secondary count,
+// what the slot's `HadFinalState` holds.
+//
+// Run alone with G4GPU_FTF_CAPACITY_ONLY.
+class CountingPrecoInterface : public G4GeneratorPrecompoundInterface {
+ public:
+  explicit CountingPrecoInterface(G4VPreCompoundModel* p) : G4GeneratorPrecompoundInterface(p) {}
+  G4ReactionProductVector* Propagate(G4KineticTrackVector* s, G4V3DNucleus* t) override {
+    count_and_decay(s);
+    return G4GeneratorPrecompoundInterface::Propagate(s, t);
+  }
+  G4ReactionProductVector* PropagateNuclNucl(G4KineticTrackVector* s, G4V3DNucleus* t,
+                                             G4V3DNucleus* p) override {
+    count_and_decay(s);
+    return G4GeneratorPrecompoundInterface::PropagateNuclNucl(s, t, p);
+  }
+  int strings = -1;   ///< reset by the caller before each event
+  int decayed = -1;
+
+ private:
+  void count_and_decay(G4KineticTrackVector* s) {
+    strings = (s != nullptr) ? static_cast<int>(s->size()) : 0;
+    if (s != nullptr) { G4DecayKineticTracks decay(s); }
+    decayed = (s != nullptr) ? static_cast<int>(s->size()) : 0;
+  }
+};
+
+/// `G4VIntraNuclearTransportModel::GetDeExcitation` is protected; the transport QBBC built is
+/// asked for its precompound model through an explicit instantiation, which may name it.
+struct TagDeExcitation {
+  using type = G4VPreCompoundModel* (G4VIntraNuclearTransportModel::*)() const;
+  friend type bridge(TagDeExcitation);
+};
+template struct PrivateBridge<TagDeExcitation, &G4VIntraNuclearTransportModel::GetDeExcitation>;
+
+void dump_capacity() {
+  FILE* f = std::fopen("ftf_capacity.csv", "w");
+  std::fprintf(f, "case,pz,pa,ekin_per_a_MeV,tz,ta,N,quantity,value,count\n");
+  G4ParticleDefinition* gi = G4GenericIon::GenericIon();
+  G4TheoFSGenerator* ftfp = nullptr;
+  G4ProcessManager* pm = gi->GetProcessManager();
+  G4ProcessVector* pv = (pm != nullptr) ? pm->GetProcessList() : nullptr;
+  for (G4int i = 0; pv != nullptr && i < (G4int)pv->size(); ++i) {
+    G4HadronicProcess* hp = dynamic_cast<G4HadronicProcess*>((*pv)[i]);
+    if (hp == nullptr || hp->GetProcessName() != "ionInelastic") { continue; }
+    ftfp = dynamic_cast<G4TheoFSGenerator*>(hp->GetHadronicModel("FTFP"));
+  }
+  if (ftfp == nullptr) {
+    std::fprintf(f, "NO_FTFP,0,0,0,0,0,0,none,0,0\n");
+    std::fclose(f);
+    return;
+  }
+  const G4VIntraNuclearTransportModel* own = ftfp->GetTransport();
+  auto* counting = new CountingPrecoInterface((own->*bridge(TagDeExcitation{}))());
+  ftfp->SetTransport(counting);
+
+  struct CCase { int pz, pa; double per_a; int tz, ta; const char* name; int n; };
+  // The corner the port refused, at four times the grid's 500 events, and its four nearest
+  // neighbours at the grid's own 500: a lighter target, a lower energy, two lighter beams.
+  const CCase cases[] = {{26, 56, 20000.0, 82, 207, "Fe56_20000_Pb207", 2000},
+                         {26, 56, 20000.0, 26, 56, "Fe56_20000_Fe56", 500},
+                         {26, 56, 8000.0, 82, 207, "Fe56_8000_Pb207", 500},
+                         {8, 16, 20000.0, 82, 207, "O16_20000_Pb207", 500},
+                         {6, 12, 20000.0, 82, 207, "C12_20000_Pb207", 500}};
+  G4IonTable* ions = G4IonTable::GetIonTable();
+  for (const CCase& c : cases) {
+    const G4ParticleDefinition* ion = ions->GetIon(c.pz, c.pa, 0.0);
+    CLHEP::HepRandom::setTheSeed(24000L + c.pa * 1000 + c.ta + G4int(c.per_a / 1000.0));
+    std::map<int, long long> h_strings, h_decayed, h_fs;
+    for (int ev = 0; ev < c.n; ++ev) {
+      G4DynamicParticle dp(ion, G4ThreeVector(0, 0, 1), c.per_a * c.pa * MeV);
+      G4HadProjectile proj(dp);
+      G4Nucleus nucleus(c.ta, c.tz);
+      counting->strings = -1;
+      counting->decayed = -1;
+      G4HadFinalState* r = nullptr;
+      try {
+        r = ftfp->ApplyYourself(proj, nucleus);
+      } catch (...) {
+        r = nullptr;
+      }
+      ++h_strings[counting->strings];
+      ++h_decayed[counting->decayed];
+      ++h_fs[(r != nullptr) ? static_cast<int>(r->GetNumberOfSecondaries()) : -1];
+      if (r != nullptr) { r->Clear(); }
+    }
+    for (const auto* q : {"strings", "decayed", "fs"}) {
+      const std::map<int, long long>& h = (q[0] == 's') ? h_strings
+                                          : (q[0] == 'd') ? h_decayed : h_fs;
+      for (const auto& kv : h) {
+        std::fprintf(f, "%s,%d,%d,%.17g,%d,%d,%d,%s,%d,%lld\n", c.name, c.pz, c.pa, c.per_a,
+                     c.tz, c.ta, c.n, q, kv.first, kv.second);
+      }
+    }
+    std::printf("  ftf_capacity %-18s max decayed %d, max fs %d\n", c.name,
+                h_decayed.empty() ? 0 : h_decayed.rbegin()->first,
+                h_fs.empty() ? 0 : h_fs.rbegin()->first);
+    std::fflush(stdout);
+    std::fflush(f);
+  }
+  ftfp->SetTransport(const_cast<G4VIntraNuclearTransportModel*>(own));
+  std::fclose(f);
+}
+
 void dump_ftf(const DumpContext&) {
+  if (std::getenv("G4GPU_FTF_CAPACITY_ONLY") != nullptr) {
+    dump_capacity();
+    return;
+  }
   dump_params();
   dump_lund_tables();
   dump_hadrons();
@@ -2865,6 +2996,7 @@ void dump_ftf(const DumpContext&) {
   dump_modelcases();
   dump_modelstat();
   dump_modelbig();
+  dump_capacity();
 }
 
 }  // namespace
@@ -2883,5 +3015,5 @@ G4GPU_REGISTER_DUMP("ftf",
                     "ftf_nucstat.csv ftf_aaradius.csv ftf_prescatter.csv ftf_windows.csv "
                     "ftf_hyperon_xsc.csv "
                     "ftf_modelbig_strings.csv "
-                    "ftf_modelbig_mult.csv",
+                    "ftf_modelbig_mult.csv ftf_capacity.csv",
                     dump_ftf);

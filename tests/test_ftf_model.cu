@@ -63,6 +63,7 @@
 // are not duplicated - they come from ftf_modelcases.csv - because an ion's projectile mass is
 // `G4IonTable::GetIonMass(Z, A)` and writing that number twice is exactly the mistake the
 // warning describes.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -72,6 +73,7 @@
 #include <vector>
 
 #include "core/rng.cuh"
+#include "physics/hadronic/ftf/ftf_entry.cuh"
 #include "physics/hadronic/ftf/theo_fs_generator.cuh"
 #include "physics/hadronic/xs/hadron_nucleon_xsc.cuh"
 
@@ -1936,15 +1938,23 @@ int main(int argc, char** argv) {
   // wall are made of.
   // -------------------------------------------------------------------------------------------
   {
-    using WS = ftf::FtfWorkspace<250, 64, 1024, 512, 512, 96>;
+    // THE TRANSPORT'S OWN TYPES, since P24: `entry::Workspace` is what `had::InteractionPool`
+    // allocates a slot of, and `entry::kMaxSecondaries` is the final-state width the slot's
+    // `kInteractionSecondaryCap` is built from. This section used its own
+    // `FtfWorkspace<..., 512, ...>` and a `HadFinalState<double, 512>` - the second was raised
+    // from 128 by P11d part 2 "for whoever sizes the transport's own", and nobody did: the slot
+    // held 256, which 156 of this grid's 500 Fe56-on-Pb207 events at 20 GeV per nucleon exceed.
+    // Running the grid through the transport's sizes is what makes this section the transport's
+    // capacity test as well as the model's.
+    using WS = ftf::entry::Workspace;
     WS* ws = new WS();
-    // 512 AND NOT 128, AND THE NUMBER IS MEASURED. Before P11d part 2 the ion arm averaged 14
-    // secondaries and 128 was never reached; the decay pass turns every resonance into two or
-    // more tracks and the average went to 28, with Fe on Pb at 20 GeV per nucleon running past
-    // 128 in 1,269 of 36,000 events. That is the TEST's buffer and not a limit of the model -
-    // `kMaxSec` is the caller's template argument in P5's framework - so it is raised here and
-    // the number is recorded for whoever sizes the transport's own.
-    static physics::hadronic::HadFinalState<double, 512> out;
+    static physics::hadronic::HadFinalState<double, ftf::entry::kMaxSecondaries> out;
+    // What each event NEEDED, per point: the string products, the list after the decay pass
+    // (the `kMaxTracks` lists hold it) and the final state. Compared below with QBBC's own FTFP at
+    // the five heaviest points (ftf_capacity.csv), and asserted against both capacities.
+    struct Need { int strings = 0, tracks = 0, fs = 0; double sum_fs = 0.0; long long n = 0; };
+    std::map<std::string, Need> need;
+    Need need_all;
     struct Ion { const char* name; int a, z; };
     const Ion beams[] = {{"alpha", 4, 2}, {"C12", 12, 6}, {"O16", 16, 8}, {"Fe56", 56, 26}};
     const Ion targets[] = {{"H1", 1, 1},   {"C12", 12, 6},   {"O16", 16, 8},
@@ -1970,10 +1980,26 @@ int main(int argc, char** argv) {
           physics::hadronic::HadNucleus nuc;
           nuc.a = t.a;
           nuc.z = t.z;
+          char point[64];
+          std::snprintf(point, sizeof point, "%s_%d_%s", b.name, static_cast<int>(pn), t.name);
           for (int ev = 0; ev < n_events; ++ev) {
-            out = physics::hadronic::HadFinalState<double, 512>();
+            out = physics::hadronic::HadFinalState<double, ftf::entry::kMaxSecondaries>();
             Philox<double> rng(static_cast<uint32_t>(ev), 53u);
             ftf::apply_yourself(hp, nuc, out, ws, lund, rng);
+            {
+              // `strings.n_out` and `n_tracks` are left by the call: the string products, and
+              // the list the decay pass handed `Propagate`. Recorded for every event, refused
+              // or not, so a refusal cannot hide the event that needed the most.
+              Need& nd = need[point];
+              nd.strings = std::max(nd.strings, ws->strings.n_out);
+              nd.tracks = std::max(nd.tracks, ws->n_tracks);
+              nd.fs = std::max(nd.fs, out.n_secondaries + out.secondary_overflow);
+              nd.sum_fs += out.n_secondaries;
+              ++nd.n;
+              need_all.strings = std::max(need_all.strings, nd.strings);
+              need_all.tracks = std::max(need_all.tracks, nd.tracks);
+              need_all.fs = std::max(need_all.fs, nd.fs);
+            }
             if (out.n_secondaries == 0 || ws->report.any()) {
               ++refused;
               // WHICH refusal, because "1,594 refused" was the whole answer before P11d part 2
@@ -2067,6 +2093,75 @@ int main(int argc, char** argv) {
       std::printf("FAIL: ion arm conservation - %lld baryon, %lld charge, %lld unknown\n",
                   bad_b, bad_q, unknown);
       ++fails;
+    }
+
+    // THE CAPACITIES, against what the grid and QBBC's own FTFP needed (P24, docs/RISK.md V236).
+    //
+    // Every event of the grid runs: `list_full` was 63 of the 500 at Fe56 on Pb207 at 20 GeV
+    // per nucleon with 512 tracks, and nothing is refused by capacity now. The two bounds are
+    // then held above the largest need on EITHER side - the port's own over this grid, and
+    // Geant4's over ftf_capacity.csv's five heaviest points (2,000 events at the corner, 500 at
+    // the four next to it) - because a bound that covers the port's distribution and not
+    // Geant4's is a bound that a port agreeing better with Geant4 would overflow.
+    {
+      constexpr int kTracks = ftf::entry::kIonMaxTracks;
+      constexpr int kFs = ftf::entry::kMaxSecondaries;
+      std::printf("    capacities: %d tracks, %d secondaries; the grid needed at most %d string "
+                  "products, %d tracks, %d secondaries\n", kTracks, kFs, need_all.strings,
+                  need_all.tracks, need_all.fs);
+      if (decay_full != 0 || refused != 0) {
+        std::printf("FAIL: the ion grid refused %lld events (%lld of them list_full) - every "
+                    "event should run since P24\n", refused, decay_full);
+        ++fails;
+      }
+      int g4_strings = 0, g4_tracks = 0, g4_fs = 0;
+      Csv cap;
+      if (cap.load(dir + "/ftf_capacity.csv") && !quick) {
+        std::map<std::string, std::map<std::string, std::map<int, long long>>> h;
+        for (size_t r = 0; r < cap.rows.size(); ++r) {
+          h[cap.s(r, "case")][cap.s(r, "quantity")][static_cast<int>(cap.i(r, "value"))] +=
+              cap.i(r, "count");
+        }
+        std::printf("    point                Geant4: N strings tracks   fs  <fs>    port: N "
+                    "strings tracks   fs  <fs>\n");
+        for (const auto& kv : h) {
+          const auto& s = kv.second.at("strings");
+          const auto& d = kv.second.at("decayed");
+          const auto& f = kv.second.at("fs");
+          long long n = 0;
+          double sum = 0.0;
+          for (const auto& b : f) {
+            if (b.first < 0) { continue; }   // an exception: no final state
+            n += b.second;
+            sum += double(b.first) * b.second;
+          }
+          g4_strings = std::max(g4_strings, s.rbegin()->first);
+          g4_tracks = std::max(g4_tracks, d.rbegin()->first);
+          g4_fs = std::max(g4_fs, f.rbegin()->first);
+          const auto it = need.find(kv.first);
+          const Need mine = (it != need.end()) ? it->second : Need();
+          std::printf("    %-20s %8lld %7d %6d %4d %5.1f   %7lld %7d %6d %4d %5.1f\n",
+                      kv.first.c_str(), n, s.rbegin()->first, d.rbegin()->first,
+                      f.rbegin()->first, n ? sum / n : 0.0, mine.n, mine.strings, mine.tracks,
+                      mine.fs, mine.n ? mine.sum_fs / mine.n : 0.0);
+          if (it == need.end()) {
+            std::printf("FAIL: ftf_capacity.csv's point %s is not on the ion grid\n",
+                        kv.first.c_str());
+            ++fails;
+          }
+        }
+        if (h.size() != 5) {
+          std::printf("FAIL: ftf_capacity.csv has %zu points, expected 5\n", h.size());
+          ++fails;
+        }
+      }
+      const int want_tracks = std::max({need_all.strings, need_all.tracks, g4_strings, g4_tracks});
+      const int want_fs = std::max(need_all.fs, g4_fs);
+      if (want_tracks > kTracks || want_fs > kFs) {
+        std::printf("FAIL: a capacity is under what an event needed - tracks %d of %d, final "
+                    "state %d of %d\n", want_tracks, kTracks, want_fs, kFs);
+        ++fails;
+      }
     }
     delete ws;
   }
