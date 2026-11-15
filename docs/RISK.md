@@ -15658,3 +15658,191 @@ where P18's row read -0.62%. The B1 gate as build_all.bat runs it: b1_gpu_sched 
 g4dose -verify-processes and -verify-step-hook pass; the proton depth-dose (proton_depth 6000,
 tools/compare_depth.ps1) OK. test_step_hadron (900 steps host against device, worst 5.1e-13),
 test_neutron and test_ion_transport pass on the GPU.
+### V245: P26's scope, measured - what G4EmStandardPhysics option 0 and G4EmExtraPhysics still did in 11.1.1's QBBC that this port did not, before any change
+
+Six items (docs/HADRONIC_PLAN.md section 10). For each: Geant4's line, the port's before P26, and
+the size where it could be measured before anything moved.
+
+**1. The gamma general process's zone totals and EM fractions.** `TotalCrossSectionPerVolume`
+reads `LambdaGeneral0/2/6/10` (zone 0 adding the photoelectric model's `GetLambda`) and
+`PostStepDoIt` walks `ProbGeneral1, 3, 4, 7-9, 11-13` - tables whose nodes are each sub-process's
+`GetLambda`, i.e. its OWN lambda and prim vectors. The port evaluated its models at the photon's
+energy and read table 9 alone (V224, V225). V225's table extended to every zone total and
+fraction - the tables as V246 builds them (Geant4's stored tables to 6e-16) against the models'
+sums at the photon's energy, `tests/test_gamma_general_tables.cu` section 4, 45 energies, a
+selection here:
+
+| E (MeV) | zone | air | water | A-150 | bone | worst abs. fraction |
+|--:|:--:|--:|--:|--:|--:|--:|
+| 0.002 | 0 | +0.001% | +0.005% | +0.004% | +0.009% | 5.9e-4 |
+| 0.01 | 0 | +0.176% | +0.183% | +0.128% | +0.032% | 1.0e-2 |
+| 0.03 | 0 | **+0.565%** | +0.555% | +0.478% | +0.378% | 9.2e-3 |
+| 0.05 | 0 | +0.356% | +0.331% | +0.260% | +0.311% | 4.9e-3 |
+| 0.1 | 0 | +0.048% | +0.043% | +0.035% | +0.049% | 7.1e-4 |
+| 0.2 | 1 | +0.011% | +0.010% | +0.007% | +0.017% | 1.7e-4 |
+| 0.8 | 1 | +0.087% | +0.087% | +0.088% | +0.086% | 4.7e-7 |
+| 1.2 | 2 | -0.376% | **-0.377%** | -0.377% | -0.376% | 5.1e-5 |
+| 1.5 | 2 | -0.122% | -0.123% | -0.123% | -0.122% | 3.6e-5 |
+| 6 | 2 | +0.077% | +0.079% | +0.082% | +0.074% | 3.9e-5 |
+| 17 | 2 | -0.037% | -0.658% | +0.152% | -0.189% | 7.1e-3 |
+| 22 | 2 | -0.514% | **-0.929%** | -0.888% | -0.686% | 9.5e-3 |
+| 25 | 2 | +0.131% | +0.069% | +0.467% | +0.162% | 4.2e-3 |
+| 150 | 3 | +0.059% | +0.080% | +0.096% | +0.031% | 2.0e-3 |
+| 300 | 3 | -0.076% | -0.093% | -0.113% | -0.072% | 1.1e-3 |
+| 1e4 | 3 | +0.000% | +0.000% | +0.000% | +0.000% | 5.5e-11 |
+| 1e5 | 3 | +2.44% | +1.45% | +2.22% | +0.82% | 7.7e-5 |
+| 1e6 | 3 | -14.9% | -18.0% | -19.2% | -16.3% | 7.1e-4 |
+| 1e7 | 3 | -38.6% | -45.5% | **-49.3%** | -39.7% | 2.3e-3 |
+
+The zone-2 fraction column includes P9, which P21 already read. Zone 0 is new: Compton's splined
+lambda vector and Rayleigh's LINEAR one under 150 keV, and Rayleigh's share of T0 moves by up to
+1e-2 absolute at 10-30 keV. Above 30 GeV the models' path keeps `pair_xs_per_atom`'s
+parameterisation (docs/PORTED.md 4.1) - the -49%. V225's scratch read of the totals alone moved
+B1's gate by +0.036%; V246's addendum has the measured number.
+
+**2. `CorrectionsAlongStep` under `isIon`.** `AlongStepDoIt` multiplies an ion's mean loss by
+`q2(max(E - eloss/2, E/2))/q2(E)` on a step that loses 5% or more; the port did not. The models'
+answer (`ref/oracle/ion_corrections.csv`, new, V247): from 0.9997 at 1000 MeV/u to **0.605** for
+Fe56 losing 99% at 0.1 MeV/u. `isIon` is `G4EmTableUtil::CheckIon`'s - He3 and every real
+nucleus; the alpha, deuteron and triton are excluded by name, so **on the 840 MeV and 4 GeV alpha
+beams the number of corrected primary steps is zero by construction**, in Geant4 as here: the 816
+alpha rows of the dump come back unchanged and the stepper never calls it for one. On those beams
+it touches only their He3 and GenericIon fragments. A per-step count on the beams was not taken (no
+device counter was added for it).
+
+**3. The ion's spin and magnetic moment.** `G4IonTable::CreateIon` reads 2J and mu from
+G4ENSDFSTATE; `em::ion_particle_def` reports 0 and -1. One consumer: the Bethe-Bloch delta-ray
+sampler's spin term and form-factor rejection for a real nucleus, whose whole delta-ray channel the
+port refuses (item 4). Not reachable on its own.
+
+**4. An ion's delta rays.** NOT "above 17 GeV per nucleon": that was V200's factor-of-a-thousand
+error, and the P26 brief and docs/PORTED.md's spin row repeated it. The window opens at
+`tmax > cut`, about 147 MeV/u in water and far lower in air, and `step_hadron` books
+`kIonDeltaRay` per step there. Per beam (V230/V232's ledgers): neutron 100 MeV 9, neutron
+1000 MeV 0, deuteron 3, alpha 4000 MeV 25, He3 9, alpha 840 MeV 11 steps. The charge ledger
+(`kIonWithoutNuclide`): 0, 2, 5, 9, 4, 5 GenericIons.
+
+**5. The e+- residual above 100 MeV** (README open question 5: the 1 GeV electron row -0.39%, 2.8
+sigma; the named candidate is the discrete rates, V78). Measured (`ref/oracle/lepton_rates.csv`,
+new: `G4EmCalculator::GetCrossSectionPerVolume` - the lambda table - against
+`ComputeCrossSectionPerVolume` - the model - at the couple's cut, 20 MeV to 10 GeV): eIoni, e- and
+e+, agree to 1e-5 at every energy in all four materials; eBrem below 1 GeV to 0.05% (water: -0.051%
+to +0.021%). Above 1 GeV the model column is not a stable reference: the same call in `g4dump`'s
+inline electron dump gives 0.035379/mm at 1059 MeV in water (the relativistic model) and in this
+dump, run after the others, 0.03872 at 1002 MeV - 7% apart - while the table reads 0.036131, the
+SB-to-Rel `del` factor of `G4EmModelManager::FillLambdaVector`, which the port's `BremsBoundary`
+already carries. So the TABLE half of V78 is not where the -0.39% is. Its other half, the integral
+approach's rejection (`fEmTwoPeaks` for eBrem, `fEmOnePeak` for eIoni), is unmeasured. Open, with
+that one candidate. `annihil` returned 0 from both calls in this configuration and is not compared.
+
+**6. The lepton models' FTF arm.** `G4ElectroVDNuclearModel`/`G4MuonVDNuclearModel` hand an
+equivalent photon of 10 GeV or more to FTFP as a pi0; the port refuses it (`kSubModel`, `used_ftf`,
+PORTED 2.1.16's `kLeptoNuclearFtf`). The equivalent photon is strictly below the lepton's kinetic
+energy, so **a 10 GeV electron beam makes zero such interactions by construction**, in Geant4 and
+here; the host test's 30 GeV electron reaches it in 9 of 200. V249.
+
+### V246: the photon reads G4GammaGeneralProcess's own tables - built as BuildPhysicsTable builds them, every node of every table Geant4's to 6e-16 - once conversion's lambda vector runs past 30 GeV on Geant4's integral and LPM functions
+
+**WHAT IS BUILT**, at upload, per material (`host::build_gamma_general_host_tables`):
+
+  * each sub-process's own tables as G4VEmProcess builds them (`em/em_lambda_table.cuh`):
+    `BuildLambdaTable`'s bin count (7 a decade over 100 eV-100 TeV = 84, or `SetLambdaBinning`'s
+    220 for conversion) and `G4EmTableUtil::BuildLambdaTable`'s vectors - Compton 100 eV-1 MeV
+    (28 bins, splined) and its prim vector, E*sigma, 1 MeV-100 TeV (56, splined); conversion
+    2 m_e-100 TeV (146, splined, node 0 zero by `startFromNull`); the photoelectric effect no
+    lambda vector (the model below 200 keV) and a prim vector from 200 keV (61); Rayleigh
+    100 eV-150 keV (22, LINEAR: `SetSplineFlag(false)`) and a prim vector from 150 keV (62,
+    splined, as every prim vector is) - and `GetCurrentLambda`'s choice among them. Compton's
+    model returns 0 at `E <= 100 eV`: `InitialiseProcess` sets its low limit to the EM parameters'
+    minimum, and Geant4 stores 0 at that node.
+  * the general process's fifteen slots on `InitialiseProcess`'s four grids (aVector 21 bins
+    splined, bVector 40, cVector 50, dVector 42 splined), each node's sums in the source's order,
+    and `FillSecondDerivatives` (ComputeSecDerivative1) on 0, 1 and 10-14. Behind the existing
+    table-9 pointer: no kernel's wiring moved by a byte.
+
+Two pieces of conversion were not the port's and are now (`em/pair_production.cuh`):
+`pair_xs_per_atom_rel`, `ComputeCrossSectionPerAtom` past 30 GeV - the two-interval 8-point
+Gauss-Legendre integral of the differential cross section, LPM above 100 GeV, `gXSecFactor*Z*(Z +
+eta)`, Z^(1/3) from `G4Pow::Z13` - and `pair_get_lpm_functions`, the pair model's own
+`GetLPMFunctions`: a 201-entry table of `ComputeLPMGsPhis` at ds = 0.01, interpolated linearly,
+where the port had only the bremsstrahlung model's (coefficients rounded to six digits, evaluated
+directly). On the parameterisation conversion's vector was 2.28x off at the top and, through its
+spline, 3.5e-3 off at 26.8 GeV; on the bremsstrahlung LPM functions, 6.4e-7 at 100 TeV.
+
+**AGAINST GEANT4.** `ref/gammagp` also prints the stored sub-process vectors now (kind=subnode)
+and 13 more energies in zones 0 and 3. `tests/test_gamma_general_tables.cu` (host): the four
+models against G4EmCalculator at 44 energies x 4 materials, worst 4.9e-16; 24 stored sub-process
+vectors - edges, lengths, 1,524 nodes - worst 6.1e-16; tables 0-14, 2,344 nodes (500 above
+30 GeV), worst 6.3e-16, table 14 equal to table 13 at every node (V207); the device reader
+`had::gamma_general_value` against Geant4's own `LogVectorValue` at 2,464 points, worst 4.4e-16;
+`had::gamma_general_select` gives every process its table's share of a 2,000,000-point q grid in
+24 cells across the four zones.
+
+**WHAT THE PHOTON DOES.** `step_gamma` reads them when the general process is on, all four EM
+processes and their data are present, and photonNuclear is in the run if it was in the tables:
+the length over the zone's total and the process from `PostStepDoIt`'s switch on the same uniform
+- zone 0's `preStepLambda*q <= peLambda` and Rayleigh's `(lambda - pe)*P1 + pe`, zone 1's P3/P4,
+zone 2's P7/P8/P9 with photonNuclear the rest, zone 3's `q + P <= 1` with the last slice a
+conversion (counted, V207). The element inside each process is still chosen on the models'
+per-element cross sections. `G4GPU_GAMMA_GENERAL_TABLES=0` at upload keeps P1's models and P21's
+table 9, line for line.
+
+Anti-vacuity, each once and restored: Compton's 100 eV limit removed - 3 failures; the prim
+vector unsplined - 2; the reader without its spline term - 88 values off, 1; table 4's numerator
+without the photoelectric term - 2; the bremsstrahlung LPM functions in the rate - 4; the
+parameterisation at every energy - 4; zone 3 walked as `q <= P11` - 1.
+
+### V247: CorrectionsAlongStep, applied where AlongStepDoIt applies it
+
+`em::ion_corrections_along_step` (em/hadron_range.cuh) is G4BraggIonModel's and
+G4BetheBlochModel's `CorrectionsAlongStep` - one body in 11.1.1 - and `step_hadron` calls it for
+He3 and every real nucleus after the mean loss (short step or range inversion) and before the
+fluctuations, then clamps to the pre-step energy as `AlongStepDoIt`'s `eloss >= preStepKinEnergy`
+does. The alpha, deuteron and triton are not `isIon` and never reach it.
+
+`ref/dump/dump_ion_corrections.cc` hands the running models - the one each species' `ionIoni`
+selects at the scaled energy - He3, C12, O16, Fe56 and the alpha in B1's four materials at
+0.1-1000 MeV/u and losses of 1% to 99%, 5% itself and the double under it included
+(`ref/dump/g4dump.cc` takes `G4GPU_DUMP_ONLY=<names>` now, so one dump can be regenerated without
+the hours of campaigns). `tests/test_ion_corrections.cu`: 4,080 rows, 1,944 corrected and 1,320
+returned by the guard, worst 2.05e-15; the largest correction a factor 0.605; the 816 alpha rows
+unchanged in Geant4. Anti-vacuity: the guard as `<=` - 1 failure (1.9e-2 at the 5% rows); q2/q20
+replaced by 1 - 1 failure (0.65). The `E/2` floor removed: no failure, and none can come - with
+`eloss < E` the mid-energy is always above `E/2`, in Geant4's code as in this one.
+
+It moves only steps that lose 5% or more: the last steps of a stopping He3 or nucleus. The alpha
+and deuteron sweep rows cannot move through it.
+
+### V248: GetA27 is the element's mean mass; the ion's delta rays and spin stay refused by name; open question 5's table half is measured
+
+**GetA27.** `G4BetheBlochModel::SetupParameters` divides the form-factor scale by
+`G4NistManager::GetA27(G4lrint(|q|))` = `std::pow(GetAtomicMassAmu(Z), 0.27)`. `hadron_tlimit`
+took `pow(Z, 0.27)` (tlimit 45% high for the alpha and He3, a recorded gap in
+`tests/test_species.cu`) and `hadron_formfactor` 2Z (a part in 6,000 for both). Both call
+`em::nist_a27` now, on `data::nist_atomic_mass_table`; test_species asserts the two rows (484
+comparisons, 0 failures; 2 with pow(Z) put back). No dE/dx bit can move: tlimit enters
+`min(cut, tmax, tlimit)`.
+
+**THE ION'S DELTA RAYS AND ITS SPIN: REFUSED, STILL BY NAME.** Retiring `kIonDeltaRay` is three
+things: the rate for a real nucleus as Geant4 forms it (GenericIon's lambda at the scaled energy
+times the dynamic q2), the sampler on the ion's own definition, and that definition's spin and
+magnetic moment from ENSDFSTATE's 2J and mu columns (whose only consumer is the sampler). The
+first two change `step_hadron`'s delta-ray branch - outside the two stepper edits P26's brief
+allowed (the photon's table read and the ion's correction), in the kernel P23a owns - and the third
+has no consumer without them. So they stay named: `kIonDeltaRay` per step (3 to 25 a beam, V245
+item 4), `ion_particle_def`'s spin 0 / mag_moment2 -1. The threshold behind the refusal is V200's
+147 MeV/u in water.
+
+**OPEN QUESTION 5**: V245 item 5. The e+- discrete rates' tables are not the residual; the integral
+approach is the remaining candidate. Open.
+
+### V249: the lepton models' FTF arm - refused by name, and unreachable from a 10 GeV beam
+
+`G4ElectroVDNuclearModel::CalculateHadronicVertex` and the muon model's send an equivalent photon
+of `gammaE >= 10 GeV` to `G4TheoFSGenerator` (FTF + G4ExcitedStringDecay) as a pi0. The port
+refuses that arm by name (`EmExtraRefusal::kSubModel` with `used_ftf`, counted as
+`kLeptoNuclearFtf`). The photon's energy is strictly below the lepton's kinetic energy, so a 10 GeV
+electron beam - the beam the brief named - can make none, in Geant4 or here: zero by construction.
+Wiring it is the lepto-nuclear drain taking an `ftf::entry` slot (P11d's contract; the drain's frame
+was 4,096 bytes at ba61, V237) and a beam above 10 GeV to campaign it against; neither is in P26.
+What books it today: the host test's 30 GeV electron, 9 of 200 interactions; no B1 beam.
