@@ -1578,7 +1578,8 @@ int main() {
   // `G4GPU_DUMP_ONLY=name[,name...]` runs only the named registered dumps (P23a). The whole
   // registry is hours of campaigns now - Bertini, FTF, the cascades - and a package that adds
   // one small file should not have to regenerate every other package's to get it. Unset, every
-  // dump runs as before.
+  // dump runs as before. (P26 added the same knob, the same
+  // four lines, in its own worktree the same week; one copy survived the integration.)
   const char* only = std::getenv("G4GPU_DUMP_ONLY");
   for (const DumpEntry& d : dump_registry()) {
     if (only != nullptr && only[0] != '\0') {

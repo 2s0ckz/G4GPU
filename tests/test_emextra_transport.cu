@@ -379,10 +379,24 @@ int main() {
     rt.table_v = rtv.data();
   }
 
+  // P26: sections 1-7 are the photon on P1's models and P21's table 9 - the comparison's other
+  // side, which the general process's own tables replace by default since P26 - so their upload
+  // is made with the tables switched off. Section 8 uploads again with them on.
+  _putenv_s("G4GPU_GAMMA_GENERAL_TABLES", "0");
   host::EmExtraTableOwner<real_t> emx =
+      host::upload_emextra_tables<real_t>(mats, data::kNumMaterials, true, &pe);
+  _putenv_s("G4GPU_GAMMA_GENERAL_TABLES", "1");
+  host::EmExtraTableOwner<real_t> emx_t =
       host::upload_emextra_tables<real_t>(mats, data::kNumMaterials, true, &pe);
   static host::EmExtraHostTables<real_t> hemx;
   host::build_emextra_host_tables<real_t>(hemx, mats, data::kNumMaterials, false, &pe);
+  static host::EmExtraHostTables<real_t> hemx_t;
+  host::build_emextra_host_tables<real_t>(hemx_t, mats, data::kNumMaterials, false, &pe, &rt,
+                                          true);
+  if (!hemx_t.gg_ok || emx_t.view.p9 == nullptr) {
+    std::printf("  FAIL: the general process's tables were not built\n");
+    return 1;
+  }
   if (!emx.gamma_ok || !hemx.gamma_ok || emx.view.p9 == nullptr || !hemx.p9_ok) {
     std::printf("  FAIL: G4PARTICLEXS gamma data could not be resolved, or table 9 not built\n");
     return 1;
@@ -1334,6 +1348,219 @@ int main() {
              "would be blind");
       }
     }
+  }
+
+  // ============================================================================================
+  // 8. P26: the photon on G4GammaGeneralProcess's own tables
+  // ============================================================================================
+  // `step_gamma` with the tables uploaded and read: the length over the zone's total
+  // (LambdaGeneral0 + the photoelectric model in zone 0, 2, 6, 10) and the process from the zone's
+  // walk on the second uniform (`had::gamma_general_select`). Replayed photon by photon on the host
+  // from each photon's own key against `hemx_t`'s tables - which tests/test_gamma_general_tables.cu
+  // holds to Geant4's to 6e-16 - in all four zones; then section 7's first interactions against
+  // Geant4's forty million.
+  std::printf("-- 8. P26: the photon on the general process's own tables --\n");
+  {
+    had::HadronicWiring<real_t> had_t = had;
+    had_t.emextra = emx_t.view;
+    const had::EmExtraTables<real_t> ht8 = hemx_t.view();
+    struct Cell8 { int m; real_t e; };
+    const Cell8 cells8[] = {{data::kWater, 0.03},       {data::kBoneCompact, 0.05},
+                            {data::kAir, 0.12},         {data::kWater, 0.5},
+                            {data::kAir, 0.8},          {data::kWater, 1.2},
+                            {data::kBoneCompact, 1.5},  {data::kWater, 6.0},
+                            {data::kWater, 11.2},       {data::kWater, 22.0},
+                            {data::kBoneCompact, 22.0}, {data::kAir, 17.0},
+                            {data::kWater, 150.0},      {data::kBoneCompact, 500.0},
+                            {data::kWater, 1.0e5}};
+    constexpr int kN8 = 200000;
+    constexpr int kBatches8 = 5;
+    long long total_wrong = 0;
+    double worst_total_shift = 0;
+    for (const Cell8& c : cells8) {
+      const Scene<real_t> s = scene_for(c.m);
+      reset();
+      const int zone = had::gamma_general_zone<real_t>(c.e);
+      const had::GammaGeneralRead<real_t> rd =
+          had::gamma_general_read<real_t>(*ht8.p9, zone, c.m, c.e);
+      const auto xs =
+          em::gamma_macroscopic_xs<real_t>(mats[c.m], c.e, &pe, &rt, true, true, true);
+      const real_t lam = (zone == 0) ? rd.lambda + xs.photoelectric : rd.lambda;
+      const real_t store = had::photon_nuclear_xs<real_t>(htab, had::GammaGeneralProcess::kOff,
+                                                          c.m, mats[c.m], c.e);
+      // What P26 changes here: the models' total (P21's, with table 9 in zone 2) against the table's.
+      const real_t p9m = (zone == 2 && c.e > htab.p9->threshold[c.m]) ? p9_at(c.m, c.e) : 1;
+      const double model_total = (zone == 2) ? double(xs.total / p9m)
+                                 : (zone == 3) ? double(xs.total + store) : double(xs.total);
+      const double shift = double(lam) / model_total - 1.0;
+      if (std::fabs(shift) > worst_total_shift) { worst_total_shift = std::fabs(shift); }
+      long long wrong_proc = 0, wrong_len = 0, slice = 0, nq = 0, counts[6] = {};
+      for (int batch = 0; batch < kBatches8; ++batch) {
+        const unsigned int key0 = 0x2600000u + 0x1000000u * static_cast<unsigned>(c.m)
+                                  + static_cast<unsigned>(batch * kN8);
+        k_gamma<<<blocks(kN8), kT>>>(s, had_t, true, c.e, kN8, key0, d_out);
+        if (!get(a, kN8)) { return 1; }
+        for (int i = 0; i < kN8; ++i) {
+          Philox<real_t> rng(key0 + static_cast<unsigned>(i), 0u, 0u);
+          const real_t u1 = rng.uniform();
+          const real_t u2 = rng.uniform();
+          bool nuc = false, sl = false;
+          const em::GammaProcess want =
+              had::gamma_general_select<real_t>(rd, zone, lam, xs.photoelectric, u2, true, nuc, sl);
+          int want_pid = -1;
+          if (nuc) {
+            want_pid = static_cast<int>(ProcessId::fPhotoNuclear);
+          } else if (want == em::GammaProcess::kCompton) {
+            want_pid = static_cast<int>(ProcessId::fCompton);
+          } else if (want == em::GammaProcess::kPair) {
+            want_pid = static_cast<int>(ProcessId::fGammaConversion);
+          } else if (want == em::GammaProcess::kPhotoelectric) {
+            want_pid = static_cast<int>(ProcessId::fPhotoelectric);
+          } else if (want == em::GammaProcess::kRayleigh) {
+            want_pid = static_cast<int>(ProcessId::fRayleigh);
+          }
+          const int got_pid = a[i].queued ? static_cast<int>(ProcessId::fPhotoNuclear)
+                                          : a[i].process;
+          if (got_pid != want_pid) { ++wrong_proc; }
+          if (!close_rel(a[i].length, double(-log(u1) / lam), 1e-13)) { ++wrong_len; }
+          if (sl) { ++slice; }
+          nq += a[i].queued;
+          counts[nuc ? 5 : static_cast<int>(want)] += 1;
+        }
+      }
+      unsigned long long st[had::kNumEmxStats] = {};
+      cudaMemcpy(st, d_stats, sizeof(st), cudaMemcpyDeviceToHost);
+      std::printf("   %-6s %9.4g MeV zone %d: total %+.3f%% off the models'; replayed: %lld on the "
+                  "wrong process, %lld on the wrong length; compt %lld conv %lld phot %lld Rayl "
+                  "%lld nuc %lld; zone-3 slice %lld (counted %llu), edge %llu\n",
+                  mat_name(c.m), double(c.e), zone, 100.0 * shift, wrong_proc, wrong_len,
+                  counts[1], counts[2], counts[3], counts[4], counts[5], slice,
+                  st[had::kEmxZone3Conversion], st[had::kEmxTable9Edge]);
+      total_wrong += wrong_proc + wrong_len;
+      if (wrong_proc != 0 || wrong_len != 0) {
+        fail("%s %.4g MeV: the device's step is not the general process's tables'",
+             mat_name(c.m), double(c.e));
+      }
+      if (static_cast<long long>(st[had::kEmxZone3Conversion]) != slice) {
+        fail("%s %.4g MeV: %llu zone-3 hand-offs counted for %lld in the slice", mat_name(c.m),
+             double(c.e), st[had::kEmxZone3Conversion], slice);
+      }
+      const long long want_edge = (zone == 2 && !(store > real_t(0))) ? nq : 0;
+      if (static_cast<long long>(st[had::kEmxTable9Edge]) != want_edge) {
+        fail("%s %.4g MeV: %llu table-9 edge interactions counted for %lld", mat_name(c.m),
+             double(c.e), st[had::kEmxTable9Edge], want_edge);
+      }
+      if (c.e == real_t(11.2) && c.m == data::kWater && !(nq > 0 && store == 0)) {
+        fail("water 11.2 MeV is table 9's edge and queued nothing on the tables");
+      }
+    }
+    std::printf("   the replay can tell the tables from the models: the largest total shift is "
+                "%.3f%%\n", 100.0 * worst_total_shift);
+    if (worst_total_shift < 3e-3) {
+      fail("no cell's table total is 0.3%% off its models' - the replay could not tell them apart");
+    }
+
+    // Section 7's first interactions against Geant4's forty million, on the tables.
+    struct G4Count { int mat; double e; long long n; std::string process; long long count; };
+    std::vector<G4Count> g4;
+    {
+      const char* env = std::getenv("G4GPU_ORACLE");
+      const std::string path =
+          std::string((env != nullptr && env[0] != '\0') ? env : "ref/oracle") +
+          "/gammagp_counts.csv";
+      FILE* f = std::fopen(path.c_str(), "r");
+      if (f == nullptr) {
+        fail("cannot read %s", path.c_str());
+      } else {
+        static char line[4096];
+        const char* g4mat[data::kNumMaterials] = {"G4_AIR", "G4_WATER", "G4_A-150_TISSUE",
+                                                  "G4_BONE_COMPACT_ICRU"};
+        while (std::fgets(line, sizeof line, f) != nullptr) {
+          char mname[64] = {}, proc[64] = {};
+          double e = 0;
+          long long n = 0, k = 0;
+          if (std::sscanf(line, "%63[^,],%lf,%lld,%63[^,],%lld,", mname, &e, &n, proc, &k) != 5) {
+            continue;
+          }
+          for (int m = 0; m < data::kNumMaterials; ++m) {
+            if (std::string(mname) == g4mat[m]) { g4.push_back({m, e, n, proc, k}); }
+          }
+        }
+        std::fclose(f);
+      }
+    }
+    struct Pt { int m; real_t e; };
+    const Pt pts[] = {{data::kWater, 1.5},  {data::kBoneCompact, 1.5}, {data::kWater, 11.2},
+                      {data::kWater, 20.0}, {data::kWater, 22.0},      {data::kWater, 60.0},
+                      {data::kBoneCompact, 20.0}, {data::kBoneCompact, 22.0},
+                      {data::kBoneCompact, 60.0}, {data::kWater, 99.9},
+                      {data::kBoneCompact, 99.9}, {data::kAir, 17.0}, {data::kAir, 6.0},
+                      {data::kA150Tissue, 60.0}};
+    const char* procs[5] = {"compt", "conv", "phot", "Rayl", "photonNuclear"};
+    double chi2 = 0;
+    int dof = 0;
+    for (const Pt& pt : pts) {
+      const Scene<real_t> s = scene_for(pt.m);
+      long long port[5] = {};
+      long long n_port = 0;
+      for (int batch = 0; batch < kBatches8; ++batch) {
+        reset();
+        const unsigned int key0 = 0x2800000u + 0x1000000u * static_cast<unsigned>(pt.m)
+                                  + static_cast<unsigned>(batch * kN8);
+        k_gamma<<<blocks(kN8), kT>>>(s, had_t, true, pt.e, kN8, key0, d_out);
+        if (!get(a, kN8)) { return 1; }
+        for (int i = 0; i < kN8; ++i) {
+          if (a[i].status == static_cast<int>(StepStatus::fGeomBoundary)) { continue; }
+          ++n_port;
+          if (a[i].queued || a[i].process == static_cast<int>(ProcessId::fPhotoNuclear)) {
+            ++port[4];
+          } else if (a[i].process == static_cast<int>(ProcessId::fCompton)) {
+            ++port[0];
+          } else if (a[i].process == static_cast<int>(ProcessId::fGammaConversion)) {
+            ++port[1];
+          } else if (a[i].process == static_cast<int>(ProcessId::fPhotoelectric)) {
+            ++port[2];
+          } else if (a[i].process == static_cast<int>(ProcessId::fRayleigh)) {
+            ++port[3];
+          }
+        }
+      }
+      std::printf("   %-6s %6.2f MeV, tables:", mat_name(pt.m), double(pt.e));
+      for (int k = 0; k < 5; ++k) {
+        long long n_g4 = -1, k_g4 = -1;
+        for (const G4Count& gc : g4) {
+          if (gc.mat == pt.m && std::fabs(gc.e - double(pt.e)) < 1e-9 && gc.process == procs[k]) {
+            n_g4 = gc.n;
+            k_g4 = gc.count;
+          }
+        }
+        if (k_g4 < 0) {
+          fail("no Geant4 count for %s at %.2f MeV in %s", procs[k], double(pt.e),
+               mat_name(pt.m));
+          continue;
+        }
+        const double p = double(port[k] + k_g4) / double(n_port + n_g4);
+        const double se = std::sqrt(std::fmax(p * (1 - p) * (1.0 / n_port + 1.0 / n_g4), 1e-300));
+        const double z = (double(port[k]) / n_port - double(k_g4) / n_g4) / se;
+        std::printf("  %s %lld/%lld", procs[k], port[k], k_g4);
+        if (port[k] + k_g4 >= 20) {
+          std::printf(" (z %+.2f)", z);
+          chi2 += z * z;
+          ++dof;
+          if (std::fabs(z) > 3.5) {
+            fail("%s %.2f MeV on the tables: %s is %.2f sigma from Geant4's count",
+                 mat_name(pt.m), double(pt.e), procs[k], z);
+          }
+        }
+        if (k == 3 && (port[k] != 0 || k_g4 != 0)) {
+          fail("%s %.2f MeV: a Rayleigh scatter above 2 m_e on the tables", mat_name(pt.m),
+               double(pt.e));
+        }
+      }
+      std::printf("\n");
+    }
+    std::printf("   on the tables against Geant4's counts: chi2 %.1f for %d binomials\n", chi2, dof);
+    (void)total_wrong;
   }
 
   if (g_fails == 0) {

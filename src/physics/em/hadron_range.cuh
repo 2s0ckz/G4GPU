@@ -529,6 +529,42 @@ __host__ __device__ inline real_t hadron_charge_sq_ratio(const data::Material<re
   return hadron_charge_sq_ratio<real_t>(m, h.type, kinetic);
 }
 
+/// P26: `G4VEmModel::CorrectionsAlongStep` as `G4VEnergyLossProcess::AlongStepDoIt` calls it
+/// under `if(isIon)` - after the mean loss (short or long step), before the fluctuations - for the
+/// species `G4EmTableUtil::CheckIon` makes `isIon`: He3 and every real nucleus, not the alpha or
+/// the deuteron (excluded by name). Both models QBBC's `G4ionIonisation` uses have the same body
+/// (G4BraggIonModel.cc and G4BetheBlochModel.cc, 11.1.1):
+///
+///     if(isAlpha) { return; }
+///     if(eloss >= preKinEnergy || eloss < preKinEnergy*0.05) { return; }
+///     const G4double e = std::max(preKinEnergy - eloss*0.5, preKinEnergy*0.5);
+///     const G4double q20 = corr->EffectiveChargeSquareRatio(p, mat, preKinEnergy);
+///     const G4double q2 = corr->EffectiveChargeSquareRatio(p, mat, e);
+///     const G4double qfactor = q2/q20;
+///     eloss *= qfactor;
+///
+/// and `AlongStepDoIt` then takes `eloss = std::max(eloss, 0.0)`. The effective charge squared is
+/// `hadron_charge_sq_ratio`, which is `EffectiveChargeSquareRatio` (its note above), at the two
+/// energies. The ion's mean loss on a step that loses 5% or more is evaluated at the step's mean
+/// effective charge rather than the pre-step one, and it is the step a slowing ion takes.
+///
+/// `__noinline__`: two effective-charge evaluations, reached on the rare long step of one
+/// species family, are not worth their registers inlined into every hadron step.
+template <typename real_t>
+__host__ __device__ __noinline__ real_t ion_corrections_along_step(
+    const data::Material<real_t>& m, const SteppedHadron<real_t>& h, real_t pre_kin_energy,
+    real_t eloss) {
+  if (eloss >= pre_kin_energy || eloss < pre_kin_energy * real_t(0.05)) { return eloss; }
+  const real_t e_mid = pre_kin_energy - eloss * real_t(0.5);
+  const real_t e_half = pre_kin_energy * real_t(0.5);
+  const real_t e = (e_mid > e_half) ? e_mid : e_half;
+  const real_t q20 = hadron_charge_sq_ratio<real_t>(m, h, pre_kin_energy);
+  const real_t q2 = hadron_charge_sq_ratio<real_t>(m, h, e);
+  const real_t qfactor = q2 / q20;
+  eloss *= qfactor;
+  return (eloss > real_t(0.0)) ? eloss : real_t(0.0);
+}
+
 /// Range as a function of energy, per species and material.
 ///
 /// The same shape as em::RangeTable for electrons, and for the same two reasons: a step is

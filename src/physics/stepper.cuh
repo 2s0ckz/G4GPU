@@ -388,8 +388,27 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   // function that returned zero without evaluating anything (docs/RISK.md V210). Table 9's
   // threshold is its last leading node of exactly 1.0, the store's is the material's; below
   // either, the answer is known without a call.
+  //
+  // P26: THE GENERAL PROCESS'S OWN TABLES, WHEN THEY ARE THIS RUN'S. `TotalCrossSectionPerVolume`
+  // reads the zone's total off LambdaGeneral0/2/6/10 (zone 0 adding the photoelectric model's
+  // lambda) and `PostStepDoIt` walks ProbGeneral1, 3, 4, 7-9, 11-13 on one uniform - tables built
+  // from the sub-processes' own lambda tables, off the models at the photon's energy by up to
+  // 0.57% in zone 0, 0.38% at 1.2 MeV, 0.93% across the giant resonance (docs/RISK.md V225 and
+  // P26's entry). They are read only for the configuration they were built for: the general
+  // process on, all four EM processes present, and photonNuclear in the run if it was in the
+  // tables. Anything else - and G4GPU_GAMMA_GENERAL_TABLES=0 at upload - is P1's models and P21's
+  // table 9 below, unchanged.
+  const had::GammaGeneralTable9<real_t>* gg = general_on ? had->emextra.p9 : nullptr;
+  const bool read_tables =
+      gg != nullptr && gg->read_tables != 0 && gg->t[0] != nullptr && s.processes.compton
+      && s.processes.pair_production && s.processes.photoelectric && s.processes.rayleigh
+      && s.photoelectric != nullptr && s.rayleigh != nullptr
+      && (had->photon_nuclear || gg->built_with_nuclear == 0);
+  const int gg_zone = read_tables ? had::gamma_general_zone<real_t>(p.ekin) : -1;
+  had::GammaGeneralRead<real_t> gg_read{};
+  if (read_tables) { gg_read = had::gamma_general_read<real_t>(*gg, gg_zone, mat, p.ekin); }
   const had::GammaNuclearSlot gn_slot =
-      (had != nullptr && had->photon_nuclear)
+      (!read_tables && had != nullptr && had->photon_nuclear)
           ? had::gamma_nuclear_slot<real_t>(had->gamma_general, p.ekin)
           : had::GammaNuclearSlot::kAbsent;
   real_t p9 = real_t(1);
@@ -405,7 +424,9 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
     sig_n = had::photon_nuclear_xs<real_t>(had->emextra, had->gamma_general, mat,
                                            s.materials[mat], p.ekin);
   }
-  const real_t xs_total = (p9 < real_t(1))      ? xs.total / p9
+  const real_t xs_total = read_tables           ? ((gg_zone == 0) ? gg_read.lambda + xs.photoelectric
+                                                                  : gg_read.lambda)
+                          : (p9 < real_t(1))    ? xs.total / p9
                           : (sig_n > real_t(0)) ? xs.total + sig_n
                                                 : xs.total;
 
@@ -441,7 +462,19 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
   const real_t q_sel = rng.uniform();
   em::GammaProcess proc = em::GammaProcess::kNone;
   bool to_nucleus = false;
-  if (p9 < real_t(1)) {
+  if (read_tables) {
+    // P26: `PostStepDoIt`'s switch on the zone, every comparison the source's
+    // (`had::gamma_general_select`). Zone 2's last arm is photonNuclear when it is a sub-process,
+    // and its P9 is what the queue entry's cross section and table 9's edge count read below.
+    // Zone 3's last arm is the photo-nuclear share 11.1.1 gives to conversion (V207), counted.
+    bool zone3_slice = false;
+    proc = had::gamma_general_select<real_t>(gg_read, gg_zone, xs_total, xs.photoelectric, q_sel,
+                                             had->photon_nuclear, to_nucleus, zone3_slice);
+    if (gg_zone == 2) { p9 = gg_read.p2; }
+    if (zone3_slice && had->emx_stats != nullptr) {
+      atomicAdd(&had->emx_stats[had::kEmxZone3Conversion], 1ull);
+    }
+  } else if (p9 < real_t(1)) {
     // ZONE 2: `case 2` of `PostStepDoIt`, whose EM arms all test `q <= P7/P8/P9` and whose
     // photonNuclear arm is what is left - `q > P9` - on the same `q`. Below it `q * xs_total` is
     // `q/P9` of the EM total, uniform over it, and P1's walk splits it by the models' shares; a
@@ -481,7 +514,9 @@ __device__ inline bool step_gamma(const Scene<real_t>& s, TrackState<real_t>& p,
     // part of the total its length was drawn from.
     rep.process = ProcessId::fPhotoNuclear;
     const int slot = s.geometry.volumes[p.volume].score_index;
-    const real_t sig_n_total = (p9 < real_t(1)) ? xs_total - xs.total : sig_n;
+    const real_t sig_n_total = read_tables       ? xs_total * (real_t(1) - p9)
+                               : (p9 < real_t(1)) ? xs_total - xs.total
+                                                  : sig_n;
     // TABLE 9's EDGE, counted (P21): a photon put on a nucleus at or below the material's
     // threshold, where the data store's cross section is exactly zero and the general process's
     // linear table is not. `run_emextra` applies it as Geant4 does, on the first element.
@@ -1985,6 +2020,16 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
                      mm, h, mat, fmax(range - step_len, real_t(0)), e_before);
       }
       loss = fmin(fmax(loss, real_t(0)), e_before);
+
+      // ---- P26: "Corrections, which cannot be tabulated" - `currentModel->CorrectionsAlongStep`
+      // under `if(isIon)`, where `AlongStepDoIt` calls it: on the mean loss, before the
+      // fluctuations. `isIon` is `G4EmTableUtil::CheckIon`'s - He3 and every real nucleus, not the
+      // alpha, deuteron or triton - and the correction acts only on a step that loses 5% or more
+      // (`em::ion_corrections_along_step`).
+      if (h.is_real_ion() || em::uses_dynamic_effective_charge(type)) {
+        loss = em::ion_corrections_along_step<real_t>(mm, h, e_before, loss);
+        loss = fmin(loss, e_before);
+      }
 
       // ---- energy-loss fluctuations.
       //
