@@ -590,3 +590,34 @@ machine's four hours apart and not a measurement. The 100 MeV batch ran 786 iter
 bone face in 1e-7 mm pushes - the navigator's tangent case, which 11.1.1's order reaches by making
 neutrons interact on faces; nothing was abandoned and no other row's iteration count moved
 (docs/RISK.md V232).
+
+## The strange species on tracks, after P23a (2026-11-06)
+
+P23a gives the sixteen strange species QBBC transports - K0S, K0L, lambda, sigma+-, sigma0, xi0, xi-,
+omega- and the seven anti-hyperons - tracks of their own (docs/RISK.md V240-V243). Two beams that
+make them in quantity, 10 GeV proton and pi+, and the existing row most likely to move, proton_1000.
+The port is this branch at G4GPU_HADRONIC_STAGE=final with the DEFAULT 4 live tracks an event (the
+sweep's 32 did not fit beside 2.4 GB of desktop on the card: CUDA out of memory, V244); "refused" is
+the same binary with `G4GPU_STRANGE_TRACKS=0`, which refuses the sixteen at emission as before P23a.
+Geant4 is 11.1.1 serial (ref/run/runb1.bat), QBBC as it ships and with this sweep's EM-only list
+inactivated (hBrems, hPairProd, ionElastic). Doses as B1 prints them, with its rms.
+
+| beam | events | port | port, strange refused | G4 QBBC | G4 EM-only | port vs QBBC |
+|---|--:|--:|--:|--:|--:|--:|
+| proton 10 GeV | 500,000 | 2.58393 uGy +/- 9.44 nGy | 2.56649 +/- 9.40 | 2.14589 +/- 6.21 | 2.15074 +/- 6.22 | +20.4%, +38.8 sigma |
+| pi+ 10 GeV | 500,000 | 1.77059 uGy +/- 5.41 nGy | 1.74461 +/- 5.34 | 1.67928 +/- 4.55 | 1.68302 +/- 4.54 | +5.4%, +12.9 sigma |
+| proton 1000 MeV | 200,000 | 391.888 nGy +/- 1.338 | - | 391.654 +/- 1.337 | 390.403 +/- 1.329 | +0.06%, +0.1 sigma |
+
+**The strange share** - port minus port-refused: +0.68% of the 10 GeV proton's dose (+1.3 sigma) and
++1.49% of the pi+'s (+3.4 sigma). Refused, the two beams booked 12,305 strange secondaries
+(1.90e7 MeV) and 23,690 (3.96e7 MeV), K0S/K0L and lambda the most; with the tracks, none.
+
+**The 10 GeV rows are not inside the band, and not because of the strange species.** Refused, as
+before P23a, they already read +19.6% and +3.9% against QBBC; the strange tracks add dose on top. The
+excess is above 1 GeV (proton_1000 agrees), predates this package, and is opened in docs/RISK.md
+V244. The port still loses the eta and the eta' on both beams (no ParticleType; 2.30e7 and 4.95e7 MeV
+of kinetic energy), which would LOWER its dose - so whatever puts the excess in is larger still.
+
+**proton_1000 is unchanged within its band**: +0.38%, +0.8 sigma against the sweep's own EM-only
+number, which Geant4 reproduces here to the digit. The B1 gamma gate (exampleB1 -n 2000000) reads
+1.19 sigma and b1_gpu_sched 1.0007; the proton depth-dose comparison is OK.

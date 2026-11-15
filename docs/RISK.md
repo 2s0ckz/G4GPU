@@ -15443,3 +15443,218 @@ this machine costs every full gate about an hour and a half more of ptxas, which
 the Titan V being a first-class card here. The `ref/`
 scripts that regenerate the oracle still carry this machine's Geant4 install path, which is a
 prerequisite the README states rather than hides; the port itself reads no such path.
+### V240: P23a's scope, measured - sixteen strange species against what the port had for each, the refusals two 10 GeV beams booked, and why two group kernels and not sixteen units
+
+P23a puts on tracks the strange species QBBC transports. What 11.1.1 gives each, read off the
+constructed QBBC (`species_processes.csv`, `strange_scope.csv`) and not off the builders alone:
+
+| species | q | tau, ns | EM (G4EmBuilder) | hadElastic | inelastic (models, MeV) | at rest | decay table |
+|---|--:|--:|---|---|---|---|---|
+| K0S | 0 | 0.0895 | - | GG + G4HadronElastic | GG; FTFP 3e3-1e8, Bertini 0-6e3 | - | G4KaonZeroShort, 2 ch |
+| K0L | 0 | 51.16 | - | same | same | - | G4KaonZeroLong, 6 ch |
+| lambda, xi0 | 0 | 0.263, 0.290 | - | same | same | - | own G4*.cc, 2 / 1 ch |
+| sigma0 | 0 | 7.4e-11 | - | - | - | - | 1 ch (decays at its first step) |
+| sigma+ | +1 | 0.0802 | hIoni (base proton), ionmsc Urban, UrbanFluc | same | GG; FTFP + Bertini | - | 2 ch |
+| sigma-, xi-, omega- | -1 | 0.148, 0.164, 0.0821 | hIoni (base anti_proton), Urban | same | GG; FTFP + Bertini | Bertini capture | 1 / 1 / 3 ch |
+| anti_lambda, anti_xi0 | 0 | 0.263, 0.290 | - | same | GG; FTFP 0-1e8 | Fritiof | P23b's, exact |
+| anti_sigma0 | 0 | 7.4e-11 | - | - | - | Fritiof | P23b's |
+| anti_sigma+ | -1 | 0.0802 | hIoni (base anti_proton), Urban | same | GG; FTFP 0-1e8 | Fritiof | P23b's |
+| anti_sigma-, anti_xi-, anti_omega- | +1 | 0.148, 0.164, 0.0821 | hIoni (base proton), Urban | same | GG; FTFP 0-1e8 | - (decay) | P23b's |
+
+No CoulombScat, hBrems or hPairProd on any of them: `ConstructBasicEmPhysics` registers the
+shared "ionmsc" and a G4hIonisation and nothing else. The 30 b/c hadrons of `sBCHadrons` carry the
+same shape (hIoni on the charged ones, GG elastic, FTFP 0-100 TeV) and are NOT in P23a's
+transport: see V243.
+
+What the port had for each before P23a (P23b, V226-V229): a row and the mass (exact against
+`species_tables.csv`), the cross sections (component exact; P23b), the decay tables (exact), the
+model entry points (Bertini applicable to all eight it is registered on, FTFP to all) - and NO
+TRANSPORT: `species_index` -1, so `BufferEmitter::push` counted every one by name in
+`refused_by_type` and `BeamOn` refused it as a primary. After P23a every one is stepped, and the
+emitter refuses nothing with a row (`test_species`: stepped 34, counted 6, refused 0 of 40 types).
+
+THE REFUSALS THE TWO 10 GeV BEAMS BOOKED. Example B1, 10 GeV proton and pi+, the sweep's port
+settings (final stage, 32 live tracks an event), with `G4GPU_STRANGE_TRACKS=0` (the emitter refuses
+the sixteen as before P23a, no child index spent, so every other species' stream is the pre-P23a
+one) and without:
+
+| species | proton 10 GeV: count, kinetic MeV | pi+ 10 GeV: count, kinetic MeV |
+|---|--:|--:|
+| kaon0L | 2,577, 2.750e6 | 8,380, 1.575e7 |
+| kaon0S | 2,654, 2.925e6 | 8,456, 1.603e7 |
+| lambda | 3,922, 7.142e6 | 3,325, 3.598e6 |
+| sigma+ | 1,063, 2.355e6 | 1,261, 1.859e6 |
+| sigma- | 478, 6.192e5 | 732, 7.938e5 |
+| sigma0 | 1,605, 3.171e6 | 1,476, 1.462e6 |
+| xi-, xi0 | 2 and 4, 9.8e3 | 7 and 8, 1.29e4 |
+| anti_lambda, anti_sigma+, anti_sigma0, anti_sigma-, anti_xi- | - | 17, 7, 9, 11, 1; 9.21e4 |
+| **all, before** | **12,305, 1.897e7 MeV** | **23,690, 3.959e7 MeV** |
+| **after** | **0** | **0** |
+
+500,000 events each. With the strange tracks the proton beam queues 412,610 interactions against
+408,509, the pi+ 302,808 against 295,189 - the strange species' own and their products'. What
+each beam still books without a track is NOT strange: 17,574 and 21,245 inelastic secondaries
+with no row (2.30e7 and 4.95e7 MeV), which a host probe of the same FTFP final states names as
+the eta (221) and the eta' (331) - 81 and 56 of 137 - and 98 anti-neutrons on the pi+ beam,
+booked by name (V243). Neither is in P23a's brief; both are in V244's reading of the beams.
+
+THE KERNEL COUNT. What `run_step_hadron<kType>` specialises on, read off `step_hadron`: the msc
+model (`uses_wentzel_msc`), CoulombScat, muonNuclear, the ion arms (GenericIon's nuclide, an ion's
+effective charge, G4ionIonisation's 0.02 loss limit and IonFluc, nuclear stopping). Everything else
+- mass, charge, the base table, the decay table, the elastic and inelastic channels, the at-rest
+arm - is a run-time lookup on the species. The eight charged strange baryons give the SAME answer
+to every structural predicate (Urban, no CoulombScat, no muonNuclear, no ion arm), so `step_hadron`
+takes a structural `kernel_type` beside the data `type`: every existing kernel passes nothing and
+folds exactly as before; the group kernel passes sigma+ as a compile-time constant and the
+track's own species as data. `test_species` holds the other seven to the representative on all
+nine predicates and to Geant4's process lists. The neutral eight share `step_neutral_strange`,
+which has no structural branch at all. Measured, CUDA 12.9.86, `-Xptxas -v`, one unit at a time
+on this machine (another worktree's ptxas beside it):
+
+| unit | ptxas rung | wall | frame | spill st/ld | regs |
+|---|---|--:|--:|--:|--:|
+| `run_step_hadron<kDeuteron>`, main 37ac5f5 (its build log) | -O3 | - | 4,512 B | 204/536 | 255 |
+| `run_step_hadron<kDeuteron>`, P23a | -O3 | 117 s | 4,528 B | 192/532 | 255 |
+| `run_step_hadron<kSigmaMinus>`, ONE species (measurement only) | -O3 | 135 s | 4,928 B | 48/44 | 255 |
+| `run_step_strange<true>`, the eight charged | -O3 | 159 s | 4,928 B | 60/80 | 255 |
+| `run_step_strange<false>`, the eight neutral | -O3 | 131 s | 5,072 B | 64/80 | 255 |
+
+A group kernel compiles at the first rung, at the frame of a single-species one and 24 s longer;
+sixteen single-species units would be about 16 x 130 s = 35 CPU-minutes where two are 4.8. So two
+units, `transport_run_strange_charged.cu` and `_neutral.cu`: the engine goes from 25 units to 27.
+The whole engine compiled serially, one unit at a time under the RAM rule and beside another
+worktree's ptxas: 27 units in 9,185 s, of which the two new ones 155 and 120 s and the seven
+interaction units 4,580 s - so the two group units are 3% of a serial rebuild, where sixteen
+single-species ones would have been about a third of it. In build_engine.bat's six-wide pass they
+are two more stepping-unit slots, about two minutes of wall clock at most. Every frame is under the 16,384-byte stepping stack, so nothing raises it.
+
+### V241: a Bertini hyperon was a neutron - the cascade fills `a` with the baryon number, and two functions read `a > 0` as "a nucleus"
+
+`G4CascadeInterface` (bertini/cascade_interface.cuh) fills each secondary's `a` with
+`inucl_names_baryon(type)` - 1 for the lambda, the sigmas, the xis and the omega - and `z` with
+its charge. Two places in `interaction_apply.cuh` took `a > 0` for a nucleus:
+
+  * `emit_interaction_result` pushed it through `push_nucleus(z, a)`: a cascade lambda or xi0
+    became a NEUTRON, a sigma+ a proton, and a sigma-, xi- or omega- (Z = -1) a GenericIon with no
+    nuclide, killed by `step_hadron` as `kIonWithoutNuclide`. Silently - in every Bertini
+    interaction or at-rest capture that made strangeness (a K- stopping in water is the common one).
+  * `definition_mass_of` gave the hyperon the nuclear mass of (A = 1, Z): 939.565 MeV for a lambda
+    against the model's 1115.683, nothing for Z = -1. `CheckResult`'s off-shell test then rejected
+    the whole final state (|m_def - m_dyn| > 10% + 1 MeV) and `run_inelastic` resampled it a
+    hundred times into `kInelasticReentryExhausted` - Geant4's had006, a FatalException. On
+    `test_inelastic_transport`'s grid with P23a's fourteen strange beams: 80 had006 refusals, 30 of
+    37 omega- interactions in bone, 17 of 26 in water; every Bertini interaction that made a
+    hyperon was thrown away.
+
+`had::secondary_is_nucleus` is the one rule now: a nuclear PDG code, or `a > 0` and not one of
+the sixteen strange species by code. A nucleon goes through `push_nucleus` exactly as before, so no
+existing track changes. After: 0 had006 on the grid, every strange cell balanced in baryon number
+and charge, interaction by interaction. `test_inelastic_transport` now FAILS on any had006 - the
+assertion that would have caught it (perturbed back: 77 refusals, 1 failure) - and
+`test_strange_tracks` section 7 hands the emitter Bertini's own (pdg, z, a) for six baryons
+(perturbed: lambda -> neutron, sigma- -> GenericIon, 4 failures).
+
+### V242: a derived species reads its base particle's IonisationTable, splined - and the antiproton's four strange baryons were reading its linear DEDX table
+
+`G4LossTableManager::CopyTables` (11.1.1, G4LossTableManager.cc:751) gives a species with a base
+particle `SetDEDXTable(base_proc->IonisationTable(), fRestricted)` - the hIoni-only vector - and
+the base's own range and inverse-range objects. `strange_vectors.csv` (dump_strange_tracks.cc)
+reads it off the running Geant4 for all eight charged strange baryons in every material:
+`dedx_shared` 0, `dedx_spline` 1, `range_shared` 1 with the base's spline flag. For the proton the
+two vectors interpolate alike; the ANTIPROTON's DEDX table is the linear part2 vector
+`hadron_table_uses_spline` describes (hBrems constructed first), its IonisationTable is splined.
+So sigma-, xi-, omega- and anti_sigma+ read a SPLINE through the antiproton's nodes, and the port
+read a chord: 5.4-6.4% off in 1-10 keV, 2.7-6.3% in 10-100 keV (worst omega- at 10 keV in water,
+7.349 against 6.914 MeV/mm). `HadronRangeTable::ioni_d2` is the always-splined copy of the same
+row, read by `dedx_for` for a scaled species; for every splined base it is bit-for-bit `dedx_d2`, so
+deuteron, triton and He3 are unchanged (`test_hadron_range`'s rows read as before). After: both
+bands 0.000%. What remains is the antiproton's own charge-odd air anomaly in its node values (15.2%
+dE/dx, 10.0% range in 2-100 MeV on its own row), through a spline instead of a chord: 18.8% at worst
+in air. Perturbed (`dedx_for` back to `dedx_at`): the four 1-10 keV bands fail at the new 0.2% limit.
+
+### V243: the strange species on tracks - two steppers, the K0's extra deviate, and what is still refused by name
+
+**The two steppers.** The charged eight run `step_hadron` (V240's `kernel_type`); the neutral eight
+run `step_neutral_strange` - `Transportation, Decay, hadElastic, <name>Inelastic` in the manager's
+order, ties to the earlier process, each length drawn from the pre-step energy, a neutral
+projectile `fHadNoIntegral` so hadElastic's target comes from the pre-step partial sums and the
+inelastic entry is queued with no cross section to reject against; at rest (born at rest, or
+stopped by an elastic scatter off hydrogen) `G4Decay`, or for anti_lambda, anti_sigma0 and anti_xi0
+in the final stage the Fritiof annihilation that pre-empts it. sigma0 and anti_sigma0 decay at their
+first step through the same competition (DBL_MIN mean free path), not a special case.
+
+**The K0's deviate** (V226's first note): `had::range_manager_draws_is_applicable`, one uniform
+discarded before `choose_inelastic_model` for a K0S or K0L inelastic step at every energy. Counted in
+`test_strange_tracks` section 5 against a lambda's and an anti-lambda's step at 1, 4.5 and 50 GeV:
+exactly one more (2/3/2 against 1/2/1); removed, three failures. The K0/anti-K0 mixing on the two
+Geant4 lines (V226's second note) was P23b's and is unchanged; what reaches the emitter is a K0S or
+a K0L and is a track now.
+
+**Against Geant4, per species** (`test_strange_tracks`, oracle `strange_tracks_xs.csv` from the
+running QBBC in B1's four materials, 1 MeV-100 TeV): hadElastic and Inelastic per volume through the
+port's channel, projectile and material - 5,184 points each, worst 5.4e-16 and 5.2e-16; G4Decay's
+mean free path on a real G4Track, 5,184 points, worst 4.0e-16; each species' process list against
+`species_processes.csv` (Decay, hadElastic, Inelastic, at-rest capture), and the 14 inelastic
+model lists against `strange_scope.csv`, model for model and window for window. Stepped on the host
+through the group kernels' own functions in water and bone, 9,600 tracks: 7,618 decays in flight and
+563 at rest, every one exact in charge, baryon number and total energy (2.4e-14) once the refused
+anti-neutron is counted back in; 315 elastic scatters, 1,271 interactions queued.
+`test_inelastic_transport` runs the fourteen with an inelastic process (1-4 GeV, water, bone, air)
+through the queue and the models: the interaction rate against the cross section, worst 1.53 sigma
+over the strange cells, and every interaction without an unrowed secondary balanced in baryon number
+and charge (the per-cell exclusion is per interaction now - one anti-neutron anywhere in a cell used
+to switch the balance off for the rest of it).
+
+**The loss tables** (`test_hadron_range`, `strange_hadron_tables.csv`, 11,844 points): the positive
+four on the proton's numbers band for band (worst 1.06% dE/dx, 0.55% range, both at the Bragg/
+Bethe-Bloch boundary, as the deuteron and triton); the negative four exact below 2 MeV and carrying
+the antiproton's own air anomaly above (V242).
+
+**Refused by name, where they remain.** `kAntiNeutronSecondary` (P23c's species; a daughter of
+anti_lambda and through it anti_sigma0 and anti_xi0, and an FTFP product) and `kBcHadronSecondary`
+(every charm or bottom hadron, `is_bc_hadron_pdg` - the quark digits, held against all 45 b/c codes
+of `strange_scope.csv` and all 40 ParticleTypes). Both were inside `kDecayChannel` /
+`kInelasticSecondarySpecies` before. `kStoppedAntiHyperon` books a stopped anti-hyperon whose
+Fritiof capture did not run, and `stopped_refusal` names sigma-, xi- and omega- under
+`kStoppedNegativeHadron`. The b/c hadrons are QBBC tracks (V229) that P23a leaves without a
+`ParticleType`: 30 in 640,000 FTFP events (V226), none booked on either 10 GeV beam.
+
+`G4GPU_STRANGE_TRACKS=0` (`EmitterBooks::refuse_strange`) refuses the sixteen at emission exactly as
+before - no child index spent - and is how V240's "before" and V244's share were measured on one
+engine. `test_neutron` exercises it (its refused-species check pushes a lambda, which has a kernel
+now).
+
+### V244: the beams after - 10 GeV proton and pi+ against QBBC as it ships, the strange species' share, and the existing rows
+
+Example B1, the port at this branch (G4GPU_HADRONIC_STAGE=final, the default 4 live tracks an event:
+the sweep's 32 does not fit beside the desktop's 2.4 GB - the auto batch is sized before the
+override is read, and the 8x pool failed with CUDA out of memory), Geant4 11.1.1 serial on
+ref/run/runb1.bat; B1's printed rms.
+
+| beam | events | port, strange tracks | port, refused (G4GPU_STRANGE_TRACKS=0) | G4 QBBC as it ships | G4 EM-only | port vs QBBC |
+|---|--:|--:|--:|--:|--:|--:|
+| proton 10 GeV | 500,000 | 2.58393 uGy +/- 9.44 nGy | 2.56649 +/- 9.40 | 2.14589 +/- 6.21 | 2.15074 +/- 6.22 | **+20.4%, +38.8 sigma** |
+| pi+ 10 GeV | 500,000 | 1.77059 uGy +/- 5.41 nGy | 1.74461 +/- 5.34 | 1.67928 +/- 4.55 | 1.68302 +/- 4.54 | **+5.4%, +12.9 sigma** |
+| proton 1000 MeV | 200,000 | 391.888 nGy +/- 1.338 | - | 391.654 +/- 1.337 | 390.403 +/- 1.329 | +0.06%, +0.1 sigma |
+
+**The strange species' share of the dose:** +0.68% of the proton beam's (+1.3 sigma) and +1.49% of
+the pi+ beam's (+3.4 sigma) - on minus refused, two runs whose streams differ (a refused species
+spends no child index).
+
+**NEITHER 10 GeV ROW IS INSIDE 3 SIGMA, AND THE EXCESS IS NOT THE STRANGE SPECIES'.** With them
+refused, as before P23a, the port reads +19.6% and +3.9% against QBBC; the strange tracks move the
+proton row by +0.7% and the pi+ by +1.5%, toward more dose, where Geant4's own row lies BELOW both.
+EM-only and QBBC agree on the Geant4 side within 0.2%, so hBrems/hPairProd are not it. What the
+port still loses on these beams lowers its dose: the eta and eta' (no ParticleType; 2.30e7 and
+4.95e7 MeV of kinetic energy over the run, V240). So something above 1 GeV - proton_1000 agrees to
+0.06% - puts 4-20% more dose into the trapezoid than Geant4 does, and it predates P23a. Opened, not
+diagnosed here: these are the first beams of this port above 4 GeV per nucleon (the sweep's highest
+is alpha_4000), and the 10 GeV proton's interactions are FTFP's (3 GeV up).
+
+**The existing rows.** proton_1000 at the sweep's count (200,000): 391.888 nGy, QBBC 391.654 and
+EM-only 390.403 (the sweep's own Geant4 number, to the digit) - +0.38%, +0.8 sigma like for like,
+where P18's row read -0.62%. The B1 gate as build_all.bat runs it: b1_gpu_sched 2M, ratio 1.0007
+(427.699 against 427.385 pGy); exampleB1 -n 2000000, 425.921 +/- 0.868 pGy, 1.19 sigma (limit 3);
+g4dose -verify-processes and -verify-step-hook pass; the proton depth-dose (proton_depth 6000,
+tools/compare_depth.ps1) OK. test_step_hadron (900 steps host against device, worst 5.1e-13),
+test_neutron and test_ion_transport pass on the GPU.
