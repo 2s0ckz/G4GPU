@@ -329,6 +329,32 @@ inline constexpr int kGammaGeneralZone2Nodes = kGammaGeneralZone2Bins + 1;
 /// holds it against the running Geant4's own table) - and read by `gamma_general_p9`, which is
 /// `LogVectorValue`.
 template <typename real_t>
+struct GammaGeneralGrid {
+  const real_t* e = nullptr;  ///< the node energies, MeV
+  int n = 0;                  ///< `numberOfNodes`
+  real_t edge_min = 0, edge_max = 0, inv_dbin = 0, log_emin = 0;
+};
+
+/// The general process's 15 table slots, `theT[i]` (G4GammaGeneralProcess.cc:79): 5 is never
+/// built, 1 only with Rayleigh, which QBBC has.
+inline constexpr int kGammaGeneralNumTables = 15;
+
+/// The zone each table belongs to - `InitialiseProcess`'s `i <= 1` aVector, `i <= 5` bVector,
+/// `i <= 9` cVector, else dVector - and whether `BuildPhysicsTable` splines it (`k <= 1 || k >= 10`).
+__host__ __device__ inline constexpr int gamma_general_table_zone(int k) {
+  return (k <= 1) ? 0 : (k <= 5) ? 1 : (k <= 9) ? 2 : 3;
+}
+__host__ __device__ inline constexpr bool gamma_general_table_spline(int k) {
+  return k <= 1 || k >= 10;
+}
+
+/// P21: table 9 - and since P26 EVERY table `G4GammaGeneralProcess::BuildPhysicsTable` fills. The
+/// struct keeps P21's name and its first eleven fields, which are P21's table 9 exactly as it was
+/// (built from the MODELS' cross sections, the photon's path with the tables switched off); the
+/// P26 fields after them are all fifteen slots built as Geant4 builds them, from the
+/// sub-processes' own lambda tables (`em/em_lambda_table.cuh`). Behind one pointer in
+/// `EmExtraTables`, so adding them moved no kernel's wiring by a byte.
+template <typename real_t>
 struct GammaGeneralTable9 {
   const real_t* e = nullptr;  ///< the 51 node energies, MeV: `cVector`'s binVector
   const real_t* v = nullptr;  ///< `n_materials` x 51 values, row-major by material
@@ -342,6 +368,23 @@ struct GammaGeneralTable9 {
   real_t edge_max = 0;  ///< `edgeMax` = minMMEnergy
   real_t inv_dbin = 0;  ///< `invdBin` = (idxmax + 1)/G4Log(edgeMax/edgeMin)
   real_t log_emin = 0;  ///< `logemin` = G4Log(edgeMin)
+
+  // ------------------------------------------------------------------ P26
+  /// 1: `step_gamma` reads the tables below for the total and the selection, as Geant4 does.
+  /// 0: P1's models at the photon's energy and P21's table 9 - the comparison's other side,
+  /// `G4GPU_GAMMA_GENERAL_TABLES=0` at upload.
+  int read_tables = 0;
+  /// 1 when the tables were built with photonNuclear's data store in them (sigN in zones 2 and
+  /// 3). A run whose photon has no photonNuclear must not read tables built with it.
+  int built_with_nuclear = 0;
+  /// aVector, bVector, cVector, dVector - `InitialiseProcess`'s four grids.
+  GammaGeneralGrid<real_t> grid[4];
+  /// Table k: `n_materials` x `grid[zone(k)].n` values, row-major by material; null where the
+  /// slot is not built (5) or the tables are absent.
+  const real_t* t[kGammaGeneralNumTables] = {};
+  /// The second derivatives `FillSecondDerivatives` computed, same shape, for the splined tables
+  /// (0, 1, 10-14); null for the linear ones.
+  const real_t* d2[kGammaGeneralNumTables] = {};
 };
 
 /// Which threshold row `EmExtraTables::threshold` holds. The muon has none: its cross section is
@@ -624,6 +667,131 @@ __host__ __device__ inline bool gamma_general_selects_nuclear(const EmExtraTable
   }
   if (mat < 0 || mat >= t.p9->n_materials || !(e > t.p9->threshold[mat])) { return false; }
   return gamma_general_p9<real_t>(*t.p9, mat, e) < real_t(1);
+}
+
+// =============================================================================================
+// P26: every table, as G4GammaGeneralProcess reads it
+// =============================================================================================
+
+/// `theHandler->GetVector(k, basedCoupleIndex)->LogVectorValue(preStepKinEnergy, preStepLogE)` -
+/// `ComputeGeneralLambda` and `GetProbability` alike: the bin from the logarithm
+/// (`ComputeLogVectorBin`, truncation toward zero, clamped to idxmax), `Interpolation` with the
+/// spline term for the tables `FillSecondDerivatives` was called on, in Geant4's order of
+/// operations, and the end values outside the vector.
+template <typename real_t>
+__host__ __device__ inline real_t gamma_general_value(const GammaGeneralTable9<real_t>& t, int k,
+                                                      int mat, real_t e, real_t loge) {
+  const GammaGeneralGrid<real_t>& g = t.grid[gamma_general_table_zone(k)];
+  const real_t* v = t.t[k] + static_cast<long long>(mat) * g.n;
+  if (!(e > g.edge_min && e < g.edge_max)) { return (e <= g.edge_min) ? v[0] : v[g.n - 1]; }
+  int idx = static_cast<int>((loge - g.log_emin) * g.inv_dbin);
+  if (idx > g.n - 2) { idx = g.n - 2; }
+  const real_t x1 = g.e[idx];
+  const real_t dl = g.e[idx + 1] - x1;
+  const real_t y1 = v[idx];
+  const real_t dy = v[idx + 1] - y1;
+  const real_t b = (e - x1) / dl;
+  real_t res = y1 + b * dy;
+  if (t.d2[k] != nullptr) {
+    const real_t* d = t.d2[k] + static_cast<long long>(mat) * g.n;
+    const real_t c0 = (real_t(2) - b) * d[idx];
+    const real_t c1 = (real_t(1) + b) * d[idx + 1];
+    res += (b * (b - real_t(1))) * (c0 + c1) * (dl * dl * (real_t(1) / real_t(6)));
+  }
+  return res;
+}
+
+/// What `TotalCrossSectionPerVolume` and `PostStepDoIt` read in one zone: the zone's total and
+/// its (up to) three selection fractions.
+///
+///   zone 0   lambda = T0 (Compton + Rayleigh; the photoelectric model is added by the caller)
+///            p0 = P1 (Rayleigh's share of T0)
+///   zone 1   lambda = T2, p0 = P3 (phot), p1 = P4 (phot + compt)
+///   zone 2   lambda = T6, p0 = P7 (conv), p1 = P8 (conv + compt), p2 = P9 (conv + compt + phot)
+///   zone 3   lambda = T10, p0 = P11, p1 = P12, p2 = P13 (each walked as `q + P <= 1`)
+///
+/// Table 14 is not read: in 11.1.1 its branch tests the complement of P13's and cannot be taken
+/// while QBBC builds no G4GammaConversionToMuons (docs/RISK.md V207); the host test holds it equal
+/// to table 13 node by node.
+template <typename real_t>
+struct GammaGeneralRead {
+  real_t lambda = 0, p0 = 0, p1 = 0, p2 = 0;
+};
+
+/// `__noinline__` for `gamma_general_p9`'s reason: one call out of the photon's kernel per step,
+/// rather than four table reads' registers inlined into it.
+template <typename real_t>
+__host__ __device__ __noinline__ GammaGeneralRead<real_t> gamma_general_read(
+    const GammaGeneralTable9<real_t>& t, int zone, int mat, real_t e) {
+  GammaGeneralRead<real_t> r;
+  const real_t loge = log(e);
+  switch (zone) {
+    case 0:
+      r.lambda = gamma_general_value<real_t>(t, 0, mat, e, loge);
+      r.p0 = gamma_general_value<real_t>(t, 1, mat, e, loge);
+      break;
+    case 1:
+      r.lambda = gamma_general_value<real_t>(t, 2, mat, e, loge);
+      r.p0 = gamma_general_value<real_t>(t, 3, mat, e, loge);
+      r.p1 = gamma_general_value<real_t>(t, 4, mat, e, loge);
+      break;
+    case 2:
+      r.lambda = gamma_general_value<real_t>(t, 6, mat, e, loge);
+      r.p0 = gamma_general_value<real_t>(t, 7, mat, e, loge);
+      r.p1 = gamma_general_value<real_t>(t, 8, mat, e, loge);
+      r.p2 = gamma_general_value<real_t>(t, 9, mat, e, loge);
+      break;
+    default:
+      r.lambda = gamma_general_value<real_t>(t, 10, mat, e, loge);
+      r.p0 = gamma_general_value<real_t>(t, 11, mat, e, loge);
+      r.p1 = gamma_general_value<real_t>(t, 12, mat, e, loge);
+      r.p2 = gamma_general_value<real_t>(t, 13, mat, e, loge);
+      break;
+  }
+  return r;
+}
+
+/// Which sub-process `PostStepDoIt` selects for the uniform `q`, from what `gamma_general_read`
+/// returned and - in zone 0 - the photoelectric model's lambda that `TotalCrossSectionPerVolume`
+/// added to T0 (`peLambda`). `to_nucleus` is set for zone 2's last arm when photonNuclear is a
+/// sub-process (`theGammaNuclear`); `zone3_slice` for zone 3's final `else`, the photo-nuclear
+/// share that 11.1.1 gives to conversion (V207), so the caller can count it.
+///
+/// Every comparison is the source's own (G4GammaGeneralProcess.cc:587-641): `<=` and `<` where
+/// it has them, `q + P <= 1.0` in zone 3 rather than `q <= 1 - P`, which is not the same double.
+template <typename real_t>
+__host__ __device__ inline em::GammaProcess gamma_general_select(
+    const GammaGeneralRead<real_t>& r, int zone, real_t pre_step_lambda, real_t pe_lambda,
+    real_t q, bool has_gamma_nuclear, bool& to_nucleus, bool& zone3_slice) {
+  to_nucleus = false;
+  zone3_slice = false;
+  switch (zone) {
+    case 0:
+      if (pre_step_lambda * q <= pe_lambda) { return em::GammaProcess::kPhotoelectric; }
+      if (pre_step_lambda * q < (pre_step_lambda - pe_lambda) * r.p0 + pe_lambda) {
+        return em::GammaProcess::kRayleigh;
+      }
+      return em::GammaProcess::kCompton;
+    case 1:
+      if (q <= r.p0) { return em::GammaProcess::kPhotoelectric; }
+      if (q <= r.p1) { return em::GammaProcess::kCompton; }
+      return em::GammaProcess::kRayleigh;
+    case 2:
+      if (q <= r.p0) { return em::GammaProcess::kPair; }
+      if (q <= r.p1) { return em::GammaProcess::kCompton; }
+      if (q <= r.p2) { return em::GammaProcess::kPhotoelectric; }
+      if (has_gamma_nuclear) {
+        to_nucleus = true;
+        return em::GammaProcess::kNone;
+      }
+      return em::GammaProcess::kPair;
+    default:
+      if (q + r.p0 <= real_t(1)) { return em::GammaProcess::kPair; }
+      if (q + r.p1 <= real_t(1)) { return em::GammaProcess::kCompton; }
+      if (q + r.p2 <= real_t(1)) { return em::GammaProcess::kPhotoelectric; }
+      zone3_slice = true;
+      return em::GammaProcess::kPair;
+  }
 }
 
 /// `cVector`'s 51 node energies, in `G4PhysicsLogVector`'s own order of operations

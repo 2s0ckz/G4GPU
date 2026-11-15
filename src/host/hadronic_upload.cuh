@@ -52,6 +52,10 @@
 #include "physics/hadronic/emextra/mu_vd_table.cuh"
 #include "physics/hadronic/emextra_wiring.cuh"
 #include "physics/hadronic/inelastic_wiring.cuh"
+// P26: G4VEmProcess's lambda tables for the photon's four processes, host only, which the general
+// process's tables are built from.
+#include "physics/em/em_lambda_table.cuh"
+#include "physics/em/pair_production.cuh"
 
 namespace g4gpu::host {
 
@@ -399,6 +403,15 @@ struct EmExtraHostTables {
   std::vector<real_t> p9_e, p9_v, p9_threshold;
   had::GammaGeneralTable9<real_t> p9{};
   bool p9_ok = false;
+  /// P26: every table of the general process, built as `BuildPhysicsTable` builds them - the four
+  /// grids, the values and second derivatives of each slot, `n_mat` rows each - and the
+  /// sub-processes' own lambda tables they were built from, `n_mat` x 4 (`em::GammaSubProcess`
+  /// order), kept for the host tests. Empty without the photoelectric or the Rayleigh table.
+  bool gg_ok = false;
+  std::vector<real_t> gg_e[4];
+  std::vector<real_t> gg_t[had::kGammaGeneralNumTables];
+  std::vector<real_t> gg_d2[had::kGammaGeneralNumTables];
+  std::vector<em::EmProcessLambda> gg_sub;
 
   /// A view whose pointers are HOST pointers, for host callers of the transport's functions.
   had::EmExtraTables<real_t> view() const {
@@ -422,6 +435,219 @@ struct EmExtraHostTables {
   }
 };
 
+/// `G4GammaGeneralProcess::InitialiseProcess`'s four grids (G4GammaGeneralProcess.cc:213-223):
+///
+///     nbin1 = max(5, nd*G4lrint(log10(minPEEnergy/mine)))      21
+///     nbin2 = max(5, nd*G4lrint(log10(maxe/minMMEnergy)))      42
+///     aVector(mine, minPEEnergy, nbin1, true)                  zone 0, splined
+///     bVector(minPEEnergy, minEEEnergy, nLowE = 40, false)     zone 1
+///     cVector(minEEEnergy, minMMEnergy, nHighE = 50, false)    zone 2 (P21's grid)
+///     dVector(minMMEnergy, maxe, nbin2, true)                  zone 3, splined
+///
+/// with `mine`, `maxe` and `nd` the EM parameters' defaults. The edges are the same doubles
+/// `had::gamma_general_min_*` return; `minPEEnergy` is `150*CLHEP::keV`.
+inline void gamma_general_grids(em::LogVecHost g[4]) {
+  const double mine = em::kEmParamMinKinEnergy, maxe = em::kEmParamMaxKinEnergy;
+  const double min_pe = 150 * em::kEmKeV;
+  const double min_ee = had::gamma_general_min_ee<double>();
+  const double min_mm = had::gamma_general_min_mm<double>();
+  const int nd = em::kEmParamBinsPerDecade;
+  int nbin1 = nd * em::g4_lrint(std::log10(min_pe / mine));
+  if (nbin1 < 5) { nbin1 = 5; }
+  int nbin2 = nd * em::g4_lrint(std::log10(maxe / min_mm));
+  if (nbin2 < 5) { nbin2 = 5; }
+  g[0].make(mine, min_pe, nbin1, true);
+  g[1].make(min_pe, min_ee, 40, false);
+  g[2].make(min_ee, min_mm, had::kGammaGeneralZone2Bins, false);
+  g[3].make(min_mm, maxe, nbin2, true);
+}
+
+/// P26: `G4GammaGeneralProcess::BuildPhysicsTable` for @p n_mat materials, into @p h.
+///
+/// First each sub-process's own `BuildPhysicsTable` - `em::EmProcessLambda::build`, its lambda
+/// and prim vectors from this port's models - then the four zones' loops in the source's order of
+/// operations (G4GammaGeneralProcess.cc:309-438), each node's sigmas through `GetLambda`
+/// (`em::EmProcessLambda::get_lambda`) and sigN through photonNuclear's data store
+/// (`gn->ComputeCrossSection`, which is `had::emextra_xs_per_volume`), and last
+/// `FillSecondDerivatives` on tables 0, 1 and 10-14.
+///
+/// The models, as each process's `InitialiseProcess` sets them up:
+///   * Compton: `G4KleinNishinaCompton` with `SetLowEnergyLimit(param->MinKinEnergy())` - so its
+///     `ComputeCrossSectionPerAtom` returns 0 at `GammaEnergy <= 100 eV`, where this port's
+///     `em::compton_xs_per_atom` keeps G4VEmModel's 10 eV default (the photon is absorbed at
+///     990 eV, so the transport never asks). Only node 0 of Compton's lambda vector sits there,
+///     and Geant4 stores 0 at it (`ref/oracle/gammagp_tables.csv`, table 300).
+///   * conversion: `G4PairProductionRelModel` - this port's `em::pair_xs_per_atom`, the
+///     parameterisation Geant4 uses below 30 GeV. Above 30 GeV Geant4 integrates the
+///     differential cross section with LPM and this port does not (docs/PORTED.md 4.1), so
+///     zone 3's nodes above 30 GeV carry that difference, and through the spline's tridiagonal
+///     solve a vanishing amount of it below; the host test measures how much.
+///   * photoelectric: `G4LivermorePhotoElectricModel`, `data::photoelectric_xs_per_atom`.
+///   * Rayleigh: `G4LivermoreRayleighModel`, `data::rayleigh_xs_per_atom`.
+/// Each summed over the material's elements in their order, `G4VEmModel::CrossSectionPerVolume`.
+template <typename real_t>
+inline void build_gamma_general_host_tables(EmExtraHostTables<real_t>& h,
+                                            const data::Material<real_t>* mats, int n_mat,
+                                            const data::PhotoElectricTable<real_t>& pe,
+                                            const data::RayleighTable<real_t>& ray,
+                                            bool read_tables) {
+  namespace E = g4gpu::em;
+  const double me = units::electron_mass_c2<double>();
+  em::LogVecHost grid[4];
+  gamma_general_grids(grid);
+  for (int z = 0; z < 4; ++z) { h.gg_e[z].assign(grid[z].e.begin(), grid[z].e.end()); }
+  for (int k = 0; k < had::kGammaGeneralNumTables; ++k) {
+    h.gg_t[k].clear();
+    h.gg_d2[k].clear();
+  }
+  h.gg_sub.assign(static_cast<std::size_t>(n_mat) * 4, E::EmProcessLambda{});
+  const had::EmExtraTables<real_t> hv = h.view();
+
+  for (int m = 0; m < n_mat; ++m) {
+    const data::Material<real_t>& mat = mats[m];
+    auto compt = [&](double e) -> double {
+      if (e <= E::kEmParamMinKinEnergy) { return 0.0; }
+      return static_cast<double>(
+          em::gamma_macroscopic_xs<real_t>(mat, real_t(e), nullptr, nullptr, true, false).compton);
+    };
+    // `SetupForMaterial`: `fLPMEnergy = mat->GetRadlen()*gLPMconstant`, then the element sum,
+    // through the model's whole range (`em::pair_xs_per_atom_rel`).
+    const real_t lpm_energy = mat.radiation_length * em::lpm_constant<real_t>();
+    auto conv = [&](double e) -> double {
+      real_t s = real_t(0);
+      for (int i = 0; i < mat.n_elements; ++i) {
+        s += mat.n_atoms[i] * em::pair_xs_per_atom_rel<real_t>(real_t(e), mat.z[i], lpm_energy);
+      }
+      return static_cast<double>(s);
+    };
+    auto phot = [&](double e) -> double {
+      return static_cast<double>(
+          em::gamma_macroscopic_xs<real_t>(mat, real_t(e), &pe, nullptr, false, false)
+              .photoelectric);
+    };
+    auto rayl = [&](double e) -> double {
+      return static_cast<double>(
+          em::gamma_macroscopic_xs<real_t>(mat, real_t(e), nullptr, &ray, false, false)
+              .rayleigh);
+    };
+    E::EmProcessLambda* sub = &h.gg_sub[static_cast<std::size_t>(m) * 4];
+    // `BuildPhysicsTable`'s order: photoelectric, Compton, conversion, Rayleigh. The order does
+    // not change a number - each process's tables are its own - but it is the source's.
+    sub[2].build(E::em_process_lambda_config(E::GammaSubProcess::kPhotoelectric, me), phot);
+    sub[0].build(E::em_process_lambda_config(E::GammaSubProcess::kCompton, me), compt);
+    sub[1].build(E::em_process_lambda_config(E::GammaSubProcess::kConversion, me), conv);
+    sub[3].build(E::em_process_lambda_config(E::GammaSubProcess::kRayleigh, me), rayl);
+    auto L = [&](int k, double e, double loge) -> double {
+      switch (k) {
+        case 0: return sub[0].get_lambda(e, loge, compt);
+        case 1: return sub[1].get_lambda(e, loge, conv);
+        case 2: return sub[2].get_lambda(e, loge, phot);
+        default: return sub[3].get_lambda(e, loge, rayl);
+      }
+    };
+    auto sig_n_at = [&](double e) -> double {
+      hadronic::xs::MaterialXs<real_t> mxs{};
+      return static_cast<double>(had::emextra_xs_per_volume<real_t>(
+          hv, had::EmExtraProcess::kPhotonNuclear, m, mat, real_t(e), mxs));
+    };
+    // Per-material vectors, one per slot, filled node by node as the source fills them.
+    std::vector<double> tv[had::kGammaGeneralNumTables];
+    for (int k = 0; k < had::kGammaGeneralNumTables; ++k) {
+      if (k == 5) { continue; }
+      tv[k].assign(grid[had::gamma_general_table_zone(k)].e.size(), 0.0);
+    }
+    // energy interval 0
+    for (std::size_t j = 0; j < grid[0].e.size(); ++j) {
+      const double e = grid[0].e[j];
+      const double loge = std::log(e);
+      const double sigComp = L(0, e, loge);
+      const double sigR = L(3, e, loge);
+      const double sum = sigComp + sigR;
+      tv[0][j] = sum;
+      tv[1][j] = sigR / sum;
+    }
+    // energy interval 1
+    for (std::size_t j = 0; j < grid[1].e.size(); ++j) {
+      const double e = grid[1].e[j];
+      const double loge = std::log(e);
+      const double sigComp = L(0, e, loge);
+      const double sigR = L(3, e, loge);
+      const double sigPE = L(2, e, loge);
+      const double sum = sigComp + sigR + sigPE;
+      tv[2][j] = sum;
+      tv[3][j] = sigPE / sum;
+      tv[4][j] = (sigR > 0.0) ? (sigComp + sigPE) / sum : 1.0;
+    }
+    // energy interval 2
+    for (std::size_t j = 0; j < grid[2].e.size(); ++j) {
+      const double e = grid[2].e[j];
+      const double loge = std::log(e);
+      const double sigComp = L(0, e, loge);
+      const double sigConv = L(1, e, loge);
+      const double sigPE = L(2, e, loge);
+      const double sigN = sig_n_at(e);
+      const double sum = sigComp + sigConv + sigPE + sigN;
+      tv[6][j] = sum;
+      tv[7][j] = sigConv / sum;
+      tv[8][j] = (sigConv + sigComp) / sum;
+      tv[9][j] = (sigN > 0.0) ? (sigConv + sigComp + sigPE) / sum : 1.0;
+    }
+    // energy interval 3. `sigM` is G4GammaConversionToMuons', which QBBC does not build: 0.0, and
+    // written into every sum and share where the source writes it, since `x + 0.0` is `x`.
+    for (std::size_t j = 0; j < grid[3].e.size(); ++j) {
+      const double e = grid[3].e[j];
+      const double loge = std::log(e);
+      const double sigComp = L(0, e, loge);
+      const double sigConv = L(1, e, loge);
+      const double sigPE = L(2, e, loge);
+      const double sigN = sig_n_at(e);
+      const double sigM = 0.0;
+      const double sum = sigComp + sigConv + sigPE + sigN + sigM;
+      tv[10][j] = sum;
+      tv[11][j] = (sigComp + sigPE + sigN + sigM) / sum;
+      tv[12][j] = (sigPE + sigN + sigM) / sum;
+      tv[13][j] = (sigN + sigM) / sum;
+      tv[14][j] = sigN / sum;
+    }
+    for (int k = 0; k < had::kGammaGeneralNumTables; ++k) {
+      if (k == 5) { continue; }
+      const em::LogVecHost& g = grid[had::gamma_general_table_zone(k)];
+      for (const double x : tv[k]) { h.gg_t[k].push_back(static_cast<real_t>(x)); }
+      if (had::gamma_general_table_spline(k)) {
+        std::vector<double> d(tv[k].size(), 0.0);
+        data::fill_second_derivatives(g.e.data(), tv[k].data(), static_cast<int>(tv[k].size()),
+                                      d.data());
+        for (const double x : d) { h.gg_d2[k].push_back(static_cast<real_t>(x)); }
+      }
+    }
+  }
+
+  // The device-shaped view, HOST pointers; `upload_emextra_tables` swaps them for device copies.
+  for (int z = 0; z < 4; ++z) {
+    had::GammaGeneralGrid<real_t>& g = h.p9.grid[z];
+    g.e = h.gg_e[z].data();
+    g.n = static_cast<int>(h.gg_e[z].size());
+    g.edge_min = static_cast<real_t>(grid[z].edge_min);
+    g.edge_max = static_cast<real_t>(grid[z].edge_max);
+    g.inv_dbin = static_cast<real_t>(grid[z].inv_dbin);
+    g.log_emin = static_cast<real_t>(grid[z].log_emin);
+  }
+  for (int k = 0; k < had::kGammaGeneralNumTables; ++k) {
+    h.p9.t[k] = h.gg_t[k].empty() ? nullptr : h.gg_t[k].data();
+    h.p9.d2[k] = h.gg_d2[k].empty() ? nullptr : h.gg_d2[k].data();
+  }
+  h.p9.built_with_nuclear = h.gamma_ok ? 1 : 0;
+  h.p9.read_tables = read_tables ? 1 : 0;
+  h.gg_ok = true;
+}
+
+/// `G4GPU_GAMMA_GENERAL_TABLES`: unset or anything but "0" reads the general process's tables
+/// (P26, as Geant4 does); "0" keeps P1's models and P21's table 9, the comparison's other side.
+inline bool gamma_general_tables_from_env() {
+  const char* s = std::getenv("G4GPU_GAMMA_GENERAL_TABLES");
+  return !(s != nullptr && s[0] == '0' && s[1] == '\0');
+}
+
 /// Builds P13's three tables on the host and the thresholds of @p n_mat materials - and since
 /// P21 the general process's table 9 from @p pe.
 ///
@@ -437,7 +663,9 @@ template <typename real_t>
 inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
                                       const data::Material<real_t>* mats, int n_mat,
                                       bool verbose = true,
-                                      const data::PhotoElectricTable<real_t>* pe = nullptr) {
+                                      const data::PhotoElectricTable<real_t>* pe = nullptr,
+                                      const data::RayleighTable<real_t>* ray = nullptr,
+                                      bool read_tables = gamma_general_tables_from_env()) {
   namespace hxs = g4gpu::hadronic::xs;
   namespace ee = g4gpu::physics::hadronic::emextra;
   const std::string gdir = g4particlexs_subdir("gamma");
@@ -495,8 +723,10 @@ inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
   // P21: G4GammaGeneralProcess's table 9, at Geant4's own 51 nodes, from this port's cross
   // sections - `had::gamma_general_table9_node` is the loop body of `BuildPhysicsTable`'s zone 2.
   // Built from the HOST view above, so the store it evaluates is the one the drain will use.
+  // P26: built without the gamma data set too - every node is then 1.0, its threshold the last
+  // node, and nothing reads it - because since P26 the struct carries every other table as well.
   h.p9_ok = false;
-  if (h.gamma_ok && pe != nullptr && n_mat > 0) {
+  if (pe != nullptr && n_mat > 0) {
     h.p9_e.assign(had::kGammaGeneralZone2Nodes, real_t(0));
     real_t inv_dbin = 0, log_emin = 0;
     had::gamma_general_zone2_grid<real_t>(h.p9_e.data(), inv_dbin, log_emin);
@@ -533,6 +763,14 @@ inline void build_emextra_host_tables(EmExtraHostTables<real_t>& h,
     std::printf("photo-nuclear table 9: no photoelectric table was given to build it from - "
                 "the photon has no photo-nuclear term in zone 2 (2 m_e to 100 MeV)\n");
   }
+  // P26: the rest of the general process's tables, which need the Rayleigh table as well.
+  h.gg_ok = false;
+  if (h.p9_ok && ray != nullptr) {
+    build_gamma_general_host_tables<real_t>(h, mats, n_mat, *pe, *ray, read_tables);
+  } else if (verbose) {
+    std::printf("G4GammaGeneralProcess tables: no photoelectric or Rayleigh table to build them "
+                "from - the photon reads its models (P1) and table 9 alone\n");
+  }
 }
 
 /// Everything `upload_emextra_tables` allocated.
@@ -560,7 +798,38 @@ inline EmExtraTableOwner<real_t> upload_emextra_tables(
   namespace ee = g4gpu::physics::hadronic::emextra;
   EmExtraTableOwner<real_t> own;
   EmExtraHostTables<real_t> h;
-  build_emextra_host_tables<real_t>(h, mats, n_mat, verbose, pe);
+  // P26: the Rayleigh cross sections on the HOST, for the scene's elements - zones 0 and 1 of the
+  // general process sum Rayleigh's `GetLambda`. Read here, from the directory
+  // `host::default_rayl_dir` names (G4GPU_RAYL_DIR, else G4EMLOW's epics2017/rayl), rather than
+  // passed in, so that the engine's upload needed no new argument. A missing file is fatal, as
+  // the device upload of the same data is.
+  data::RayleighTable<real_t> ray_host{};
+  std::vector<real_t> ray_e, ray_v;
+  const data::RayleighTable<real_t>* ray = nullptr;
+  if (pe != nullptr) {
+    std::vector<int> zs;
+    for (int m = 0; m < n_mat; ++m) {
+      for (int i = 0; i < mats[m].n_elements; ++i) {
+        const int z = static_cast<int>(mats[m].z[i] + real_t(0.5));
+        bool seen = false;
+        for (const int y : zs) { seen |= (y == z); }
+        if (!seen) { zs.push_back(z); }
+      }
+    }
+    const char* env = std::getenv("G4GPU_RAYL_DIR");
+    const std::string rdir = env ? std::string(env) : g4emlow_subdir("epics2017/rayl", "re-cs-1.dat");
+    if (!data::load_rayleigh<real_t>(rdir, zs.data(), static_cast<int>(zs.size()), ray_host,
+                                     ray_e, ray_v)) {
+      std::printf("\nFATAL: the Rayleigh data (G4EMLOW epics2017/rayl) could not be read from "
+                  "'%s' for the general process's tables\n", rdir.c_str());
+      std::exit(1);
+    }
+    ray_host.table_e = ray_e.data();
+    ray_host.table_v = ray_v.data();
+    ray_host.table_n = static_cast<int>(ray_e.size());
+    ray = &ray_host;
+  }
+  build_emextra_host_tables<real_t>(h, mats, n_mat, verbose, pe, ray);
 
   auto up = [&own](const void* src, std::size_t n) -> void* {
     void* p = nullptr;
@@ -597,16 +866,33 @@ inline EmExtraTableOwner<real_t> upload_emextra_tables(
     d9.v = static_cast<const real_t*>(up(h.p9_v.data(), h.p9_v.size() * sizeof(real_t)));
     d9.threshold = static_cast<const real_t*>(
         up(h.p9_threshold.data(), h.p9_threshold.size() * sizeof(real_t)));
+    // P26: the four grids and every built slot's values and second derivatives.
+    if (h.gg_ok) {
+      for (int z = 0; z < 4; ++z) {
+        d9.grid[z].e =
+            static_cast<const real_t*>(up(h.gg_e[z].data(), h.gg_e[z].size() * sizeof(real_t)));
+      }
+      for (int k = 0; k < had::kGammaGeneralNumTables; ++k) {
+        d9.t[k] = h.gg_t[k].empty() ? nullptr
+                                    : static_cast<const real_t*>(up(
+                                          h.gg_t[k].data(), h.gg_t[k].size() * sizeof(real_t)));
+        d9.d2[k] = h.gg_d2[k].empty() ? nullptr
+                                      : static_cast<const real_t*>(up(
+                                            h.gg_d2[k].data(), h.gg_d2[k].size() * sizeof(real_t)));
+      }
+    }
     own.view.p9 = static_cast<const had::GammaGeneralTable9<real_t>*>(up(&d9, sizeof(d9)));
   }
 
   if (verbose) {
     std::printf("photo-/lepto-nuclear tables: %.2f MB - G4GammaNuclearXS %s, "
                 "G4KokoulinMuonNuclearXS %zu B, G4MuonVDNuclearModel sampling table %zu B, "
-                "G4GammaGeneralProcess table 9 %s\n",
+                "G4GammaGeneralProcess table 9 %s, its other tables %s\n",
                 double(own.bytes) / 1048576.0, h.gamma_ok ? "loaded" : "ABSENT",
                 sizeof(hxs::kokoulin::KokoulinTable<real_t>), sizeof(ee::MuVdTable),
-                h.p9_ok ? "built" : "ABSENT");
+                h.p9_ok ? "built" : "ABSENT",
+                !h.gg_ok ? "ABSENT" : (h.p9.read_tables ? "built and READ" : "built, NOT read "
+                                                          "(G4GPU_GAMMA_GENERAL_TABLES=0)"));
   }
   return own;
 }

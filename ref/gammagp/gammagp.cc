@@ -273,6 +273,41 @@ int dump_tables(const std::vector<double>& energies) {
     std::printf("FATAL: no general-process table was found under %s\n", dir.c_str());
     return 1;
   }
+  // P26: and the tables those were built FROM, node by node - each sub-process's own lambda
+  // tables, which `StorePhysicsTable` above wrote beside the general ones
+  // (`G4VEmProcess::StorePhysicsTable`: `Lambda.<proc>.gamma.dat` below `minKinEnergyPrim`,
+  // `LambdaPrim.<proc>.gamma.dat` - E times sigma - from it up). `BuildPhysicsTable` reads them
+  // through `GetLambda`, so a port that builds the general tables has to build these first,
+  // and holding them node by node is what says where a difference comes from (docs/RISK.md
+  // V225: Compton's prim table near its first node). kind=subnode, table = 300 + 10*k for the
+  // lambda vector and 301 + 10*k for the prim one, k = 0 compt, 1 conv, 2 phot, 3 Rayl; the
+  // index is the node, and a header row per vector (index -1) gives its stored edges as E and
+  // its node count as the value. Absent files are simply absent: the photoelectric effect
+  // builds no lambda vector and conversion no prim one in 11.1.1.
+  const char* sub[4] = {"compt", "conv", "phot", "Rayl"};
+  for (int k = 0; k < 4; ++k) {
+    for (int prim = 0; prim < 2; ++prim) {
+      const std::string file =
+          dir + "/" + (prim ? "LambdaPrim." : "Lambda.") + sub[k] + ".gamma.dat";
+      if (!std::filesystem::exists(file)) { continue; }
+      std::vector<StoredVector> stored;
+      if (!read_stored_table(file, stored) || stored.size() != 1) {
+        std::printf("FATAL: %s is not one stored vector\n", file.c_str());
+        return 1;
+      }
+      const StoredVector& sv = stored[0];
+      const int id = 300 + 10 * k + prim;
+      std::printf("%s,%d,subhead,-1,%.17g,%zu\n", g_material.c_str(), id, sv.edge_min / MeV,
+                  sv.e.size());
+      std::printf("%s,%d,subhead,-2,%.17g,%d\n", g_material.c_str(), id, sv.edge_max / MeV,
+                  sv.type);
+      for (std::size_t j = 0; j < sv.e.size(); ++j) {
+        // A prim vector holds E*sigma: MeV/mm in Geant4's units, printed as MeV/mm.
+        std::printf("%s,%d,subnode,%zu,%.17g,%.17g\n", g_material.c_str(), id, j, sv.e[j] / MeV,
+                    sv.v[j] * mm / (prim ? MeV : 1.0));
+      }
+    }
+  }
   // And what the tables were built FROM, at the same energies: each sub-process's own model
   // through `G4EmCalculator::ComputeCrossSectionPerVolume` and photonNuclear's data store
   // through `G4HadronicProcessStore`, 1/mm, as kind=model rows with table = 100 compt,

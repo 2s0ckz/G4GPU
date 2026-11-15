@@ -24,7 +24,10 @@ rem
 rem   gammagp_tables.csv   the general process's own tables for B1's four materials (all but table
 rem                        5, which it never builds), node by node as BuildPhysicsTable filled
 rem                        them, and LogVectorValue at a set of energies.
-rem                        tests\test_emextra_wiring.cu holds the port's table 9 to it.
+rem                        tests\test_emextra_wiring.cu holds the port's table 9 to it. P26:
+rem                        each sub-process's own lambda vectors as well (kind=subnode), and
+rem                        13 more energies, in zones 0 and 3 where tables 0, 1 and 10-14 are
+rem                        splined; tests\test_gamma_general_tables.cu holds every table to it.
 rem   gammagp_counts.csv   which sub-process took the first interaction of FORTY MILLION photons,
 rem                        at each point P21 was asked about: Rayleigh at 1.5 MeV in water and
 rem                        bone, table 9 at 20, 22 and 60 MeV in both and at every other point of
@@ -43,7 +46,7 @@ rem `tables` exit below: a package regenerating the tables needs these files as 
 call "%~dp0..\gammagp\build.bat" || exit /b 1
 if exist "%~dp0gammagp_tables.csv" del /q "%~dp0gammagp_tables.csv"
 for %%M in (G4_AIR G4_WATER G4_A-150_TISSUE G4_BONE_COMPACT_ICRU) do (
-  call "%~dp0..\gammagp\run.bat" %%M tables 0.2 0.3 0.5 0.8 1.0 1.2 1.5 2 2.5 3 3.9 4.5 5.4 6 7 8 10 11.2 12.5 14 17 20 21 22 23 25 30 40 60 80 99.9 >> "%~dp0gammagp_tables.csv" || exit /b 1
+  call "%~dp0..\gammagp\run.bat" %%M tables 0.2 0.3 0.5 0.8 1.0 1.2 1.5 2 2.5 3 3.9 4.5 5.4 6 7 8 10 11.2 12.5 14 17 20 21 22 23 25 30 40 60 80 99.9 0.002 0.01 0.03 0.05 0.1 0.149 150 300 1000 10000 100000 1000000 10000000 >> "%~dp0gammagp_tables.csv" || exit /b 1
 )
 if exist "%~dp0gammagp_counts.csv" del /q "%~dp0gammagp_counts.csv"
 for %%P in ("G4_WATER 40000000 1.5" "G4_WATER 40000000 11.2" "G4_WATER 40000000 20" "G4_WATER 40000000 22" "G4_WATER 40000000 60" "G4_BONE_COMPACT_ICRU 40000000 1.5" "G4_BONE_COMPACT_ICRU 40000000 20" "G4_BONE_COMPACT_ICRU 40000000 22" "G4_BONE_COMPACT_ICRU 40000000 60" "G4_WATER 40000000 99.9" "G4_BONE_COMPACT_ICRU 40000000 99.9" "G4_AIR 40000000 17" "G4_AIR 40000000 6" "G4_A-150_TISSUE 40000000 60") do (
