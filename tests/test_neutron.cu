@@ -470,6 +470,13 @@ int main() {
       cudaMemset(books.carried_away, 0, sizeof(double) * 4);
       cudaMemset(books.carried_by_type, 0, sizeof(int) * kNT);
       cudaMemset(books.refused_by_type, 0, sizeof(int) * kNT);
+      // P23a: the lambda has a kernel now, and nothing with a `ParticleType` row is refused any
+      // more - so the refused disposition is reached through `refuse_strange`, the study knob
+      // that reproduces the pre-P23a emitter, and this section checks the knob as well as the
+      // disposition. Without the knob the lambda is stepped (asserted below).
+      books.refuse_strange = true;
+      Check(species_disposition(ParticleType::kLambda) == SpeciesDisposition::kStepped,
+            "a lambda is stepped by default since P23a");
 
       int* d_slots = nullptr;
       unsigned int* d_children = nullptr;
