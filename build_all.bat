@@ -65,7 +65,7 @@ rem Tests that launch real kernels rather than calling __host__ __device__ code 
 rem host. They need the arch flag: StepTally reduces with atomicAdd on a double, which
 rem does not exist before sm_60, and %NV% has no -arch so it defaults below that. This is
 rem how that was found - the test would not compile until it was built like the engine.
-set TESTS_GPU=test_step_hook test_neutron test_step_hadron test_capture_device test_ion_transport test_neutron_general test_lepton_transport test_inelastic_transport test_emextra_transport
+set TESTS_GPU=test_step_hook test_neutron test_step_hadron test_capture_device test_ion_transport test_neutron_general test_lepton_transport test_inelastic_transport test_emextra_transport test_strange_tracks
 
 echo --- drivers ---
 rem /IMPLIB keeps the import library and its .exp out of the project root. They are a

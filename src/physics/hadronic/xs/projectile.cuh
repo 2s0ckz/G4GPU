@@ -120,6 +120,30 @@ template <typename real_t> __host__ __device__ inline Projectile<real_t> kaon_ze
 template <typename real_t> __host__ __device__ inline Projectile<real_t> lambda() {
   return {pdg::kLambda, real_t(1.115683) * units::GeV<real_t>(), real_t(0), 1, 0};
 }
+/// P23a: the seven hyperons and their seven antiparticles as the cross sections read them, by
+/// PDG code - the projectiles of `hadElastic` and `<name>Inelastic` once these species are
+/// tracks. Each mass is its own definition's `x*GeV` (G4SigmaPlus.cc 1.18937, G4SigmaMinus.cc
+/// 1.197449, G4SigmaZero.cc 1.192642, G4XiZero.cc 1.31486, G4XiMinus.cc 1.32171,
+/// G4OmegaMinus.cc 1.67245, G4Lambda.cc 1.115683), written as Geant4 writes it for the reason
+/// the block above gives; an antiparticle has the same mass, the opposite charge and baryon
+/// number -1. A code that is not one of the fourteen returns a zero projectile (pdg 0, mass 0),
+/// which every caller here treats as "no such species".
+template <typename real_t> __host__ __device__ inline Projectile<real_t> strange_baryon(int code) {
+  const int a = (code < 0) ? -code : code;
+  real_t m = 0, q = 0;
+  switch (a) {
+    case 3122: m = real_t(1.115683); q = 0; break;
+    case 3222: m = real_t(1.18937); q = 1; break;
+    case 3212: m = real_t(1.192642); q = 0; break;
+    case 3112: m = real_t(1.197449); q = -1; break;
+    case 3322: m = real_t(1.31486); q = 0; break;
+    case 3312: m = real_t(1.32171); q = -1; break;
+    case 3334: m = real_t(1.67245); q = -1; break;
+    default: return Projectile<real_t>{};
+  }
+  const bool anti = (code < 0);
+  return {code, m * units::GeV<real_t>(), anti ? -q : q, anti ? -1 : 1, 0};
+}
 template <typename real_t> __host__ __device__ inline Projectile<real_t> gamma() {
   return {pdg::kGamma, real_t(0), real_t(0), 0, 0};
 }

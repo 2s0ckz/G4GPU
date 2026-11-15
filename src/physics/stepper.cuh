@@ -1430,13 +1430,27 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
 ///        interaction kernel does both. Defaulted to null so that every caller written before
 ///        P15 - `tests/test_step_hadron.cu`, `src/host/b1_gpu_sched.cu` - is unchanged and
 ///        simply never enqueues, because `HadronicWiring::queue` is empty in those runs.
+/// @param kernel_type P23a: the species that decides the function's STRUCTURE - which msc model,
+///        whether CoulombScat, muonNuclear, an ion's effective charge or nuclear stopping exist
+///        at all - where `type` decides its DATA (mass, charge, base table, decay table,
+///        hadronic channels). Every kernel before P23a was one species and passes nothing here,
+///        so the two are the same constant and every branch folds exactly as it did. The
+///        strange group kernel passes a REPRESENTATIVE of its eight species as a compile-time
+///        constant and the track's own species as `type`: the eight share every structural
+///        answer (Urban, no CoulombScat, no muonNuclear, G4hIonisation with UrbanFluc - see
+///        `is_strange_charged_track`), so the branches still fold and the group kernel carries
+///        neither WentzelVI nor any ion arm. `tests/test_species.cu` asserts that the eight agree
+///        with their representative on every one of those predicates, which is what makes a
+///        representative a correct choice rather than a convenient one.
 template <typename real_t, typename Rng, typename Emitter>
 __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<real_t>& p,
                                    ParticleType type, const had::HadronicWiring<real_t>& had,
                                    Rng& rng, Emitter& em, real_t& edep,
                                    StepReport<real_t>& rep,
                                    vis::TrajectoryBuffer traj = vis::no_capture(),
-                                   bool* queued = nullptr) {
+                                   bool* queued = nullptr,
+                                   ParticleType kernel_type = ParticleType::kNumTypes) {
+  const ParticleType kt = (kernel_type == ParticleType::kNumTypes) ? type : kernel_type;
   edep = real_t(0);
   rep = StepReport<real_t>{};
   const Vec3<real_t> pos_before = p.pos;
@@ -1458,7 +1472,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder and the track is an
   // oxygen recoil. See `em::SteppedHadron`, which carries both plus the nuclide.
   const em::SteppedHadron<real_t> h =
-      (type == ParticleType::kGenericIon)
+      (kt == ParticleType::kGenericIon)
           ? em::stepped_ion<real_t>(ion_z_of(p.ion_za), ion_a_of(p.ion_za))
           : em::stepped_hadron<real_t>(type);
   const ParticleDef<real_t> pd = h.def;
@@ -1477,7 +1491,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // `dynamic_particle_beta` reads as a photon: beta exactly 1, no stopping power, and a nucleus
   // that crosses the geometry depositing nothing. That is the shape of failure this project
   // keeps writing up, so it is a counter and a deposit instead.
-  if (h.type == ParticleType::kGenericIon && !(pd.mass > real_t(0))) {
+  if (kt == ParticleType::kGenericIon && !(pd.mass > real_t(0))) {
     had::book_refusal<real_t>(had.books, had::HadronicRefusal::kIonWithoutNuclide, p.ekin);
     rep.status = StepStatus::fStopAndKill;
     rep.process = ProcessId::fBelowTrackingCut;
@@ -1596,7 +1610,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     //
     // CONDITIONAL, like the decay draw above and for the same reason: a species or an energy
     // that has no process must consume no uniform, or every existing number for it moves.
-    const bool has_coul = s.processes.coulomb_scattering && em::has_coulomb_scattering(type)
+    const bool has_coul = s.processes.coulomb_scattering && em::has_coulomb_scattering(kt)
                           && p.ekin >= em::coulomb_table_min_energy<real_t>(type, pd.mass,
                                                                            mm.inv_a23);
     const real_t coul_xs =
@@ -1672,7 +1686,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // not in that set: `protonInelastic` stays on and its hole is reported instead.
     real_t inel_xs = real_t(0);
     const bool inelastic_on =
-        had.hadron_inelastic && (had.ion_inelastic || !had::is_ion_inelastic_species(type));
+        had.hadron_inelastic && (had.ion_inelastic || !had::is_ion_inelastic_species(kt));
     const real_t d_inelastic =
         inelastic_on
             ? had::inelastic_length<real_t>(had.inelastic, mm, type, p.ekin, h.z, h.a, rng,
@@ -1694,7 +1708,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // cross section - 7.7e-8 /mm in water, a 13 km mean free path. It is Geant4's number and it
     // moves every muon's random stream by one uniform a step; what it almost never does in a
     // phantom is fire.
-    const bool is_muon = (type == ParticleType::kMuonMinus || type == ParticleType::kMuonPlus);
+    const bool is_muon = (kt == ParticleType::kMuonMinus || kt == ParticleType::kMuonPlus);
     real_t munuc_xs = real_t(0);
     const real_t d_munuc =
         (is_muon && had.muon_nuclear)
@@ -1731,7 +1745,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // Geant4 gives an Urban model and WentzelVI for the eight it does not. It was false for one
     // package because ptxas would not compile the branch in a translation unit holding eighteen
     // kernels: docs/RISK.md V63 is the wall and V65 is the split that removed it.
-    const bool urban_msc = kUrbanIonMscWired && !uses_wentzel_msc(type);
+    const bool urban_msc = kUrbanIonMscWired && !uses_wentzel_msc(kt);
 
     const real_t safety = geom::compute_safety(s.geometry, p.volume, p.pos);
     rep.safety = safety;
@@ -1960,7 +1974,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // the accurate one - so it moves a stepped alpha's numbers slightly and cannot move a
     // total.
     const real_t kLinLossLimit =
-        uses_ion_ionisation(type) ? real_t(0.02) : real_t(0.01);
+        uses_ion_ionisation(kt) ? real_t(0.02) : real_t(0.01);
     if (step_len >= range || e_before <= em::kHadronTrackingCut<real_t>()) {
       loss = e_before;
     } else {
@@ -1993,7 +2007,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
       if (loss < e_before) {
         const real_t tmax = em::hadron_max_secondary_energy(pd, e_before);
         const real_t tcut = fmin(cut, tmax);
-        if (uses_ion_fluctuations(type)) {
+        if (uses_ion_fluctuations(kt)) {
           // THE EFFECTIVE CHARGE SQUARED, and which species get one is `isIon`.
           //
           // `G4IonFluctuations` only ever sees an effective charge through
@@ -2007,7 +2021,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
           // The comment this replaces said "a generic ion will need the real ratio here"; it
           // was also He3's, which was not transported when it was written.
           const real_t q2 =
-              (h.is_real_ion() || em::uses_dynamic_effective_charge(type))
+              (h.is_real_ion() || em::uses_dynamic_effective_charge(kt))
                   ? em::hadron_charge_sq_ratio<real_t>(mm, h, e_before)
                   : pd.charge * pd.charge;
           loss = em::sample_ion_fluctuation(mm, pd, e_before, tcut, tmax, step_len, loss, q2,
@@ -2037,7 +2051,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // uses_nuclear_stopping in core/particle.cuh - which is now `false` for everything, and is
     // still a predicate because `/process/em/setMaxNIEL` turns it on and the source's
     // four-species split is then the right answer.
-    if (uses_nuclear_stopping(type) && e_after > real_t(0) && step_len > real_t(0)) {
+    if (uses_nuclear_stopping(kt) && e_after > real_t(0) && step_len > real_t(0)) {
       const real_t t_mean = real_t(0.5) * (e_before + e_after);
       const real_t nl = fmin(step_len * em::nuclear_stopping_dedx(mm, type, t_mean), e_before);
       if (nl > real_t(0)) {
@@ -2850,6 +2864,225 @@ __host__ __device__ inline bool step_neutral(const Scene<real_t>& s, TrackState<
     }
   }
   p.ekin = real_t(0);
+  return false;
+}
+
+/// P23a: one step of a NEUTRAL strange hadron - K0S, K0L, lambda, sigma0, xi0, anti-lambda,
+/// anti-sigma0 or anti-xi0.
+///
+/// NOT `step_neutral`, and the reason is the neutron. `step_neutral` is built around
+/// `G4NeutronGeneralProcess` - one summed interaction length, the sub-process named afterwards,
+/// a count carried on the track, a time cut - and nothing of it applies here. These species
+/// carry the plain process list `ref/oracle/species_processes.csv` reads off the constructed
+/// QBBC: `Transportation, Decay, hadElastic, <name>Inelastic` (sigma0: `Transportation, Decay`;
+/// anti_sigma0 the same plus `hFritiofCaptureAtRest`; the three neutral anti-hyperons with
+/// inelastic carry the capture too). Each discrete process is a separate `G4VProcess` drawing
+/// its own interaction length - so this is `step_hadron`'s competition without the charged half
+/// (no ionisation, no msc, no delta ray: all three are registered by charge), and each length is
+/// drawn afresh from the pre-step energy, which `decay_in_flight_length`'s header shows is
+/// Geant4's distribution for every process that charges a step at the length it was taken with.
+///
+/// THE ORDER is the manager's - Decay, hadElastic, Inelastic - and a tie goes to the earlier,
+/// as `G4SteppingManager::DefinePhysicalStepLength`'s strict `<` gives it. A neutral projectile
+/// is `fHadNoIntegral` (`G4HadronicProcess::BuildPhysicsTable` guards the integral approach with
+/// `charge != 0`), so `hadElastic`'s target is drawn from the PRE-step partial sums this call
+/// computes, and the inelastic entry goes to the queue with no cross section to reject against.
+///
+/// THE TWO NOTES OF docs/RISK.md V226 THAT ARE THIS FUNCTION'S. A K0S or K0L inelastic
+/// interaction spends one uniform on Bertini's `IsApplicable` before the model is chosen, at
+/// every energy (`had::range_manager_draws_is_applicable`); and a K0/anti-K0 a model makes is
+/// mixed where it is made - by the process (`run_inelastic`'s step 7, G4HadronicProcess.cc
+/// 446-460) or by Bertini's `makeDynamicParticle` - so what arrives here is already a K0S or a
+/// K0L. sigma0 and anti_sigma0 have lifetime 7.4e-11 ns: `in_flight_mean_free_path` returns
+/// `DBL_MIN` or a length far below any geometry and they decay inside their first step, which
+/// is the same competition and not a special case (V229).
+///
+/// AT REST - a neutral born with zero kinetic energy, or brought to rest by an elastic scatter
+/// off hydrogen at 180 degrees - the at-rest question is `step_hadron`'s: `G4Decay` for the five
+/// whose only at-rest process it is, and `G4HadronicAbsorptionFritiof` for anti_lambda,
+/// anti_sigma0 and anti_xi0 (G4StoppingPhysics' explicit list, `has_at_rest_arm`), whose
+/// `AtRestGetPhysicalInteractionLength` of 0 pre-empts the decay in the final stage.
+template <typename real_t, typename Rng, typename Emitter>
+__host__ __device__ inline bool step_neutral_strange(const Scene<real_t>& s, TrackState<real_t>& p,
+                                                     ParticleType type,
+                                                     const had::HadronicWiring<real_t>& had,
+                                                     Rng& rng, Emitter& em, real_t& edep,
+                                                     StepReport<real_t>& rep,
+                                                     vis::TrajectoryBuffer traj = vis::no_capture(),
+                                                     bool* queued = nullptr) {
+  edep = real_t(0);
+  rep = StepReport<real_t>{};
+  const Vec3<real_t> pos_before = p.pos;
+  const real_t ekin_pre = p.ekin;
+  const Vec3<real_t> dir_pre = p.dir;
+  const int volume_pre = p.volume;
+  if (queued != nullptr) { *queued = false; }
+  if (p.volume == geom::kOutsideWorld) { return false; }
+
+  const int mat = geom::material_at(s.geometry, p.volume, p.pos);
+  rep.material = mat;
+  const data::Material<real_t>& mm = s.materials[mat];
+  const real_t mass = particle_def<real_t>(type).mass;
+  const int score_slot = (p.volume >= 0) ? s.geometry.volumes[p.volume].score_index : -1;
+  em.pos = p.pos;
+  em.volume = p.volume;
+  em.event = p.event;
+
+  if (p.ekin > real_t(0)) {
+    int next_volume = geom::kOutsideWorld;
+    const real_t d_boundary =
+        geom::step_to_boundary(s.geometry, p.volume, p.pos, p.dir, next_volume);
+    // The three discrete lengths, in the manager's order, each conditional on its process
+    // existing for this species - a draw where Geant4 has no process moves the stream for no
+    // physics, as `step_hadron`'s notes say for every one of its competitors.
+    const real_t d_decay = (had.decay && had::decays_in_flight(type))
+                               ? had::decay_in_flight_length<real_t>(type, mass, p.ekin, rng)
+                               : geom::kInfinity<real_t>();
+    hadronic::xs::MaterialXs<real_t> el_mxs{};
+    const real_t el_xs =
+        had.hadron_elastic
+            ? had::elastic_xs_per_volume<real_t>(had.elastic, mm, type, p.ekin, el_mxs)
+            : real_t(0);
+    const real_t d_elastic =
+        (el_xs > real_t(0)) ? -log(rng.uniform()) / el_xs : geom::kInfinity<real_t>();
+    real_t inel_xs = real_t(0);
+    const real_t d_inelastic =
+        had.hadron_inelastic
+            ? had::inelastic_length<real_t>(had.inelastic, mm, type, p.ekin, 0, 0, rng, inel_xs)
+            : geom::kInfinity<real_t>();
+    const bool elastic_first = (d_elastic <= d_inelastic);
+    const real_t s_hadronic = elastic_first ? d_elastic : d_inelastic;
+
+    if (d_decay <= s_hadronic && d_decay < d_boundary) {
+      rep.true_length = d_decay;
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fDecay;
+      p.pos = p.pos + d_decay * p.dir;
+      traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+      em.pos = p.pos;
+      const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};
+      decay::DecayProducts<real_t> products;
+      decay::sample_decay<real_t>(pdg_code(type), mass, p.ekin, dir3, false, rng, products);
+      if (products.status == decay::DecayStatus::kOK) {
+        had::emit_decay_products<real_t>(products, em, had.books);
+      } else if (products.status != decay::DecayStatus::kStable) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, p.ekin);
+      }
+      return false;
+    }
+
+    if (s_hadronic >= d_boundary) {
+      // Streaming, exactly as `step_neutral`'s boundary branch: one step, the push past the
+      // surface, requeued unless it left the world.
+      rep.true_length = d_boundary + geom::kPushDistance<real_t>();
+      rep.status = StepStatus::fGeomBoundary;
+      rep.process = ProcessId::fTransportation;
+      p.pos = p.pos + (d_boundary + geom::kPushDistance<real_t>()) * p.dir;
+      traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+      p.volume = geom::resolve_after_step(s.geometry, next_volume, p.pos);
+      return p.volume != geom::kOutsideWorld;
+    }
+
+    rep.true_length = s_hadronic;
+    rep.status = StepStatus::fPostStepDoItProc;
+    p.pos = p.pos + s_hadronic * p.dir;
+    traj.add(pos_before, p.pos, type, p.event, p.rng_key);
+    em.pos = p.pos;
+
+    if (elastic_first) {
+      // `G4HadronElasticProcess::PostStepDoIt` with `G4HadronElastic` - the kaon's channel, see
+      // `had::elastic_channel`. Everything after the interaction length is `step_hadron`'s
+      // elastic block, which this mirrors line for line.
+      rep.process = ProcessId::fHadronElastic;
+      const auto er = had::elastic_apply<real_t>(had.elastic, mm, type, p.ekin, p.dir,
+                                                 s.range_cut, el_xs, el_mxs, rng);
+      if (er.interacted) {
+        p.dir = er.dir;
+        p.ekin = er.energy;
+        if (er.edep > real_t(0)) {
+          if (score_slot >= 0) { edep += er.edep; }
+          rep.non_ionizing += er.edep;
+        }
+        if (er.emit_recoil) {
+          em.push_nucleus(er.recoil_z, er.recoil_a, er.recoil_dir, er.recoil_ekin, p.event);
+        }
+        if (er.dropped_secondaries > 0) {
+          had::book_refusal<real_t>(had.books, had::HadronicRefusal::kElasticDropped,
+                                    er.recoil_ekin);
+        }
+      }
+      // `efinal == 0`: every one of these has an at-rest process, so Geant4 proposes
+      // fStopButAlive and the at-rest step follows. Here the track goes back to the pool with
+      // zero kinetic energy and its next step is the at-rest branch below.
+      if (!er.primary_survives) { p.ekin = real_t(0); }
+      return true;
+    }
+
+    // `<name>Inelastic`: the step ends here and the final state is the interaction kernel's,
+    // through the same queue `step_hadron` uses (see its block for why the model is chosen at
+    // enqueue).
+    rep.process = ProcessId::fHadronInelastic;
+    if (had.queue.items != nullptr) {
+      // V226's first note, and the draw is DISCARDED - it is the answer `IsApplicable` throws
+      // away, not the K0/anti-K0 choice Bertini makes for itself later.
+      if (had::range_manager_draws_is_applicable(type)) { (void)rng.uniform(); }
+      physics::hadronic::ModelChoice mstat = physics::hadronic::ModelChoice::kOk;
+      const had::InelasticModel model = had::choose_inelastic_model<real_t>(
+          type, p.ekin, had::baryon_number_of(type, 0), rng, mstat);
+      if (model != had::InelasticModel::kNone
+          && had::enqueue_interaction<real_t>(
+                 had.queue, p, had::InteractionKind::kInelastic, type, rep, edep, ekin_pre,
+                 pos_before, dir_pre, volume_pre, score_slot,
+                 static_cast<unsigned int>(em.child_count), em.last_secondary, rep.status,
+                 real_t(0), had::bucket_of_model(model), model)) {
+        if (queued != nullptr) { *queued = true; }
+        return false;
+      }
+      if (model == had::InelasticModel::kNone) {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kNoInelasticModel, p.ekin);
+      } else {
+        had::book_refusal<real_t>(had.books, had::HadronicRefusal::kInelasticQueueFull, p.ekin);
+      }
+    }
+    // No queue, or it was full: `step_hadron`'s disposal and its SIZE counter, which names
+    // every hadron but the neutron.
+    had::book_refusal<real_t>(had.books, had::HadronicRefusal::kChargedHadronInelastic, p.ekin);
+    rep.status = StepStatus::fStopAndKill;
+    if (score_slot >= 0) { edep += p.ekin; }
+    p.ekin = real_t(0);
+    return false;
+  }
+
+  // ---- at rest. `step_hadron`'s dying branch, for a particle that has nothing to deposit.
+  rep.true_length = real_t(0);
+  rep.status = StepStatus::fStopAndKill;
+  rep.process = ProcessId::fBelowTrackingCut;
+  if (had.decay && had::decay_at_rest_allowed(type, had.stage)) {
+    const real_t dir3[3] = {p.dir.x, p.dir.y, p.dir.z};
+    decay::DecayProducts<real_t> products;
+    decay::sample_decay<real_t>(pdg_code(type), mass, real_t(0), dir3, true, rng, products);
+    if (products.status == decay::DecayStatus::kOK) {
+      had::emit_decay_products<real_t>(products, em, had.books);
+      rep.process = ProcessId::fDecay;
+    } else if (products.status != decay::DecayStatus::kStable) {
+      had::book_refusal<real_t>(had.books, had::HadronicRefusal::kDecayChannel, real_t(0));
+    }
+  } else if (had.stage == had::HadronicStage::kFinal) {
+    // The Fritiof annihilation of a neutral anti-hyperon, queued as `step_hadron` queues a
+    // stopped antiproton's.
+    const had::HadronicRefusal r = had::stopped_refusal(type);
+    if (had.hadron_at_rest && had::has_at_rest_arm(type) && had.queue.items != nullptr
+        && had::enqueue_interaction<real_t>(
+               had.queue, p, had::InteractionKind::kAtRest, type, rep, edep, ekin_pre,
+               pos_before, dir_pre, volume_pre, score_slot,
+               static_cast<unsigned int>(em.child_count), em.last_secondary,
+               StepStatus::fStopAndKill, real_t(0), had::at_rest_bucket(type),
+               had::InelasticModel::kNone)) {
+      if (queued != nullptr) { *queued = true; }
+    } else if (r != had::HadronicRefusal::kNumHadronicRefusals) {
+      had::book_refusal<real_t>(had.books, r, had::stopped_refusal_energy<real_t>(type, p.ekin));
+    }
+  }
   return false;
 }
 

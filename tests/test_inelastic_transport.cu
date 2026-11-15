@@ -366,6 +366,26 @@ int main() {
       {ParticleType::kPionMinus, 300, "pi- 300 MeV"},
       {ParticleType::kAlpha, 840, "alpha 840 MeV"},
       {ParticleType::kDeuteron, 400, "deuteron 400 MeV"},
+      // P23a: the fourteen strange species QBBC gives an inelastic process, through the two
+      // group kernels' steppers - the charged eight through `step_hadron` with the group's
+      // representative, the neutral six through `step_neutral_strange`. Bertini and FTFP for
+      // the hyperons and the K0s (1, 2 and 4 GeV straddle the 3-6 GeV overlap), FTFP alone for
+      // the anti-hyperons; and the balance below is the deliverable's "baryon number and charge
+      // exact across every interaction", now that a cascade hyperon is a hyperon (V241).
+      {ParticleType::kSigmaPlus, 1000, "sigma+ 1 GeV"},
+      {ParticleType::kSigmaMinus, 1000, "sigma- 1 GeV"},
+      {ParticleType::kXiMinus, 4000, "xi- 4 GeV"},
+      {ParticleType::kOmegaMinus, 2000, "omega- 2 GeV"},
+      {ParticleType::kAntiSigmaPlus, 1000, "anti_sigma+ 1 GeV"},
+      {ParticleType::kAntiSigmaMinus, 2000, "anti_sigma- 2 GeV"},
+      {ParticleType::kAntiXiMinus, 4000, "anti_xi- 4 GeV"},
+      {ParticleType::kAntiOmegaMinus, 2000, "anti_omega- 2 GeV"},
+      {ParticleType::kLambda, 1000, "lambda 1 GeV"},
+      {ParticleType::kXiZero, 4000, "xi0 4 GeV"},
+      {ParticleType::kAntiLambda, 1000, "anti_lambda 1 GeV"},
+      {ParticleType::kAntiXiZero, 2000, "anti_xi0 2 GeV"},
+      {ParticleType::kKaonZeroLong, 1000, "kaon0L 1 GeV"},
+      {ParticleType::kKaonZeroShort, 4000, "kaon0S 4 GeV"},
   };
   // The three B1 materials with a hadronic target worth having: hydrogen-rich (water),
   // calcium-bearing (compact bone) and light (air, where the mean free path is metres and the
@@ -506,8 +526,8 @@ int main() {
   }
 
   std::printf("== 3. the interaction rate against the cross section, and 4. the balance ==\n");
-  std::printf("  %-18s %-6s %9s %9s %8s %8s %7s %9s %7s\n", "beam", "mat", "expected",
-              "queued", "sigma", "ran", "reject", "worst dE", "max sec");
+  std::printf("  %-18s %-6s %9s %9s %8s %8s %7s %9s %7s %8s\n", "beam", "mat", "expected",
+              "queued", "sigma", "ran", "reject", "worst dE", "max sec", "balanced");
 
   double worst_sigma = 0;
   std::string worst_where;
@@ -576,8 +596,16 @@ int main() {
           real_t edep = 0;
           bool queued = false;
           qcursor = 0;
-          alive = step_hadron(scene, p, b.t, had, rng, em, edep, rep, vis::no_capture(),
-                              &queued);
+          if (is_strange_neutral_track(b.t)) {
+            alive = step_neutral_strange(scene, p, b.t, had, rng, em, edep, rep,
+                                         vis::no_capture(), &queued);
+          } else if (is_strange_charged_track(b.t)) {
+            alive = step_hadron(scene, p, b.t, had, rng, em, edep, rep, vis::no_capture(),
+                                &queued, ParticleType::kSigmaPlus);
+          } else {
+            alive = step_hadron(scene, p, b.t, had, rng, em, edep, rep, vis::no_capture(),
+                                &queued);
+          }
           cell.expected += static_cast<double>(rep.true_length) * static_cast<double>(sigma);
           ++p.step;
 
@@ -651,6 +679,14 @@ int main() {
                   had::has_at_rest_arm(q.species), slot.pdg_mass);
               CountingEmitter ie;
               ie.books = had.books;
+              // P23a: the three rows a secondary with no track is booked under, counted around
+              // THIS interaction's emission - see the balance below.
+              auto unrowed = [&]() {
+                return ref_n[static_cast<int>(had::HadronicRefusal::kInelasticSecondarySpecies)]
+                       + ref_n[static_cast<int>(had::HadronicRefusal::kBcHadronSecondary)]
+                       + ref_n[static_cast<int>(had::HadronicRefusal::kAntiNeutronSecondary)];
+              };
+              const int unrowed_before = unrowed();
               had::emit_interaction_result<real_t>(slot.filled, ie, had.books);
               cell.secondaries += ie.n_secondaries;
               if (ie.n_secondaries > cell.max_secondaries) {
@@ -663,9 +699,14 @@ int main() {
               // secondary this transport cannot step is BOOKED and not emitted, so its baryon
               // number left with it. `kInelasticSecondarySpecies` counts exactly those, and a
               // cell with none of them must balance exactly.
-              const int refused_species =
-                  ref_n[static_cast<int>(had::HadronicRefusal::kInelasticSecondarySpecies)]
-                  - ref_n0[static_cast<int>(had::HadronicRefusal::kInelasticSecondarySpecies)];
+              //
+              // P23a made the exclusion PER INTERACTION and widened it to the two named rows
+              // (`kBcHadronSecondary`, `kAntiNeutronSecondary`). Per cell, as it was, one refused
+              // secondary anywhere in a cell switched the balance off for every later interaction
+              // of it - and an anti-hyperon beam makes an anti-neutron in most interactions, so
+              // its cells would have balanced nothing. The cells and interactions it skips are
+              // counted (`n_balance` against `ran`) and printed, so a skip is visible.
+              const int refused_species = unrowed() - unrowed_before;
               if (refused_species == 0) {
                 const int b_in = proj.baryon_number + oc.target_a;
                 const int q_in = static_cast<int>(std::lrint(proj.charge)) + oc.target_z;
@@ -738,9 +779,17 @@ int main() {
              + std::to_string(cell.bad_charge) + " of " + std::to_string(cell.n_balance)
              + " interactions do not balance charge");
       }
-      std::printf("  %-18s %-6s %9.1f %9lld %8.2f %8lld %7lld %9.3g %7d\n", b.name,
+      // P23a: a strange cell that ran interactions and balanced none would make the balance
+      // vacuous for exactly the species it was widened for.
+      if ((is_strange_charged_track(b.t) || is_strange_neutral_track(b.t)) && cell.ran > 0
+          && cell.n_balance == 0) {
+        fail(std::string(b.name) + " in " + kMatNames[mi]
+             + ": interactions ran and none could be balanced");
+      }
+      std::printf("  %-18s %-6s %9.1f %9lld %8.2f %8lld %7lld %9.3g %7d %8lld\n", b.name,
                   kMatNames[mi], cell.expected, cell.queued, sig, cell.ran, cell.rejected,
-                  cell.worst_energy, cell.max_secondaries);
+                  cell.worst_energy, cell.max_secondaries,
+                  static_cast<long long>(cell.n_balance));
       if (cell.max_secondaries > g_max_secondaries) {
         g_max_secondaries = cell.max_secondaries;
       }
@@ -781,6 +830,15 @@ int main() {
     if (worst_sigma == 0.0) {
       fail("not one interaction was drawn in any cell - the cross section is zero everywhere, "
            "which is what an unwired table looks like");
+    }
+    // P23a: Geant4 raises had006 - a FatalException - where this row is booked, so a run that
+    // books it is a run Geant4 would not have finished. It is how V241 showed itself: before
+    // `secondary_is_nucleus`, every Bertini interaction that made a hyperon failed CheckResult's
+    // off-shell test a hundred times, 80 of them on this grid (30 of 37 omega- in bone).
+    if (ref_n[static_cast<int>(had::HadronicRefusal::kInelasticReentryExhausted)] > 0) {
+      fail(std::to_string(
+               ref_n[static_cast<int>(had::HadronicRefusal::kInelasticReentryExhausted)])
+           + " interactions ran CheckResult's 100 attempts out (had006)");
     }
     std::printf("  refusals over the whole grid (the SIZE group and the WHY group are not "
                 "summed - see had::HadronicRefusal):\n");

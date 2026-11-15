@@ -386,9 +386,11 @@ enum class HadronicRefusal : int {
   /// An inelastic secondary whose PDG code `core/particle.cuh` has no row for.
   ///
   /// NOT A TRIPWIRE and not expected to be zero: an inelastic model at a few GeV emits
-  /// hyperons, K0S/K0L and anti-nuclei, all of which this port refuses at emission already
-  /// (README's species table). This counter separates "the model produced something this
-  /// transport cannot step" from "the model produced nothing", which the two `*Inelastic`
+  /// anti-nuclei, and until P23a hyperons and K0S/K0L, which have tracks now - so what is left
+  /// here is the light anti-nuclei and anything else with no row (the anti-neutron and the b/c
+  /// hadrons have rows of their own since P23a). This counter separates "the model produced
+  /// something this transport cannot step" from
+  /// "the model produced nothing", which the two `*Inelastic`
   /// counters above cannot distinguish.
   kInelasticSecondarySpecies,
   /// The `do { ApplyYourself } while(!CheckResult)` loop ran its 100 attempts out. Geant4
@@ -514,6 +516,25 @@ enum class HadronicRefusal : int {
   /// generator reaches (`CascadeRefusal::high_energy_primary`). A tripwire: QBBC's cascade is
   /// standalone.
   kCascadeHighEnergyPrimary,
+  /// P23a, BY NAME: a charm or bottom hadron made by a model or a decay - QBBC's FTFP makes them
+  /// under `EnableBCParticles` (`G4LundStringFragmentation.cc:69-71`; 30 in 640,000 events of
+  /// P23b's campaign, docs/RISK.md V226) and their decay tables are written (V229), but they
+  /// have no `ParticleType` and therefore no track. Counted here INSTEAD of
+  /// `kInelasticSecondarySpecies` / `kDecayChannel`, so the one hole P23a leaves open among the
+  /// species QBBC transports is booked under its own name (`is_bc_hadron_pdg`), with the
+  /// secondary's kinetic energy.
+  kBcHadronSecondary,
+  /// P23a: a stopped anti-hyperon (anti_lambda, anti_sigma+, anti_sigma0, anti_xi0 - the four
+  /// `G4StoppingPhysics` gives `G4HadronicAbsorptionFritiof`) whose capture was not run: the
+  /// at-rest processes switched off, or the queue full. Its rest mass plus a nucleon's is lost.
+  kStoppedAntiHyperon,
+  /// P23a, BY NAME: an anti-neutron made by a decay or a model. Three anti-hyperons decay to one
+  /// (anti_lambda -> anti_n pi0, and through it anti_sigma0 and anti_xi0) and FTFP makes them
+  /// directly; it has no `ParticleType` because its transport - and its own decay table,
+  /// G4NeutronBetaDecayChannel - is the anti-light-ion package's (P23c, docs/RISK.md V229).
+  /// Booked with its KINETIC energy; its rest mass is the 939.565 MeV `kDecayChannel` used to
+  /// lose silently inside a "channel P4 refused".
+  kAntiNeutronSecondary,
 
   kNumHadronicRefusals,
 };
@@ -527,8 +548,8 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "a charged hadron's inelastic interaction with no final state [SIZE - do not add "
              "to the WHY group]";
     case HadronicRefusal::kStoppedNegativeHadron:
-      return "stopped pi-/K- capture (G4HadronicAbsorptionBertini; P12) - its rest mass is "
-             "lost from the answer";
+      return "stopped pi-/K-/sigma-/xi-/omega- capture (G4HadronicAbsorptionBertini; P12) - its "
+             "rest mass is lost from the answer";
     case HadronicRefusal::kStoppedMuonMinus:
       return "stopped mu- capture and bound decay (G4MuonMinusCapture / "
              "G4MuonMinusBoundDecay; P12)";
@@ -574,7 +595,7 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "WHY: an inelastic final state with more than 256 secondaries";
     case HadronicRefusal::kInelasticSecondarySpecies:
       return "an inelastic secondary whose PDG code core/particle.cuh has no row for - "
-             "hyperons, K0S/K0L, anti-nuclei; NOT expected to be zero";
+             "light anti-nuclei and the like; NOT expected to be zero";
     case HadronicRefusal::kInelasticReentryExhausted:
       return "WHY: ApplyYourself/CheckResult ran 100 attempts out (G4Exception had006)";
     case HadronicRefusal::kInelasticQueueFull:
@@ -621,6 +642,15 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
     case HadronicRefusal::kCascadeHighEnergyPrimary:
       return "BY NAME, of the two cascade WHY rows: the late-particle arm of a high-energy "
              "generator - a tripwire";
+    case HadronicRefusal::kBcHadronSecondary:
+      return "BY NAME: a charm or bottom hadron made by FTFP or a decay - no ParticleType, so no "
+             "track (P23a leaves them refused; their decay tables are P23b's)";
+    case HadronicRefusal::kStoppedAntiHyperon:
+      return "stopped anti_lambda/anti_sigma+/anti_sigma0/anti_xi0 annihilation "
+             "(G4HadronicAbsorptionFritiof) not run - rest mass plus a nucleon's";
+    case HadronicRefusal::kAntiNeutronSecondary:
+      return "BY NAME: an anti-neutron from a decay or a model - no ParticleType (P23c's), "
+             "booked with its kinetic energy";
     case HadronicRefusal::kNumHadronicRefusals: break;
   }
   return "unknown";
@@ -852,11 +882,21 @@ __host__ __device__ inline HadronicRefusal stopped_refusal(ParticleType t) {
   switch (t) {
     case ParticleType::kPionMinus:
     case ParticleType::kKaonMinus:
+    // P23a: the three hyperons `G4StoppingPhysics` gives `G4HadronicAbsorptionBertini`.
+    case ParticleType::kSigmaMinus:
+    case ParticleType::kXiMinus:
+    case ParticleType::kOmegaMinus:
       return HadronicRefusal::kStoppedNegativeHadron;
     case ParticleType::kMuonMinus:
       return HadronicRefusal::kStoppedMuonMinus;
     case ParticleType::kAntiProton:
       return HadronicRefusal::kStoppedAntiProton;
+    // P23a: the four anti-hyperons it gives `G4HadronicAbsorptionFritiof`.
+    case ParticleType::kAntiLambda:
+    case ParticleType::kAntiSigmaPlus:
+    case ParticleType::kAntiSigmaZero:
+    case ParticleType::kAntiXiZero:
+      return HadronicRefusal::kStoppedAntiHyperon;
     default:
       return HadronicRefusal::kNumHadronicRefusals;
   }
@@ -874,7 +914,9 @@ __host__ __device__ inline real_t stopped_refusal_energy(ParticleType t, real_t 
   const ParticleDef<real_t> pd = particle_def<real_t>(t);
   const real_t m = (pd.mass > real_t(0)) ? pd.mass : real_t(0);
   // The antiproton annihilates against a nucleon, so the released energy is two rest masses.
-  const real_t rest = (t == ParticleType::kAntiProton)
+  // So does an anti-hyperon (P23a), whose refusal row is `kStoppedAntiHyperon`.
+  const real_t rest = (t == ParticleType::kAntiProton
+                       || stopped_refusal(t) == HadronicRefusal::kStoppedAntiHyperon)
                           ? m + units::proton_mass_c2<real_t>()
                           : m;
   return rest + residual_ekin;
@@ -1015,6 +1057,17 @@ __host__ __device__ inline real_t neutron_general_length(real_t& n_left, real_t 
 // Emitting what a decay made
 // =============================================================================================
 
+/// P23a: the refusal a secondary with NO `ParticleType` row is booked under. Two such species are
+/// named - the charm and bottom hadrons (`is_bc_hadron_pdg`) and the anti-neutron - because
+/// they are the two QBBC transports that P23a leaves without a track; anything else keeps the
+/// caller's generic row (`kDecayChannel` for a decay, `kInelasticSecondarySpecies` for a model).
+__host__ __device__ inline HadronicRefusal unrowed_secondary_refusal(int pdg,
+                                                                    HadronicRefusal fallback) {
+  if (is_bc_hadron_pdg(pdg)) { return HadronicRefusal::kBcHadronSecondary; }
+  if (pdg == -2112) { return HadronicRefusal::kAntiNeutronSecondary; }
+  return fallback;
+}
+
 /// Pushes a decay's products into the track pool, and reports what could not be pushed.
 ///
 /// `emitter` is `BufferEmitter`, whose `push` already answers the three dispositions - a
@@ -1037,7 +1090,12 @@ __host__ __device__ inline int emit_decay_products(const decay::DecayProducts<re
       // transcribed - every daughter of pi+-, pi0, mu+-, K+- and the neutron is in the enum -
       // and counted rather than dropped so that adding a channel without adding a species is
       // loud.
-      book_refusal<real_t>(books, HadronicRefusal::kDecayChannel, q.ekin);
+      //
+      // P23a: a charm or bottom daughter - a sigma_c's lambda_c+ - or an anti-neutron is
+      // named instead; see `unrowed_secondary_refusal`.
+      book_refusal<real_t>(books,
+                           unrowed_secondary_refusal(q.pdg, HadronicRefusal::kDecayChannel),
+                           q.ekin);
       continue;
     }
     emitter.push(t, Vec3<real_t>{q.dir[0], q.dir[1], q.dir[2]}, q.ekin, 0);

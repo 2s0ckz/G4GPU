@@ -27,7 +27,9 @@
 
 #include "core/particle.cuh"
 #include "core/track_buffer.cuh"
+#include "physics/em/coulomb_scattering.cuh"
 #include "physics/em/hadron_ionisation.cuh"
+#include "physics/em/hadron_range.cuh"
 #include "physics/hadronic/neutron_general_xs.cuh"
 
 using namespace g4gpu;
@@ -314,9 +316,17 @@ int main() {
         ++n_stepped;
         // Round trip: the dispatch index has to name the species back, or a launch would run
         // the wrong specialisation over the right tracks - which is a physics error that
-        // deposits energy and looks like a run.
+        // deposits energy and looks like a run. A GROUP index (P23a) names only its first
+        // member, and its kernel reads each track's own species, so for a group member the
+        // assertion is that the index IS a group and that its name round-trips to it.
         ++compared;
-        if (species_of_index(species_index(pt)) != pt) {
+        if (species_index_is_group(species_index(pt))) {
+          if (species_index(species_of_index(species_index(pt))) != species_index(pt)) {
+            std::printf("  FAIL %s: its group's named member is in another group\n",
+                        particle_name(pt));
+            ++fails;
+          }
+        } else if (species_of_index(species_index(pt)) != pt) {
           std::printf("  FAIL %s: species_of_index(species_index(%s)) is %s\n",
                       particle_name(pt), particle_name(pt),
                       particle_name(species_of_index(species_index(pt))));
@@ -348,10 +358,23 @@ int main() {
     std::printf("  stepped %d, counted %d, refused %d, of %d types and %d kernels\n", n_stepped,
                 n_counted, n_refused, static_cast<int>(ParticleType::kNumTypes),
                 kNumTrackSpecies);
+    // One species per single-species index plus every member of the two groups (P23a): the
+    // eight charged and the eight neutral strange species.
+    int n_group_members = 0;
+    for (int t = 0; t < static_cast<int>(ParticleType::kNumTypes); ++t) {
+      const int sp = species_index(static_cast<ParticleType>(t));
+      if (sp >= 0 && species_index_is_group(sp)) { ++n_group_members; }
+    }
     ++compared;
-    if (n_stepped != kNumTrackSpecies) {
-      std::printf("  FAIL %d species claim a kernel but there are %d dispatch indices\n",
-                  n_stepped, kNumTrackSpecies);
+    if (n_group_members != 16) {
+      std::printf("  FAIL %d species in the strange groups, expected 16\n", n_group_members);
+      ++fails;
+    }
+    ++compared;
+    if (n_stepped != kNumTrackSpecies - 2 + n_group_members) {
+      std::printf("  FAIL %d species claim a kernel but there are %d dispatch indices, two of\n"
+                  "       them groups of %d between them\n",
+                  n_stepped, kNumTrackSpecies, n_group_members);
       ++fails;
     }
     // The six neutrinos and no more. A seventh counted species would mean something was
@@ -361,6 +384,77 @@ int main() {
       std::printf("  FAIL %d counted species, expected the six neutrinos\n", n_counted);
       ++fails;
     }
+  }
+
+  // ---------------------------------------------------------------- P23a: the strange groups
+  //
+  // The charged group kernel hands `step_hadron` its REPRESENTATIVE (sigma+) as the structural
+  // species and the track's own as the data species. That is correct only while every member
+  // agrees with the representative on every structural predicate `step_hadron` folds - so the
+  // agreement is asserted here, and each member is held to Geant4 as well: the process list of
+  // the constructed QBBC must have no CoulombScat, no hBrems, no hPairProd and no
+  // nuclearStopping for it, and its msc and ionisation rows are the loop above's.
+  std::printf("\n== the strange groups (P23a) ==\n");
+  {
+    const ParticleType rep = species_of_index(kSpeciesStrangeCharged);
+    for (int t = 0; t < static_cast<int>(ParticleType::kNumTypes); ++t) {
+      const ParticleType pt = static_cast<ParticleType>(t);
+      const char* who = particle_name(pt);
+      if (is_strange_charged_track(pt)) {
+        expect_eq("group: wentzel", who, uses_wentzel_msc(pt), uses_wentzel_msc(rep));
+        expect_eq("group: coulomb", who, em::has_coulomb_scattering(pt),
+                  em::has_coulomb_scattering(rep));
+        expect_eq("group: is_muon", who, is_muon(pt), is_muon(rep));
+        expect_eq("group: ion ioni", who, uses_ion_ionisation(pt), uses_ion_ionisation(rep));
+        expect_eq("group: ion fluct", who, uses_ion_fluctuations(pt),
+                  uses_ion_fluctuations(rep));
+        expect_eq("group: eff charge", who, em::uses_dynamic_effective_charge(pt),
+                  em::uses_dynamic_effective_charge(rep));
+        expect_eq("group: nuc stop", who, uses_nuclear_stopping(pt), uses_nuclear_stopping(rep));
+        expect_eq("group: generic ion", who, pt == ParticleType::kGenericIon, false);
+        expect_eq("group: heavy charged", who, is_heavy_charged(pt), true);
+        auto it = procs.find(who);
+        ++compared;
+        if (it == procs.end()) {
+          std::printf("  FAIL %s has no rows in species_processes.csv\n", who);
+          ++fails;
+        } else {
+          bool coul = false, brem = false, pair = false, msc = false, ioni = false;
+          for (const ProcRow& p : it->second) {
+            coul |= (p.name == "CoulombScat");
+            brem |= (p.name == "hBrems");
+            pair |= (p.name == "hPairProd");
+            msc |= (p.name == "msc");
+            ioni |= (p.name == "hIoni");
+          }
+          expect_eq("G4: CoulombScat", who, coul, em::has_coulomb_scattering(pt));
+          expect_eq("G4: hBrems", who, brem, false);
+          expect_eq("G4: hPairProd", who, pair, false);
+          expect_eq("G4: msc+hIoni", who, msc && ioni, true);
+        }
+      }
+      if (is_strange_neutral_track(pt)) {
+        // A neutral member must have NO EM process on Geant4's manager at all - which is what
+        // lets `step_neutral_strange` carry none.
+        auto it = procs.find(who);
+        ++compared;
+        if (it == procs.end()) {
+          std::printf("  FAIL %s has no rows in species_processes.csv\n", who);
+          ++fails;
+        } else {
+          for (const ProcRow& p : it->second) {
+            ++compared;
+            if (p.name == "msc" || p.name == "hIoni" || p.name == "CoulombScat") {
+              std::printf("  FAIL %s carries %s in Geant4\n", who, p.name.c_str());
+              ++fails;
+            }
+          }
+        }
+        expect_eq("neutral: charge 0", who, particle_def<real_t>(pt).charge == 0.0, true);
+      }
+    }
+    std::printf("  representative %s; 8 charged and 8 neutral members checked\n",
+                particle_name(rep));
   }
 
   // ---------------------------------------------------------------- the neutron's own facts

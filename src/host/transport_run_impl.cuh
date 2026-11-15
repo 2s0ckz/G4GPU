@@ -797,6 +797,121 @@ __global__ void run_step_neutral(Scene<real_t> scene, TrackBuffer<real_t> in, co
   if (requeue) { out.append(p); }
 }
 
+/// P23a: one step of one STRANGE track - a GROUP kernel, the first in this engine.
+///
+/// Every kernel above is one species, fixed at compile time, because `run_step_hadron`'s species
+/// decides which msc model, which EM processes and which ion arms exist in the body (V55, V65).
+/// The eight charged strange baryons (`is_strange_charged_track`) agree on every one of those
+/// answers - Urban, G4hIonisation with UrbanFluc, no CoulombScat, no muonNuclear, no ion arm -
+/// and differ only in data, so ONE kernel steps all eight: `step_hadron` is handed the track's
+/// own species as `type` and a representative as its structural `kernel_type`. The eight
+/// neutral ones (`is_strange_neutral_track`) share `step_neutral_strange`, which has no
+/// structural branch at all. docs/RISK.md V240 has the measurement: what one unit per species
+/// would cost against one per group, and the frame and spill the group kernels compile to.
+///
+/// What differs from `run_step_hadron` is only where the species comes from - the TRACK, here,
+/// so `p.species` is read and never overwritten - and the stream's purpose value, which is
+/// `run_step_hadron`'s for the charged group and `run_step_neutral`'s for the neutral one: a
+/// track has one species, so no two tracks of one key can draw the same stream either way.
+template <typename real_t, bool kCharged, typename StepHook>
+__global__ void run_step_strange(Scene<real_t> scene, TrackBuffer<real_t> in, const int* idx,
+                                 TrackBuffer<real_t> out, int n, int batch, double* score,
+                                 double* voxel_score, int n_step,
+                                 had::HadronicWiring<real_t> had,
+                                 vis::TrajectoryBuffer traj, int* status_warn,
+                                 SecondaryArena sec, EmitterBooks books, StepHook hook) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) { return; }
+  TrackState<real_t> p;
+  in.load(idx[i], p);
+  if (i >= n_step) {
+    out.append(p);
+    return;
+  }
+  const int slot = (p.volume >= 0) ? scene.geometry.volumes[p.volume].score_index : -1;
+  int vcell = -1;
+  if (slot >= 0 && p.volume >= 0 && voxel_score != nullptr) {
+    const auto& vv = scene.geometry.volumes[p.volume];
+    if (vv.score_per_voxel) {
+      const auto grid = geom::voxel_grid_of(vv.solid);
+      const auto q = geom::to_local(vv.xform, p.pos);
+      int ijk[3];
+      geom::voxel_cell_of(grid, q, ijk);
+      vcell = grid.index(ijk[0], ijk[1], ijk[2]);
+    }
+  }
+
+  StepReport<real_t> srep;
+  Philox<real_t> rng(p.rng_key, p.step, kCharged ? 0xB19Du : 0x4E7Au);
+  const ParticleType species = p.species;
+  const real_t track_mass = particle_def<real_t>(species).mass;
+  BufferEmitter<real_t> em{out, p.pos, p.volume, p.event, p.rng_key, p.step,
+                           0u, p.global_time, p.weight,
+                           TrackState<real_t>::pre_step_velocity(p.ekin, track_mass),
+                           sec, -1, &srep, books};
+
+  const real_t ekin_pre = p.ekin;
+  const Vec3<real_t> pos_pre = p.pos;
+  const Vec3<real_t> dir_pre = p.dir;
+  const int volume_pre = p.volume;
+  const bool first_in_vol = (p.flags & kFirstStepInVolume) != 0u;
+
+  real_t edep = 0;
+  bool queued = false;
+  bool alive = false;
+  if constexpr (kCharged) {
+    // kSigmaPlus is the representative; `tests/test_species.cu` holds the other seven to its
+    // structural answers.
+    alive = step_hadron(scene, p, species, had, rng, em, edep, srep, traj, &queued,
+                        ParticleType::kSigmaPlus);
+  } else {
+    alive = step_neutral_strange(scene, p, species, had, rng, em, edep, srep, traj, &queued);
+  }
+  if (queued) { return; }
+  ++p.step;
+  p.advance(srep.true_length, ekin_pre, track_mass);
+  p.flags = (srep.status == StepStatus::fGeomBoundary) ? (p.flags | kFirstStepInVolume)
+                                                       : (p.flags & ~kFirstStepInVolume);
+  if (edep != real_t(0) && slot >= 0) {
+    atomicAdd(&score[static_cast<size_t>(slot) * batch + p.event], static_cast<double>(edep));
+    if (vcell >= 0) { atomicAdd(&voxel_score[vcell], static_cast<double>(edep)); }
+  }
+  const bool escaped = (p.volume == geom::kOutsideWorld);
+  DeviceStep<real_t> ds{};
+  ds.species = species;
+  ds.ekin_pre = ekin_pre;
+  ds.ekin_post = (alive || escaped) ? p.ekin : real_t(0);
+  ds.edep = edep;
+  ds.length = srep.true_length;
+  ds.pos_pre = pos_pre;
+  ds.pos_post = p.pos;
+  ds.dir_pre = dir_pre;
+  ds.dir_post = p.dir;
+  ds.volume_pre = volume_pre;
+  ds.volume_post = p.volume;
+  ds.score_slot = slot;
+  ds.event = p.event;
+  ds.alive = alive;
+  ds.track_ptr = &p;
+  ds.first_in_volume = first_in_vol;
+  ds.material = srep.material;
+  ds.safety = srep.safety;
+  ds.non_ionizing = srep.non_ionizing;
+  ds.n_secondaries = static_cast<int>(em.child_count);
+  ds.sec_arena = sec;
+  ds.sec_pool = &out;
+  ds.sec_last = em.last_secondary;
+  ds.status = (escaped && srep.status == StepStatus::fGeomBoundary) ? StepStatus::fWorldBoundary
+                                                                   : srep.status;
+  ds.process = srep.process;
+  hook(ds);
+  const bool requeue = resolve_track_status<real_t>(alive, p.status);
+  if (status_warn != nullptr && is_unsupported_track_status(p.status)) {
+    atomicAdd(status_warn, 1);
+  }
+  if (requeue) { out.append(p); }
+}
+
 // ---------------------------------------------------------------- P15: the interaction kernel
 //
 // DECLARED HERE, DEFINED IN host/transport_run_int_impl.cuh - and the split is docs/RISK.md
@@ -927,6 +1042,13 @@ __global__ void run_emextra_drain(Scene<real_t> scene, const had::PendingInterac
       Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
       double*, int, const had::NeutronGeneralXs<double>*, had::HadronicWiring<double>,       \
       double*, int*, vis::TrajectoryBuffer, int*, SecondaryArena, EmitterBooks, HOOK)
+// P23a's two group kernels, `run_step_strange<true>` (the eight charged strange baryons) and
+// `<false>` (the eight neutral strange species), one translation unit each.
+#define G4GPU_STEP_STRANGE(CHARGED, HOOK)                                                    \
+  __global__ void run_step_strange<double, CHARGED, HOOK>(                                   \
+      Scene<double>, TrackBuffer<double>, const int*, TrackBuffer<double>, int, int, double*, \
+      double*, int, had::HadronicWiring<double>, vis::TrajectoryBuffer, int*, SecondaryArena, \
+      EmitterBooks, HOOK)
 // P15's interaction kernels: FIVE of them, one per model, one translation unit each
 // (`host/transport_run_int_*.cu`). Those five are the only objects in the build that carry any
 // hadronic model at all, and the split is not a preference - ptxas cannot compile four models
@@ -971,6 +1093,8 @@ extern template G4GPU_INTERACTION(had::InteractionBucket::kLightIon, StepTap<dou
 extern template G4GPU_INTERACTION(had::InteractionBucket::kAtRest, StepTap<double>);
 extern template G4GPU_EMX_DRAIN(had::InteractionBucket::kPhotoNuclear, StepTap<double>);
 extern template G4GPU_EMX_DRAIN(had::InteractionBucket::kLeptoNuclear, StepTap<double>);
+extern template G4GPU_STEP_STRANGE(true, StepTap<double>);
+extern template G4GPU_STEP_STRANGE(false, StepTap<double>);
 
 
 // ---------------------------------------------------------------- method bodies
@@ -2198,7 +2322,12 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // portably, and because each line names the specialisation it launches - which is what
         // makes a missing species a compile error in the switch rather than a track that is
         // counted and never stepped.
-        const EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_, d_refused_e_};
+        EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_, d_refused_e_};
+        // P23a's study knob: `G4GPU_STRANGE_TRACKS=0` refuses the sixteen strange species at
+        // emission as the port did before they had kernels - see `EmitterBooks::refuse_strange`.
+        if (const char* env = std::getenv("G4GPU_STRANGE_TRACKS")) {
+          books.refuse_strange = (env[0] == '0');
+        }
         // P8's wiring, built here and passed by value into every hadronic launch. One struct
         // rather than five arguments, and built per launch rather than at Upload so that the
         // stage can change between two BeamOn calls in one process - which is what
@@ -2363,6 +2492,20 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             case kSpeciesGenericIon: G4GPU_LAUNCH_HADRON(ParticleType::kGenericIon); break;
             case kSpeciesNeutron:    G4GPU_LAUNCH_NEUTRAL(ParticleType::kNeutron); break;
             case kSpeciesPiZero:     G4GPU_LAUNCH_NEUTRAL(ParticleType::kPiZero); break;
+            // P23a's two GROUP kernels: each steps eight species and reads the species off the
+            // track, so the launch names a group and not a ParticleType.
+            case kSpeciesStrangeCharged:
+              run_step_strange<real_t, true><<<blocks, threads_>>>(
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
+                  hook_);
+              break;
+            case kSpeciesStrangeNeutral:
+              run_step_strange<real_t, false><<<blocks, threads_>>>(
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
+                  hook_);
+              break;
             default:
               // Not reachable, and not silent if it becomes so: a TrackSpeciesIndex added
               // without a line above would land here, and a species counted by the histogram

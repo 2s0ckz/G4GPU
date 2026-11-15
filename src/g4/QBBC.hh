@@ -28,9 +28,15 @@ class QBBC : public G4VModularPhysicsList {
         "QBBC: EM standard physics is active (photoelectric, Compton, Rayleigh, pair,\n"
         "      bremsstrahlung, annihilation, multiple scattering, continuous ionisation).\n"
         "      Transported:");
-    for (int sp = 0; sp < g4gpu::kNumTrackSpecies; ++sp) {
-      std::printf("%s %s", (sp % 8 == 0 && sp > 0) ? "\n                  " : "",
-                  g4gpu::particle_name(g4gpu::species_of_index(sp)));
+    // Every species a kernel steps, walked over the enum rather than over the dispatch indices:
+    // since P23a two indices are GROUPS of eight, and `species_of_index` names only the first.
+    int shown = 0;
+    for (int t = 0; t < static_cast<int>(g4gpu::ParticleType::kNumTypes); ++t) {
+      const auto pt = static_cast<g4gpu::ParticleType>(t);
+      if (g4gpu::species_index(pt) < 0) { continue; }
+      std::printf("%s %s", (shown % 8 == 0 && shown > 0) ? "\n                  " : "",
+                  g4gpu::particle_name(pt));
+      ++shown;
     }
     std::printf(
         "\n"

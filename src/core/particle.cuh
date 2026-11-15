@@ -76,6 +76,10 @@ enum class ParticleType : int {
   kAntiNeutrinoMu = 21,
   kNeutrinoTau = 22,
   kAntiNeutrinoTau = 23,
+  // TRANSPORTED SINCE P23a, all sixteen strange species below, by two group kernels
+  // (`is_strange_charged_track`, `is_strange_neutral_track`; docs/RISK.md V240). The history
+  // that follows is what these rows were for before that.
+  //
   // Refused, with real rows. QBBC transports all six - species_processes.csv shows the charged
   // hyperons carrying hIoni scaled from the proton and an Urban msc, and all six carrying
   // hadElastic, an inelastic and a decay - so they are species this port is MISSING rather
@@ -558,6 +562,22 @@ __host__ __device__ inline ParticleType particle_type_of_pdg(int pdg) {
   return ParticleType::kNumTypes;
 }
 
+/// Is this PDG code a charm or bottom hadron - a c or b quark among its quark digits?
+///
+/// P23a leaves these REFUSED, by this name (`had::HadronicRefusal::kBcHadronSecondary`): QBBC
+/// transports the thirty of `G4HadParticles::sBCHadrons`, the six sigma_c/sigma_b states and
+/// etac, J/psi and Upsilon (docs/RISK.md V229), and none of them has a `ParticleType`. The rule
+/// reads the PDG numbering scheme's quark digits - `n_q1 n_q2 n_q3` of a baryon, `n_q2 n_q3` of a
+/// meson, the hundreds, tens-of-hundreds and thousands digits of |code| - rather than listing
+/// the thirty-nine, so an excited state FTFP's string decay hands back undecayed is named
+/// rather than lumped with "no row". A nucleus code (10LZZZAAAI) is never one.
+__host__ __device__ inline bool is_bc_hadron_pdg(int code) {
+  const int a = (code < 0) ? -code : code;
+  if (a >= 1000000000 || a < 100) { return false; }
+  const int q3 = (a / 10) % 10, q2 = (a / 100) % 10, q1 = (a / 1000) % 10;
+  return q1 == 4 || q1 == 5 || q2 == 4 || q2 == 5 || q3 == 4 || q3 == 5;
+}
+
 /// A species whose energy leaves the event without being transported.
 ///
 /// QBBC registers nothing but G4Transportation for a neutrino, so in Geant4 one is created,
@@ -583,6 +603,37 @@ __host__ __device__ inline bool is_neutrino(ParticleType t) {
 /// step_neutral in physics/stepper.cuh.
 __host__ __device__ inline bool is_neutral_hadron(ParticleType t) {
   return t == ParticleType::kNeutron || t == ParticleType::kPiZero;
+}
+
+/// P23a: the eight CHARGED strange baryons QBBC transports - sigma+, sigma-, xi-, omega- and
+/// the four charged anti-hyperons - which are exactly the hyperon half of
+/// `G4HadParticles::sHeavyChargedPart` (G4HadParticles.cc), the list
+/// `G4EmBuilder::ConstructCharged` hands to `ConstructBasicEmPhysics` together with the SHARED
+/// "ionmsc" `G4hMultipleScattering`. So every one of them gets G4hIonisation (base particle by
+/// `hadron_base_particle`'s rule: proton for the positive four, anti_proton for the negative
+/// four) and the Urban model the deuteron and the triton get - `ref/oracle/species_processes.csv`
+/// says `UrbanMsc` and `UrbanFluc` for all eight - and no CoulombScat, no hBrems, no hPairProd.
+///
+/// One predicate because one kernel steps all eight (docs/RISK.md V240: the kernel-count
+/// measurement). Nothing in the eight differs at compile time; mass, charge, base table, decay
+/// table and hadronic channels are all read off the track's own species at run time.
+__host__ __device__ inline bool is_strange_charged_track(ParticleType t) {
+  return t == ParticleType::kSigmaPlus || t == ParticleType::kSigmaMinus
+         || t == ParticleType::kXiMinus || t == ParticleType::kOmegaMinus
+         || t == ParticleType::kAntiSigmaPlus || t == ParticleType::kAntiSigmaMinus
+         || t == ParticleType::kAntiXiMinus || t == ParticleType::kAntiOmegaMinus;
+}
+
+/// P23a: the eight NEUTRAL strange species QBBC transports - K0S, K0L, lambda, sigma0, xi0 and
+/// the three neutral anti-hyperons. No ionisation and no msc (both are registered by charge),
+/// so their step is geometry against Decay, hadElastic and `<name>Inelastic` and nothing else -
+/// sigma0 and anti_sigma0 carry Decay alone (and Fritiof at rest for the antiparticle), with a
+/// lifetime of 7.4e-11 ns that decays them inside their first step (V229).
+__host__ __device__ inline bool is_strange_neutral_track(ParticleType t) {
+  return t == ParticleType::kKaonZeroShort || t == ParticleType::kKaonZeroLong
+         || t == ParticleType::kLambda || t == ParticleType::kSigmaZero
+         || t == ParticleType::kXiZero || t == ParticleType::kAntiLambda
+         || t == ParticleType::kAntiSigmaZero || t == ParticleType::kAntiXiZero;
 }
 
 /// Is G4ionIonisation the ionisation process Geant4 registers for this species, rather than
@@ -671,7 +722,8 @@ __host__ __device__ inline bool uses_ion_fluctuations(ParticleType t) {
 /// `G4VEnergyLossProcess::BaseParticle()` on the process the constructed QBBC registered - for
 /// every species that has an ionisation process at all. It gets sigma+, sigma- and xi- right
 /// as a side effect of being the rule rather than a list, and those three are species this
-/// port refuses to transport, so the rule is checked further than it is used.
+/// port refused to transport until P23a - and since P23a the rule is what scales all eight charged
+/// strange baryons, from the proton or the antiproton (tests/test_hadron_range.cu tapes them).
 ///
 /// For a NEUTRAL hadron the answer is unreachable: G4hIonisation is registered by charge, so
 /// the neutron and the pi0 have no ionisation process to have a base particle. `q > 0` is false
@@ -721,7 +773,7 @@ __host__ __device__ inline bool is_heavy_charged(ParticleType t) {
          || t == ParticleType::kProton || t == ParticleType::kAntiProton
          || t == ParticleType::kAlpha || t == ParticleType::kHe3
          || t == ParticleType::kGenericIon || t == ParticleType::kDeuteron
-         || t == ParticleType::kTriton;
+         || t == ParticleType::kTriton || is_strange_charged_track(t);
 }
 
 /// Does QBBC register G4NuclearStopping for this species?

@@ -99,6 +99,7 @@
 #include <cstdio>
 #include <cmath>
 #include <vector>
+#include <cstdlib>
 #include <string>
 
 namespace {
@@ -1574,7 +1575,16 @@ int main() {
   // dump because the registry string is the CONTRACT - it is what says which files a package
   // promises - and a promise nobody checks is exactly what both failures were.
   int missing = 0;
+  // `G4GPU_DUMP_ONLY=name[,name...]` runs only the named registered dumps (P23a). The whole
+  // registry is hours of campaigns now - Bertini, FTF, the cascades - and a package that adds
+  // one small file should not have to regenerate every other package's to get it. Unset, every
+  // dump runs as before.
+  const char* only = std::getenv("G4GPU_DUMP_ONLY");
   for (const DumpEntry& d : dump_registry()) {
+    if (only != nullptr && only[0] != '\0') {
+      const std::string list = std::string(",") + only + ",";
+      if (list.find(std::string(",") + d.name + ",") == std::string::npos) { continue; }
+    }
     const DumpContext ctx{mats};
     d.fn(ctx);
     std::printf("wrote %s (%s)\n", d.files, d.name);

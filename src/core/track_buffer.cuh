@@ -102,8 +102,22 @@ enum TrackSpeciesIndex : int {
   // its own (Z, A) in `TrackState::ion_za`; see `em::SteppedHadron`.
   kSpeciesHe3 = 16,
   kSpeciesGenericIon = 17,
-  kNumTrackSpecies = 18,
+  // P23a: the strange species, and the first two indices that are NOT one species each. The
+  // kernel behind each steps a GROUP and reads the species off the track (`TrackState::
+  // species`), because nothing about the eight in either group differs at compile time - and
+  // sixteen more single-species units would add hours to every engine rebuild. docs/RISK.md
+  // V240 is the measurement that chose two units over sixteen.
+  kSpeciesStrangeCharged = 18,  ///< sigma+-, xi-, omega- and their antiparticles: step_hadron
+  kSpeciesStrangeNeutral = 19,  ///< K0S, K0L, lambda, sigma0, xi0, anti-lambda/-sigma0/-xi0
+  kNumTrackSpecies = 20,
 };
+
+/// Is this dispatch index a GROUP - one kernel, several species, the species read off the
+/// track? The two strange indices are; every other index is exactly one species, and
+/// `species_of_index` names it.
+__host__ __device__ inline bool species_index_is_group(int sp) {
+  return sp == kSpeciesStrangeCharged || sp == kSpeciesStrangeNeutral;
+}
 
 /// -1 for a particle no kernel steps. The caller decides what that means; nothing here
 /// quietly routes it somewhere plausible.
@@ -127,8 +141,11 @@ __host__ __device__ inline int species_index(ParticleType t) {
     case ParticleType::kPiZero:     return kSpeciesPiZero;
     case ParticleType::kHe3:        return kSpeciesHe3;
     case ParticleType::kGenericIon: return kSpeciesGenericIon;
-    default:                        return -1;
+    default:                        break;
   }
+  if (is_strange_charged_track(t)) { return kSpeciesStrangeCharged; }
+  if (is_strange_neutral_track(t)) { return kSpeciesStrangeNeutral; }
+  return -1;
 }
 
 /// The ParticleType a dispatch index steps. The inverse of species_index, and the one place
@@ -154,6 +171,12 @@ __host__ __device__ inline ParticleType species_of_index(int sp) {
     case kSpeciesPiZero:     return ParticleType::kPiZero;
     case kSpeciesHe3:        return ParticleType::kHe3;
     case kSpeciesGenericIon: return ParticleType::kGenericIon;
+    // A GROUP has no single species, and what this returns for one is its FIRST member, which
+    // is a name for reports and never a dispatch: the group kernels read each track's own
+    // species. `species_index_is_group` says which indices these are, and a caller that needs
+    // every member walks the enum through `species_index` instead.
+    case kSpeciesStrangeCharged: return ParticleType::kSigmaPlus;
+    case kSpeciesStrangeNeutral: return ParticleType::kKaonZeroShort;
     default:                 return ParticleType::kNumTypes;
   }
 }
@@ -174,9 +197,10 @@ enum class SpeciesDisposition : int {
   /// it.
   kCounted = 1,
   /// This port cannot transport it. Counted BY SPECIES at the point of emission and reported
-  /// at the end of the run; fatal if it arrives as a primary. Hyperons, K0L/K0S, anti-nuclei
-  /// and the b/c hadrons `G4HadronicParameters::EnableBCParticles` turns on are all here, and
-  /// a cascade will start producing them the moment one is wired.
+  /// at the end of the run; fatal if it arrives as a primary. Since P23a every species with a
+  /// `ParticleType` row is stepped or counted, so nothing reaches this but the study knob
+  /// `EmitterBooks::refuse_strange`; the species QBBC makes that still have no row (anti-nuclei,
+  /// the b/c hadrons) are refused by NAME in `had::HadronicRefusal`, never by a default.
   kRefused = 2,
 };
 
@@ -984,6 +1008,12 @@ struct EmitterBooks {
   /// than a term in an energy balance, so what is wanted is one number per run per species and
   /// not a distribution.
   double* refused_energy = nullptr;
+  /// P23a's study knob, OFF by default: refuse the sixteen strange species at emission exactly
+  /// as the port did before they had kernels - counted by name, no child index consumed, no
+  /// track. With it set a run reproduces the pre-P23a stream of every other species to the bit,
+  /// which is what lets ONE engine measure both the refusal counts the strange tracks retire
+  /// and the share of the dose they carry (docs/RISK.md V240, V244). `G4GPU_STRANGE_TRACKS=0`.
+  bool refuse_strange = false;
 };
 
 /// Adapter giving the physics models the push() signature they already expect.
@@ -1103,7 +1133,11 @@ struct BufferEmitter {
   ///        a nucleus - is unchanged.
   __device__ int push(ParticleType type, const Vec3<real_t>& dir, real_t ekin,
                       int /*event_id*/, unsigned short za = 0) {
-    const SpeciesDisposition disp = species_disposition(type);
+    SpeciesDisposition disp = species_disposition(type);
+    if (books.refuse_strange && disp == SpeciesDisposition::kStepped
+        && (is_strange_charged_track(type) || is_strange_neutral_track(type))) {
+      disp = SpeciesDisposition::kRefused;  // see EmitterBooks::refuse_strange
+    }
     if (disp != SpeciesDisposition::kStepped) {
       if (disp == SpeciesDisposition::kCounted) {  // NOLINT - see SpeciesDisposition
         // A neutrino IS a secondary of this step as far as Geant4 is concerned, so it

@@ -299,6 +299,49 @@ const Species kSpecies[] = {
     {"triton", ParticleType::kTriton,
      {0.002, 0.002, 0.002, 0.011, 0.001},
      {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    // ---- P23a: the eight CHARGED strange baryons, transported since P23a by one group kernel.
+    // From `ref/oracle/strange_hadron_tables.csv` (dump_strange_tracks.cc), which is this file's
+    // format for exactly these eight.
+    //
+    // None has a table of its own: G4hIonisation's spin-then-charge rule scales the four
+    // POSITIVE ones (sigma+, and the anti_sigma-, anti_xi- and anti_omega- that carry +1) from
+    // the PROTON and the four negative ones from the ANTIPROTON - species_processes.csv's
+    // base_particle column says so for all eight, and tests/test_species.cu holds the rule to it.
+    // So the limits are the base particle's: the deuteron's and triton's for the positive four
+    // (the mass ratio alone, the cleanest case), the antiproton's for the negative four, whose
+    // 2-100 MeV band carries the same charge-odd air anomaly every negative hadron does.
+    {"sigma+", ParticleType::kSigmaPlus,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    {"anti_sigma-", ParticleType::kAntiSigmaMinus,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    {"anti_xi-", ParticleType::kAntiXiMinus,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    {"anti_omega-", ParticleType::kAntiOmegaMinus,
+     {0.002, 0.002, 0.002, 0.011, 0.001},
+     {0.002, 0.002, 0.002, 0.006, 0.002}, 0.001},
+    // The negative four read the ANTIPROTON'S IonisationTable - splined - and not its linear
+    // DEDX table (`em::HadronRangeTable::ioni_d2`; G4LossTableManager::CopyTables). Read through
+    // the linear one, as they were on this branch's first run, the 1-10 keV band was 5.4-6.4%
+    // and 10-100 keV 2.7-6.3%; through the spline both are 0.000%. What is left is the
+    // antiproton's own charge-odd air anomaly in its NODE values (its row above: 15.2% dE/dx,
+    // 10.0% range in 2-100 MeV), read through a spline instead of a chord: 18.8% at worst, in
+    // air, inside the antiproton's 25%. The inverse round trip is the antiproton's too - a linear
+    // R against a splined R^-1 - sampled at other scaled energies: 1.87% at worst, its 1.41%.
+    {"sigma-", ParticleType::kSigmaMinus,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.019},
+    {"xi-", ParticleType::kXiMinus,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.019},
+    {"omega-", ParticleType::kOmegaMinus,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.019},
+    {"anti_sigma+", ParticleType::kAntiSigmaPlus,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.019},
 };
 
 constexpr int kNPart = static_cast<int>(sizeof kSpecies / sizeof kSpecies[0]);
@@ -385,11 +428,21 @@ int main() {
 
   const char* env = std::getenv("G4GPU_ORACLE");
   const std::string dir = (env != nullptr) ? env : "ref/oracle";
-  const auto rows = load(dir + "/hadron_tables.csv");
+  auto rows = load(dir + "/hadron_tables.csv");
   if (rows.empty()) {
     std::printf("cannot read %s/hadron_tables.csv - run ref/oracle/run.bat first\n",
                 dir.c_str());
     return 1;
+  }
+  // P23a's eight charged strange baryons, in the same format - see the end of kSpecies.
+  {
+    const auto more = load(dir + "/strange_hadron_tables.csv");
+    if (more.empty()) {
+      std::printf("cannot read %s/strange_hadron_tables.csv - run the strange_tracks dump\n",
+                  dir.c_str());
+      return 1;
+    }
+    rows.insert(rows.end(), more.begin(), more.end());
   }
 
   int fails = 0;

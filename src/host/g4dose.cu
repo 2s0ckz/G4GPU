@@ -301,7 +301,11 @@ bool VerifyStepHook(const std::string& scene_name, int n_events, unsigned int se
     // energy and one that dies inside is reported at zero, so this holds for every path.
     const double gain = r.ekin_post - r.ekin_pre;
     if (gain > worst_gain) { worst_gain = gain; }
-    if (r.species < 0 || r.species > 32) { ++bad_species; }
+    // Against the enum and not a literal: the literal was 32 and the anti-hyperons P23a puts on
+    // tracks are 33-39.
+    if (r.species < 0 || r.species >= static_cast<int>(g4gpu::ParticleType::kNumTypes)) {
+      ++bad_species;
+    }
   }
 
   double got_sum = 0, got_sq = 0;

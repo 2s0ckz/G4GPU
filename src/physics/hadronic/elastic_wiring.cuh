@@ -130,6 +130,29 @@ __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
     case ParticleType::kPionMinus:  return ElasticChannel::kHePion;
     case ParticleType::kKaonPlus:
     case ParticleType::kKaonMinus:  return ElasticChannel::kGheishaKaon;
+    // P23a: the same row, and from the same function. `G4HadronElasticPhysics::ConstructProcess`
+    // calls `G4HadronicBuilder::BuildElastic` on `G4HadParticles::GetKaons()` (which holds 310
+    // and 130 beside the charged kaons) and, under `EnergyThresholdForHeavyHadrons` (lines
+    // 199-200), on `GetHyperons()` and `GetAntiHyperons()`; `BuildElastic` is
+    // `ElasticXS("Glauber-Gribov")` plus a plain `G4HadronElastic`. Each call makes its own
+    // model object with the same parameters, and `G4HadronElastic::SampleInvariantT`'s only
+    // species test is `|pdg| == 211`, so every one of these samples the "other particles"
+    // branch. sigma0 and anti_sigma0 are in none of the lists: `species_processes.csv` gives
+    // them Decay alone.
+    case ParticleType::kKaonZeroShort:
+    case ParticleType::kKaonZeroLong:
+    case ParticleType::kLambda:
+    case ParticleType::kSigmaPlus:
+    case ParticleType::kSigmaMinus:
+    case ParticleType::kXiZero:
+    case ParticleType::kXiMinus:
+    case ParticleType::kOmegaMinus:
+    case ParticleType::kAntiLambda:
+    case ParticleType::kAntiSigmaPlus:
+    case ParticleType::kAntiSigmaMinus:
+    case ParticleType::kAntiXiZero:
+    case ParticleType::kAntiXiMinus:
+    case ParticleType::kAntiOmegaMinus: return ElasticChannel::kGheishaKaon;
     case ParticleType::kDeuteron:
     case ParticleType::kTriton:
     case ParticleType::kHe3:
@@ -220,7 +243,11 @@ __host__ __device__ inline hxs::Projectile<real_t> elastic_projectile(ParticleTy
     case ParticleType::kTriton:     return hxs::triton<real_t>();
     case ParticleType::kHe3:        return hxs::he3<real_t>();
     case ParticleType::kAlpha:      return hxs::alpha<real_t>();
-    default:                        return hxs::Projectile<real_t>{};
+    case ParticleType::kKaonZeroShort: return hxs::kaon_zero_short<real_t>();
+    case ParticleType::kKaonZeroLong:  return hxs::kaon_zero_long<real_t>();
+    default:
+      // P23a: the fourteen hyperons and anti-hyperons, by code (a zero projectile otherwise).
+      return hxs::strange_baryon<real_t>(pdg_code(t));
   }
 }
 

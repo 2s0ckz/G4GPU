@@ -370,10 +370,28 @@ struct NuclearMassMeV {
 /// `core/particle.cuh`'s table by PDG code; a code with no row there answers with the model's
 /// own mass, which makes the test pass rather than inventing a number, and the secondary is
 /// refused at emission a few lines later anyway.
+///
+/// P23a: IS A NUCLEUS, AND A HYPERON IS NOT ONE. Bertini fills a hyperon's `a` with its baryon
+/// number (1) and its `z` with its charge, so `a > 0` alone took a cascade lambda for a NEUTRON
+/// here - 939.565 MeV of definition mass against the model's 1115.683 - and a sigma- or an
+/// omega- (Z = -1) for a nuclide with no mass at all. `CheckResult`'s off-shell test then
+/// rejected the final state (|m_def - m_dyn| > 10% + 1 MeV) and `run_inelastic` resampled it,
+/// a hundred times, into `kInelasticReentryExhausted`: every Bertini interaction that made a
+/// hyperon was thrown away. Measured on `tests/test_inelastic_transport.cu`'s grid before the
+/// fix: 80 had006 refusals, 30 of 37 omega- interactions in bone among them. docs/RISK.md V241.
+template <typename real_t>
+__host__ __device__ inline bool secondary_is_nucleus(
+    const physics::hadronic::HadSecondary<real_t>& s) {
+  if (s.a <= 0) { return false; }
+  if (s.pdg >= 1000000000 || s.pdg <= -1000000000) { return true; }
+  const ParticleType t = particle_type_of_pdg(s.pdg);
+  return !(is_strange_charged_track(t) || is_strange_neutral_track(t));
+}
+
 template <typename real_t>
 __host__ __device__ inline real_t definition_mass_of(
     const physics::hadronic::HadSecondary<real_t>& s) {
-  if (s.a > 0) { return static_cast<real_t>(deex::nuclear_mass(s.a, s.z)); }
+  if (secondary_is_nucleus(s)) { return static_cast<real_t>(deex::nuclear_mass(s.a, s.z)); }
   const ParticleType t = particle_type_of_pdg(s.pdg);
   if (t == ParticleType::kNumTypes) { return s.mass; }
   return particle_def<real_t>(t).mass;
@@ -911,7 +929,19 @@ __host__ __device__ inline int emit_interaction_result(
   int emitted = 0;
   for (int i = 0; i < r.n_secondaries; ++i) {
     const physics::hadronic::HadSecondary<real_t>& q = r.secondaries[i];
-    if (q.a > 0) {
+    // A HYPERON IS NOT A NUCLEUS, and until P23a this loop sent it down the nucleus path.
+    // Bertini's `G4CascadeInterface` fills every secondary's baryon number off
+    // `G4InuclElementaryParticle` - `inucl_names_baryon` is 1 for the lambda, the three sigmas,
+    // the two xis and the omega - and its charge into `z`, so a cascade lambda arrived here as
+    // (Z = 0, A = 1) and `push_nucleus` made it a NEUTRON; a sigma+ became a proton, and a
+    // sigma-, xi- or omega- (Z = -1) a GenericIon with no nuclide, which `step_hadron` kills as
+    // `kIonWithoutNuclide`. Silently, in every Bertini interaction or at-rest capture that made
+    // strangeness - a K- stopping in water is the common one. docs/RISK.md V241. The hyperons
+    // go by their PDG code now, which is the only field that says what they are; a nucleon
+    // still goes through `push_nucleus` exactly as before, so every existing track is
+    // bit-for-bit what it was. `secondary_is_nucleus` is the one rule, shared with
+    // `definition_mass_of`, which had the same misreading.
+    if (secondary_is_nucleus(q)) {
       // A nucleus, including a bare proton or neutron a cascade reports as (Z=1,A=1)/(0,1).
       // `push_nucleus` answers with one of the five light species or with kGenericIon carrying
       // its own nuclide, which is exactly what `step_hadron` needs to step it.
@@ -921,7 +951,11 @@ __host__ __device__ inline int emit_interaction_result(
     }
     const ParticleType t = particle_type_of_pdg(q.pdg);
     if (t == ParticleType::kNumTypes) {
-      book_refusal<real_t>(books, HadronicRefusal::kInelasticSecondarySpecies, q.kin_energy);
+      // P23a: a charm or bottom hadron, or an anti-neutron, is named rather than lumped with
+      // "no row" - see `unrowed_secondary_refusal`.
+      book_refusal<real_t>(
+          books, unrowed_secondary_refusal(q.pdg, HadronicRefusal::kInelasticSecondarySpecies),
+          q.kin_energy);
       continue;
     }
     em.push(t, q.direction, q.kin_energy, 0);

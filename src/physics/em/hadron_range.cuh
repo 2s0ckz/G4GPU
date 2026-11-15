@@ -547,6 +547,22 @@ struct HadronRangeTable {
   /// Restricted ionisation dE/dx, MeV/mm, and its spline second derivatives.
   real_t dedx[static_cast<int>(HadronSpecies::kCount)][data::kMaxMaterials][kHadronRangeBins];
   real_t dedx_d2[static_cast<int>(HadronSpecies::kCount)][data::kMaxMaterials][kHadronRangeBins];
+  /// The same `dedx` row splined ALWAYS - the base particle's `IonisationTable()`, which is what
+  /// a species with a base particle reads instead of the base's own DEDX table.
+  ///
+  /// P23a, measured on the running Geant4 before it was written (`ref/oracle/
+  /// strange_vectors.csv`): `G4LossTableManager::CopyTables` (11.1.1, G4LossTableManager.cc:751)
+  /// gives a derived particle `SetDEDXTable(base_proc->IonisationTable(), fRestricted)` - the
+  /// hIoni-only vector, never summed with hBrems/hPairProd and therefore splined - while its
+  /// range and inverse range ARE the base's own objects. For a base whose DEDX table is splined
+  /// anyway (proton, GenericIon) the two read the same; for the antiproton, whose DEDX table is
+  /// the linear part2 vector `hadron_table_uses_spline` describes, they do not, and the four
+  /// strange baryons scaled from it - sigma-, xi-, omega-, anti_sigma+ - read a SPLINE through
+  /// the antiproton's nodes. Read through the antiproton's linear interpolation instead, their
+  /// dE/dx was 6% off Geant4's at 10 keV and 14% across the 2-100 MeV band in air, on exactly
+  /// the antiproton's own nodes. Same nodes, other interpolation: `dedx` is shared, only the
+  /// second derivatives differ, and for every splined base they are bit-for-bit `dedx_d2`.
+  real_t ioni_d2[static_cast<int>(HadronSpecies::kCount)][data::kMaxMaterials][kHadronRangeBins];
 
   /// Range, mm, and its spline second derivatives.
   real_t range[static_cast<int>(HadronSpecies::kCount)][data::kMaxMaterials][kHadronRangeBins];
@@ -564,6 +580,16 @@ struct HadronRangeTable {
   __host__ __device__ real_t dedx_at(HadronSpecies sp, int material, real_t kinetic) const {
     const real_t* row = dedx[static_cast<int>(sp)][material];
     const real_t* d2 = dedx_d2[static_cast<int>(sp)][material];
+    real_t x = data::spline_value<real_t>(energy, row, d2, kHadronRangeBins, kinetic);
+    if (kinetic < e_min) { x *= sqrt(kinetic / e_min); }
+    return fmax(x, real_t(0));
+  }
+
+  /// `dedx_at` through the base's `IonisationTable()` - the always-splined `ioni_d2` - which is
+  /// what a species with a base particle reads. See `ioni_d2`.
+  __host__ __device__ real_t ioni_dedx_at(HadronSpecies sp, int material, real_t kinetic) const {
+    const real_t* row = dedx[static_cast<int>(sp)][material];
+    const real_t* d2 = ioni_d2[static_cast<int>(sp)][material];
     real_t x = data::spline_value<real_t>(energy, row, d2, kHadronRangeBins, kinetic);
     if (kinetic < e_min) { x *= sqrt(kinetic / e_min); }
     return fmax(x, real_t(0));
@@ -618,8 +644,13 @@ struct HadronRangeTable {
                                       const SteppedHadron<real_t>& h, int material,
                                       real_t kinetic) const {
     const real_t mr = hadron_mass_ratio<real_t>(h);
+    // A species with its own table reads its DEDX table; one with a base particle reads the
+    // base's IonisationTable - `ioni_d2`'s note has the Geant4 line.
+    const HadronSpecies sp = hadron_species_of<real_t>(h.type);
+    const bool scaled = (hadron_base_particle(h.type) != h.type);
     return hadron_charge_sq_ratio<real_t>(m, h, kinetic)
-           * dedx_at(hadron_species_of<real_t>(h.type), material, kinetic * mr);
+           * (scaled ? ioni_dedx_at(sp, material, kinetic * mr)
+                     : dedx_at(sp, material, kinetic * mr));
   }
 
   /// Range for this particle, mm.
@@ -734,6 +765,19 @@ __host__ inline void build_hadron_range_table(const data::Material<real_t>* mats
       for (int b = 0; b < kHadronRangeBins; ++b) {
         t.dedx[s][m][b] = static_cast<real_t>(y[b]);
         t.dedx_d2[s][m][b] = static_cast<real_t>(d2[b]);
+      }
+      // The IonisationTable's spline, which a derived species reads (`ioni_d2`). For a splined
+      // species it IS `d2`, copied rather than recomputed so the two cannot differ in a bit.
+      {
+        std::vector<double> id2(kHadronRangeBins);
+        if (use_spline) {
+          id2 = d2;
+        } else {
+          data::fill_second_derivatives(x.data(), y.data(), kHadronRangeBins, id2.data());
+        }
+        for (int b = 0; b < kHadronRangeBins; ++b) {
+          t.ioni_d2[s][m][b] = static_cast<real_t>(id2[b]);
+        }
       }
 
       // ---- range, by integrating that table as it will be read.

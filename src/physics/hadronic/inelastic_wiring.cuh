@@ -201,6 +201,27 @@ __host__ __device__ inline InelasticChannel inelastic_channel(ParticleType t) {
     case ParticleType::kPionMinus:  return InelasticChannel::kBggPion;
     case ParticleType::kKaonPlus:
     case ParticleType::kKaonMinus:  return InelasticChannel::kGgHadronNucleus;
+    // P23a. `G4HadronicBuilder::BuildKaonsFTFP_BERT` and `BuildHyperonsFTFP_BERT` both pass
+    // "Glauber-Gribov" to `G4HadProcesses::InelasticXS`, which is
+    // `G4CrossSectionInelastic(G4ComponentGGHadronNucleusXsc)` - the charged kaons' own data set
+    // - for K0S, K0L, the six hyperons `G4HadParticles::sHyperons` names and the six of
+    // `sAntiHyperons`. The anti-hyperons are NOT on `G4ComponentAntiNuclNuclearXS` as the
+    // antiproton is: they take the component's hyperon arm on |pdg| (P23b, docs/RISK.md V226).
+    // sigma0 and anti_sigma0 are in neither list and have no inelastic process at all.
+    case ParticleType::kKaonZeroShort:
+    case ParticleType::kKaonZeroLong:
+    case ParticleType::kLambda:
+    case ParticleType::kSigmaPlus:
+    case ParticleType::kSigmaMinus:
+    case ParticleType::kXiZero:
+    case ParticleType::kXiMinus:
+    case ParticleType::kOmegaMinus:
+    case ParticleType::kAntiLambda:
+    case ParticleType::kAntiSigmaPlus:
+    case ParticleType::kAntiSigmaMinus:
+    case ParticleType::kAntiXiZero:
+    case ParticleType::kAntiXiMinus:
+    case ParticleType::kAntiOmegaMinus: return InelasticChannel::kGgHadronNucleus;
     case ParticleType::kGenericIon: return InelasticChannel::kGgNuclNucl;
     case ParticleType::kAntiProton: return InelasticChannel::kAntiNucleusRefused;
     default:                        return InelasticChannel::kNone;
@@ -331,9 +352,28 @@ __host__ __device__ inline InelasticModelList<real_t> inelastic_models(ParticleT
     // cascade's MINIMUM is zero because nothing calls SetMinEnergy on it there.
     case ParticleType::kKaonPlus:
     case ParticleType::kKaonMinus:
+    // P23a: the same builder for K0S/K0L (`BuildKaonsFTFP_BERT`) and for the six hyperons
+    // (`BuildHyperonsFTFP_BERT`'s first line, bert = true), so the same two objects in the same
+    // order. Bertini's IsApplicable says yes to all eight (V227 for the K0s, strange_scope.csv).
+    case ParticleType::kKaonZeroShort:
+    case ParticleType::kKaonZeroLong:
+    case ParticleType::kLambda:
+    case ParticleType::kSigmaPlus:
+    case ParticleType::kSigmaMinus:
+    case ParticleType::kXiZero:
+    case ParticleType::kXiMinus:
+    case ParticleType::kOmegaMinus:
       add(InelasticModel::kFtfp, ftf_transition_min<real_t>(), hadronic_max_energy<real_t>());
       add(InelasticModel::kBertini, real_t(0), ftf_transition_max<real_t>());
       return L;
+    // P23a: `BuildHyperonsFTFP_BERT`'s second line, bert = false - "for anti-hyperons, FTFP can
+    // be used down to zero kinetic energy" - one model, as for the antiproton below.
+    case ParticleType::kAntiLambda:
+    case ParticleType::kAntiSigmaPlus:
+    case ParticleType::kAntiSigmaMinus:
+    case ParticleType::kAntiXiZero:
+    case ParticleType::kAntiXiMinus:
+    case ParticleType::kAntiOmegaMinus:
     // BuildAntiLightIonsFTFP, bert = false: one model, and its minimum is G4HadronicInteraction's
     // own zero. `choose_hadronic_interaction`'s `n_models == 1` shortcut then never looks at the
     // window at all, which is Geant4's behaviour and is why this row cannot be got wrong by
@@ -391,6 +431,20 @@ __host__ __device__ __noinline__ InelasticModel choose_inelastic_model(ParticleT
   status = sel.status;
   if (sel.status != hp::ModelChoice::kOk || sel.index < 0) { return InelasticModel::kNone; }
   return L.model[sel.index];
+}
+
+/// P23a, docs/RISK.md V226's first note: does `G4EnergyRangeManager::GetHadronicInteraction`
+/// spend a deviate on this species BEFORE it looks at a single energy window?
+///
+/// It calls `IsApplicable` on every registered model first (G4EnergyRangeManager.cc:82), and
+/// `G4CascadeInterface::IsApplicable` goes through `G4InuclElementaryParticle::type`, whose last
+/// statement mixes a K0S or a K0L back to K0 or anti-K0 on `G4UniformRand() > 0.5`
+/// (G4InuclElementaryParticle.cc:165-167, V227). So every K0S and K0L inelastic interaction -
+/// at 100 GeV too, where Bertini cannot be chosen - costs one uniform here, discarded, ahead of
+/// the window choice; FTFP's IsApplicable draws nothing, and no other species' Bertini type()
+/// does. Bertini's own `ApplyYourself` draws its two more inside the model, where P23b put them.
+__host__ __device__ inline bool range_manager_draws_is_applicable(ParticleType t) {
+  return t == ParticleType::kKaonZeroShort || t == ParticleType::kKaonZeroLong;
 }
 
 /// True when this species' model choice CONSUMES A UNIFORM at this energy, which is the one
@@ -482,7 +536,12 @@ __host__ __device__ inline hxs::Projectile<real_t> inelastic_projectile(Particle
     case ParticleType::kHe3:        return hxs::he3<real_t>();
     case ParticleType::kAlpha:      return hxs::alpha<real_t>();
     case ParticleType::kGenericIon: return hxs::generic_ion<real_t>(z, a);
-    default:                        return hxs::Projectile<real_t>{};
+    case ParticleType::kKaonZeroShort: return hxs::kaon_zero_short<real_t>();
+    case ParticleType::kKaonZeroLong:  return hxs::kaon_zero_long<real_t>();
+    default:
+      // P23a: the fourteen hyperons and anti-hyperons, by code; a zero projectile for anything
+      // else, which is what this returned for every one of them before.
+      return hxs::strange_baryon<real_t>(pdg_code(t));
   }
 }
 
