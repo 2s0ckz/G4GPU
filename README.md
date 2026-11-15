@@ -30,7 +30,11 @@ stopped μ⁻, π⁻, K⁻ or negative hyperon is captured rather than decayed. 
 named and counted with its rate. The strange and heavy species QBBC transports - the neutral kaons,
 the hyperons and anti-hyperons, the charmed and bottom hadrons QBBC's FTF does produce - have their
 data on main since P23b: cross sections, decay tables and the two cascades' acceptance of them, 65
-species measured against the running QBBC (RISK V226-V229); their transport is P23a's.
+species measured against the running QBBC (RISK V226-V229), and since P23a the sixteen strange
+species are tracks: the charged eight through the hadron stepper, the neutral eight through a
+stepper of their own, decaying in flight and at rest as `G4Decay` does and interacting through
+P23b's cross sections (RISK V240-V244). Still refused by name: the anti-neutron (P23c's) and the
+charm and bottom hadrons, which have no `ParticleType`.
 The largest hole P15 had - `G4BinaryLightIonReaction::Interact`,
 every ion at or above 50 MeV per nucleon, which is where a therapeutic alpha beam lives - is closed
 by P9e's cascade since the second pass, and the hydrogen target (`Propagate1H1`) since P18, which
@@ -347,10 +351,12 @@ V222-V225 for the hook projects' split per kernel and the gamma general process'
 V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles, and
 V230-V232 for the neutron's interaction count carried in 11.1.1's order, V233 for the header
 split that keeps the models out of the stepping units, V234-V238 for the capacities P24 read
-off Geant4's own runs, the slot they make, and the nuclear mass's four levels, and V239 for the
+off Geant4's own runs, the slot they make, and the nuclear mass's four levels, V239 for the
 second card: every unit compiled for the cards present with the compute_70 PTX beside them, the
 Titan V's gate to the 3070's digit, what its stack reservation and the JIT path cost, and a fresh
-clone built and run from this file's four commands.
+clone built and run from this file's four commands, and V240-V244 for the strange species on
+tracks: two group kernels, a Bertini hyperon that was a neutron, the derived species' splined
+tables, and the two 10 GeV beams.
 
 #### Tables, materials and framework
 
@@ -412,7 +418,7 @@ closed - the same question has the mechanism.
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
-| hyperons, K⁰L/K⁰S, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species, fatal as a primary. Since P23b their cross sections, decay tables and the cascades' acceptance of them are on main (RISK V226-V229), so what is left for them is the transport itself: P23a |
+| the anti-neutron, anti-nuclei, b/c hadrons | **refused by name** at emission, counted per species (`kAntiNeutronSecondary`, `kBcHadronSecondary`), fatal as a primary. The hyperons, the anti-hyperons and K⁰L/K⁰S are tracks since P23a (RISK V240-V244): two group kernels, `G4GPU_STRANGE_TRACKS=0` refuses them as before. The anti-neutron and the anti-nuclei are P23c's; the charm and bottom hadrons QBBC's FTF does produce (30 in 640,000 FTFP events, none on either 10 GeV beam) have no `ParticleType` |
 
 ### Not implemented
 
@@ -609,6 +615,17 @@ send every one of them somewhere else.
     or their de-excitation. Nothing before P24 compared the ion arm with Geant4 beyond baryon
     number and charge, which a residual that keeps what should have evaporated still satisfies.
     It wants a package of its own, with the per-species rows `ftf_modelstat` gives the hadron arm.
+
+  9. **The two 10 GeV beams sit above QBBC, and the excess predates P23a** (RISK V244, found at
+    P23a's beams). Example B1, 500,000 events, against Geant4 11.1.1 QBBC as it ships: the 10 GeV
+    proton +20.4% (+38.8 sigma), the 10 GeV pi+ +5.4% (+12.9 sigma); with the strange species
+    refused, as before P23a, +19.6% and +3.9%, so the strange tracks move the rows by +0.7% and
+    +1.5% and are not the excess. The 1 GeV proton agrees to +0.06%, and Geant4's EM-only and QBBC
+    rows agree within 0.2%, so hBrems/hPairProd are not it; what the port still loses on these
+    beams - the eta and eta', which have no `ParticleType` - lowers its dose. These are the first
+    beams above 4 GeV per nucleon this port has run (the sweep's highest is alpha_4000), and the
+    10 GeV proton's interactions are FTFP's (3 GeV up). Not diagnosed; it wants a package of its
+    own, a step tape against Geant4 on the 10 GeV proton first.
 
 
 ---
