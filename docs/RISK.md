@@ -15792,6 +15792,46 @@ vector unsplined - 2; the reader without its spline term - 88 values off, 1; tab
 without the photoelectric term - 2; the bremsstrahlung LPM functions in the rate - 4; the
 parameterisation at every energy - 4; zone 3 walked as `q <= P11` - 1.
 
+**V246 ADDENDUM - THE GPU SIDE.**
+
+`tests/test_emextra_transport.cu` section 8, on this branch's stepper (CUDA 12.9, sm_86), ALL OK:
+the replay - each photon's two uniforms drawn again on the host from its own key, its length
+`-log(u1)` over the table's zone total and its process `had::gamma_general_select` on `u2` -
+in 15 cells across the four zones (water 0.03, bone 0.05, air 0.12 MeV in zone 0; water 0.5,
+air 0.8 in zone 1; water 1.2, 6, 11.2, 22, bone 1.5, 22, air 17 in zone 2; water 150 MeV, bone
+500 MeV, water 100 GeV in zone 3), a million photons each: **0 on the wrong process and 0 on the
+wrong length in every cell**, the zone-3 slice counted exactly (2,996, 6,570, 2,643), table 9's
+edge at 11.2 MeV in water 152 of 152; the cells' totals sit -0.377% to +1.454% off the models',
+so the replay could tell them apart. And section 7's fourteen points against Geant4's forty
+million first interactions, on the tables: **chi2 52.7 for 54 binomials**, worst |z| 2.60
+(photonNuclear at 20 MeV in bone). The conversion count at 1.5 MeV in water, which V223 found
+1.7% over the models' share, is 1,643 in a million against Geant4's 64,951 in forty (z +0.47; on
+the models it was z -1.54). Sections 1-7, on the models' path, unchanged.
+
+**THE GATE.** B1's 6 MeV gamma, 2,000,000 events, default seed and `/random/setSeeds 1..4` (V96's
+method), one build, the tables read against `G4GPU_GAMMA_GENERAL_TABLES=0` - paired runs:
+
+| seed | models (P21), pGy | tables (P26), pGy | tables - models |
+|--:|--:|--:|--:|
+| default | 425.921 | 426.028 | +0.107 |
+| 1 | 426.125 | 426.201 | +0.076 |
+| 2 | 426.944 | 427.261 | +0.317 |
+| 3 | 427.535 | 427.657 | +0.122 |
+| 4 | 427.510 | 427.590 | +0.080 |
+
+**+0.140 +/- 0.045 pGy, +0.033%**, towards Geant4's 427.385 +/- 0.870 (default seed 1.1915 sigma
+before, 1.1045 after) - V225's scratch read of the totals alone was +0.153 +/- 0.013, so the
+fractions add nothing measurable at 6 MeV, as V225 expected (P7 and P8 within 0.03% of the models
+there). The models' column is V223's "after" column to every printed digit at all five seeds: the
+switch's other side is the pre-P26 photon, and P26's other changes (the ion correction, GetA27)
+move nothing a 6 MeV photon run prints.
+
+**FRAMES** (CUDA 12.9.86, -O2/-O3 as `build_engine_unit.bat` builds them): `run_step_gamma`
+3,952 bytes (3,840 at V224); `gamma_general_read` 0; `run_emextra_drain<kPhotoNuclear>` 11,808
+and `<kLeptoNuclear>` 4,096, both as at ba61 (V237) - the drains do not call the new reader;
+`run_step_hadron` in the GenericIon and alpha units 4,224, as on the lead's tree. All under the
+16,384-byte stepping stack.
+
 ### V247: CorrectionsAlongStep, applied where AlongStepDoIt applies it
 
 `em::ion_corrections_along_step` (em/hadron_range.cuh) is G4BraggIonModel's and
