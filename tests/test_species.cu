@@ -209,20 +209,11 @@ int main() {
         const double d = std::fabs(got - g4.tlimit) / g4.tlimit;
         // Alpha and He3 are the only species here with |charge| > 1, and they are the only ones
         // that reach `x /= G4NistManager::GetA27(iz)`. GetA27 is a table of A^0.27 for natural
-        // abundances - A, the atomic weight - and hadron_tlimit computes pow(Z, 0.27). For
-        // Z = 2 that is 2^0.27 = 1.206 against 4.0026^0.27 = 1.454, so tlimit comes out 45%
-        // high. RECORDED, NOT ASSERTED, and not fixed here: the port carries no A(Z) table, the
-        // fix is 101 transcribed values in a file this package does not own, and the error is
-        // unreachable - tlimit only binds where tmax exceeds it, which for an alpha is above
-        // 3 TeV. See docs/RISK.md.
-        if (std::fabs(pd.charge) > 1.5 && d > 1e-9) {
-          std::printf("  gap  %-12s tlimit ours %.7g  G4 %.7g  rel %.2e  (Z^0.27 for A^0.27,"
-                      " RISK.md - binds only above ~3 TeV)\n", who, got, g4.tlimit, d);
-          ++tlimit_gaps;
-          worst_tlimit_gap = std::fmax(worst_tlimit_gap, d);
-        } else {
-          expect("tlimit", who, got, g4.tlimit, 1e-9);
-        }
+        // abundances - A, the atomic weight. This was a recorded gap until P26 (hadron_tlimit
+        // took pow(Z, 0.27): 2^0.27 = 1.206 against 4.0026^0.27 = 1.454, tlimit 45% high);
+        // `em::nist_a27` reads `data::nist_atomic_mass_table`, and it is asserted like the rest.
+        (void)d;
+        expect("tlimit", who, got, g4.tlimit, 1e-9);
       }
     }
   }

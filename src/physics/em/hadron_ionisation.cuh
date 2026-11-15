@@ -18,6 +18,7 @@
 #include "core/particle.cuh"
 #include "core/units.cuh"
 #include "data/materials.cuh"
+#include "physics/em/muon_radiative.cuh"  // em::nist_a27 - G4NistManager::GetA27
 #include "physics/em/electron_processes.cuh"
 #include "physics/em/em_corrections.cuh"
 
@@ -38,6 +39,18 @@ __host__ __device__ inline real_t hadron_max_secondary_energy(const ParticleDef<
   return real_t(2) * me * tau * (tau + real_t(2))
          / (real_t(1) + real_t(2) * (tau + real_t(1)) * ratio + ratio * ratio);
 }
+
+/// `G4NistManager::GetA27(Z)`: `POWERA27[Z]`, which the manager's constructor fills with
+/// `std::pow(A, 0.27)` for `A = elmBuilder->GetAtomicMassAmu(Z)` - the element's MEAN atomic
+/// mass, not a projectile's mass number and not Z (G4NistManager.cc:216-221, 11.1.1). It is what
+/// `G4BetheBlochModel::SetupParameters` divides the form-factor scale by for every projectile
+/// heavier than a GeV with |charge| > 1, so for the alpha AND He3 it is helium's 4.0026^0.27.
+///
+/// P26: this port took `pow(Z, 0.27)` in `hadron_tlimit` (2^0.27 = 1.206 against 1.454, tlimit
+/// 45% high, tests/test_species.cu's recorded gap) and 2Z to the 0.27 in `hadron_formfactor`
+/// (4^0.27 against 4.0026^0.27, 1.75e-4, for the alpha and He3 alike). Both now call
+/// `em::nist_a27` - the muon models' (`muon_radiative.cuh`), which already read Geant4's own
+/// table, `data::nist_atomic_mass_table`, for Z = 1..98.
 
 /// The nuclear form-factor cut on the delta-ray spectrum.
 /// Verbatim from G4BetheBlochModel::SetupParameters (the LeptonNumber == 0 branch, i.e.
@@ -60,7 +73,7 @@ __host__ __device__ inline real_t hadron_tlimit(const ParticleDef<real_t>& pd,
     x = real_t(736.0);
   } else if (pd.mass > real_t(1000)) {
     const int iz = static_cast<int>(fabs(pd.charge) + real_t(0.5));
-    if (iz > 1) { x /= pow(real_t(iz), real_t(0.27)); }  // G4NistManager::GetA27
+    if (iz > 1) { x /= nist_a27<real_t>(iz); }  // G4NistManager::GetA27 (P26: the mean A)
   }
   const real_t formfact = real_t(2) * me / (x * x);
   return real_t(2) / formfact;

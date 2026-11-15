@@ -41,27 +41,23 @@ namespace g4gpu::em {
 /// this transport (leptons go through Moller-Bhabha, not this file) but the guard is cheap and
 /// leaving it out would make the function wrong if it were ever reused.
 ///
-/// @param mass_number `G4NistManager::GetA27`'s argument. Zero means "take it as 2Z", which is
-///        the alpha's own A and was the only answer this function needed while the alpha was
-///        the only species reaching the heavy branch. A real nucleus has to pass its own A: the
-///        term is `A^0.27` and for O16 the two differ by (16/16)^0.27 = 1 only by luck - for
-///        Ca40 it is (40/40)^0.27 = 1 as well, and for Li7 it is (7/6)^0.27, 4%. The ratio is
-///        A/2Z, which is 1 for every N = Z nuclide and rises to about 1.3 at the top of the
-///        chart, so a rule written on 2Z is right for the light even-even nuclides and wrong
-///        elsewhere. `em::SteppedHadron` carries A for this.
+/// P26: `G4NistManager::GetA27(iz)` is the ELEMENT's mean atomic mass to the 0.27
+/// (`em::nist_a27`), indexed by the projectile's charge - not the projectile's own mass number,
+/// which this took (as 2Z when not given) until P26. For the alpha that was (4/4.0026)^0.27, a
+/// part in 6,000 of the form-factor scale; for He3, which passed nothing, the same; for a real
+/// nucleus it would have been A/A_mean of its element (`em::nist_a27` is muon_radiative.cuh's,
+/// which `hadron_ionisation.cuh` includes). Geant4 knows only Z here
+/// (`G4lrint(std::abs(q))`), so a C13 projectile gets carbon's 12.0107^0.27 like a C12.
 template <typename real_t>
-__host__ __device__ inline real_t hadron_formfactor(const ParticleDef<real_t>& pd,
-                                                    int mass_number = 0) {
+__host__ __device__ inline real_t hadron_formfactor(const ParticleDef<real_t>& pd) {
   if (pd.is_lepton) { return real_t(0); }
   constexpr real_t kGeV = real_t(1000);
   real_t x = real_t(0.8426) * kGeV;
   if (pd.spin == real_t(0) && pd.mass < kGeV) {
     x = real_t(0.736) * kGeV;
   } else if (pd.mass > kGeV) {
-    // G4NistManager::GetA27(Z) is A^0.27 of the projectile's own mass number.
     const int iz = static_cast<int>(fabs(pd.charge) + real_t(0.5));
-    const int ia = (mass_number > 0) ? mass_number : 2 * iz;
-    if (iz > 1) { x /= pow(static_cast<real_t>(ia), real_t(0.27)); }
+    if (iz > 1) { x /= nist_a27<real_t>(iz); }
   }
   return real_t(2) * units::electron_mass_c2<real_t>() / (x * x);
 }
