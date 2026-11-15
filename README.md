@@ -346,8 +346,11 @@ Geant4's neutron general process, V220-V221 for the gate's split and its increme
 V222-V225 for the hook projects' split per kernel and the gamma general process's zones and table 9,
 V226-V229 for the strange and heavy species' cross sections, decay tables and projectiles, and
 V230-V232 for the neutron's interaction count carried in 11.1.1's order, V233 for the header
-split that keeps the models out of the stepping units, and V234-V238 for the capacities P24 read
-off Geant4's own runs, the slot they make, and the nuclear mass's four levels.
+split that keeps the models out of the stepping units, V234-V238 for the capacities P24 read
+off Geant4's own runs, the slot they make, and the nuclear mass's four levels, and V239 for the
+second card: every unit compiled for the cards present with the compute_70 PTX beside them, the
+Titan V's gate to the 3070's digit, what its stack reservation and the JIT path cost, and a fresh
+clone built and run from this file's four commands.
 
 #### Tables, materials and framework
 

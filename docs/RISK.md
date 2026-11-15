@@ -15274,3 +15274,172 @@ theoretical table's A bound 339 -> 338, each fail it.
 tests/test_ion_transport.cu (a GPU test, not run here) asserted (Z=8, A=40) had no mass; it now
 asserts the formula's 37,493.505693394261 MeV, and Z > A none. `kIonWithoutNuclide` stays in the
 ledger as the tripwire for a track with no (Z, A) at all.
+
+### V239: the second card - every unit compiled for the cards present, the Titan V reproduces the 3070's gate to every printed digit, the stack reservation takes all of its 12 GB, and what a fresh clone needs
+
+**THE CARDS, AND HOW THE BUILD FINDS THEM.** The Titan V (compute capability 7.0, 80 SMs, 12 GB
+of HBM2, CUDA device 1 under driver 581.80) went into the gating machine beside the RTX 3070
+(8.6, 46 SMs, 8 GB, device 0) on 2026-11-05, and nothing in the tree knew: `setupenv.bat` said
+`-arch=sm_86`, the B1 CMake file said 86, the builder's generated CMake file said 86, and
+`setupenv.bat` also hardcoded Visual Studio 2019 Community's path and set the two nvcc flags only
+when `D:\cuda129` existed. The user's aim was a clone that builds and runs on whatever card another
+machine has - an H100 was the example - so the fixed choices became detected ones:
+
+* `setupenv.bat` asks `nvidia-smi --query-gpu=compute_cap` for every card present and writes one
+  `-gencode arch=compute_XY,code=sm_XY` per distinct capability from 7.0 up (this machine:
+  `-gencode arch=compute_86,code=sm_86 -gencode arch=compute_70,code=[sm_70,compute_70]`), with the
+  compute_70 PTX embedded once - beside the sm_70 SASS, where it costs no ptxas time, or alone -
+  so that a card no pair names (Turing, Ada, Hopper, Blackwell) JITs it at its first launch. A
+  card below 7.0 is refused by name: the gamma and lepton stepping kernels take
+  `__grid_constant__` parameters, which is the floor, not the toolkit. A preset `G4GPU_ARCH` passes
+  through untouched; a machine whose nvidia-smi answers nothing gets the PTX pair alone and a
+  line saying so. Exercised in a fresh cmd: the pairs above, VS 2019 chosen with 2022 also
+  installed, the preset honoured; the first version lost the first pair's leading dash when the
+  second was appended and the test caught it.
+* The compiler is found through vswhere (2019 preferred, 14.29 being the gated one; CUDA 12.9
+  accepts through 14.4x), the nvcc flags are set whatever toolkit was found,
+  `-Wno-deprecated-gpu-targets` among them because nvcc 12.9 warns on every compile that sm_70's
+  offline compilation "will be removed in a future release", and a run with no dataset configured
+  is told so once at setup rather than at its first upload.
+* README's "A fresh clone, on another machine" says what the build needs (VS 2019 or 2022, a CUDA
+  12.x toolkit, a CUDA 12 driver, a card of compute capability 7.0 or above, 32 GB of RAM for the
+  interaction units' ptxas), what a run needs (G4EMLOW8.2, PhotonEvaporation5.7, G4PARTICLEXS4.0,
+  G4ENSDFSTATE2.3, RadioactiveDecay5.6 under `G4GPU_DATA_DIR`), the four commands, and what the gate
+  needs beyond that (`ref/oracle`, 217 MB dumped from a Geant4 install, which the tests read).
+
+**WHAT TWO TARGETS COST (gate ba62, 2026-11-06, the full chain on the 3070 with the detected
+pairs).** build_all 3 h 59 min against ba61c's 2 h 20 for the same stages at one target: the
+engine's 25 units 2 h 46 min against about 1 h 25, the 93 tests built in 2,573 s against 495,
+because every ptxas runs twice. The frames, sm_86 beside sm_70, from the units' own logs:
+
+| kernel | sm_86 | sm_70 |
+|---|--:|--:|
+| `run_interaction<kFtfp>` | 2,688 | 2,688 |
+| `run_interaction<kBertini>` | 12,720 | 12,720 |
+| `run_interaction<kBinary>` | 69,920 | 69,904 |
+| `run_interaction<kLightIon>` | 61,728 | 61,728 |
+| `run_interaction<kAtRest>` | 14,368 | 14,368 |
+| `run_emextra_drain<kPhotoNuclear>` | 11,808 | 11,824 |
+| `run_emextra_drain<kLeptoNuclear>` | 4,096 | 4,144 |
+| `run_step_hadron<kProton>` | 4,384 | 4,368 |
+
+Volta's ptxas compiled every unit at -O3 on the first rung. The hook archives were NOT rebuilt by
+ba62: `build_hook_engine.bat` and `build_vis.bat` asked the archive against the hook header and
+every header under `src`, which no change of `G4GPU_ARCH` touches, and reported both archives "up
+to date" at sm_86 alone. The archive mode of `tools/freshness.ps1` compares a recipe when the
+caller keeps one now, and both scripts pass and stamp theirs as `build_engine_unit.bat` has since
+V221; the modes were exercised on scratch copies before the change went in.
+
+**THE TITAN V RUNS THE SAME BINARIES (gate ba62t2, 2026-11-06, `build_all.bat` under
+`CUDA_VISIBLE_DEVICES=1`, the Titan V as device 0 for every process).** 93 passed, 0 failed, and the
+dose gates, to every printed digit the 3070's (ba62, the same binaries, the same day):
+
+| | RTX 3070 | Titan V |
+|---|--:|--:|
+| B1, 2M events, against Geant4 | -1.46411 pGy = 1.19148 sigma | -1.46411 pGy = 1.19148 sigma |
+| batch against macro | 425.921 pGy vs 426.502 pGy (0.05 sigma) | the same |
+| second run in one process | 31.125 pGy = 1.26 sigma | the same |
+| the stack raise | 77,824 B a thread, kBinary 69,920 B, 1.42 GB of 8.00 left | 77,824 B a thread, kBinary 69,904 B, **0.00 GB of 12.00 left** |
+
+Identical to the digit, which is what the compiler promises - the PTX is the same, the contraction
+decisions are NVVM's, ptxas does not reassociate doubles - and what nothing before this entry had
+measured. The first attempt, ba62t, lost test_core to the runner: `Start-Process -PassThru` opens
+the process handle after creation, a test that exits within a second can be gone by then, and its
+ExitCode reads null, which the runner printed as "FAILED (exit )" under a test that had printed
+ALL PASS. The first time in some four hundred runs, and enough to stop build_all before the dose
+gates; every launch goes through .NET's `Process.Start` now, whose handle is held from creation.
+
+**THE RESERVATION IS THE CARD'S THREAD COUNT TIMES THE FRAME, AND ON THE TITAN V THAT IS ALL OF
+IT.** V190's arithmetic with the second card's numbers: the raise asks 77,824 bytes a thread for
+every thread that can be resident, 46 x 1,536 = 70,656 on the 3070 (5.1 GB of 8) and 80 x 2,048 =
+163,840 on the Titan V (11.9 GB of 12). The raise succeeded there because the pools, the queue and
+the scene were allocated before it and it took what was left - "0.00 GB of 12.00 GB left" - so a
+larger batch, more slots or a bigger scene would fail it, and a card with 12 GB and more SMs
+would fail it outright. An H100's 132 x 2,048 = 270,336 threads at the same frame are 19.6 GB of
+80 and no concern. What makes hadron runs on the Titan V viable rather than merely possible is the
+Binary cascade kernel's own frame, 69,904 bytes of working arrays on the stack: at 40 KB the
+reservation would be 6.5 GB. That is the next lead item after P23a and P26 land, a slice of the performance phase's slot
+slimming brought forward, and it is the first number their beams on the Titan V will need.
+
+**THE JIT PATH, MEASURED (gate ba62j, 2026-11-14).** The tree rebuilt with sm_86 SASS and the compute_70 PTX and no sm_70 SASS (2 h 00 for the
+build, one ptxas per unit), then `build_all.bat` twice on the Titan V with the driver's JIT cache
+pointed at a fresh folder:
+
+| | cold (fresh cache) | warm (the cache) | native sm_70 (ba62t2) |
+|---|--:|--:|--:|
+| the 93 tests | 93 passed, 1,521 s | 93 passed, 1,508 s | 93 passed, 1,474 s |
+| the photon gates (b1_gpu_sched 2M, example B1 2M, mesh, seven switches, hook, pool, sequence) | 28 min | 49 s | about 1 min |
+| of which b1_gpu_sched's 2M events / example B1's 2M | - | 1 s / 6 s | - |
+| the proton depth-dose | 48 min | stopped by the lead (see below) | about 1 h 45 (the gates together) |
+| `run_interaction<kBinary>`'s frame as the driver compiled it | 69,904 B | - | 69,904 B |
+| the JIT cache after the cold run | 498,987,484 B (476 MiB) in 26 files | unchanged | - |
+
+So the JIT path costs about 25 minutes ONCE per set of binaries - the driver's ptxas over every
+kernel the drivers launch, about what the build's own ptxas takes on them - and nothing after:
+the cache held every module at 476 MiB (the 256 MB cap of older drivers would not have; this
+driver's is larger), every kernel survived the driver's compiler, the frames came out as the
+build's, and the answers are the ones above to the digit. The 25 minutes recur whenever the
+binaries change, which on a card used for routine beams is every gate; on a card the build
+never saw it is the price of running at all. A single GPU test probed cold and warm on its own (test_inelastic_transport, a fresh cache) ran in 3 s either way and wrote nothing to the cache: it launches no engine kernel, and the per-process cost is the engine's, paid by the first driver that launches it - the 28 minutes above - and by nothing after.
+
+The proton gate's 48 minutes cold and the native run's hour and three quarters are not the JIT:
+they are the reservation. With 0.00 GB left after the raise, WDDM pages the card's memory
+through system memory - the user watched the 12 GB card report 12.6 - and V210 measured the
+same paging at 10x on the 3070. The warm run's proton gate was stopped by hand after its first
+minute rather than paid again; nothing about it was in question.
+
+**WHAT THE SECOND CARD IS WORTH (gate ba62s2, 2026-11-15, the same native binaries, each card made
+the only visible one, the second of two runs read).** The photon gate through `b1_gpu_sched`,
+which never raises the stack, and a 200,000-event 1 GeV proton beam through example B1, which
+raises it:
+
+| | RTX 3070 (46 SMs) | Titan V (80 SMs) | ratio |
+|---|--:|--:|--:|
+| photons, 2M B1 events | 793 ms, 2.52e6 events/s, 3.29e7 track-steps/s | 360 ms, 5.56e6 events/s, 7.24e7 track-steps/s | 2.2 |
+| protons, 1 GeV, 200k events | 174 s, 1,150 events/s, 64,175 track-steps/s | 100 s, 2,000 events/s, 111,631 track-steps/s | 1.74 |
+| the raise on that beam | 0.00 GB of 8.00 left | 0.00 GB of 12.00 left | |
+
+The first run of each pair was within 1% of the second on both cards. The photon ratio is
+somewhat above the SM ratio of 1.74 - the Titan V's HBM2 against the 3070's GDDR6 on a kernel
+that reads tables - and the hadron ratio is the SM ratio exactly, so the beam that raises the
+stack is not paging on either card at this batch: the 3070 also reports 0.00 GB left after its
+raise (5.1 GB asked of what the pools left of 8), and the proton depth-dose gate that did page on
+the Titan V is a larger configuration, not a different kernel. The hadron rate on the Titan V,
+2,000 1 GeV protons a second through the full B1 geometry, is the number P23a's and P26's beams
+will be run against.
+
+**A FRESH CLONE (ba63, 2026-11-15).** `git clone --branch integ/titan` of this repository into an empty
+`D:\g4gpu_fresh` (99 MB, 86 of them `.git`), then README's four commands and nothing else, with
+`G4GPU_DATA_DIR` naming the Geant4 install's dataset folder (gate ba63, `out\lead\gate_ba63.bat`):
+
+| stage | what it did | time | exit |
+|---|---|--:|--:|
+| `setupenv.bat` | found both cards (the two pairs above) and VS 2019 through vswhere | 1.5 s | 0 |
+| `build_engine.bat` | the 25 units at both targets: the seven interaction units one at a time (2 h 00), the GenericIon unit alone, the rest in parallel | 2 h 43 min | 0 |
+| `examples\B1\build.bat` | the viewer archive, then the example's sources at both targets | 8 min 25 s | 0 |
+| `exampleB1.exe -n 100000` | 100,000 6 MeV photons on the RTX 3070 | 2.3 s | 0 |
+
+The run printed `4.26961 nanoGy rms = 38.8839 picoGy` - scaled, 426.961 +/- 3.888 pGy against
+Geant4's 427.385 +/- 0.87, -0.42 pGy = 0.11 sigma - at 798,593 events/s; the tree in `D:\g4gpu`,
+asked the same command the same minute, printed every line the same except the two timings. The
+clone after the build is 1,002,372,387 bytes: `out\` 573 MB (every unit's object at two targets
+and the library), `examples\B1` 290 MB, `.git` 86 MB. Nothing untracked in `D:\g4gpu` was
+load-bearing, which is what the gate was for.
+
+Two false starts were the gate's wrapper and not the clone, recorded because a script of the
+same shape will meet them: the session's harness sets `NoDefaultCurrentDirectoryInExePath=1`,
+under which cmd does not find a bare `setupenv.bat` in the current directory (a user's own cmd
+has no such variable, and README's bare commands are right for it; the wrapper calls the clone's
+scripts by explicit path); and `vcvars64.bat` starts Visual Studio's telemetry in the background,
+which inherits a redirected log handle and holds it for some seconds after the call returns, so
+every later line that reopened the log failed with "being used by another process" -
+`VSCMD_SKIP_SENDTELEMETRY=1` before the call stops it, and the gate's wrappers set it now.
+
+
+**WHAT STAYS AS IT IS.** The default is the detected cards' SASS with the PTX beside it. Native
+code for the cards a machine has, since a card used for routine beams would otherwise re-JIT
+every new set of binaries; the PTX for the card it does not have, at 25 minutes once. Dual on
+this machine costs every full gate about an hour and a half more of ptxas, which is the price of
+the Titan V being a first-class card here. The `ref/`
+scripts that regenerate the oracle still carry this machine's Geant4 install path, which is a
+prerequisite the README states rather than hides; the port itself reads no such path.
