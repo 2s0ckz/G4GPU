@@ -15886,3 +15886,5 @@ electron beam - the beam the brief named - can make none, in Geant4 or here: zer
 Wiring it is the lepto-nuclear drain taking an `ftf::entry` slot (P11d's contract; the drain's frame
 was 4,096 bytes at ba61, V237) and a beam above 10 GeV to campaign it against; neither is in P26.
 What books it today: the host test's 30 GeV electron, 9 of 200 interactions; no B1 beam.
+
+**V247 ADDENDUM.** GPU: `tests/test_ion_transport.cu` PASS (0 failures) and `tests/test_step_hadron.cu` PASSED on this branch's stepper; `run_step_hadron`'s frame is 4,224 bytes in the GenericIon and alpha units, unchanged. The sweep rows (He3, deuteron, alpha 840 and 4000 MeV) were not taken - docs/B1_SWEEP.md's P26 section says why and what is owed.

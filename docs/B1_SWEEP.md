@@ -621,3 +621,33 @@ of kinetic energy), which would LOWER its dose - so whatever puts the excess in 
 **proton_1000 is unchanged within its band**: +0.38%, +0.8 sigma against the sweep's own EM-only
 number, which Geant4 reproduces here to the digit. The B1 gamma gate (exampleB1 -n 2000000) reads
 1.19 sigma and b1_gpu_sched 1.0007; the proton depth-dose comparison is OK.
+## P26: the photon on G4GammaGeneralProcess's own tables, and the ion's CorrectionsAlongStep
+
+**The 6 MeV gamma gate**, 2,000,000 events at the default seed and `/random/setSeeds 1..4`, one
+build, `G4GPU_GAMMA_GENERAL_TABLES=0` (P1's models and P21's table 9 - the pre-P26 photon,
+V223's column to every printed digit) against the default (the general process's own tables,
+docs/RISK.md V246):
+
+| seed | models, pGy | tables, pGy | tables - models |
+|--:|--:|--:|--:|
+| default | 425.921 | 426.028 | +0.107 |
+| 1 | 426.125 | 426.201 | +0.076 |
+| 2 | 426.944 | 427.261 | +0.317 |
+| 3 | 427.535 | 427.657 | +0.122 |
+| 4 | 427.510 | 427.590 | +0.080 |
+
++0.140 +/- 0.045 pGy (+0.033%), towards Geant4's 427.385 +/- 0.870: 1.1915 sigma at the default
+seed before, 1.1045 after. V225's scratch read of the totals alone measured +0.153 +/- 0.013.
+
+**The ion's correction** (`G4VEmModel::CorrectionsAlongStep` under `isIon`, V247) acts on He3 and
+real nuclei only, never on the alpha or deuteron primaries - so the alpha_840, alpha_4000 and
+deuteron rows can move through it only by their He3 and GenericIon fragments' last steps.
+
+**THE HADRON SWEEP ROWS WERE NOT TAKEN.** Two attempts, both on this branch's engine: at the default
+`G4GPU_HADRONIC_STAGE` (stage 1, not the sweep's configuration) He3 3000 MeV read 561.163 nGy and the
+deuteron 244.618, not comparable with V232's final-stage column; with `G4GPU_HADRONIC_STAGE=final` all
+four beams (He3, deuteron, alpha 4000, alpha 840) stopped at `transport_run_impl.cuh:1476` with CUDA out
+of memory on the 3070, which had 3.9 GB in use by other processes at the time (the automatic batch
+sized 1,714,256 events against 5.90 GB free). The lead's gate then held the GPU for the rest of the
+session. Owed: the four rows against V232's QBBC column (600.455, 279.007, 664.032, 4.93621 uGy),
+at the sweep's configuration, on a free card.
