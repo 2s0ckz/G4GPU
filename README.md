@@ -247,7 +247,7 @@ resolution. Machine-precision figures are quoted as they are printed.
 |---|---|---|---|
 | `G4KleinNishinaCompton` | Compton cross section | `test_vs_oracle` | < 1e-6 |
 | `G4KleinNishinaCompton::SampleSecondaries` | Compton final state | `test_vs_oracle` | < 1e-6 |
-| `G4PairProductionRelModel` | pair production, cross section and final state, with LPM | `test_vs_oracle` | < 1e-6 |
+| `G4PairProductionRelModel` | pair production, cross section and final state, with LPM; above 30 GeV the cross section is Geant4's integral with the pair model's own LPM functions since P26 (RISK V246) | `test_vs_oracle`, `test_gamma_general_tables` | < 1e-6; 6e-16 at every node to 100 TeV |
 | `G4LivermorePhotoElectricModel` | photoelectric, EPICS2017 data | `test_photoelectric` | < 1e-6 (21,022 points) |
 | `G4SauterGavrilaAngularDistribution` | photoelectron direction | `test_photoelectric` | < 1e-6 |
 | `G4LivermoreRayleighModel` | Rayleigh cross section, EPICS2017 | `test_rayleigh` | < 1e-6 (3,400 points) |
@@ -356,7 +356,9 @@ second card: every unit compiled for the cards present with the compute_70 PTX b
 Titan V's gate to the 3070's digit, what its stack reservation and the JIT path cost, and a fresh
 clone built and run from this file's four commands, and V240-V244 for the strange species on
 tracks: two group kernels, a Bertini hyperon that was a neutron, the derived species' splined
-tables, and the two 10 GeV beams.
+tables, and the two 10 GeV beams, and V245-V249 for the EM remainders: the photon on the general
+process's own tables, conversion's rate past 30 GeV, the ion's along-step correction, GetA27, and
+the lepton models' FTF arm refused by name.
 
 #### Tables, materials and framework
 
@@ -428,11 +430,11 @@ closed - the same question has the mechanism.
 | Bertini's `rescatter`/`Propagate` entry (the FTFP hand-in) and `generateSCMmuonAbsorption` | what the Bertini cascade still refuses: 11 `kFate` events in 190,000, and the two entries named. K0S and K0L as projectiles run since P23b (RISK V227 reverses V139: Geant4 mixes them back to K0 or anti-K0 on a coin), and the anti-hyperon decay tables are on main | Phase 3, remaining. The cascade itself is on main ([`docs/PORTED.md`](docs/PORTED.md) 2.1.12) and P15 calls it: a nucleon or pion between 1 and 6 GeV, a kaon or hyperon below 6, and every at-rest Bertini capture |
 | the anti-nucleus arm of `PropagateNuclNucl` | what the FTF model still refuses: anti-nucleus projectiles past the string stage. The 512-track list is 832 since P24 (RISK V236, read off QBBC's own FTFP at Fe56 on Pb207 at 20 GeV per nucleon) and the ion grid runs 36,000 of 36,000 | Phase 3, nearly closed: the model runs to a final state for nucleons, pions, kaons, anti-nucleons and ions on any target with its strong resonances decayed ([`docs/PORTED.md`](docs/PORTED.md) 2.1.11b); P15 calls it; what its ion arm leaves is open question 8 |
 | the anti-nucleus hand-over behind `G4HadronicAbsorptionFritiof`, and the P6 interface refusals its anti-baryon captures meet | what `G4StoppingPhysics` still refuses: 40% and 8.3% of the Fritiof arm's calls | Phase 3, remaining. Every arm of the at-rest chain runs ([`docs/PORTED.md`](docs/PORTED.md) 2.1.13) and P15 calls it |
-| `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; everything below those energies is wired (2.1.16), and a QBBC photon never reaches QGS through its general process in any case (RISK V207) | Phase 3, remaining; QGS is not in this port |
-| `G4GammaGeneralProcess`'s own zone totals and EM fractions (`LambdaGeneral0/2/6/10`, `ProbGeneral1/3/4/7/8/11-13`) | the tables the general process reads instead of its models, which differ from them by up to 0.43% below 2 MeV and 0.93% across the giant resonance | not read: the port reads the models, and Geant4's table 9 since P21; a scratch read of the totals alone moved the B1 gate by +0.036% (RISK V225) |
+| `G4QGSModel<G4GammaParticipants>` for the photon above 3 GeV; the lepton models' FTF arm at 10 GeV and above | what `G4EmExtraPhysics` still refuses; everything below those energies is wired (2.1.16), and a QBBC photon never reaches QGS through its general process in any case (RISK V207) | Phase 3, remaining; QGS is not in this port. The lepton arm is refused by name (`kLeptoNuclearFtf`, RISK V249): the equivalent photon is strictly below the lepton's energy, so a 10 GeV lepton beam makes none, in Geant4 or here; the host test's 30 GeV electron books 9 in 200 |
+| `G4GammaGeneralProcess`'s own zone totals and EM fractions (`LambdaGeneral0/2/6/10`, `ProbGeneral1/3/4/7/8/11-13`) | the tables the general process reads instead of its models, which differ from them by up to 0.43% below 2 MeV and 0.93% across the giant resonance | **closed by P26** (RISK V246): built at upload as `BuildPhysicsTable` builds them, every node of every table Geant4's to 6e-16, with conversion's vector past 30 GeV on Geant4's integral and LPM functions (the parameterisation was 2.28x off at the top); the photon reads them, and the B1 gate moved +0.140 +/- 0.045 pGy (+0.033%) toward Geant4 over five paired seeds; `G4GPU_GAMMA_GENERAL_TABLES=0` keeps the models |
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
-| `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | absent. It returns immediately unless a step loses ≥ 5% of the energy, so it is a correction on the long steps of a slowing ion; the recoil ions stop in one step |
-| `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead |
+| `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | **closed by P26** (RISK V247): applied in `step_hadron` for He3 and every real nucleus after the mean loss and before the fluctuations, 4,080 oracle rows to 2.05e-15, the largest correction a factor 0.605; it moves only steps that lose 5% or more, and the alpha, deuteron and triton are not `isIon` and never reach it |
+| `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | not read. An ion's `ParticleDef` reports spin 0, which is exactly right for an even-even nuclide and wrong for one with spin; the one consumer, the projectile form-factor rejection in the ion's delta-ray sampler, is refused by name instead (`kIonDeltaRay`, 3 to 25 steps a beam) above about 147 MeV per nucleon in water (RISK V248; V200's 17 GeV/u was a factor of a thousand off). P26 fixed the threshold's `GetA27`, the element's mean mass to the 0.27, which the port had as Z to the 0.27 (45% high for the alpha and He3); the spin and the rejection are P26b's |
 | `G4NuclNuclDiffuseElastic` + `G4ComponentGGNuclNuclXsc` as `ionElastic` | the ion's OWN elastic scattering | both halves are ported; the channel is not wired, so a transported ion draws no hadronic interaction length. Bounded at ~1e-9 per recoil — a micrometre of range against a metre of mean free path |
 | Penelope, PAI, Goudsmit-Saunderson, Livermore polarised, DNA, adjoint, PIXE, optical, transition radiation | alternative and specialist models | none are in QBBC's chain |
 
@@ -548,7 +550,11 @@ send every one of them somewhere else.
    -0.39%, for which the DISCRETE rates are the largest named candidate — this port draws them
    from the models rather than from `G4VEnergyLossProcess`'s lambda tables and its integral
    approach (RISK V78) — while `extremesmallstep` (RISK V62) is now EXCLUDED by measurement, at
-   one part in 240,000 of the same row (RISK V95). And the 100,000-event statistics the sweep
+   one part in 240,000 of the same row (RISK V95). P26 measured the table half (RISK V248): the
+   e+- lambda tables agree with the models to 1e-5 (eIoni) and 0.05% (eBrem) below 1 GeV, so the
+   tables are not the residual and the integral approach is the remaining candidate; above 1 GeV
+   `G4EmCalculator`'s own model column is unstable - 7% apart in one run - so nothing is claimed
+   there. And the 100,000-event statistics the sweep
    uses for this beam are not enough for either side: Geant4's own reference moves 2.3 sigma of
    its own quoted rms between 100,000 and 1,000,000 events, because the dose a 1 GeV shower puts
    in that trapezoid is heavy-tailed. **Closed by P14d**: a lepton fired through a VACUUM used to
