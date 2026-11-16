@@ -160,6 +160,22 @@ template <typename real_t> __host__ __device__ inline Projectile<real_t> alpha()
   return {1000020040, data::alpha_mass_c2<real_t>(), real_t(2), 4, 0};
 }
 
+/// P23c: the four light anti-nuclei `G4HadParticles::GetLightAntiIons()` lists, each from its
+/// G4Anti*.cc - the same `x*GeV` mass as its particle (1.875613, 2.808921, 2.808391, 3.727379),
+/// the opposite charge, and baryon number -2, -3, -3, -4. The PDG code is the particle's negated.
+template <typename real_t> __host__ __device__ inline Projectile<real_t> anti_deuteron() {
+  return {-1000010020, data::deuteron_mass_c2<real_t>(), real_t(-1), -2, 0};
+}
+template <typename real_t> __host__ __device__ inline Projectile<real_t> anti_triton() {
+  return {-1000010030, data::triton_mass_c2<real_t>(), real_t(-1), -3, 0};
+}
+template <typename real_t> __host__ __device__ inline Projectile<real_t> anti_he3() {
+  return {-1000020030, data::he3_mass_c2<real_t>(), real_t(-2), -3, 0};
+}
+template <typename real_t> __host__ __device__ inline Projectile<real_t> anti_alpha() {
+  return {-1000020040, data::alpha_mass_c2<real_t>(), real_t(-2), -4, 0};
+}
+
 /// An arbitrary ion, as G4IonTable builds it: the PDG code is 10LZZZAAAI with L = I = 0, the
 /// charge is Z, the baryon number A, and the mass is G4IonTable::GetNucleusMass, which is
 /// G4NucleiProperties::GetNuclearMass(A, Z) except for the six light ions it answers from the

@@ -52,6 +52,13 @@ enum class XsRefusal : int {
   /// the projectile's baryon number straight into `pTkin = kinEnergy/pA`, which for an
   /// anti-deuteron is a division by -2. Geant4 avoids that by never calling it; this port
   /// refuses instead of returning the number that comes out.
+  ///
+  /// P23c: THE FIRST SENTENCE ABOVE WAS WRONG and the component is ported. QBBC DOES register
+  /// "AntiAGlauber": `G4HadronElasticPhysics` for the hadElastic and `BuildAntiLightIonsFTFP` for
+  /// the inelastic process of pbar, nbar and the four light anti-ions
+  /// (`xs/anti_nucl_nuclear_xs.cuh`, held to Geant4 by tests/test_anti_nucleon.cu). What this
+  /// value still means is the second half: an anti-nucleus handed to the WRONG component (the
+  /// GG nucleus-nucleus one), or a projectile that is not one of the six handed to the right one.
   kComponentAntiNuclNuclearXS,
   /// G4IsotopeList.hh `aeff[]` indexed past its 95th entry. G4NeutronElasticXS's
   /// ComputeIsoCrossSection is `ElementCrossSection(...)*A/aeff[Z]` at the UNCLAMPED Z, so for
