@@ -117,7 +117,18 @@ enum class ParticleType : int {
   kAntiXiZero = 37,
   kAntiXiMinus = 38,
   kAntiOmegaMinus = 39,
-  kNumTypes = 40
+  // P23c - the anti-nucleon family QBBC transports: `G4HadParticles::GetLightAntiIons()` less the
+  // antiproton, which has been a row since P1. The anti-neutron is a daughter of the anti-lambda
+  // (and through it anti_sigma0 and anti_xi0) and an FTFP product; the four anti-nuclei are FTFP
+  // products, and `G4GeneratorPrecompoundInterface::PropagateNuclNucl`'s anti-nucleus arm makes
+  // them out of an anti-nucleus projectile's residual. Transported by the two P23a group kernels
+  // (`is_strange_neutral_track` takes the anti-neutron, `is_strange_charged_track` the four).
+  kAntiNeutron = 40,
+  kAntiDeuteron = 41,
+  kAntiTriton = 42,
+  kAntiHe3 = 43,
+  kAntiAlpha = 44,
+  kNumTypes = 45
 };
 
 /// Static properties the EM models need: PDG mass, charge and spin.
@@ -340,6 +351,35 @@ __host__ __device__ inline ParticleDef<real_t> particle_def(ParticleType t) {
       // written; it enters only squared here.
       return {real_t(1672.45), real_t(1), real_t(1.5), false, false, false,
               real_t(-2.02 * 1672.45 / 938.272013 * (-2.02 * 1672.45 / 938.272013) - 1)};
+    // P23c. Each from its own G4Anti*.cc: the particle's `x*GeV` mass, the opposite charge, the
+    // same 2*spin, and the magnetic moment that file sets (in nuclear magnetons, against the
+    // proton's magneton, as for the particle rows above). anti_alpha sets none, and its spin is
+    // zero - which is what sends `hadron_base_particle` to the KAON- rule for it (G4hIonisation's
+    // `GetPDGSpin() == 0.0` branch), where the other three take the anti-proton.
+    case ParticleType::kAntiNeutron:
+      // G4AntiNeutron.cc: neutron_mass_c2, 2*spin = 1, moment +1.9130427 mN.
+      return {units::neutron_mass_c2<real_t>(), real_t(0), real_t(0.5), false, false, false,
+              real_t(1.9130427 * 939.56536 / 938.272013
+                     * (1.9130427 * 939.56536 / 938.272013) - 1)};
+    case ParticleType::kAntiDeuteron:
+      // G4AntiDeuteron.cc: `1.875613*GeV`, -eplus, 2*spin = 2, moment -0.857438230 mN.
+      return {real_t(1875.613), real_t(-1), real_t(1), false, false, false,
+              real_t(-0.857438230 * 1875.613 / 938.272013
+                     * (-0.857438230 * 1875.613 / 938.272013) - 1)};
+    case ParticleType::kAntiTriton:
+      // G4AntiTriton.cc: `2.808921*GeV`, -eplus, 2*spin = 1, moment -2.97896248 mN.
+      return {real_t(2808.921), real_t(-1), real_t(0.5), false, false, false,
+              real_t(-2.97896248 * 2808.921 / 938.272013
+                     * (-2.97896248 * 2808.921 / 938.272013) - 1)};
+    case ParticleType::kAntiHe3:
+      // G4AntiHe3.cc: `2.808391*GeV`, -2 eplus, 2*spin = 1, moment +2.12762485 mN. is_ion is
+      // FALSE: G4BetheBlochModel's isIon is `charge > eplus`, and -2 is not.
+      return {real_t(2808.391), real_t(-2), real_t(0.5), false, false, false,
+              real_t(2.12762485 * 2808.391 / 938.272013
+                     * (2.12762485 * 2808.391 / 938.272013) - 1)};
+    case ParticleType::kAntiAlpha:
+      // G4AntiAlpha.cc: `3.727379*GeV`, -2 eplus, 2*spin = 0, no moment.
+      return {real_t(3727.379), real_t(-2), real_t(0), false, false, false, real_t(-1)};
     case ParticleType::kNumTypes:
       break;
   }
@@ -410,6 +450,11 @@ __host__ __device__ inline const char* particle_name(ParticleType t) {
     case ParticleType::kAntiXiZero: return "anti_xi0";
     case ParticleType::kAntiXiMinus: return "anti_xi-";
     case ParticleType::kAntiOmegaMinus: return "anti_omega-";
+    case ParticleType::kAntiNeutron: return "anti_neutron";
+    case ParticleType::kAntiDeuteron: return "anti_deuteron";
+    case ParticleType::kAntiTriton: return "anti_triton";
+    case ParticleType::kAntiHe3: return "anti_He3";
+    case ParticleType::kAntiAlpha: return "anti_alpha";
     default: return "?";
   }
 }
@@ -470,6 +515,11 @@ __host__ __device__ inline int pdg_code(ParticleType t) {
     case ParticleType::kAntiXiZero: return -3322;
     case ParticleType::kAntiXiMinus: return -3312;
     case ParticleType::kAntiOmegaMinus: return -3334;
+    case ParticleType::kAntiNeutron: return -2112;
+    case ParticleType::kAntiDeuteron: return -1000010020;
+    case ParticleType::kAntiTriton: return -1000010030;
+    case ParticleType::kAntiHe3: return -1000020030;
+    case ParticleType::kAntiAlpha: return -1000020040;
     case ParticleType::kNumTypes: break;
   }
   return 0;
@@ -557,6 +607,11 @@ __host__ __device__ inline ParticleType particle_type_of_pdg(int pdg) {
     case -3322: return ParticleType::kAntiXiZero;
     case -3312: return ParticleType::kAntiXiMinus;
     case -3334: return ParticleType::kAntiOmegaMinus;
+    case -2112: return ParticleType::kAntiNeutron;
+    case -1000010020: return ParticleType::kAntiDeuteron;
+    case -1000010030: return ParticleType::kAntiTriton;
+    case -1000020030: return ParticleType::kAntiHe3;
+    case -1000020040: return ParticleType::kAntiAlpha;
     default: break;
   }
   return ParticleType::kNumTypes;
@@ -605,6 +660,17 @@ __host__ __device__ inline bool is_neutral_hadron(ParticleType t) {
   return t == ParticleType::kNeutron || t == ParticleType::kPiZero;
 }
 
+/// P23c: the four light anti-nuclei. `G4HadParticles::sHeavyChargedPart` lists them right after
+/// the eight charged hyperons, so `G4EmBuilder::ConstructCharged` gives them the SAME
+/// `ConstructBasicEmPhysics` - the shared "ionmsc" (Urban) and a G4hIonisation, nothing else -
+/// and the charged strange group kernel steps them (docs/RISK.md V250's unit note). Their
+/// hadronic rows are the anti-proton's: AntiAGlauber for hadElastic and the inelastic, FTFP at
+/// every energy, Fritiof at rest.
+__host__ __device__ inline bool is_light_anti_ion(ParticleType t) {
+  return t == ParticleType::kAntiDeuteron || t == ParticleType::kAntiTriton
+         || t == ParticleType::kAntiHe3 || t == ParticleType::kAntiAlpha;
+}
+
 /// P23a: the eight CHARGED strange baryons QBBC transports - sigma+, sigma-, xi-, omega- and
 /// the four charged anti-hyperons - which are exactly the hyperon half of
 /// `G4HadParticles::sHeavyChargedPart` (G4HadParticles.cc), the list
@@ -621,7 +687,8 @@ __host__ __device__ inline bool is_strange_charged_track(ParticleType t) {
   return t == ParticleType::kSigmaPlus || t == ParticleType::kSigmaMinus
          || t == ParticleType::kXiMinus || t == ParticleType::kOmegaMinus
          || t == ParticleType::kAntiSigmaPlus || t == ParticleType::kAntiSigmaMinus
-         || t == ParticleType::kAntiXiMinus || t == ParticleType::kAntiOmegaMinus;
+         || t == ParticleType::kAntiXiMinus || t == ParticleType::kAntiOmegaMinus
+         || is_light_anti_ion(t);
 }
 
 /// P23a: the eight NEUTRAL strange species QBBC transports - K0S, K0L, lambda, sigma0, xi0 and
@@ -633,7 +700,10 @@ __host__ __device__ inline bool is_strange_neutral_track(ParticleType t) {
   return t == ParticleType::kKaonZeroShort || t == ParticleType::kKaonZeroLong
          || t == ParticleType::kLambda || t == ParticleType::kSigmaZero
          || t == ParticleType::kXiZero || t == ParticleType::kAntiLambda
-         || t == ParticleType::kAntiSigmaZero || t == ParticleType::kAntiXiZero;
+         || t == ParticleType::kAntiSigmaZero || t == ParticleType::kAntiXiZero
+         // P23c: the anti-neutron - Transportation, Decay (880.2 s), hadElastic and
+         // anti_neutronInelastic on AntiAGlauber, Fritiof at rest - is the same shape of step.
+         || t == ParticleType::kAntiNeutron;
 }
 
 /// Is G4ionIonisation the ionisation process Geant4 registers for this species, rather than

@@ -1,4 +1,7 @@
-// P23a: the sixteen strange species QBBC transports, as TRACKS.
+// P23a: the sixteen strange species QBBC transports, as TRACKS - and since P23c the anti-neutron
+// and the four light anti-nuclei, which the same two group kernels step (21 species). Their
+// model windows come from anti_scope.csv (ref/dump/dump_anti_nucleon.cc), in strange_scope.csv's
+// layout, and every other section reads the same files the sixteen do.
 //
 // What a stepping kernel needs of a species, held against what the constructed QBBC gives it.
 // Eight sections, and each is a different kind of claim:
@@ -121,7 +124,7 @@ struct BalanceEmitter {
   int last_secondary = -1;
   const StepReport<real_t>* report = nullptr;
   had::HadronicRefusalBooks books{};
-  int charge = 0, baryon = 0, n = 0;
+  int charge = 0, baryon = 0, n = 0, n_antineutron = 0;
   double etot = 0;
   ParticleType last = ParticleType::kNumTypes;
   __host__ __device__ int push(ParticleType t, const Vec3<real_t>&, real_t ekin, int,
@@ -129,6 +132,7 @@ struct BalanceEmitter {
     ++child_count;
     ++n;
     last = t;
+    if (t == ParticleType::kAntiNeutron) { ++n_antineutron; }
     charge += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
     baryon += had::baryon_number_of(t, ion_a_of(za));
     etot += static_cast<double>(ekin) + (particle_def<real_t>(t).mass > 0
@@ -189,7 +193,9 @@ int main() {
                + (g4 ? "yes" : "no"));
         }
       };
-      check("Decay", had::decays_in_flight(pt), decay);
+      // anti_triton carries G4Decay (17.774 years is a lifetime) and is flagged STABLE, so
+      // DecayIt is a no-op and the port draws no length - the triton's own case (P23c).
+      check("Decay", had::decays_in_flight(pt), decay && pt != ParticleType::kAntiTriton);
       check("hadElastic", had::elastic_channel_has_xs(had::elastic_channel(pt)), el);
       check("Inelastic", had::inelastic_channel_has_xs(had::inelastic_channel(pt)), inel);
       check("an at-rest capture", had::has_at_rest_arm(pt), bert_rest || ftf_rest);
@@ -198,14 +204,17 @@ int main() {
                   bert_rest ? "Bertini" : (ftf_rest ? "Fritiof" : "-"));
     }
     ++g_compared;
-    if (n_species != 16) { fail("expected 16 strange species, found " + std::to_string(n_species)); }
+    if (n_species != 21) { fail("expected 21 group species, found " + std::to_string(n_species)); }
   }
 
   // ======================================================================== 2. model windows
   std::printf("\n== 2. the inelastic models and their windows, against strange_scope.csv ==\n");
   {
-    const auto rows = load_csv(dir + "/strange_scope.csv");
+    auto rows = load_csv(dir + "/strange_scope.csv");
     if (rows.empty()) { fail("cannot read strange_scope.csv"); }
+    const auto anti_rows = load_csv(dir + "/anti_scope.csv");
+    if (anti_rows.empty()) { fail("cannot read anti_scope.csv - run the anti_nucleon dump"); }
+    rows.insert(rows.end(), anti_rows.begin(), anti_rows.end());
     // species -> the (model, emin, emax) rows of its <name>Inelastic process, in file order.
     struct M { std::string model; double lo, hi; };
     std::map<std::string, std::vector<M>> g4;
@@ -468,13 +477,12 @@ int main() {
                                       ? (at_rest ? pd.mass : static_cast<double>(p.ekin) + pd.mass)
                                       : e_parent;
               if (at_rest) { ++rest_decays; } else { ++decays; }
-              // An anti-neutron daughter is BOOKED, by name, with its kinetic energy - the
-              // one product the ledger carries instead of a track (P23c's species). Its baryon
-              // number and rest mass go back into the sum here, exactly.
-              const int an = ref_n[kAn] - an_n0;
-              an_seen += an;
-              em.baryon -= an;
-              em.etot += (ref_e[kAn] - an_e0) + an * units::neutron_mass_c2<double>();
+              // P23c: an anti-neutron daughter is a TRACK now, pushed like any product and
+              // balanced by `push` itself; the named row it was booked under until then must
+              // stay at zero (asserted below).
+              (void)an_n0;
+              (void)an_e0;
+              an_seen += em.n_antineutron;
               const bool ok_q = (em.charge == q_parent), ok_b = (em.baryon == b_parent);
               const double de = std::fabs(em.etot - e_in) / e_in;
               if (de > worst_e) { worst_e = de; }
@@ -497,10 +505,15 @@ int main() {
     std::printf("  %lld steps: %lld decays in flight, %lld at rest, %lld elastic scatters, %lld "
                 "interactions queued; %lld decays out of balance, worst energy %.2e\n",
                 steps, decays, rest_decays, elastic, queued_n, bad, worst_e);
-    std::printf("  %lld anti-neutron daughters booked by name (kAntiNeutronSecondary) and "
-                "balanced back in\n", an_seen);
+    std::printf("  %lld anti-neutron daughters pushed as tracks; kAntiNeutronSecondary booked %d "
+                "times\n", an_seen,
+                ref_n[static_cast<int>(had::HadronicRefusal::kAntiNeutronSecondary)]);
+    ++g_compared;
+    if (ref_n[static_cast<int>(had::HadronicRefusal::kAntiNeutronSecondary)] > 0) {
+      fail("an anti-neutron was booked by name - it has a ParticleType since P23c");
+    }
     g_compared += 4;
-    if (an_seen == 0) { fail("no anti-neutron daughter was met - the named row is untested"); }
+    if (an_seen == 0) { fail("no anti-neutron daughter was met - the track is untested"); }
     if (bad > 0) { fail(std::to_string(bad) + " decays do not conserve charge, baryon number or energy"); }
     if (decays == 0 || rest_decays == 0 || elastic == 0 || queued_n == 0) {
       fail("a branch was never reached - the conservation check is vacuous for it");

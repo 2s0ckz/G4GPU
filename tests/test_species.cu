@@ -357,8 +357,10 @@ int main() {
       if (sp >= 0 && species_index_is_group(sp)) { ++n_group_members; }
     }
     ++compared;
-    if (n_group_members != 16) {
-      std::printf("  FAIL %d species in the strange groups, expected 16\n", n_group_members);
+    // P23c: 21 - the sixteen strange species, the anti-neutron in the neutral group and the four
+    // light anti-nuclei in the charged one.
+    if (n_group_members != 21) {
+      std::printf("  FAIL %d species in the group kernels, expected 21\n", n_group_members);
       ++fails;
     }
     ++compared;

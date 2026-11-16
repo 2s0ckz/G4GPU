@@ -117,7 +117,16 @@ struct WoundedNucleus {
 /// What the interface refused or had to report.
 struct GeneratorRefusal {
   bool short_lived_track = false;   ///< G4DecayKineticTracks would have run
-  bool anti_nucleus = false;        ///< the ProjectileIsAntiNucleus branches
+  /// The ProjectileIsAntiNucleus branches. Written since P23c, so nothing sets this any more;
+  /// kept so the enumeration of reasons stays what it was.
+  bool anti_nucleus = false;
+  /// P23c: an anti-nucleus projectile's residual that is not one of the six species Geant4's
+  /// re-typing gives an antiparticle row (pbar, nbar, anti-d, anti-t, anti-He3, anti-alpha).
+  /// Geant4 de-excites the residual first (Fermi break-up for these A <= 4 fragments) and
+  /// re-types the PRODUCTS; this port's FTF hand-over emits its residuals undecayed (the open
+  /// difference of docs/RISK.md V236), and an unbound anti-(Z, A) such as (0, 2) has no species
+  /// to be emitted as - so it is refused by name, with `refused_z`/`refused_a`.
+  bool anti_residual_unbound = false;
   bool hyper_nucleus = false;       ///< aLb > 0
   bool dropped_residual = false;    ///< Propagate's `anA >= aZ` with no else
   bool missing_primary = false;     ///< the QGS branch needs GetPrimaryProjectile()
@@ -125,7 +134,8 @@ struct GeneratorRefusal {
   int refused_z = 0, refused_a = 0;
 
   __host__ __device__ bool any() const {
-    return short_lived_track || anti_nucleus || hyper_nucleus || dropped_residual ||
+    return short_lived_track || anti_nucleus || anti_residual_unbound || hyper_nucleus ||
+           dropped_residual ||
            missing_primary || capacity;
   }
 };
@@ -389,12 +399,34 @@ __host__ __device__ inline int make_coalescence(const CascadeTrack* in, int n_in
 // PropagateNuclNucl
 // ---------------------------------------------------------------------------------------------
 
+/// P23c: PropagateNuclNucl's `if(ProjectileIsAntiNucleus)` re-typing of the projectile residual's
+/// de-excitation products - proton, neutron, lambda, deuteron, triton, He3 and He4 become
+/// anti_proton, anti_neutron, anti_lambda, anti_deuteron, anti_triton, anti_He3 and anti_alpha by
+/// `SetDefinitionAndUpdateE`, and ANYTHING ELSE KEEPS ITS DEFINITION (a gamma, or a matter
+/// nucleus the source has no anti row for, stays what it is: `LastFragment = aFragment`). The
+/// anti-hypernucleus rows need `aLb > 0`, which this port refuses before here. Returns the PDG
+/// code the product leaves with; (Z, A) are the product's as the de-excitation made it, with
+/// A = 0 for a non-nuclear product.
+__host__ __device__ inline int propagate_nucl_nucl_anti_species(int pdg, int z, int a) {
+  if (pdg == 2212 || (z == 1 && a == 1)) { return -2212; }
+  if (pdg == 2112 || (z == 0 && a == 1)) { return -2112; }
+  if (pdg == 3122) { return -3122; }
+  if (z == 1 && a == 2) { return -1000010020; }
+  if (z == 1 && a == 3) { return -1000010030; }
+  if (z == 2 && a == 3) { return -1000020030; }
+  if (z == 2 && a == 4) { return -1000020040; }
+  return pdg;
+}
+
 /// Both residuals PropagateNuclNucl builds. The projectile one is de-excited in ITS OWN rest
 /// frame and the products boosted back, which the target one is not.
 struct NuclNuclResiduals {
   CascadeResidual target;
   CascadeResidual projectile;
   Vec3d projectile_boost_to_cm{0.0, 0.0, 0.0};  ///< findBoostToCM of the projectile residual
+  /// P23c: the projectile was an anti-nucleus, so the projectile residual's de-excitation
+  /// products become their antiparticles (`propagate_nucl_nucl_anti_species`).
+  bool projectile_is_anti = false;
 };
 
 /// G4GeneratorPrecompoundInterface::PropagateNuclNucl, the nucleus-on-nucleus form, up to but
@@ -435,10 +467,23 @@ propagate_nucl_nucl_residuals(const CascadeTrack* tracks, int n_tracks,
   NuclNuclResiduals out;
   n_escaped = 0;
 
-  if (primary_baryon_number < -1) {
-    ref.anti_nucleus = true;
-    return out;
-  }
+  // `ProjectileIsAntiNucleus = GetPrimaryProjectile()->GetDefinition()->GetBaryonNumber() < -1`.
+  // P23c writes its arm; until then it was refused here by name (`GeneratorRefusal::anti_nucleus`,
+  // docs/RISK.md V117). Four things change for an anti-nucleus, each transcribed where it falls:
+  //   1. the projectile's hit loop counts `aZb += G4int(q/eplus - 0.1)` on the ANTI-nucleon's
+  //      charge - -1 for an anti-proton, 0 for an anti-neutron - which is `aZb -= hit.charge` on
+  //      the matter nucleon this port builds the projectile from (V117), as for a nucleus;
+  //   2. any track that is not p, n, pbar or nbar escapes before a single deviate is drawn (the
+  //      first `if` of the loop, whose `&& ProjectileIsAntiNucleus` makes it dead for a nucleus);
+  //   3. only pbar and nbar can be captured by the projectile, and p and n only by the target -
+  //      so at most one capture test draws, and the coin flip below can never be reached;
+  //   4. a captured anti-nucleon adds `G4int(q/eplus + 0.1)` negated to the charge, and for an
+  //      anti-proton that is `G4int(-0.9)` = 0: the source's truncation toward zero leaves the
+  //      projectile residual's Z unchanged by a captured anti-PROTON. Transcribed as it stands.
+  // The residual is then a MATTER (Z, A) to de-excite and the caller turns its products into
+  // their antiparticles (`propagate_nucl_nucl_anti_species`).
+  const bool anti = (primary_baryon_number < -1);
+  out.projectile_is_anti = anti;
   if (target.lambdas != 0 || projectile.lambdas != 0) {
     ref.hyper_nucleus = true;
     return out;
@@ -492,6 +537,49 @@ propagate_nucl_nucl_residuals(const CascadeTrack* tracks, int n_tracks,
   for (int i = 0; i < n_tracks; ++i) {
     const CascadeTrack& t = tracks[i];
     const bool is_nucleon = (t.pdg == 2212 || t.pdg == 2112);
+    const bool is_anti_nucleon = (t.pdg == -2212 || t.pdg == -2112);
+    if (anti && !is_nucleon && !is_anti_nucleon) {
+      if (n_escaped >= escaped_capacity) { ref.capacity = true; return out; }
+      escaped[n_escaped++] = t;
+      continue;
+    }
+    if (anti) {
+      const double tmag_a = t.momentum.mag();
+      bool by_target_a = false;
+      if (is_nucleon && exist_target_remnant) {
+        const double add = (t.momentum + target4).mag() - tmag_a - target4.mag();
+        by_target_a = (-capture_threshold() * std::log(rng.uniform()) > add) &&
+                      (g4gpu::mag(t.position) < R);
+      }
+      LorentzVector pos4a(t.position, t.formation_time);
+      pos4a.boost(bst);
+      bool by_projectile_a = false;
+      if (is_anti_nucleon && exist_projectile_remnant) {
+        const double add = (t.momentum + projectile4).mag() - tmag_a - projectile4.mag();
+        by_projectile_a = (-capture_threshold() * std::log(rng.uniform()) > add) &&
+                          (g4gpu::mag(pos4a.v) < Rb);
+      }
+      if (by_target_a) {
+        ++anA;
+        ++n_ex;
+        // `G4int Z = G4int(part->GetPDGCharge()/eplus + 0.1)` - 1 or 0 for a nucleon.
+        aZ += t.charge;
+        n_ch += t.charge;
+        target4 += t.momentum;
+      } else if (by_projectile_a) {
+        ++anAb;
+        ++n_exB;
+        // `G4int(q + 0.1)` for q = -1 or 0, then negated: 0 either way (note 4 above).
+        const int zc = -static_cast<int>(static_cast<double>(t.charge) + 0.1);
+        aZb += zc;
+        n_chB += zc;
+        projectile4 += t.momentum;
+      } else {
+        if (n_escaped >= escaped_capacity) { ref.capacity = true; return out; }
+        escaped[n_escaped++] = t;
+      }
+      continue;
+    }
     if (!is_nucleon) {
       if (n_escaped >= escaped_capacity) { ref.capacity = true; return out; }
       escaped[n_escaped++] = t;

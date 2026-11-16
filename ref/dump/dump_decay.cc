@@ -124,8 +124,11 @@ const char* const kSpecies[] = {
     "etac", "J/psi", "Upsilon", "eta",
     "sigma_c++", "sigma_c+", "sigma_c0", "sigma_b+", "sigma_b0", "sigma_b-",
     "anti_sigma_c++", "anti_sigma_c+", "anti_sigma_c0", "anti_sigma_b+", "anti_sigma_b0",
-    "anti_sigma_b-"};
-constexpr int kNumSpecies = 70;
+    "anti_sigma_b-",
+    // P23c, appended last so every earlier species keeps its seed: G4AntiNeutron.cc's
+    // G4NeutronBetaDecayChannel("anti_neutron") - e+, nu_e, anti_proton.
+    "anti_neutron"};
+constexpr int kNumSpecies = 71;
 
 G4ParticleDefinition* find(const char* name) {
   return G4ParticleTable::GetParticleTable()->FindParticle(G4String(name));

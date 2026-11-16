@@ -246,7 +246,8 @@ int main() {
       // The triton is the one row where the port says no and Geant4's vector says Decay: it is
       // flagged stable, so DecayIt is a no-op. Handled by name in the expectation rather than
       // by widening the rule, because it IS a difference and it has a reason.
-      const bool stable_noop = (t == ParticleType::kTriton);
+      // P23c: anti_triton too - G4AntiTriton.cc flags it stable with 17.774 years, as the triton.
+      const bool stable_noop = (t == ParticleType::kTriton || t == ParticleType::kAntiTriton);
       if (got_stage1 != (want_stage1 && !stable_noop)) {
         std::printf("  FAIL: %s stage1 at-rest decay %d, expected %d (has Decay %d)\n",
                     kv.second.c_str(), int(got_stage1), int(want_stage1 && !stable_noop),

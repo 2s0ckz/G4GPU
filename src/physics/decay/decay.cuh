@@ -324,14 +324,16 @@ __host__ __device__ inline AtRestCompetitor decay_at_rest_competitor(int pdg) {
       return AtRestCompetitor::kHadronicAbsorptionBertini;
     case kPdgMuMinus:
       return AtRestCompetitor::kMuonMinusCapture;
-    // G4StoppingPhysics' Fritiof list, less the anti-proton and the anti-neutron (no decay table
-    // here) and the anti-nuclei: the four anti-hyperons with charge <= 0 that it NAMES. The
+    // G4StoppingPhysics' Fritiof list, less the anti-proton (stable, no G4Decay) and the anti-nuclei
+    // (stable or decay-less): the four anti-hyperons with charge <= 0 that it NAMES, and since P23c
+    // the anti-neutron, whose decay table (880.2 s, e+ nu_e pbar) is written now. The
     // anti-sigma-, anti-xi- and anti-omega- carry charge +1 and get nothing, as a K+ does.
     // Measured, not read: decay_atrest.csv puts hFritiofCaptureAtRest first on exactly these.
     case kPdgAntiLambda:
     case kPdgAntiSigmaZero:
     case kPdgAntiSigmaPlus:
     case kPdgAntiXiZero:
+    case kPdgAntiNeutron:
       return AtRestCompetitor::kHadronicAbsorptionFritiof;
     default:
       return AtRestCompetitor::kNone;

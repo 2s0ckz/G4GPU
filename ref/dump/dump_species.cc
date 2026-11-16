@@ -104,6 +104,12 @@ static void dump_species(const DumpContext&) {
       G4ParticleTable::GetParticleTable()->FindParticle(-3322),
       G4ParticleTable::GetParticleTable()->FindParticle(-3312),
       G4ParticleTable::GetParticleTable()->FindParticle(-3334),
+      // P23c: the anti-neutron and the four light anti-nuclei, in core/particle.cuh's order.
+      G4ParticleTable::GetParticleTable()->FindParticle(-2112),
+      G4ParticleTable::GetParticleTable()->FindParticle(-1000010020),
+      G4ParticleTable::GetParticleTable()->FindParticle(-1000010030),
+      G4ParticleTable::GetParticleTable()->FindParticle(-1000020030),
+      G4ParticleTable::GetParticleTable()->FindParticle(-1000020040),
   };
 
   FILE* f = std::fopen("species_tables.csv", "w");

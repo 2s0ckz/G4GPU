@@ -66,9 +66,13 @@ double electron_cut(const G4Material* m) {
   return 0.99e-3 * MeV;
 }
 
-const int kCharged[] = {3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334};
+// P23c appends the anti-neutron and the four light anti-nuclei, which the same two group kernels
+// step: the anti-ions get the same ConstructBasicEmPhysics as the eight charged hyperons.
+const int kCharged[] = {3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334,
+                        -1000010020, -1000010030, -1000020030, -1000020040};
 const int kAll[] = {310, 130, 3122, 3212, 3322, -3122, -3212, -3322,
-                    3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334};
+                    3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334,
+                    -2112, -1000010020, -1000010030, -1000020030, -1000020040};
 
 void dump_tables(const DumpContext& ctx) {
   FILE* f = std::fopen("strange_hadron_tables.csv", "w");

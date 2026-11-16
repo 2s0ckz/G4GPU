@@ -94,16 +94,14 @@
 //               `G4BinaryCascade::Propagate` the nucleon arm runs. What `Propagate` itself
 //               refuses is `BlirRefusal::cascade` and `kLightIonCascade` in the ledger.
 //
-//   THE ANTI-NUCLEON ROW HAS NO CROSS SECTION AT ALL, and that is a P2 refusal rather than a
-//   P15 one. `BuildAntiLightIonsFTFP` passes `xsName = "AntiAGlauber"`, which
+//   THE ANTI-NUCLEON ROW. `BuildAntiLightIonsFTFP` passes `xsName = "AntiAGlauber"`, which
 //   `G4HadProcesses::InelasticXS` turns into
 //   `G4CrossSectionInelastic(new G4ComponentAntiNuclNuclearXS())` - the same component
-//   `elastic_wiring.cuh` records as refused for the antiproton's `hadElastic`. So an
-//   antiproton in this transport draws no inelastic interaction length either, and the gap is
-//   structurally zero for the reason `HadronicRefusal::kAntiNucleusElastic`'s comment gives at
-//   length: a cross section that is absent is not an interaction that could not be applied,
-//   and booking it per step would count chances. The FINAL STATE for a stopped antiproton is a
-//   different matter and P15 does wire it - see `stopping::at_rest`'s Fritiof arm.
+//   `elastic_wiring.cuh` uses for the `hadElastic` of the same six species. Until P23c that
+//   component was a P2 refusal and an antiproton drew no inelastic interaction length at all
+//   (structurally zero, `HadronicRefusal::kAntiNucleusInelastic`); P23c ports it
+//   (`xs/anti_nucl_nuclear_xs.cuh`), so pbar, nbar and the four light anti-ions now interact
+//   in flight through FTFP at every energy.
 //
 // ---------------------------------------------------------------------------------------------
 // WHAT IS UPLOADED
@@ -132,6 +130,7 @@
 #include "physics/hadronic/xs/bgg_pion_xs.cuh"
 #include "physics/hadronic/xs/gg_hadron_nucleus_xsc.cuh"
 #include "physics/hadronic/xs/gg_nucl_nucl_xsc.cuh"
+#include "physics/hadronic/xs/anti_nucl_nuclear_xs.cuh"
 #include "physics/hadronic/xs/particlexs.cuh"
 #include "physics/hadronic/xs/sample_za.cuh"
 
@@ -183,10 +182,10 @@ enum class InelasticChannel : int {
   kBggPion,            ///< pi+, pi- - G4BGGPionInelasticXS
   kGgHadronNucleus,    ///< K+, K-, hyperons - G4CrossSectionInelastic(G4ComponentGGHadronNucleusXsc)
   kGgNuclNucl,         ///< GenericIon - G4CrossSectionInelastic(G4ComponentGGNuclNuclXsc)
-  /// pbar, nbar, anti-hyperons, anti-light-ions - `G4CrossSectionInelastic(
-  /// G4ComponentAntiNuclNuclearXS)`, which P2 refuses by name in `xs/refusal.cuh`. The same
-  /// component and the same refusal as `ElasticChannel::kAntiNucleusRefused`.
-  kAntiNucleusRefused,
+  /// pbar, nbar and the four light anti-ions - `G4CrossSectionInelastic(
+  /// G4ComponentAntiNuclNuclearXS)` (`xs/anti_nucl_nuclear_xs.cuh`), the same component as
+  /// `ElasticChannel::kAntiNucleus`. Refused by name (`kAntiNucleusRefused`) until P23c.
+  kAntiNucleus,
 };
 
 __host__ __device__ inline InelasticChannel inelastic_channel(ParticleType t) {
@@ -223,7 +222,14 @@ __host__ __device__ inline InelasticChannel inelastic_channel(ParticleType t) {
     case ParticleType::kAntiXiMinus:
     case ParticleType::kAntiOmegaMinus: return InelasticChannel::kGgHadronNucleus;
     case ParticleType::kGenericIon: return InelasticChannel::kGgNuclNucl;
-    case ParticleType::kAntiProton: return InelasticChannel::kAntiNucleusRefused;
+    // P23c: `G4HadronicBuilder::BuildAntiLightIonsFTFP` passes "AntiAGlauber" for all six of
+    // `G4HadParticles::GetLightAntiIons()`.
+    case ParticleType::kAntiProton:
+    case ParticleType::kAntiNeutron:
+    case ParticleType::kAntiDeuteron:
+    case ParticleType::kAntiTriton:
+    case ParticleType::kAntiHe3:
+    case ParticleType::kAntiAlpha:  return InelasticChannel::kAntiNucleus;
     default:                        return InelasticChannel::kNone;
   }
 }
@@ -261,17 +267,16 @@ __host__ __device__ inline const char* inelastic_channel_name(InelasticChannel c
       return "G4CrossSectionInelastic(G4ComponentGGHadronNucleusXsc)";
     case InelasticChannel::kGgNuclNucl:
       return "G4CrossSectionInelastic(G4ComponentGGNuclNuclXsc)";
-    case InelasticChannel::kAntiNucleusRefused:
-      return "G4CrossSectionInelastic(G4ComponentAntiNuclNuclearXS) - refused by name (P2)";
+    case InelasticChannel::kAntiNucleus:
+      return "G4CrossSectionInelastic(G4ComponentAntiNuclNuclearXS)";
   }
   return "unknown";
 }
 
-/// Does this channel have a cross section this port can evaluate? Two answers collapse to "no"
-/// and they are different statements - see `elastic_channel_has_xs`, which says the same thing
-/// about the same two kinds of gap.
+/// Does this channel have a cross section this port can evaluate? Since P23c only `kNone` says
+/// no: the anti-nucleus row, the other gap this used to merge, has its component.
 __host__ __device__ inline bool inelastic_channel_has_xs(InelasticChannel c) {
-  return c != InelasticChannel::kNone && c != InelasticChannel::kAntiNucleusRefused;
+  return c != InelasticChannel::kNone;
 }
 
 // =============================================================================================
@@ -379,6 +384,12 @@ __host__ __device__ inline InelasticModelList<real_t> inelastic_models(ParticleT
     // window at all, which is Geant4's behaviour and is why this row cannot be got wrong by
     // getting the window wrong - only by registering a second model that is not there.
     case ParticleType::kAntiProton:
+    // P23c: the other five of `GetLightAntiIons()` through the same builder call.
+    case ParticleType::kAntiNeutron:
+    case ParticleType::kAntiDeuteron:
+    case ParticleType::kAntiTriton:
+    case ParticleType::kAntiHe3:
+    case ParticleType::kAntiAlpha:
       add(InelasticModel::kFtfp, real_t(0), hadronic_max_energy<real_t>());
       return L;
     // G4IonPhysics: the light-ion reaction FIRST, then FTFP.
@@ -527,6 +538,11 @@ __host__ __device__ inline hxs::Projectile<real_t> inelastic_projectile(Particle
     case ParticleType::kProton:     return hxs::proton<real_t>();
     case ParticleType::kNeutron:    return hxs::neutron<real_t>();
     case ParticleType::kAntiProton: return hxs::anti_proton<real_t>();
+    case ParticleType::kAntiNeutron: return hxs::anti_neutron<real_t>();
+    case ParticleType::kAntiDeuteron: return hxs::anti_deuteron<real_t>();
+    case ParticleType::kAntiTriton: return hxs::anti_triton<real_t>();
+    case ParticleType::kAntiHe3: return hxs::anti_he3<real_t>();
+    case ParticleType::kAntiAlpha: return hxs::anti_alpha<real_t>();
     case ParticleType::kPionPlus:   return hxs::pi_plus<real_t>();
     case ParticleType::kPionMinus:  return hxs::pi_minus<real_t>();
     case ParticleType::kKaonPlus:   return hxs::kaon_plus<real_t>();
@@ -588,8 +604,10 @@ struct InelasticXsFn {
         return hxs::ggh_inelastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case InelasticChannel::kGgNuclNucl:
         return hxs::ggnn_inelastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
+      case InelasticChannel::kAntiNucleus:
+        // G4CrossSectionInelastic passes the NIST mean mass, as for the two GG rows above.
+        return hxs::anu_inelastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case InelasticChannel::kNone:
-      case InelasticChannel::kAntiNucleusRefused:
         break;
     }
     return {real_t(0), hxs::XsRefusal::kNone};
@@ -714,7 +732,7 @@ __host__ __device__ inline hxs::TargetZA inelastic_sample_target(
 template <typename real_t>
 __host__ __device__ inline hp::HadXsType inelastic_xs_type(const hxs::Projectile<real_t>& pj) {
   return hp::hadronic_xs_type<real_t>(
-      pj.pdg, pj.charge, pj.mass, (pj.baryon_number > 1) ? pj.baryon_number : 0, false, true);
+      pj.pdg, pj.charge, pj.mass, hp::xs_type_atomic_number(pj.baryon_number), false, true);
 }
 
 }  // namespace g4gpu::had

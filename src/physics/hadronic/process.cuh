@@ -809,6 +809,21 @@ __host__ __device__ inline HadXsType hadronic_xs_type(int pdg, real_t charge, re
   return (charge > real_t(0)) ? HadXsType::kIncreasing : HadXsType::kDecreasing;
 }
 
+/// What `G4ParticleDefinition::GetAtomicNumber()` answers for `hadronic_xs_type`'s `ok` test,
+/// as far as that test reads it (zero or not), from the projectile's baryon number.
+///
+/// P23c: an ANTI-nucleus is not zero. `G4Ions`' constructor sets `SetAtomicNumber(|Z|)` for
+/// anti_deuteron, anti_triton, anti_He3 and anti_alpha ("AtomicNumber/Mass is positive even for
+/// anti_nulceus", G4Ions.cc:96), so their hadElastic and inelastic processes take the integral
+/// approach (`fHadDecreasing`, charge < 0) although every one is heavier than 1 GeV. Reading
+/// `baryon_number > 1` alone, as both callers did, gave them `fHadNoIntegral`. Nothing with a
+/// baryon number below -1 was transported before P23c, so no existing species moves.
+__host__ __device__ inline int xs_type_atomic_number(int baryon_number) {
+  if (baryon_number > 1) { return baryon_number; }
+  if (baryon_number < -1) { return -baryon_number; }
+  return 0;
+}
+
 /// The integral-approach rejection at the top of PostStepDoIt.
 ///
 /// The mean free path was sampled with the cross section at the START of the step, which for a

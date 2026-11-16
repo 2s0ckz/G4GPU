@@ -297,9 +297,8 @@ __host__ __device__ inline const ParticleRow* particle_rows() {
     // G4AntiProton.cc: proton_mass_c2, 0.0*MeV, stable, lifetime -1.0.
     {kPdgAntiProton, 938.272013, 0.0, -1.0, true, "anti_proton"},
     // G4AntiNeutron.cc: neutron_mass_c2, 7.478e-28*GeV, 880.2*second - the neutron's numbers.
-    // A daughter of the anti-lambda, the anti-sigma+ and the anti-sigma-. Its OWN table (a
-    // G4NeutronBetaDecayChannel on "anti_neutron") is the anti-light-ion package's, P23c, and
-    // is refused by name below until it lands.
+    // A daughter of the anti-lambda, the anti-sigma+ and the anti-sigma-. Its own table, a
+    // G4NeutronBetaDecayChannel on "anti_neutron", is channel 98 (P23c).
     {kPdgAntiNeutron, 939.56536, 7.478e-28 * gev(), 880.2 * second(), false, "anti_neutron"},
     // The seven anti-hyperons, each from its G4Anti*.cc, with its particle's numbers.
     {kPdgAntiLambda, 1.115683 * gev(), 2.501e-12 * mev(), 0.2631 * nanosecond(), false,
@@ -473,7 +472,7 @@ struct DecayTableRow {
 
 /// Every channel, grouped by parent, each group in G4DecayTable::Insert's descending-BR
 /// order. The comment on each row is the line in the Geant4 definition file it came from.
-constexpr int kNumChannels = 98;   // 19, the eleven hyperon channels P10c added, P23b's 68
+constexpr int kNumChannels = 99;   // 19, the eleven hyperon channels P10c added, P23b's 68, P23c's 1
 
 __host__ __device__ inline const ChannelRow* channel_rows() {
   static const ChannelRow v[kNumChannels] = {
@@ -692,13 +691,18 @@ __host__ __device__ inline const ChannelRow* channel_rows() {
     {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgAntiLambdab, kPdgPiMinus, 0}, 0.0, 0.0},
     {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgAntiLambdab, kPdgPiZero, 0}, 0.0, 0.0},
     {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgAntiLambdab, kPdgPiPlus, 0}, 0.0, 0.0},
+    // ---- anti_neutron (P23c), channel 98: G4AntiNeutron.cc's
+    //   G4VDecayChannel* mode = new G4NeutronBetaDecayChannel("anti_neutron",1.00);
+    // whose constructor's "anti_neutron" branch sets the daughters to e+, nu_e, anti_proton in
+    // that order (G4NeutronBetaDecayChannel.cc:62-69) - the neutron's three, charge-conjugated.
+    {ChannelKind::kNeutronBeta, 1.00, 3, {kPdgPositron, kPdgNuE, kPdgAntiProton}, 0.0, 0.0},
   };
   return v;
 }
 
 /// The parents, and where each one's channels start. Order here is irrelevant to the physics
 /// (the lookup is by PDG code); the channel order WITHIN a group is not.
-constexpr int kNumTables = 70;   // 8, the seven hyperons P10c added, and P23b's 55
+constexpr int kNumTables = 71;   // 8, the seven hyperons P10c added, P23b's 55, P23c's 1
 
 __host__ __device__ inline const DecayTableRow* table_rows() {
   static const DecayTableRow v[kNumTables] = {
@@ -734,6 +738,8 @@ __host__ __device__ inline const DecayTableRow* table_rows() {
       {kPdgSigmabPlus, 89, 1},         {kPdgSigmabZero, 90, 1},     {kPdgSigmabMinus, 91, 1},
       {kPdgAntiSigmacPlusPlus, 92, 1}, {kPdgAntiSigmacPlus, 93, 1}, {kPdgAntiSigmacZero, 94, 1},
       {kPdgAntiSigmabPlus, 95, 1},     {kPdgAntiSigmabZero, 96, 1}, {kPdgAntiSigmabMinus, 97, 1},
+      // P23c: the anti-neutron, channel 98.
+      {kPdgAntiNeutron, 98, 1},
   };
   return v;
 }
@@ -766,9 +772,6 @@ __host__ __device__ inline const char* decay_refusal_reason(int pdg) {
       return "K0/anti-K0: G4KaonZero's table is two ONE-BODY channels into K0L and K0S; no "
              "generator in QBBC emits a K0 (G4KineticTrack and Bertini both mix it first) - "
              "refused";
-    case -2112:
-      return "anti_neutron: G4NeutronBetaDecayChannel(\"anti_neutron\") - the anti-light-ion "
-             "package's (P23c), refused here; 880 s against an annihilation length of cm";
     case 331:
       return "eta_prime: two of its five G4PhaseSpaceDecayChannels have a rho0 or an omega "
              "daughter, wide enough for G4VDecayChannel::DynamicalMass, which is not ported";

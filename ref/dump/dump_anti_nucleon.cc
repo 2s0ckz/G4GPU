@@ -14,6 +14,8 @@
 //                         per point - pbar on C12 and Pb208 at 300 MeV, 1 GeV and 10 GeV, plus
 //                         anti-d and anti-alpha on C12 at 1 GeV/n - one LCG stream per point: the
 //                         lab cos(theta) histogram (50 bins), the draw count, and sum t.
+//   anti_scope.csv        strange_scope.csv's rows for the six: every process on each manager
+//                         and every hadronic model with its window (test_strange_tracks).
 //
 // THE ENGINE is dump_bertini.cc's LcgEngine - Knuth's MMIX LCG, top 53 bits - so the port replays
 // the same uniforms (tests/test_anti_nucleon.cu) and every sample is compared one for one.
@@ -30,7 +32,13 @@
 #include "G4Element.hh"
 #include "G4HadFinalState.hh"
 #include "G4HadProjectile.hh"
+#include "G4DecayTable.hh"
+#include "G4HadronicInteraction.hh"
+#include "G4HadronicProcess.hh"
 #include "G4HadronicProcessStore.hh"
+#include "G4ProcessManager.hh"
+#include "G4ProcessVector.hh"
+#include "G4VProcess.hh"
 #include "G4Material.hh"
 #include "G4NistManager.hh"
 #include "G4Nucleus.hh"
@@ -222,7 +230,53 @@ void dump_elastic(const DumpContext&) {
   CLHEP::HepRandom::setTheEngine(saved);
 }
 
+/// strange_scope.csv's layout (dump_strange.cc) for the six anti species, so test_strange_tracks
+/// reads them with the same parser: every registered process and, for a hadronic one, every
+/// model with its window. `bertini_applicable` is -1 - not asked; no anti row registers Bertini.
+void dump_scope() {
+  FILE* f = std::fopen("anti_scope.csv", "w");
+  std::fprintf(f, "species,pdg,mass_MeV,width_MeV,lifetime_ns,stable,shortlived,charge,baryon,"
+                  "n_decay_channels,bertini_applicable,process,process_type,process_subtype,"
+                  "atrest_index,model,emin_MeV,emax_MeV\n");
+  for (int pdg : kSpecies) {
+    G4ParticleDefinition* p = find_pdg(pdg);
+    const G4DecayTable* dt = p->GetDecayTable();
+    char head[512];
+    std::snprintf(head, sizeof head, "%s,%d,%.17g,%.17g,%.17g,%d,%d,%.17g,%d,%d,%d",
+                  p->GetParticleName().c_str(), pdg, p->GetPDGMass() / MeV,
+                  p->GetPDGWidth() / MeV, p->GetPDGLifeTime() / ns, p->GetPDGStable() ? 1 : 0,
+                  p->IsShortLived() ? 1 : 0, p->GetPDGCharge() / eplus, p->GetBaryonNumber(),
+                  (dt != nullptr) ? dt->entries() : 0, -1);
+    G4ProcessManager* pm = p->GetProcessManager();
+    G4ProcessVector* all = pm->GetProcessList();
+    G4ProcessVector* rest = pm->GetAtRestProcessVector();
+    for (G4int i = 0; i < (G4int)all->size(); ++i) {
+      G4VProcess* pr = (*all)[i];
+      int atrest = -1;
+      if (rest != nullptr) {
+        for (G4int k = 0; k < (G4int)rest->size(); ++k) {
+          if ((*rest)[k] == pr) { atrest = k; }
+        }
+      }
+      G4HadronicProcess* hp = dynamic_cast<G4HadronicProcess*>(pr);
+      if (hp == nullptr || hp->GetHadronicInteractionList().empty()) {
+        std::fprintf(f, "%s,%s,%d,%d,%d,(none),0,0\n", head, pr->GetProcessName().c_str(),
+                     (int)pr->GetProcessType(), pr->GetProcessSubType(), atrest);
+        continue;
+      }
+      for (const G4HadronicInteraction* m : hp->GetHadronicInteractionList()) {
+        std::fprintf(f, "%s,%s,%d,%d,%d,%s,%.17g,%.17g\n", head, pr->GetProcessName().c_str(),
+                     (int)pr->GetProcessType(), pr->GetProcessSubType(), atrest,
+                     m->GetModelName().c_str(), m->GetMinEnergy() / MeV,
+                     m->GetMaxEnergy() / MeV);
+      }
+    }
+  }
+  std::fclose(f);
+}
+
 void dump_anti_nucleon(const DumpContext& ctx) {
+  dump_scope();
   dump_xs(ctx);
   dump_elastic(ctx);
 }
@@ -230,5 +284,6 @@ void dump_anti_nucleon(const DumpContext& ctx) {
 }  // namespace
 
 G4GPU_REGISTER_DUMP("anti_nucleon",
-                    "anti_xs.csv anti_xs_volume.csv anti_elastic.csv anti_elastic_hist.csv",
+                    "anti_xs.csv anti_xs_volume.csv anti_elastic.csv anti_elastic_hist.csv "
+                    "anti_scope.csv",
                     dump_anti_nucleon);

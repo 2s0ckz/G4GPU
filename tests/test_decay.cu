@@ -817,7 +817,7 @@ int main(int argc, char** argv) {
       // seven anti-hyperons came off it when P23b gave them theirs. What stays is the strong
       // K0 pair, the tau, and two daughters P23b's tables made reachable without tabulating:
       // the anti-neutron (P23c's) and the eta' (its rho0 and omega need DynamicalMass).
-      const int named[] = {311, -311, -2112, 331, 15, -15};
+      const int named[] = {311, -311, 331, 15, -15};  // -2112 left with P23c: it has a table
       for (int pdg : named) {
         const char* why = decay_refusal_reason(pdg);
         require(std::strcmp(why, generic) != 0,
@@ -1645,7 +1645,7 @@ int main(int argc, char** argv) {
     // one unmixed), the anti-neutron and the eta' - daughters of P23b's tables whose own tables
     // are not here - and the tau. The two daughters are the point of listing: a table that
     // makes a species nothing can decay must say so where the decay would have happened.
-    const int refused[] = {311, -311, -2112, 331, -15, 999999};
+    const int refused[] = {311, -311, 331, -15, 999999};  // P23c tabulated -2112
     DecayProducts<real_t> out;
     const real_t dir[3] = {0, 0, 1};
     for (int pdg : refused) {

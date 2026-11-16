@@ -36,12 +36,13 @@
 //    `G4IonElasticPhysics`' model for GenericIon, a different constructor and a different
 //    process (named `"ionElastic"`, not `"hadElastic"`). P8c transports the ion and did NOT
 //    wire that channel; see `ElasticChannel::kIonDiffuseNotWired`, which is the row.
-//  * pbar HAS A PORTED MODEL AND NO PORTED CROSS SECTION. `lhep2` (a `G4HadronElastic` capped
-//    at 100.1 MeV) covers it below 100 MeV, but the data set is
-//    `G4ComponentAntiNuclNuclearXS`, which P2 refuses by name, and above 100 MeV the model is
-//    `G4AntiNuclElastic`, which P5 did not start. So the antiproton has NO elastic scattering
-//    here and it is booked as `HadronicRefusal::kAntiNucleusElastic`, which is the counter
-//    wiring.cuh already reserved for it.
+//  * pbar, nbar AND THE FOUR LIGHT ANTI-NUCLEI SHARE ONE ROW (P23c). The data set is
+//    `G4ComponentAntiNuclNuclearXS` (`xs/anti_nucl_nuclear_xs.cuh`) and TWO models are registered
+//    on the one process: `lhep2`, a `G4HadronElastic` capped at 100.1 MeV, and `anuc`,
+//    `G4AntiNuclElastic` from 100 MeV (`elastic/anti_nucl_elastic.cuh`). So the model is chosen
+//    per scatter by `G4EnergyRangeManager` - per nucleon for an anti-nucleus - with one uniform
+//    drawn in the 100-100.1 MeV overlap. Until P23c the component was refused by name and the
+//    antiproton had no elastic scattering at all (`HadronicRefusal::kAntiNucleusElastic`).
 //
 // And one thing about the cross sections that decides the target draw: none of these four data
 // sets overrides `G4VCrossSectionDataSet::SelectIsotope`. The BGG classes' IsElementApplicable
@@ -74,11 +75,13 @@
 #include "physics/hadronic/elastic/elastic_hadr_nucleus_he.cuh"
 #include "physics/hadronic/elastic/elastic_process.cuh"
 #include "physics/hadronic/elastic/hadron_elastic.cuh"
+#include "physics/hadronic/elastic/anti_nucl_elastic.cuh"
 #include "physics/hadronic/process.cuh"
 #include "physics/hadronic/xs/bgg_nucleon_xs.cuh"
 #include "physics/hadronic/xs/bgg_pion_xs.cuh"
 #include "physics/hadronic/xs/gg_hadron_nucleus_xsc.cuh"
 #include "physics/hadronic/xs/gg_nucl_nucl_xsc.cuh"
+#include "physics/hadronic/xs/anti_nucl_nuclear_xs.cuh"
 #include "physics/hadronic/xs/sample_za.cuh"
 
 namespace g4gpu::had {
@@ -96,9 +99,10 @@ enum class ElasticChannel : int {
   kHePion,            ///< pi+- - G4BGGPionElasticXS + G4ElasticHadrNucleusHE
   kGheishaKaon,       ///< K+- - GG hadron-nucleus + G4HadronElastic
   kGheishaLightIon,   ///< d, t, He3, alpha - GG nucl-nucl + G4HadronElastic
-  /// pbar - the cross section (G4ComponentAntiNuclNuclearXS) is refused by P2 and the
-  /// high-energy model (G4AntiNuclElastic) is not written. Booked, not approximated.
-  kAntiNucleusRefused,
+  /// pbar, nbar, anti-d, anti-t, anti-He3, anti-alpha: G4ComponentAntiNuclNuclearXS +
+  /// G4HadronElastic below 100.1 MeV per nucleon and G4AntiNuclElastic from 100 MeV (P23c).
+  /// It was `kAntiNucleusRefused` until P23c, when P2 refused the cross section by name.
+  kAntiNucleus,
   /// GenericIon - `G4IonElasticPhysics::ConstructProcess` gives it a process named
   /// `"ionElastic"`, `G4CrossSectionElastic(G4ComponentGGNuclNuclXsc)` with `SetMinKinEnergy(0)`
   /// and `G4NuclNuclDiffuseElastic` with `SetMinEnergy(0)`, registered straight onto
@@ -157,7 +161,12 @@ __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
     case ParticleType::kTriton:
     case ParticleType::kHe3:
     case ParticleType::kAlpha:      return ElasticChannel::kGheishaLightIon;
-    case ParticleType::kAntiProton: return ElasticChannel::kAntiNucleusRefused;
+    case ParticleType::kAntiProton:
+    case ParticleType::kAntiNeutron:
+    case ParticleType::kAntiDeuteron:
+    case ParticleType::kAntiTriton:
+    case ParticleType::kAntiHe3:
+    case ParticleType::kAntiAlpha:  return ElasticChannel::kAntiNucleus;
     case ParticleType::kGenericIon: return ElasticChannel::kIonDiffuseNotWired;
     default:                        return ElasticChannel::kNone;
   }
@@ -174,8 +183,9 @@ __host__ __device__ inline const char* elastic_channel_name(ElasticChannel c) {
       return "G4CrossSectionElastic(G4ComponentGGHadronNucleusXsc) + G4HadronElastic";
     case ElasticChannel::kGheishaLightIon:
       return "G4CrossSectionElastic(G4ComponentGGNuclNuclXsc) + G4HadronElastic";
-    case ElasticChannel::kAntiNucleusRefused:
-      return "G4ComponentAntiNuclNuclearXS + G4AntiNuclElastic - refused by name";
+    case ElasticChannel::kAntiNucleus:
+      return "G4CrossSectionElastic(G4ComponentAntiNuclNuclearXS) + G4HadronElastic (< 100.1 MeV) "
+             "/ G4AntiNuclElastic (>= 100 MeV)";
     case ElasticChannel::kIonDiffuseNotWired:
       return "ionElastic: G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic - both ported, "
              "this channel not wired";
@@ -185,18 +195,17 @@ __host__ __device__ inline const char* elastic_channel_name(ElasticChannel c) {
 
 /// Does this channel have a cross section this port can evaluate?
 ///
-/// Three answers collapse to "no" and they are three different statements, which is why the
-/// enum keeps them apart and only this predicate merges them: `kNone` is a species Geant4 gives
-/// no elastic process to at all, `kAntiNucleusRefused` is a process whose data set P2 refuses,
-/// and `kIonDiffuseNotWired` is a process whose data set and model are both ported and whose
-/// channel nobody has written. All three mean the same thing to `elastic_xs_per_volume` - zero,
+/// Two answers collapse to "no" and they are two different statements, which is why the
+/// enum keeps them apart and only this predicate merges them (a third, the anti-nucleus row
+/// whose data set P2 refused, was retired by P23c): `kNone` is a species Geant4 gives
+/// no elastic process to at all, and `kIonDiffuseNotWired` is a process whose data set and model are both ported and whose
+/// channel nobody has written. Both mean the same thing to `elastic_xs_per_volume` - zero,
 /// and therefore an infinite interaction length and no uniform drawn - and `elastic_apply` must
-/// refuse all three for the reason its own guard gives (a zero `MaterialXs` makes
+/// refuse both for the reason its own guard gives (a zero `MaterialXs` makes
 /// `store_sample_za_rng` hand element 0 to the sampler on `cross <= cumulative[0]`, both sides
 /// zero, and the sampler is happy to scatter a muon off hydrogen).
 __host__ __device__ inline bool elastic_channel_has_xs(ElasticChannel c) {
-  return c != ElasticChannel::kNone && c != ElasticChannel::kAntiNucleusRefused
-         && c != ElasticChannel::kIonDiffuseNotWired;
+  return c != ElasticChannel::kNone && c != ElasticChannel::kIonDiffuseNotWired;
 }
 
 /// `G4ElasticHadrNucleusHE`'s table rows this port builds: pi+ at index 0 and pi- at 1, which
@@ -235,6 +244,11 @@ __host__ __device__ inline hxs::Projectile<real_t> elastic_projectile(ParticleTy
     case ParticleType::kProton:     return hxs::proton<real_t>();
     case ParticleType::kNeutron:    return hxs::neutron<real_t>();
     case ParticleType::kAntiProton: return hxs::anti_proton<real_t>();
+    case ParticleType::kAntiNeutron: return hxs::anti_neutron<real_t>();
+    case ParticleType::kAntiDeuteron: return hxs::anti_deuteron<real_t>();
+    case ParticleType::kAntiTriton: return hxs::anti_triton<real_t>();
+    case ParticleType::kAntiHe3: return hxs::anti_he3<real_t>();
+    case ParticleType::kAntiAlpha: return hxs::anti_alpha<real_t>();
     case ParticleType::kPionPlus:   return hxs::pi_plus<real_t>();
     case ParticleType::kPionMinus:  return hxs::pi_minus<real_t>();
     case ParticleType::kKaonPlus:   return hxs::kaon_plus<real_t>();
@@ -280,8 +294,10 @@ struct ElasticXsFn {
         return hxs::ggh_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kGheishaLightIon:
         return hxs::ggnn_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
+      case ElasticChannel::kAntiNucleus:
+        // G4CrossSectionElastic passes the NIST mean mass here too, as for the kaon row.
+        return hxs::anu_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kNone:
-      case ElasticChannel::kAntiNucleusRefused:
       case ElasticChannel::kIonDiffuseNotWired:
         break;
     }
@@ -442,7 +458,7 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
   // charged case would select an element by the cross sections at an energy the track no
   // longer has, and nothing would complain.
   const hp::HadXsType xt = hp::hadronic_xs_type<real_t>(
-      pj.pdg, pj.charge, pj.mass, (pj.baryon_number > 1) ? pj.baryon_number : 0, false, true);
+      pj.pdg, pj.charge, pj.mass, hp::xs_type_atomic_number(pj.baryon_number), false, true);
   hxs::MaterialXs<real_t> now = mxs;
   real_t xs_now = xs_at_step_start;
   if (xt != hp::HadXsType::kNoIntegral) {
@@ -482,6 +498,24 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
   const real_t h_mass = pd.mass;
   auto apply = [&](const hp::HadProjectile<real_t>& p, const hp::HadNucleus& n, real_t thr,
                    Rng& r, hp::HadFinalState<real_t, 1>* o) {
+    // P23c: the anti-nucleus row registers TWO models on one process - `lhep2`, G4HadronElastic
+    // with SetMaxEnergy(100.1 MeV), then `anuc`, G4AntiNuclElastic with SetMinEnergy(100 MeV) -
+    // so `G4HadronElasticProcess::PostStepDoIt` calls `ChooseHadronicInteraction` AFTER
+    // SampleZandA and before ApplyYourself, which is here. `G4EnergyRangeManager` compares the
+    // kinetic energy per nucleon for |B| > 1 and draws one uniform in the 100-100.1 MeV overlap.
+    bool use_anuc = false;
+    if (c == ElasticChannel::kAntiNucleus) {
+      hp::ModelRange<real_t> mr[2];
+      mr[0].min_energy = real_t(0);
+      mr[0].max_energy = real_t(100.1);
+      mr[0].applicable = true;
+      mr[1].min_energy = real_t(100);
+      mr[1].max_energy = real_t(1e8);
+      mr[1].applicable = true;
+      const hp::ModelSelection sel = hp::choose_hadronic_interaction<real_t>(
+          mr, 2, p.kin_energy, p.baryon_number, r);
+      use_anuc = (sel.status == hp::ModelChoice::kOk && sel.index == 1);
+    }
     auto sampler = [&](int pdg, real_t plab, int z, int a, real_t p_local_tmax,
                        Rng& rr) -> real_t {
       if (c == ElasticChannel::kChipsNucleon) {
@@ -515,6 +549,7 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
         }
         return tt;
       }
+      if (use_anuc) { return el::anuc_sample_invariant_t<real_t>(pdg, plab, z, a, rr); }
       return el::hadron_elastic_sample_invariant_t<real_t>(pdg, plab, z, a, p_local_tmax, rr);
     };
     (void)el::hadron_elastic_apply_yourself<real_t, 1>(p, n, sampler, nuclear_mass,

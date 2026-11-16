@@ -228,7 +228,11 @@ enum class HadronicRefusal : int {
   kStoppedAntiProton,
   /// An antinucleus's elastic scattering: `G4ComponentAntiNuclNuclearXS` (refused by name in
   /// P2's `xs/refusal.cuh`) and `G4AntiNuclElastic` (not started in P5). The antiproton
-  /// therefore has NO hadronic process at all in this transport.
+  /// therefore had NO hadronic process at all in this transport until P23c.
+  ///
+  /// RETIRED BY P23c (docs/RISK.md V251-V252): both halves are ported and
+  /// `elastic_channel(kAntiProton)` is `kAntiNucleus`. Nothing books it; the row stays because
+  /// the enumeration is a storage format (append-only). The history below is what it was for.
   ///
   /// STRUCTURALLY ZERO, and it stays that way now that every other charged hadron has an
   /// elastic process. `had::elastic_channel(kAntiProton)` is `kAntiNucleusRefused` and
@@ -419,6 +423,8 @@ enum class HadronicRefusal : int {
   /// so an antiproton draws no inelastic interaction length at all. The gap is in the CROSS
   /// SECTION and not in a final state that could not be applied - the MODEL runs, as P12b's
   /// at-rest campaign shows - and booking it per step would count chances.
+  /// RETIRED BY P23c: the component is ported and the six anti species interact in flight
+  /// through FTFP (`inelastic_channel` answers `kAntiNucleus`). Nothing books it.
   kAntiNucleusInelastic,
   /// A stopped negative hadron's at-rest capture that produced no final state:
   /// `stopping::at_rest` came back with a `StoppingRefusal`. The chain's own reasons are
@@ -554,9 +560,11 @@ __host__ __device__ inline const char* hadronic_refusal_name(HadronicRefusal r) 
       return "stopped mu- capture and bound decay (G4MuonMinusCapture / "
              "G4MuonMinusBoundDecay; P12)";
     case HadronicRefusal::kStoppedAntiProton:
-      return "stopped antiproton annihilation (G4HadronicAbsorptionFritiof; P12)";
+      return "stopped antiproton/anti-neutron/anti-nucleus annihilation "
+             "(G4HadronicAbsorptionFritiof) not run";
     case HadronicRefusal::kAntiNucleusElastic:
-      return "antinucleus elastic (G4ComponentAntiNuclNuclearXS + G4AntiNuclElastic)";
+      return "antinucleus elastic (retired by P23c: the component and G4AntiNuclElastic are "
+             "ported; structurally zero)";
     case HadronicRefusal::kDecayChannel:
       return "a decay channel P4 refused (see DecayStatus)";
     case HadronicRefusal::kCaptureOverflow:
@@ -890,6 +898,13 @@ __host__ __device__ inline HadronicRefusal stopped_refusal(ParticleType t) {
     case ParticleType::kMuonMinus:
       return HadronicRefusal::kStoppedMuonMinus;
     case ParticleType::kAntiProton:
+    // P23c: the anti-neutron and the four anti-nuclei, which `G4StoppingPhysics` gives the same
+    // `G4HadronicAbsorptionFritiof` (the anti-nuclei through its `GetBaryonNumber() < -1` arm).
+    case ParticleType::kAntiNeutron:
+    case ParticleType::kAntiDeuteron:
+    case ParticleType::kAntiTriton:
+    case ParticleType::kAntiHe3:
+    case ParticleType::kAntiAlpha:
       return HadronicRefusal::kStoppedAntiProton;
     // P23a: the four anti-hyperons it gives `G4HadronicAbsorptionFritiof`.
     case ParticleType::kAntiLambda:
@@ -899,6 +914,18 @@ __host__ __device__ inline HadronicRefusal stopped_refusal(ParticleType t) {
       return HadronicRefusal::kStoppedAntiHyperon;
     default:
       return HadronicRefusal::kNumHadronicRefusals;
+  }
+}
+
+/// P23c: |B| for the anti-neutron and the four anti-nuclei, 0 for anything else.
+__host__ __device__ inline int baryon_count_of_anti(ParticleType t) {
+  switch (t) {
+    case ParticleType::kAntiNeutron: return 1;
+    case ParticleType::kAntiDeuteron: return 2;
+    case ParticleType::kAntiTriton:
+    case ParticleType::kAntiHe3: return 3;
+    case ParticleType::kAntiAlpha: return 4;
+    default: return 0;
   }
 }
 
@@ -915,10 +942,14 @@ __host__ __device__ inline real_t stopped_refusal_energy(ParticleType t, real_t 
   const real_t m = (pd.mass > real_t(0)) ? pd.mass : real_t(0);
   // The antiproton annihilates against a nucleon, so the released energy is two rest masses.
   // So does an anti-hyperon (P23a), whose refusal row is `kStoppedAntiHyperon`.
+  // P23c: an anti-nucleus annihilates |B| nucleons, so the released energy is its rest mass and
+  // |B| proton masses - the same bookkeeping, per anti-baryon.
+  const int b = baryon_count_of_anti(t);
   const real_t rest = (t == ParticleType::kAntiProton
                        || stopped_refusal(t) == HadronicRefusal::kStoppedAntiHyperon)
                           ? m + units::proton_mass_c2<real_t>()
-                          : m;
+                          : (b > 0) ? m + static_cast<real_t>(b) * units::proton_mass_c2<real_t>()
+                                    : m;
   return rest + residual_ekin;
 }
 

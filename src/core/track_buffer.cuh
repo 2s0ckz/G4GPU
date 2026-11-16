@@ -1135,7 +1135,10 @@ struct BufferEmitter {
                       int /*event_id*/, unsigned short za = 0) {
     SpeciesDisposition disp = species_disposition(type);
     if (books.refuse_strange && disp == SpeciesDisposition::kStepped
-        && (is_strange_charged_track(type) || is_strange_neutral_track(type))) {
+        && (is_strange_charged_track(type) || is_strange_neutral_track(type))
+        // P23c: the anti-neutron and the four anti-nuclei share the group kernels but are not
+        // the sixteen this knob was made to refuse; it leaves them on tracks.
+        && type != ParticleType::kAntiNeutron && !is_light_anti_ion(type)) {
       disp = SpeciesDisposition::kRefused;  // see EmitterBooks::refuse_strange
     }
     if (disp != SpeciesDisposition::kStepped) {

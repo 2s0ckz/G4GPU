@@ -720,7 +720,8 @@ template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, 
 __host__ __device__ inline void ftf_emit_residual(const preco::CascadeResidual& residual,
                                                   const Vec3d& boost_back,
                                                   FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
-                                                  HadFinalState<real_t, kMaxSec>& out) {
+                                                  HadFinalState<real_t, kMaxSec>& out,
+                                                  int anti_pdg = 0) {
   if (!residual.exists) { return; }
   deex::LorentzVector p4 = residual.fragment.momentum;
   if (boost_back.x != 0.0 || boost_back.y != 0.0 || boost_back.z != 0.0) {
@@ -730,6 +731,14 @@ __host__ __device__ inline void ftf_emit_residual(const preco::CascadeResidual& 
   s.z = residual.fragment.z;
   s.a = residual.fragment.a;
   s.pdg = pdg_nuclear_code(s.z, s.a);
+  if (anti_pdg != 0) {
+    // P23c: an anti-nucleus projectile's residual, re-typed as PropagateNuclNucl re-types its
+    // products. It leaves as a SPECIES (z = a = 0), the antiparticle's PDG code, and the mass the
+    // fragment carries - which is how the hadron table's species leave `ftf_emit_tracks`.
+    s.pdg = anti_pdg;
+    s.z = 0;
+    s.a = 0;
+  }
   s.mass =
       static_cast<real_t>(residual.fragment.ground_state_mass + residual.fragment.excitation);
   s.kin_energy = static_cast<real_t>(p4.e) - s.mass;
@@ -882,7 +891,22 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
     // `findBoostToCM()` = -p/E, so the way back to the lab is its negation.
     const Vec3d back{-both.projectile_boost_to_cm.x, -both.projectile_boost_to_cm.y,
                      -both.projectile_boost_to_cm.z};
-    ftf_emit_residual(both.projectile, back, ws, out);
+    int anti_pdg = 0;
+    if (both.projectile_is_anti && both.projectile.exists) {
+      const int z = both.projectile.fragment.z, a = both.projectile.fragment.a;
+      anti_pdg = preco::propagate_nucl_nucl_anti_species(pdg_nuclear_code(z, a), z, a);
+      if (anti_pdg > 0) {
+        // Not one of the six: see `GeneratorRefusal::anti_residual_unbound`. Refused BEFORE
+        // anything is emitted, so the final state is not half written.
+        ws->report.generator.anti_residual_unbound = true;
+        ws->report.generator.refused_z = z;
+        ws->report.generator.refused_a = a;
+        out.clear();
+        out.status = HadFinalStateStatus::kStopAndKill;
+        return;
+      }
+    }
+    ftf_emit_residual(both.projectile, back, ws, out, anti_pdg);
     return;
   }
   // G4DecayStrongResonances::Propagate, for the event that hit EVERY target nucleon: there is no

@@ -414,10 +414,13 @@ int main() {
   // 5. The two channels that have no cross section, by name.
   // ============================================================================================
   {
-    if (had::inelastic_channel_has_xs(had::inelastic_channel(ParticleType::kAntiProton))) {
+    // P23c: the antiproton's channel HAS a cross section now - G4ComponentAntiNuclNuclearXS is
+    // ported (tests/test_anti_nucleon.cu holds it to Geant4) - so the row asserts the opposite of
+    // what it asserted while P2 refused the component.
+    if (!had::inelastic_channel_has_xs(had::inelastic_channel(ParticleType::kAntiProton))) {
       fail("the antiproton's inelastic channel",
-           "G4ComponentAntiNuclNuclearXS is refused by P2; this channel must have no cross "
-           "section, or a pbar draws an interaction length it cannot evaluate");
+           "G4ComponentAntiNuclNuclearXS is ported (P23c); a pbar must draw an interaction "
+           "length");
     }
     if (had::inelastic_channel_has_xs(had::inelastic_channel(ParticleType::kMuonMinus))
         || had::inelastic_channel_has_xs(had::inelastic_channel(ParticleType::kPiZero))) {
@@ -430,7 +433,7 @@ int main() {
         || had::inelastic_models<double>(ParticleType::kPiZero).n != 0) {
       fail("model list of a species with no inelastic process", "expected zero models");
     }
-    std::printf("  no-process species: pbar (P2 refuses its data set), mu+-, pi0 - all exact\n");
+    std::printf("  pbar has its data set (P23c); no-process species mu+-, pi0 - all exact\n");
   }
 
   std::printf("%s\n", g_fails == 0 ? "OK" : "FAILURES");
