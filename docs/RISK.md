@@ -16046,3 +16046,45 @@ interaction rate against the AntiAGlauber cross section within 1.53 sigma in eve
 every interaction that ran balanced in baryon number, and in charge up to Geant4's own +1 per
 captured anti-proton (V253); 153 FTFP refusals on the grid, all anti-He3 (108 of 783 queued, 14%:
 water and bone are two hydrogen atoms in three, V253's anti-(2,2)) and anti-alpha (45 of 777).
+
+### V255: the antiproton beam after - the anti family's ledger is empty for the right reason now, the existing rows do not move by a digit, and the beam lands +20.5% ABOVE Geant4: the excess V244 opened above 1 GeV, now on an annihilating beam
+
+Example B1, 200,000 antiprotons of 1 GeV, G4GPU_HADRONIC_STAGE=final, the default live-track count
+(unset), the 3070 (`device stack raised to 77824 B ... 0.00 GB of 8.00 GB left`, the same line the
+1 GeV proton prints at main; host peak 3.6 GB, no paging). The engine at this branch, sm_86 only.
+
+| run | dose, nGy | vs QBBC as it ships |
+|---|--:|--:|
+| Geant4 11.1.1 QBBC as it ships | 623.26 +/- 2.586 | - |
+| Geant4, hadElastic + anti_protonInelastic + hFritiofCaptureAtRest inactivated | 239.603 +/- 0.400 | -61.6% |
+| port before (main c0c022b) | 239.336 +/- 0.400 | -61.6%; against the inactivated Geant4 -0.11%, -0.47 sigma |
+| **port after** | **751.091 +/- 3.949** | **+20.5%, +27.0 sigma** |
+
+**What the "before" column says.** The port at c0c022b was Geant4 with the anti-proton's three
+hadronic processes switched off, to 0.47 sigma: the EM transport of a 1 GeV antiproton was right and
+the 384 nGy it lacked was all hadronic (V250).
+
+**What the "after" column says.** The ledger books nothing of the anti family: no
+`kAntiNucleusElastic`/`kAntiNucleusInelastic` (retired), no stopped antiproton or anti-nucleus
+refused, no anti-neutron or anti-nucleus refused at emission, no `anti_residual_unbound`. 184,735
+interactions queued. What it does book is NOT P23c's: 18,927 inelastic secondaries with no row
+(5.06e6 MeV - the eta and eta' FTFP's annihilation strings make, V240/V244), 402 ion delta-ray steps
+(P26b's) and one GenericIon with no nuclide. The eta and eta' are energy the port LOSES, so the
+excess below is net of them.
+
+**THE ROW IS NOT INSIDE ITS BAND, AND THE EXCESS IS IN THE HADRONIC PART.** The port's hadronic
+share is 751.1 - 239.3 = 511.8 nGy against Geant4's 623.3 - 239.6 = 383.7: +33%. The elastic half
+is replayed exactly (V252) and the cross sections are exact (V251), so the per-interaction RATES
+are Geant4's (`test_inelastic_transport`: within 1.53 sigma); what is left is the FINAL STATE - FTFP's
+annihilation in flight and at rest - and its transport. This is the same sign and size as V244's
++20.4% on the 10 GeV proton and +5.4% on the 10 GeV pi+ (README open question 9), which also run
+FTFP: an antiproton at 1 GeV is FTFP at every energy, so this beam puts FTFP where proton_1000 (on
+Binary and Bertini, +0.06%) never does. Opened and not diagnosed here: it is open question 9 on a
+third beam, the cleanest one yet - one model, no cascade window, and an EM part that is Geant4's
+to 0.47 sigma.
+
+**The existing rows, to the digit** (the same binaries' "before" at c0c022b in brackets):
+proton 1000 MeV 200,000 events 391.883 nGy +/- 1.338 (391.883); the B1 photon gate,
+exampleB1 -n 2000000, 426.028 pGy, -1.35734 pGy = 1.10452 sigma (426.028, 1.10452); b1_gpu_sched
+2000000 427.699 pGy, ratio 1.0007 (V244/V246's 427.699). GPU tests on this branch: test_step_hadron,
+test_neutron, test_strange_tracks (286 comparisons) and test_inelastic_transport PASS.

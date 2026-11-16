@@ -651,3 +651,27 @@ of memory on the 3070, which had 3.9 GB in use by other processes at the time (t
 sized 1,714,256 events against 5.90 GB free). The lead's gate then held the GPU for the rest of the
 session. Owed: the four rows against V232's QBBC column (600.455, 279.007, 664.032, 4.93621 uGy),
 at the sweep's configuration, on a free card.
+
+## P23c: the anti-nucleon family (2026-11-16)
+
+P23c gives the antiproton its hadronic processes - G4ComponentAntiNuclNuclearXS for hadElastic and
+the inelastic process, G4AntiNuclElastic above 100 MeV, FTFP at every energy - and puts the
+anti-neutron and the four light anti-nuclei on tracks (docs/RISK.md V250-V255). One beam that
+exercises all of it, and the rows that must not move. The port at G4GPU_HADRONIC_STAGE=final with the
+default live-track count, on the 3070; Geant4 11.1.1 serial through ref/run/runb1.bat.
+
+| beam | events | port before (c0c022b) | port after | G4 QBBC | G4, pbar hadronics off | after vs QBBC |
+|---|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 239.336 nGy +/- 0.400 | 751.091 +/- 3.949 | 623.26 +/- 2.586 | 239.603 +/- 0.400 | **+20.5%, +27.0 sigma** |
+| proton 1000 MeV | 200,000 | 391.883 nGy +/- 1.338 | 391.883 +/- 1.338 | 391.654 +/- 1.337 (V244) | - | +0.06%, unchanged |
+
+**Before**, the port was Geant4 with the antiproton's three hadronic processes inactivated, to 0.47
+sigma, and its refusal ledger was empty - every gap of the family was a structural zero (no cross
+section, so no interaction and no stopped antiproton). **After**, the family books nothing, and the
+beam lands 20.5% above QBBC: the hadronic share is +33% (512 against 384 nGy). The cross sections and
+the elastic final state are Geant4's exactly, so the excess is FTFP's annihilation and what it
+makes - the same sign as the 10 GeV proton and pi+ rows of P23a's section (README open question 9),
+on a beam with one model and an EM part that is Geant4's. Not diagnosed here (V255).
+
+**The gates, to the digit.** exampleB1 -n 2000000: 426.028 pGy, 1.10452 sigma (unchanged);
+b1_gpu_sched 2000000: 427.699 pGy, ratio 1.0007 (unchanged).
