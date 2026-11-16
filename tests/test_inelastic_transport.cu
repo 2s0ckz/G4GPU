@@ -231,6 +231,10 @@ static void section_copies() {
       {ParticleType::kTriton, 0, 3},      {ParticleType::kHe3, 0, 3},
       {ParticleType::kAlpha, 0, 4},       {ParticleType::kGenericIon, 12, 12},
       {ParticleType::kGenericIon, 208, 208},
+      // P23c
+      {ParticleType::kAntiNeutron, 0, -1},  {ParticleType::kAntiDeuteron, 0, -2},
+      {ParticleType::kAntiTriton, 0, -3},   {ParticleType::kAntiHe3, 0, -3},
+      {ParticleType::kAntiAlpha, 0, -4},
   };
   int n_b = 0;
   for (const BRow& r : rows) {
@@ -386,6 +390,15 @@ int main() {
       {ParticleType::kAntiXiZero, 2000, "anti_xi0 2 GeV"},
       {ParticleType::kKaonZeroLong, 1000, "kaon0L 1 GeV"},
       {ParticleType::kKaonZeroShort, 4000, "kaon0S 4 GeV"},
+      // P23c: the anti-nucleon family, FTFP alone on AntiAGlauber - the antiproton, the
+      // anti-neutron through `step_neutral_strange` and the four anti-nuclei through the charged
+      // group (2-4 GeV, i.e. 1 GeV per nucleon, where the anti-nucleus arm of PropagateNuclNucl runs).
+      {ParticleType::kAntiProton, 1000, "anti_proton 1 GeV"},
+      {ParticleType::kAntiNeutron, 1000, "anti_neutron 1 GeV"},
+      {ParticleType::kAntiDeuteron, 2000, "anti_deuteron 2 GeV"},
+      {ParticleType::kAntiTriton, 3000, "anti_triton 3 GeV"},
+      {ParticleType::kAntiHe3, 3000, "anti_He3 3 GeV"},
+      {ParticleType::kAntiAlpha, 4000, "anti_alpha 4 GeV"},
   };
   // The three B1 materials with a hadronic target worth having: hydrogen-rich (water),
   // calcium-bearing (compact bone) and light (air, where the mean free path is metres and the
@@ -727,7 +740,14 @@ int main() {
                   }
                 }
                 if (b_out != b_in) { ++cell.bad_baryon; }
-                if (q_out != q_in) { ++cell.bad_charge; }
+                // P23c: an ANTI-nucleus projectile's interaction may carry up to |B| units of
+                // charge too many, by Geant4's own arithmetic: PropagateNuclNucl adds
+                // `G4int(-1 + 0.1)` = 0 to the projectile residual for a captured anti-proton
+                // (docs/RISK.md V253). Anything else is a defect.
+                const int q_excess = q_out - q_in;
+                const bool g4_charge = (proj.baryon_number < -1 && q_excess > 0
+                                        && q_excess <= -proj.baryon_number);
+                if (q_out != q_in && !g4_charge) { ++cell.bad_charge; }
                 ++cell.n_balance;
               }
               const double e_in = static_cast<double>(proj.kin_energy);

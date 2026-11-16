@@ -2,7 +2,7 @@
 // Fritiof at-rest captures of the anti-baryon family meet in P6's interface - a census of FTFP's
 // outcomes by name for pbar, nbar, anti-d, anti-t, anti-He3 and anti-alpha, at rest (kinetic
 // energy 0, the projectile `G4HadronicAbsorptionFritiof` hands FTFP) and in flight at 1 and 5 GeV
-// per nucleon, on C12, O16, Ca40 and Pb208, through the TRANSPORT's workspace (`entry::Workspace`,
+// per nucleon, on H1, C12, O16, Ca40 and Pb208, through the TRANSPORT's workspace (`entry::Workspace`,
 // the one the interaction pool holds - not test_stopping's `HadronWorkspace`, whose kMaxProjA = 1
 // refuses every anti-nucleus by capacity before the hand-over is reached).
 //
@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
                     {-1000020030, -3, -2, 2808.391, "anti_He3"},
                     {-1000020040, -4, -2, 3727.379, "anti_alpha"}};
   struct T { int z, a; const char* name; };
-  const T tg[4] = {{6, 12, "C12"}, {8, 16, "O16"}, {20, 40, "Ca40"}, {82, 208, "Pb208"}};
+  const T tg[5] = {{1, 1, "H1"}, {6, 12, "C12"}, {8, 16, "O16"}, {20, 40, "Ca40"}, {82, 208, "Pb208"}};
   const double kin_per_n[3] = {0.0, 1000.0, 5000.0};
   int fails = 0;
   long long unbound_za[64] = {};
