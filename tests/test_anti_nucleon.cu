@@ -352,6 +352,27 @@ int main() {
         fail("anti_neutron decay channel");
       }
     }
+    // hadElastic's two models and their windows, against the constructed QBBC (anti_scope.csv):
+    // hElasticLHEP [0, 100.1] then AntiAElastic [100, 1e8], in registration order, for all six.
+    // `elastic_apply` spells the same four numbers; this row is what keeps them Geant4's.
+    {
+      const auto rows = load_csv(dir + "/anti_scope.csv");
+      if (rows.empty()) { fail("cannot read anti_scope.csv"); }
+      int n_ok = 0;
+      for (ParticleType t : six) {
+        std::vector<std::vector<std::string>> el;
+        for (const auto& c : rows) {
+          if (c.size() >= 18 && c[0] == particle_name(t) && c[11] == "hadElastic") { el.push_back(c); }
+        }
+        const bool ok = el.size() == 2 && el[0][15] == "hElasticLHEP"
+                        && std::atof(el[0][16].c_str()) == 0.0
+                        && std::atof(el[0][17].c_str()) == 100.1
+                        && el[1][15] == "AntiAElastic" && std::atof(el[1][16].c_str()) == 100.0
+                        && std::atof(el[1][17].c_str()) == 1e8;
+        if (!ok) { fail(std::string("hadElastic models of ") + particle_name(t)); } else { ++n_ok; }
+      }
+      std::printf("  hadElastic windows equal Geant4's for %d of 6 species\n", n_ok);
+    }
     std::printf("  six species: elastic and inelastic AntiAGlauber, FTFP 0-100 TeV alone, the "
                 "integral flag; re-typing 9 cases; anti_neutron -> e+ nu_e anti_proton\n");
   }
