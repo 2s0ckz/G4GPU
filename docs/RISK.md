@@ -15888,3 +15888,161 @@ was 4,096 bytes at ba61, V237) and a beam above 10 GeV to campaign it against; n
 What books it today: the host test's 30 GeV electron, 9 of 200 interactions; no B1 beam.
 
 **V247 ADDENDUM.** GPU: `tests/test_ion_transport.cu` PASS (0 failures) and `tests/test_step_hadron.cu` PASSED on this branch's stepper; `run_step_hadron`'s frame is 4,224 bytes in the GenericIon and alpha units, unchanged. The sweep rows (He3, deuteron, alpha 840 and 4000 MeV) were not taken - docs/B1_SWEEP.md's P26 section says why and what is owed.
+
+### V250: P23c's scope, measured - a 1 GeV antiproton beam deposits 38% of Geant4's dose in B1's trapezoid, and the port's ledger for it is EMPTY: every gap in the anti-nucleon family was structural
+
+Example B1, 200,000 antiprotons of 1 GeV. Geant4 11.1.1 QBBC as it ships (ref/run/runb1.bat,
+serial): **623.26 nGy +/- 2.586**. The port at main c0c022b (the main checkout's exampleB1.exe,
+built 2026-11-15 20:02 after gate ba65; G4GPU_HADRONIC_STAGE=final, the default live-track
+count, the 3070): **239.336 nGy +/- 0.400 - minus 61.6%, 147 sigma**, in 10 s of wall clock.
+
+**The ledger printed nothing.** Not a refused interaction, not a stopped antiproton, not an
+anti-neutron, not an anti-nucleus - zero bookings, zero energy. Each gap was one the ledger was
+built not to count:
+
+| gap | why it booked nothing on this beam |
+|---|---|
+| `kAntiNucleusElastic`, `kAntiNucleusInelastic` | structurally zero: P2 refused G4ComponentAntiNuclNuclearXS, so `elastic_channel`/`inelastic_channel(kAntiProton)` had no cross section and a pbar drew NO hadronic interaction length; a zero cross section is not a refused interaction |
+| `kStoppedAntiProton`, Fritiof at rest | a 1 GeV antiproton's range (~3 m of water) is ten times the phantom; with no inelastic process none stops, so the at-rest arm is never entered |
+| `kAntiNeutronSecondary`, anti-nucleus emission | nothing makes one: the only producers are the pbar's interactions, which did not exist |
+
+So the whole of the 384 nGy the port lacked was the antiproton's nuclear physics - annihilation
+in flight and the secondaries it scatters into the trapezoid - and none of it was visible except
+against Geant4's own number. That is the lesson the entry exists to record: a structural zero is
+honest about a process and silent about a beam.
+
+**The unit choice.** Measured against what the group kernels fold (V240's table): the anti-neutron
+gives `step_neutral_strange` nothing it does not already branch on (Decay, hadElastic, an
+inelastic, Fritiof at rest; neutral, no EM); the four anti-nuclei get exactly the eight charged
+hyperons' EM - `G4HadParticles::sHeavyChargedPart` lists them together and `ConstructBasicEmPhysics`
+gives all twelve the shared "ionmsc" (Urban) and a G4hIonisation with no CoulombScat, hBrems,
+hPairProd or nuclear stopping. Their charge-squared of 4 (anti-He3, anti-alpha) is the static
+`(q/q_base)^2` `hadron_charge_sq_ratio` already applies (G4EmTableUtil::CheckIon is false for an
+"anti_nucleus"), and anti-alpha's base particle is the KAON- (spin 0, G4hIonisation's rule),
+which `hadron_base_particle` already answers. `test_species` holds the four to the
+representative on all nine structural predicates and to Geant4's process lists (810
+comparisons, 0 failures). So no unit was added and no host file changed: two predicates in
+core/particle.cuh route the five species into the two P23a units.
+
+### V251: G4ComponentAntiNuclNuclearXS - P2's refusal rested on a sentence that was false, and the component is exact
+
+`xs/refusal.cuh` said the component is reached only through builders "none of which QBBC
+registers". QBBC registers it twice for six species: `G4HadronElasticPhysics::ConstructProcess`
+(`ElasticXS("AntiAGlauber")` on `GetLightAntiIons()`) and `G4HadronicBuilder::
+BuildAntiLightIonsFTFP` (`InelasticXS("AntiAGlauber")`). Transcribed whole
+(`xs/anti_nucl_nuclear_xs.cuh`): the NN parametrisation at the per-nucleon MOMENTUM, R0 written
+by the total and read by the elastic one, the light-target ReffTot/ReffInel tables (asymmetric as
+printed: anti-t on He4 3.589, anti-He3 on He4 2.589), the heavy-target radii on `intA =
+(int)A`, and ApAt on the UNTRUNCATED NIST mass - two A's in one formula. Against Geant4
+(`anti_xs.csv`, the registry's own instance): total, inelastic, elastic and both NN cross sections
+for the six species on B1's elements and every other element g4dump builds, 1 keV-100 TeV -
+**8,658 points, 0.0 difference** in all five. Per volume through the port's wiring against
+`G4HadronicProcessStore` (`anti_xs_volume.csv`), B1's four materials: hadElastic and inelastic
+2,664 points each, worst 4.5e-16 and 4.9e-16.
+
+One thing the wiring had wrong, found by the structure check: `G4Ions` sets an anti-nucleus's
+atomic number to |Z| ("positive even for anti_nucleus", G4Ions.cc:96), so
+`G4HadronicProcess::BuildPhysicsTable`'s `ok` test passes and anti-d/t/He3/alpha take the integral
+approach (fHadDecreasing) although each is heavier than 1 GeV. Both wirings passed
+`baryon_number > 1 ? B : 0`, which gave them fHadNoIntegral. `hp::xs_type_atomic_number` is the
+one rule now; no species transported before P23c changes.
+
+Anti-vacuity: the anti-alpha heavy-target inelastic radius 1.30 -> 1.31 fails the component at
+1.35e-2 and both per-volume rows; the integral rule reverted fails four structure rows.
+
+### V252: G4AntiNuclElastic, replayed - 9,408 samples to 2.7e-13 and 160,000 scatters bin for bin
+
+`elastic/anti_nucl_elastic.cuh` is the sampler `G4HadronElastic::ApplyYourself` calls through the
+virtual `SampleInvariantT`: the low-momentum branch (`Plab < |B|*100 MeV`, t = fTmax*u), the
+Coulomb probability against the AntiAGlauber elastic cross section at the ISOTOPE's integer A,
+the Coulomb arm (phi is drawn and only enters the transverse momentum - t does not depend on it,
+the stream does), and the strong arm's Bessel x damping acceptance loop with its 10,000-trial cap.
+The ceff2 block's last condition is `(theParticle == theAAlpha) || (ceff2 == 0.0)` - a fall-back
+by VALUE for any projectile its own block left at zero - and is transcribed as such.
+`SampleThetaCMS`/`SampleThetaLab` are not ported: nothing calls them.
+
+Wired in `elastic_apply` as `G4HadronElasticProcess::PostStepDoIt` orders it: the integral
+rejection, SampleZandA, then `ChooseHadronicInteraction` over lhep2 [0, 100.1 MeV] and anuc
+[100 MeV, 100 TeV] - per nucleon, one uniform drawn in the overlap - then ApplyYourself.
+`anti_scope.csv` (the constructed QBBC) confirms both windows for all six species.
+
+Against Geant4 under dump_bertini.cc's LCG, replayed by the port: SampleInvariantT's members
+(ptot, tmax, beta, Zommerfeld n, Am, Ra, Ref, ceff) and GetcosTeta1 over 6 species x 7 targets
+(H1 to Pb208) x 7 energies per nucleon (100.05 MeV to 100 GeV): worst 2.7e-13 (Am at Z = 1,
+where G4Pow::A13 interpolates); 32 consecutive samples per point, **9,408 samples, worst 2.7e-13,
+0 draw-count mismatches**. The campaign the brief asked for "within statistics" came out EXACT:
+20,000 whole ApplyYourself calls per point - pbar on C12 and Pb208 at 0.3, 1 and 10 GeV, anti-d
+and anti-alpha on C12 at 1 GeV/n - **0 of 50 lab-angle bins differ, draw counts equal (1.8 to
+11.1 million), sum t and sum Ef identical**. Anti-vacuity: the Coulomb arm's phi draw removed
+moves 106 draw counts and every campaign point (10-16 bins differ, chi2 still 7-16 for 8-20 -
+the statistical comparison alone would have passed it).
+
+### V253: PropagateNuclNucl's anti-nucleus arm - written, 12,000 refused calls of 18,000 become 0; Geant4 drops a unit of charge per captured anti-proton; and 2.46% of the residuals - a third of anti-He3 on hydrogen - have no anti-species to be
+
+The arm, from G4GeneratorPrecompoundInterface.cc:431-779: tracks other than p, n, pbar, nbar
+escape before any deviate (the first `if` is dead for a nucleus: `&& ProjectileIsAntiNucleus`);
+p and n can be captured only by the target, pbar and nbar only by the projectile - so the coin
+flip is unreachable; the projectile's hit loop counts `G4int(q - 0.1)` on the anti-nucleon,
+which is `aZb -= hit.charge` on the matter nucleon the port builds the projectile from (V117).
+
+**A captured anti-proton does not change the residual's charge.** `G4int Z = G4int(q/eplus +
+0.1)` is `G4int(-0.9)` = 0 for an anti-proton, then negated. The anti-residual gains a baryon and
+no charge, so the final state carries one unit of charge more than came in. Transcribed; the
+census sees it in 7 of 18,000 calls (anti-alpha), and the test accepts an
+excess between 0 and |B| for an anti-nucleus and nothing else.
+
+**The residual.** Geant4 de-excites the projectile residual in its own frame and re-types the
+PRODUCTS (p, n, lambda, d, t, He3, He4 -> their antiparticles; anything else keeps its matter
+definition). The port's FTF hand-over de-excites NO residual - the open difference V236 records
+for the ion arm - so the anti-residual is re-typed whole: one of the six species leaves as that
+species with the fragment's mass; anything else has no species to leave as and is refused by name,
+`GeneratorRefusal::anti_residual_unbound` with its (Z, A), before anything is emitted.
+
+The census (`tests/test_anti_handover.cu`, 200 FTFP calls per row through the TRANSPORT's
+`entry::Workspace`, pbar/nbar/anti-d/anti-t/anti-He3/anti-alpha x H1/C12/O16/Ca40/Pb208 x 0 (the
+at-rest projectile), 1 and 5 GeV per nucleon), the same program compiled against main c0c022b
+and against this branch:
+
+| | ran | anti_nucleus | anti_residual_unbound | other P6 refusals |
+|---|--:|--:|--:|--:|
+| before (c0c022b) | 6,000 (33.33%) | 12,000 (66.67%) | - | 0 |
+| after | 17,557 (97.54%) | 0 | 443 (2.46%): anti-(2,2) 412, anti-(1,4) 31 | 0 |
+
+Baryon number balances in every one of the 17,557. The unbound residuals are anti-He3 and
+anti-alpha only, and mostly on HYDROGEN: an anti-He3 that annihilates one anti-neutron on a proton
+leaves an anti-(2,2), 19-36% of the anti-He3-on-H1 rows; 0-12% elsewhere. **The "40% and 8.3%" of PORTED 2.1.13 are
+not this.** The 40% is `test_stopping`'s `HadronWorkspace` (kMaxProjA = 1) refusing the four
+anti-nuclei by CAPACITY before the hand-over - a test-workspace size, not a transport one: the
+interaction pool's `fritiof_at_rest_wide` hands FTFP the ion-capable `Workspace`, which is what
+the census uses. The pbar and nbar rows met no P6 refusal in 6,000 calls before or after. Anti-vacuity: the
+residual's re-typing removed, 48 rows fail on baryon number (a matter residual where an anti one belongs: +2
+baryons for an anti-d residual of one nucleon).
+
+### V254: the anti-nucleon family on tracks - five ParticleTypes, two predicates, no unit
+
+ParticleType 40-44: anti_neutron, anti_deuteron, anti_triton, anti_He3, anti_alpha, each from
+its G4Anti*.cc (mass, charge, 2*spin, moment; anti_alpha sets no moment and has spin 0) and held
+to `species_tables.csv` by `test_species`. The anti-neutron decays (G4NeutronBetaDecayChannel
+("anti_neutron") -> e+ nu_e anti_proton, 880.2 s; channel 98, `test_decay` against Geant4's
+table and 400,000 sampled final states) and is pre-empted at rest by Fritiof (`decay_atrest.csv`
+puts hFritiofCaptureAtRest first: `decay_at_rest_competitor(-2112)`). anti_triton carries G4Decay
+and is flagged stable, as the triton is. Every one has hadElastic and <name>Inelastic on
+AntiAGlauber with FTFP at every energy and Fritiof at rest - `test_strange_tracks` section 1
+against `species_processes.csv` and section 2 against `anti_scope.csv`.
+
+What retires: `kAntiNeutronSecondary` (unreachable: -2112 has a row), the anti-nucleus emission
+refusal (FTFP's anti-nuclei are pushed as tracks), `kAntiNucleusElastic` and
+`kAntiNucleusInelastic` (structural zeros with nothing left to be zero about). What stays by
+name: `anti_residual_unbound` (V253) and `kStoppedAntiProton`, now also the row of a stopped
+anti-n or anti-nucleus when the at-rest processes are switched off, with |B| nucleon masses.
+`G4GPU_STRANGE_TRACKS=0` still refuses exactly the sixteen strange species and leaves these five
+on tracks. `elastic_post_step_do_it` is still told `has_at_rest_processes=false` for every
+charged hadron (an elastic scatter to exactly zero energy would be fStopButAlive in Geant4 for
+pbar, pi- and K-); unchanged, and noted here rather than fixed under another package's banner.
+
+**Through the queue and the models** (`test_inelastic_transport`, six P23c beams - pbar and nbar
+1 GeV, anti-d 2, anti-t 3, anti-He3 3 and anti-alpha 4 GeV - in water, bone and air): the
+interaction rate against the AntiAGlauber cross section within 1.53 sigma in every cell (gate 5);
+every interaction that ran balanced in baryon number, and in charge up to Geant4's own +1 per
+captured anti-proton (V253); 153 FTFP refusals on the grid, all anti-He3 (108 of 783 queued, 14%:
+water and bone are two hydrogen atoms in three, V253's anti-(2,2)) and anti-alpha (45 of 777).
