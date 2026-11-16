@@ -342,6 +342,27 @@ const Species kSpecies[] = {
     {"anti_sigma+", ParticleType::kAntiSigmaPlus,
      {0.002, 0.002, 0.010, 0.250, 0.030},
      {0.002, 0.002, 0.002, 0.150, 0.030}, 0.019},
+    // ---- P23c: the four light anti-nuclei, which the charged group kernel steps with the same
+    // ConstructBasicEmPhysics (G4HadParticles::sHeavyChargedPart). anti_d, anti_t and anti_He3
+    // have spin and so the ANTIPROTON as base; anti_alpha has spin 0 and so the KAON- (G4hIonisation's
+    // spin-then-charge rule; species_processes.csv's base_particle column). anti_He3 and anti_alpha
+    // carry (q/q_base)^2 = 4 - static, because CheckIon is false for an "anti_nucleus". The limits
+    // are the negative four's: the base particle's charge-odd air anomaly comes with the table
+    // (18.9% dE/dx, 10.0% range in air, 2-100 MeV). The inverse round trip - the antiproton's linear
+    // R against its splined R^-1, the negative four's 1.9% - is read at lower scaled energies for
+    // these heavier species (mass ratio 0.25-0.5) and measures 1.88-2.58%: 2.6%.
+    {"anti_deuteron", ParticleType::kAntiDeuteron,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.026},
+    {"anti_triton", ParticleType::kAntiTriton,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.026},
+    {"anti_He3", ParticleType::kAntiHe3,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.026},
+    {"anti_alpha", ParticleType::kAntiAlpha,
+     {0.002, 0.002, 0.010, 0.250, 0.030},
+     {0.002, 0.002, 0.002, 0.150, 0.030}, 0.026},
 };
 
 constexpr int kNPart = static_cast<int>(sizeof kSpecies / sizeof kSpecies[0]);
