@@ -273,6 +273,8 @@ struct Storage {
   std::vector<bic::imr::ConcreteChannel> chans =
       std::vector<bic::imr::ConcreteChannel>(bic::imr::kConcreteChannelCount);
   bic::CascadeBuffers buffers;
+  /// The cascade's 256-entry working lists, in caller storage since docs/RISK.md V256.
+  std::vector<bic::BicScratch> scratch_lists = std::vector<bic::BicScratch>(1);
   std::vector<bic::CascadeProduct> products = std::vector<bic::CascadeProduct>(256);
   std::vector<bic::CascadeProduct> preco = std::vector<bic::CascadeProduct>(64);
   int n_chan = 0;
@@ -298,6 +300,7 @@ struct Storage {
     s.cascade.channels = chans.data();
     s.cascade.n_channels = n_chan;
     s.cascade.buffers = &buffers;
+    s.cascade.scratch = scratch_lists.data();
     s.cascade.products = products.data();
     s.cascade.product_capacity = static_cast<int>(products.size());
     s.cascade.preco_products = preco.data();

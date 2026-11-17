@@ -721,6 +721,8 @@ int main() {
     static bic::imr::CollisionInitialState apply_colls[bic::kSlotCollisionCap];
     static bic::imr::ConcreteChannel apply_chans[bic::imr::kConcreteChannelCount];
     static bic::CascadeBuffers apply_buffers;
+    // The cascade's 256-entry working lists, in caller storage since docs/RISK.md V256.
+    static bic::BicScratch apply_scratch;
     static bic::CascadeProduct apply_products[bic::kSlotProductCap];
     static bic::CascadeProduct apply_preco[bic::kSlotPrecoCap];
     // And the ION reaction's, which needs a second nucleus and its own product lists. Every
@@ -737,6 +739,7 @@ int main() {
     static bic::imr::CollisionInitialState ion_colls[bic::kSlotCollisionCap];
     static bic::imr::ConcreteChannel ion_chans[bic::imr::kConcreteChannelCount];
     static bic::CascadeBuffers ion_buffers;
+    static bic::BicScratch ion_scratch;
     static bic::CascadeProduct ion_products[bic::kSlotProductCap];
     static bic::CascadeProduct ion_preco[bic::kSlotPrecoCap];
     static bic::BlirProduct ion_spec[bic::kSlotSpectatorCap];
@@ -761,6 +764,7 @@ int main() {
     ion_store.cascade.n_channels =
         bic::imr::build_concrete_channels(ion_chans, bic::imr::kConcreteChannelCount);
     ion_store.cascade.buffers = &ion_buffers;
+    ion_store.cascade.scratch = &ion_scratch;
     ion_store.cascade.products = ion_products;
     ion_store.cascade.product_capacity = bic::kSlotProductCap;
     ion_store.cascade.preco_products = ion_preco;
@@ -790,6 +794,7 @@ int main() {
     store.cascade.n_channels =
         bic::imr::build_concrete_channels(apply_chans, bic::imr::kConcreteChannelCount);
     store.cascade.buffers = &apply_buffers;
+    store.cascade.scratch = &apply_scratch;
     store.cascade.products = apply_products;
     store.cascade.product_capacity = bic::kSlotProductCap;
     store.cascade.preco_products = apply_preco;
@@ -1751,6 +1756,7 @@ int main() {
     static bic::imr::CollisionInitialState blir_colls[8192];
     static bic::imr::ConcreteChannel blir_chans[bic::imr::kConcreteChannelCount];
     static bic::CascadeBuffers blir_buffers;
+    static bic::BicScratch blir_scratch;  // docs/RISK.md V256
     static bic::CascadeProduct blir_products[512];
     static bic::CascadeProduct blir_preco[256];
     static bic::BlirProduct blir_spec[512];
@@ -1810,6 +1816,7 @@ int main() {
       store.cascade.channels = blir_chans;
       store.cascade.n_channels = blir_nchan;
       store.cascade.buffers = &blir_buffers;
+      store.cascade.scratch = &blir_scratch;
       store.cascade.products = blir_products;
       store.cascade.product_capacity = 512;
       store.cascade.preco_products = blir_preco;

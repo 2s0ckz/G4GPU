@@ -2942,6 +2942,7 @@ int main() {
     static imr::ConcreteChannel chans[imr::kConcreteChannelCount];
     static bic::CascadeBuffers buffers;
     static bic::CascadeProduct products[256];
+    static bic::BicScratch scratch_lists;  // the cascade's 256-entry lists, docs/RISK.md V256
     static bic::CascadeProduct preco[8];
     const int n_chan = imr::build_concrete_channels(chans, imr::kConcreteChannelCount);
 
@@ -3021,10 +3022,31 @@ int main() {
       ws.channels = chans;
       ws.n_channels = n_chan;
       ws.buffers = &buffers;
+      ws.scratch = &scratch_lists;
       ws.products = products;
       ws.product_capacity = 256;
       ws.preco_products = preco;
       ws.preco_capacity = 8;
+      // The scratch lists are a required list since docs/RISK.md V256: a workspace without them
+      // is refused by capacity before a uniform is drawn or the state is touched - once, on the
+      // first case, on the case's own tape, whose uniform count the comparison below still reads.
+      static bool null_scratch_checked = false;
+      if (!null_scratch_checked) {
+        null_scratch_checked = true;
+        bic::CascadeWorkspace no_scratch = ws;
+        no_scratch.scratch = nullptr;
+        bic::BicCascadeState nst;
+        bic::CascadeRefusal nref;
+        bic::CascadeTrack nkt;
+        nkt.state = bic::kOutside;
+        auto no_de = [](const bic::CascadeFragment&, bic::CascadeProduct*, int) { return 0; };
+        const bic::PropagateResult npr =
+            bic::propagate(nst, nucleus, prop, sp, no_scratch, &nkt, 1, nucleus.density,
+                           bic::coulomb_barrier_mev(a, z), no_de, tape, nref);
+        cmp_int(b_prp, npr.outcome, bic::kPropagateRefused, where + " no scratch: refused");
+        cmp_int(b_prp, nref.capacity ? 1 : 0, 1, where + " no scratch: by capacity");
+        cmp_int(b_prp, tape.n, 0, where + " no scratch: no uniform drawn");
+      }
       // A fresh buffer set per case: Geant4's composites keep theirs for the life of the process
       // (docs/RISK.md V155 is what that costs), and the numbers are the same either way because
       // the buffer is a function of the pair and nothing else.

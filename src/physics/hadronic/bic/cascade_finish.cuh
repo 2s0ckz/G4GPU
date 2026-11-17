@@ -66,7 +66,7 @@ struct StepOutReport {
 template <typename Prop, typename Apply, typename Find>
 __host__ __device__ inline StepOutReport step_particles_out(
     BicCascadeState& st, imr::CollisionList& colls, Prop& propagator, const CascadeSpecies& sp,
-    Apply&& apply, Find&& find, CascadeRefusal& ref) {
+    Apply&& apply, Find&& find, BicScratch& scratch, CascadeRefusal& ref) {
   StepOutReport rep;
   while (st.lists.count(kListSecondary) > 0) {
     // "about 30*fermi/(0.1*c_light)", i.e. a big step.
@@ -97,11 +97,11 @@ __host__ __device__ inline StepOutReport step_particles_out(
     }
     if (time_to_collision > min_time_step) {
       do_time_step(st, colls, propagator, min_time_step, sp.proton_mass, sp.neutron_mass, find,
-                   ref);
+                   scratch, ref);
       ++rep.steps;
     } else {
       const TimeStepReport tsr = do_time_step(st, colls, propagator, time_to_collision,
-                                              sp.proton_mass, sp.neutron_mass, find, ref);
+                                              sp.proton_mass, sp.neutron_mass, find, scratch, ref);
       if (!tsr.success) {
         // "Check if nextCollision is still valid, ie. particle did not leave nucleus"
         if (colls.next_collision() != next) { next = -1; }
@@ -121,18 +121,19 @@ __host__ __device__ inline StepOutReport step_particles_out(
       break;
     }
     AbsorbRefusal abs_ref;
-    int secondaries[256];
+    // `secondaries` and `captured` live in the slot since docs/RISK.md V256 (cascade_scratch.cuh).
+    int* secondaries = scratch.stepout_secondaries;
     int n_sec = 0;
-    for (int i = 0; i < st.lists.n_pool && n_sec < 256; ++i) {
+    for (int i = 0; i < st.lists.n_pool && n_sec < kCascadeMaxScratch; ++i) {
       if (st.lists.pool[i].list == kListSecondary) { secondaries[n_sec++] = i; }
     }
     absorb(st.lists.pool, st.lists.n_pool, cut_on_p_absorb(), abs_ref);
     const CaptureDecision cap = capture_decision(st.lists.pool, st.lists.n_pool, st.cut_on_p,
                                                  propagator);
     if (cap.capture) {
-      int captured[256];
+      int* captured = scratch.stepout_captured;
       int n_cap = 0;
-      for (int i = 0; i < st.lists.n_pool && n_cap < 256; ++i) {
+      for (int i = 0; i < st.lists.n_pool && n_cap < kCascadeMaxScratch; ++i) {
         CascadeTrack& t = st.lists.pool[i];
         if (t.list != kListSecondary || t.state != kInside) { continue; }
         if (t.pdg != imr::kPdgProton && t.pdg != imr::kPdgNeutron) { continue; }
@@ -145,7 +146,7 @@ __host__ __device__ inline StepOutReport step_particles_out(
     if (rep.steps > 100 && colls.size() == 0) {
       // No collision and stepping for some time: look again, and count a reset.
       n_sec = 0;
-      for (int i = 0; i < st.lists.n_pool && n_sec < 256; ++i) {
+      for (int i = 0; i < st.lists.n_pool && n_sec < kCascadeMaxScratch; ++i) {
         if (st.lists.pool[i].list == kListSecondary) { secondaries[n_sec++] = i; }
       }
       find(secondaries, n_sec);
@@ -153,7 +154,8 @@ __host__ __device__ inline StepOutReport step_particles_out(
       ++rep.resets;
     }
   }
-  do_time_step(st, colls, propagator, DBL_MAX, sp.proton_mass, sp.neutron_mass, find, ref);
+  do_time_step(st, colls, propagator, DBL_MAX, sp.proton_mass, sp.neutron_mass, find, scratch,
+               ref);
   return rep;
 }
 

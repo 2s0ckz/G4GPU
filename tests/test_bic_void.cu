@@ -360,6 +360,7 @@ int main() {
   static bic::imr::CollisionInitialState colls[8192];
   static bic::imr::ConcreteChannel chans[bic::imr::kConcreteChannelCount];
   static bic::CascadeBuffers buffers;
+  static bic::BicScratch scratch_lists;  // the cascade's 256-entry lists, docs/RISK.md V256
   static bic::CascadeProduct products[512];
   static bic::CascadeProduct preco[256];
   static bic::BlirProduct spec[512];
@@ -375,6 +376,7 @@ int main() {
     ws.channels = chans;
     ws.n_channels = n_chan;
     ws.buffers = &buffers;
+    ws.scratch = &scratch_lists;
     ws.products = products;
     ws.product_capacity = 512;
     ws.preco_products = preco;

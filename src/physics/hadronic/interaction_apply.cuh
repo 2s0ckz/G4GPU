@@ -167,6 +167,15 @@ struct InteractionSlot {
   /// The two models with final-state types of their own.
   bic::BicFinalState bic_fs;
   bic::BlirFinalState blir_fs;
+
+  // ---- the Binary cascade's 256-entry working lists (`bic::BicScratch`,
+  // bic/cascade_scratch.cuh): the index lists of `propagate`, `do_time_step`,
+  // `step_particles_out`, `capture_secondaries` and `schedule_absorption`, `DecayVoidNucleus`'s
+  // masses and momenta, and the final state `G4DecayKineticTracks` decays - 51,200 bytes that
+  // were stack locals of `run_interaction<kBinary>` and `run_interaction<kLightIon>` until
+  // docs/RISK.md V256, where every byte of them was reserved for every resident thread of the
+  // card. Both arms use it, never at once, like the cascade lists above.
+  bic::BicScratch bic_scratch;
 };
 
 /// ONE SLOT'S BYTES, pinned the way docs/RISK.md V167 pins FTFP's workspace: a capacity raised
@@ -177,9 +186,12 @@ struct InteractionSlot {
 /// held 512 (four `CollisionOutput`s and the coalescence scratch). With FTFP's own
 /// `ftfe::Workspace` (539,096 -> 671,256) a slot is 2,237,728 bytes where it was 2,020,152, and
 /// the pool's default 128 slots 286.4 MB where they were 258.6 MB, out of the 0.95 GB V190 leaves
-/// beside the 86,016-byte device stack. A change to any array here fails the build until this
+/// beside the 86,016-byte device stack. docs/RISK.md V257 took it to 1,617,672 (+51,200, the
+/// `bic_scratch` above): a slot and FTFP's workspace 2,288,928 bytes, the default 128 slots
+/// 293.0 MB (279.4 MiB, as `Upload` prints it), paid once per slot instead of once per resident
+/// thread of the card on the stack. A change to any array here fails the build until this
 /// number, the comment and docs/RISK.md move together.
-static_assert(sizeof(InteractionSlot<double>) == 1566472,
+static_assert(sizeof(InteractionSlot<double>) == 1617672,
               "InteractionSlot<double> changed size - update this pin, its comment and the "
               "slot budget in docs/RISK.md (V234-V237) together. docs/RISK.md V167.");
 
@@ -237,6 +249,7 @@ __host__ __device__ inline bic::BicStorage bic_storage_of(InteractionSlot<real_t
   st.cascade.product_capacity = kCascadeProductCap;
   st.cascade.preco_products = s.preco_products;
   st.cascade.preco_capacity = kCascadePrecoCap;
+  st.cascade.scratch = &s.bic_scratch;
   st.preco = &pws;
   return st;
 }
@@ -272,6 +285,7 @@ __host__ __device__ inline bic::BlirStorage blir_storage_of(InteractionSlot<real
   st.cascade.product_capacity = kCascadeProductCap;
   st.cascade.preco_products = s.preco_products;
   st.cascade.preco_capacity = kCascadePrecoCap;
+  st.cascade.scratch = &s.bic_scratch;
   st.spectators = s.spectators;
   st.spectator_capacity = bic::kSlotSpectatorCap;
   st.cascaders = s.cascaders;

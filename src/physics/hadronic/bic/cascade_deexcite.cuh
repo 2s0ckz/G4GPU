@@ -201,23 +201,25 @@ struct CascadeProduct {
 /// space, with the two-MeV-per-nucleon cheat its own comment names.
 template <typename Rng>
 __host__ __device__ inline int decay_void_nucleus(BicCascadeState& st, CascadeProduct* out,
-                                                  int capacity, int bic_model_id, Rng& rng,
+                                                  int capacity, int bic_model_id,
+                                                  BicScratch& scratch, Rng& rng,
                                                   CascadeRefusal& ref) {
-  int idx[256];
-  double masses[256];
+  // The three 256-entry lists live in the slot since docs/RISK.md V256 (cascade_scratch.cuh).
+  int* idx = scratch.void_index;
+  double* masses = scratch.void_mass;
   int n = 0;
   double sum_mass = 0.0;
   // theTargetList first, then theCapturedList - the order the momenta are handed back in. The
   // target list's order is the pool's; the captured list's is the order of capture, which is
   // not, once nucleons have been caught in more than one step (see `push_captured`).
-  for (int i = 0; i < st.lists.n_pool && n < 256; ++i) {
+  for (int i = 0; i < st.lists.n_pool && n < kCascadeMaxScratch; ++i) {
     if (st.lists.pool[i].list != kListTarget) { continue; }
     idx[n] = i;
     masses[n] = st.lists.pool[i].pdg_mass;
     sum_mass += masses[n];
     ++n;
   }
-  for (int seq = 0; seq < st.n_captured_pushed && n < 256; ++seq) {
+  for (int seq = 0; seq < st.n_captured_pushed && n < kCascadeMaxScratch; ++seq) {
     const int i = captured_at(st, seq);
     if (i < 0) { continue; }
     idx[n] = i;
@@ -238,7 +240,7 @@ __host__ __device__ inline int decay_void_nucleus(BicCascadeState& st, CascadePr
     final_p.e = std::sqrt(g4gpu::mag2(final_p.v) + e_cms * e_cms);
   }
   st.precompound_boost = final_p.boost_vector();
-  imr::LorentzVector momenta[256];
+  imr::LorentzVector* momenta = scratch.void_momenta;
   fermi_phase_space_decay(e_cms, masses, n, momenta, rng);
   for (int k = 0; k < n; ++k) {
     const CascadeTrack& t = st.lists.pool[idx[k]];

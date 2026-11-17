@@ -73,12 +73,6 @@
 
 namespace g4gpu::bic {
 
-/// The most tracks `Propagate` will hold in one of its scratch index arrays. These index the
-/// SECONDARY and FINAL lists, not the target list, so they are far smaller than A; 256 is the
-/// bound every other file in this package uses and the overflow is a refusal, never a silent
-/// truncation.
-inline constexpr int kCascadeMaxScratch = 256;
-
 /// How `Propagate` ended. `ApplyYourself` branches on exactly this.
 enum PropagateOutcome : int {
   kPropagateOk = 0,
@@ -110,6 +104,10 @@ struct CascadeWorkspace {
   /// `DeExcite`'s return, before `ProductsAddPrecompound` boosts it.
   CascadeProduct* preco_products = nullptr;
   int preco_capacity = 0;
+  /// The 256-entry working lists of `propagate` and everything it calls (`cascade_scratch.cuh`),
+  /// which were stack locals until docs/RISK.md V256. Required: `propagate` refuses a workspace
+  /// without one by capacity, as it refuses any other missing list, rather than reading null.
+  BicScratch* scratch = nullptr;
 };
 
 /// What one `Propagate` produced, beyond the product list itself.
@@ -202,13 +200,15 @@ template <typename Prop>
 __host__ __device__ inline bool capture_secondaries(BicCascadeState& st,
                                                     imr::CollisionList& colls,
                                                     const Prop& propagator,
+                                                    BicScratch& scratch,
                                                     CascadeRefusal& ref,
                                                     CaptureDecision* seen = nullptr) {
   const CaptureDecision d = capture_decision(st.lists.pool, st.lists.n_pool, st.cut_on_p,
                                              propagator);
   if (seen != nullptr) { *seen = d; }
   if (!d.capture) { return false; }
-  int captured[kCascadeMaxScratch];
+  // `captured`, in the slot since docs/RISK.md V256 (cascade_scratch.cuh).
+  int* captured = scratch.capture_captured;
   int n_cap = 0;
   for (int i = 0; i < st.lists.n_pool; ++i) {
     CascadeTrack& t = st.lists.pool[i];
@@ -250,6 +250,14 @@ __host__ __device__ inline PropagateResult propagate(
     const NuclearDensity& density, double coulomb_barrier, DeExcite&& de_excite, Rng& rng,
     CascadeRefusal& ref) {
   PropagateResult out;
+  // The scratch lists (cascade_scratch.cuh, docs/RISK.md V256). A workspace without them is a
+  // missing list like any other, refused by capacity before anything is drawn.
+  if (ws.scratch == nullptr) {
+    ref.capacity = true;
+    out.outcome = kPropagateRefused;
+    return out;
+  }
+  BicScratch& scr = *ws.scratch;
   imr::CollisionList colls;
   colls.items = ws.collisions;
   colls.capacity = ws.collision_capacity;
@@ -310,12 +318,12 @@ __host__ __device__ inline PropagateResult propagate(
   // so finding collisions one statement earlier is a different event.
   auto find = [&](const int* idx, int n) {
     find_collisions(st, colls, idx, n, ws.channels, ws.n_channels, *ws.buffers, sp, propagator,
-                    rng, ref);
+                    rng, scr, ref);
   };
 
   // `FindCollisions(&theSecondaryList)` - "if called stand alone find first collisions".
   {
-    int initial[kCascadeMaxScratch];
+    int* initial = scr.initial;
     int n_initial = 0;
     for (int i = 0; i < st.lists.n_pool; ++i) {
       if (st.lists.pool[i].list != kListSecondary) { continue; }
@@ -351,7 +359,7 @@ __host__ __device__ inline PropagateResult propagate(
     }
     {
       CaptureDecision seen;
-      if (capture_secondaries(st, colls, propagator, ref, &seen)) {
+      if (capture_secondaries(st, colls, propagator, scr, ref, &seen)) {
         have_products = true;
         ++out.captures;
         out.capture_count = seen.particles_below_cut;
@@ -365,7 +373,7 @@ __host__ __device__ inline PropagateResult propagate(
       if (next >= 0) {
         const double step = colls.items[next].collision_time - st.current_time;
         const TimeStepReport tsr = do_time_step(st, colls, propagator, step, sp.proton_mass,
-                                                sp.neutron_mass, find, ref);
+                                                sp.neutron_mass, find, scr, ref);
         if (!tsr.success) {
           // "Check if nextCollision is still valid, ie. particle did not leave nucleus"
           if (colls.next_collision() != next) { next = -1; }
@@ -416,7 +424,7 @@ __host__ __device__ inline PropagateResult propagate(
     }
     {
       CaptureDecision seen;
-      if (capture_secondaries(st, colls, propagator, ref, &seen)) {
+      if (capture_secondaries(st, colls, propagator, scr, ref, &seen)) {
         have_products = true;
         ++out.captures;
         out.capture_count = seen.particles_below_cut;
@@ -429,7 +437,8 @@ __host__ __device__ inline PropagateResult propagate(
     return out;
   }
 
-  const StepOutReport sor = step_particles_out(st, colls, propagator, sp, apply, find, ref);
+  const StepOutReport sor = step_particles_out(st, colls, propagator, sp, apply, find, scr,
+                                                ref);
   out.step_out_resets = sor.resets;
 
   // "add left secondaries to FinalSate" - a warning path in Geant4, and it fires.
@@ -514,8 +523,8 @@ __host__ __device__ inline PropagateResult propagate(
     n_preco = 1;
   } else {
     // "No fragment, can be neutrons only" - FindFragments returned null because Z < 1.
-    n_preco = decay_void_nucleus(st, ws.preco_products, ws.preco_capacity, bic_model_id(), rng,
-                                 ref);
+    n_preco = decay_void_nucleus(st, ws.preco_products, ws.preco_capacity, bic_model_id(), scr,
+                                 rng, ref);
   }
 
   // ------------------------------------------------------------------------------------------
@@ -523,7 +532,7 @@ __host__ __device__ inline PropagateResult propagate(
   // DeExcite and BEFORE the products are made. A resonance that left the nucleus decays here.
   // ------------------------------------------------------------------------------------------
   {
-    DecayTrack dl[kCascadeMaxScratch];
+    DecayTrack* dl = scr.decay_list;
     int n = 0;
     // In theFinalState's own order, which is `final_seq` - see `push_final`.
     for (int seq = 0; seq < st.n_final_pushed; ++seq) {

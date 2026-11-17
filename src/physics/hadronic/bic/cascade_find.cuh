@@ -180,6 +180,7 @@ template <typename Prop>
 __host__ __device__ inline void schedule_absorption(BicCascadeState& st,
                                                     imr::CollisionList& colls, int index,
                                                     const Prop& propagator,
+                                                    BicScratch& scratch,
                                                     imr::AbsorptionRefusal& aref) {
   const CascadeTrack& pro = st.lists.pool[index];
   // The candidate list is theTargetList, so a pion is always the PROJECTILE here - which is why
@@ -197,13 +198,14 @@ __host__ __device__ inline void schedule_absorption(BicCascadeState& st,
                                                 pro.momentum, tgt.momentum, pro.actual_mass(),
                                                 tgt.actual_mass(), aref);
     if (time == DBL_MAX) { continue; }
-    // FindAndFillCluster over the same candidates, by pool index.
-    int charges[256];
-    deex::Vec3d positions[256];
-    int ids[256];
+    // FindAndFillCluster over the same candidates, by pool index - into the slot's lists since
+    // docs/RISK.md V256 (cascade_scratch.cuh).
+    int* charges = scratch.cluster_charges;
+    deex::Vec3d* positions = scratch.cluster_positions;
+    int* ids = scratch.cluster_ids;
     int n = 0;
     int first_slot = -1;
-    for (int j = 0; j < st.lists.n_pool && n < 256; ++j) {
+    for (int j = 0; j < st.lists.n_pool && n < kCascadeMaxScratch; ++j) {
       if (st.lists.pool[j].list != kListTarget) { continue; }
       charges[n] = st.lists.pool[j].charge;
       positions[n] = st.lists.pool[j].position;
@@ -260,6 +262,7 @@ __host__ __device__ inline void find_collisions(BicCascadeState& st, imr::Collis
                                                 const imr::ConcreteChannel* chans, int n_chan,
                                                 CascadeBuffers& buf, const CascadeSpecies& sp,
                                                 const Prop& propagator, Rng& rng,
+                                                BicScratch& scratch,
                                                 CascadeRefusal& ref) {
   (void)chans;
   (void)n_chan;
@@ -268,7 +271,7 @@ __host__ __device__ inline void find_collisions(BicCascadeState& st, imr::Collis
     imr::AbsorptionRefusal aref;
     imr::ScatterRefusal sref;
     schedule_decay(st, colls, indices[k], rng, dref);
-    schedule_absorption(st, colls, indices[k], propagator, aref);
+    schedule_absorption(st, colls, indices[k], propagator, scratch, aref);
     schedule_scattering(st, colls, indices[k], buf, sp, propagator, sref, ref);
     if (dref.unknown_species) {
       ref.unknown_species = true;

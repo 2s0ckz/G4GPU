@@ -55,6 +55,7 @@
 #include <cmath>
 
 #include "physics/hadronic/bic/cascade_capture.cuh"
+#include "physics/hadronic/bic/cascade_scratch.cuh"
 #include "physics/hadronic/bic/rk_propagation.cuh"
 
 namespace g4gpu::bic {
@@ -284,33 +285,35 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
                                                        Prop& propagator, double time_step,
                                                        double proton_mass, double neutron_mass,
                                                        FindColl&& find_collisions,
+                                                       BicScratch& scratch,
                                                        CascadeRefusal& ref) {
   TimeStepReport out;
-  int was_outside[256];
-  int was_inside[256];
+  // The five 256-entry lists live in the slot since docs/RISK.md V256 (cascade_scratch.cuh).
+  int* was_outside = scratch.step_was_outside;
+  int* was_inside = scratch.step_was_inside;
   int n_was_out = 0;
   int n_was_in = 0;
   for (int i = 0; i < st.lists.n_pool; ++i) {
     const CascadeTrack& t = st.lists.pool[i];
     if (t.list != kListSecondary) { continue; }
-    if (t.state == kOutside && n_was_out < 256) { was_outside[n_was_out++] = i; }
-    if (t.state == kInside && n_was_in < 256) { was_inside[n_was_in++] = i; }
+    if (t.state == kOutside && n_was_out < kCascadeMaxScratch) { was_outside[n_was_out++] = i; }
+    if (t.state == kInside && n_was_in < kCascadeMaxScratch) { was_inside[n_was_in++] = i; }
   }
 
   transport_secondaries(st, propagator, time_step);
   st.momentum_transfer = st.momentum_transfer + propagator.momentum_transfer;
 
-  int gone_in[256];
-  int gone_out[256];
+  int* gone_in = scratch.step_gone_in;
+  int* gone_out = scratch.step_gone_out;
   int n_in = 0;
   int n_out = 0;
   for (int k = 0; k < n_was_out; ++k) {
-    if (st.lists.pool[was_outside[k]].state == kInside && n_in < 256) {
+    if (st.lists.pool[was_outside[k]].state == kInside && n_in < kCascadeMaxScratch) {
       gone_in[n_in++] = was_outside[k];
     }
   }
   for (int k = 0; k < n_was_in; ++k) {
-    if (st.lists.pool[was_inside[k]].state == kGoneOut && n_out < 256) {
+    if (st.lists.pool[was_inside[k]].state == kGoneOut && n_out < kCascadeMaxScratch) {
       gone_out[n_out++] = was_inside[k];
     }
   }
@@ -324,12 +327,12 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
     n_in = 0;
     n_out = 0;
     for (int k = 0; k < n_was_out; ++k) {
-      if (st.lists.pool[was_outside[k]].state == kInside && n_in < 256) {
+      if (st.lists.pool[was_outside[k]].state == kInside && n_in < kCascadeMaxScratch) {
         gone_in[n_in++] = was_outside[k];
       }
     }
     for (int k = 0; k < n_was_in; ++k) {
-      if (st.lists.pool[was_inside[k]].state == kGoneOut && n_out < 256) {
+      if (st.lists.pool[was_inside[k]].state == kGoneOut && n_out < kCascadeMaxScratch) {
         gone_out[n_out++] = was_inside[k];
       }
     }
@@ -338,16 +341,20 @@ __host__ __device__ inline TimeStepReport do_time_step(BicCascadeState& st,
   // The ones that were OUTSIDE and missed, or went straight through, join the same list.
   for (int k = 0; k < n_was_out; ++k) {
     const int s = st.lists.pool[was_outside[k]].state;
-    if ((s == kMissNucleus || s == kGoneOut) && n_out < 256) { gone_out[n_out++] = was_outside[k]; }
+    if ((s == kMissNucleus || s == kGoneOut) && n_out < kCascadeMaxScratch) {
+      gone_out[n_out++] = was_outside[k];
+    }
   }
   for (int k = 0; k < n_out; ++k) { push_final(st, gone_out[k]); }
   out.n_gone_out = n_out;
 
-  int captured[256];
+  int* captured = scratch.step_captured;
   int n_cap = 0;
   for (int i = 0; i < st.lists.n_pool; ++i) {
     const CascadeTrack& t = st.lists.pool[i];
-    if (t.list == kListSecondary && t.state == kCaptured && n_cap < 256) { captured[n_cap++] = i; }
+    if (t.list == kListSecondary && t.state == kCaptured && n_cap < kCascadeMaxScratch) {
+      captured[n_cap++] = i;
+    }
   }
 
   // Is the collision the manager would run next about a track that has just left or been caught?
