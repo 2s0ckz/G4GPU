@@ -435,9 +435,10 @@ inline constexpr unsigned int kInteractionRngPurpose = 0x1E7Au;
 // kernel includes, names neither.
 //
 // WHAT A SLOT COSTS is `sizeof(had::InteractionSlot<double>)`, pinned by a static_assert beside
-// the definition: 1,566,472 bytes since P24 (V237: the four final-state arrays at 856 entries,
-// Bertini's lists at 184; 1,481,056 before), plus one `ftf::entry::Workspace` of 671,256 (V236,
-// pinned too), 2,237,728 bytes a slot, and `Upload` prints the total. A sizing table stood here
+// the definition: 1,617,672 bytes since the Binary-frame slice (V256: +51,200 for the cascade's
+// 256-entry working lists, which lived on the stack; 1,566,472 since P24, V237: the four final-state
+// arrays at 856 entries, Bertini's lists at 184; 1,481,056 before), plus one `ftf::entry::Workspace`
+// of 671,256 (V236, pinned too), 2,288,928 bytes a slot, and `Upload` prints the total. A sizing table stood here
 // until P24 and had drifted from the types - as V167's had - together with an
 // `InteractionSlotCounts` whose `kSecondaryCap = 256` nothing read and which promised that the
 // host and the kernel could not disagree about a number that had become 856; both are gone, and
