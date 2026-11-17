@@ -36,8 +36,10 @@
 // What is left ACTIVE on both sides: `msc`, `hIoni`, `ionIoni`, `hadElastic`, `CoulombScat`,
 // `Decay`, and the whole of `G4EmStandardPhysics` for the electrons and gammas.
 //
-// **Known omissions, stated up front.** The inelastic reactions (P9-P11) and the ion's own
-// `ionElastic` (`had::ElasticChannel::kIonDiffuseNotWired`) are off on both sides. And the
+// **Known omissions, stated up front.** The inelastic reactions (P9-P11) are off on both sides,
+// and the ion's own `ionElastic` is inactivated on the Geant4 side only: P25 wired it in the port
+// under `hadron_elastic`, and a recoil's track of a few micrometres against its 55-300 mm mean
+// free path (docs/RISK.md V267) puts the difference below 1e-4 of a recoil's share. And the
 // port's Bragg peak sits about 0.23 mm proximal of Geant4's, a 0.3% range difference that
 // docs/RISK.md V5 records in detail, including the seven things it has been measured *not*
 // to be.
@@ -413,8 +415,9 @@ int main(int argc, char** argv) {
         // (docs/RISK.md V53). The general process is now ACTIVE on both sides, which is the
         // only configuration in which that name's absence costs nothing.
         // The ion's own elastic process. G4IonElasticPhysics gives GenericIon "ionElastic"
-        // (G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic); both halves are ported and the
-        // channel is not wired - had::ElasticChannel::kIonDiffuseNotWired.
+        // (G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic), wired in the port by P25 under
+        // hadron_elastic and still inactivated here (the header comment: below 1e-4 of a recoil's
+        // share).
         "ionElastic",
         // Electro-, positron- and muon-nuclear: P13. These three the UI accepts.
         //

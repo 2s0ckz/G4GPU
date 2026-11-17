@@ -425,7 +425,7 @@ closed - the same question has the mechanism.
 | γ, e⁻, e⁺ | **transported**; the photon's nuclear process inside the general process and the leptons' as discrete processes act (P19), and inside that process the photon Rayleigh-scatters only below 2 m_e and goes to a nucleus at Geant4's own table-9 rate, as QBBC's does (P21) |
 | μ±, π±, K±, p̄, deuteron, triton | **transported**: dE/dx, range, delta rays, radiative losses and fluctuations act; decay acts in flight and at rest; `hadElastic` acts on π±, K±, d and t (and on the proton and alpha) and `CoulombScat` on μ±, π±, K± and p̄ — and since P23c on p̄ too: its `hadElastic` runs on `G4ComponentAntiNuclNuclearXS` with `G4HadronElastic` below 100.1 MeV and `G4AntiNuclElastic` above, both exact against Geant4 (RISK V251-V252). **`<species>Inelastic` acts since P15** for π± and K± (the Binary cascade below 1.5 GeV, Bertini above 1, FTFP above 3, chosen as `G4EnergyRangeManager` chooses) and for d and t (the light-ion reaction: its fusion arm below 50 MeV per nucleon and, since P9e, `Interact` above it). The antiproton's `anti_protonInelastic` is FTFP at every energy on the same component since P23c, and a stopped antiproton annihilates through `G4HadronicAbsorptionFritiof`'s arm (RISK V253). A stopped μ⁻, π⁻ or K⁻ is **captured** rather than decayed, which is what `G4HadronStoppingProcess` does — its at-rest interaction length is zero and pre-empts `G4Decay`; `muonNuclear` acts on μ± (P19) |
 | neutron, π⁰ | **transported** by the neutral kernel, and the neutron now INTERACTS: one discrete interaction length off `G4NeutronGeneralProcess`'s combined table per material, the sub-process from the cumulative partials on the same grid, then `G4ChipsElasticModel` on `G4NeutronElasticXS` or `G4NeutronRadCapture` on `G4NeutronCaptureXS` through PhotonEvaporation5.7's level scheme. Its B1 dose agrees with Geant4 to **+0.02%, 0.01 σ** at 500,000 events (`ref/b1hadron/stage1_README.md`). **The inelastic sub-process ACTS since P15** - the same three models a proton's does, reached through the interaction queue instead of refused by name, which closes what was this port's largest named hole (18% of the interactions in water at 10 MeV, 39% in air, 25% in bone, 51% in lead). The 10 µs tracking cut still comes first and still discards rather than deposits — 4453 neutrons of 500,000 and 3.7e-5 MeV in that run. π⁰ decays at once **Since P22 the neutron carries `G4NeutronGeneralProcess`'s interaction count across its steps in 11.1.1's order** (RISK V230-V232): the cross section is refreshed for the material the neutron is now in and the step just taken is charged at that mean free path, which is what makes QBBC's neutrons interact on the faces of denser volumes. Against QBBC as it ships the 100 MeV and 1 GeV beams read +0.64% (1.0 σ) and -0.90% (0.7 σ) where they read -41% and -37%; `G4GPU_NEUTRON_GP_ORDER=reordered` keeps the memoryless redraw for a run against a general-process-off reference, and reproduces the old numbers to every digit |
-| **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic`) and its delta-ray channel above ~17 GeV/u are refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
+| **every real nuclide** (C12, O16, Ca40, …) | **transported** as `GenericIon` carrying its own (Z, A): the elastic recoil nucleus a charged hadron makes is a track, its dE/dx and range are GenericIon's tables scaled by `m(GenericIon)/m(ion)` and the effective charge squared, and it stops where a Geant4 ion stops — a few hundred keV of oxygen goes about a micrometre. Its own `ionElastic` (`G4NuclNuclDiffuseElastic` on `G4ComponentGGNuclNuclXsc`) acts (P25, RISK V267-V271: Geant4's own `PostStepDoIt` replayed exactly; it fires once per 6-30 cm of a real ion's track in B1's phantom, and in 650,000 primaries never made a recoil above the 70 keV cut); its delta-ray channel above ~17 GeV/u is refused by name and counted. A GenericIon *primary* is refused: it would have no nuclide |
 | proton, alpha | **transported**. Multiple scattering is WentzelVI for the proton and `G4UrbanMscModel` for the alpha, which is what QBBC gives each of them — the substitution named in open question 2 ended with P8e. **`protonInelastic` acts since P15**, through the Binary cascade below 1.5 GeV, Bertini 1-6 GeV and FTFP above 3, with the model chosen as `G4EnergyRangeManager` chooses it; the hydrogen target it refused until P18 (`G4BinaryCascade::Propagate1H1`, 31 of 256 interactions at 1 GeV in water) answers since, and the destroyed nucleus (`FillVoidNucleusProducts`) since P20. **`alphaInelastic` acts since P9e**: `G4BinaryLightIonReaction` fuses below 50 MeV per nucleon and runs `Interact` at or above it, and FTFP takes over from 3 GeV per nucleon. Until P9e reached this branch `Interact` was refused by name - 195 of 215 alpha interactions in water, and every alpha beam of the B1 sweep sits in that window - so the five ion inelastic processes were held off on BOTH sides of every like-for-like column; they are on on both now (docs/RISK.md V192, V198). With the destroyed-nucleus branch answered (P20) the 4 GeV alpha row reads -3.82% (2.6 sigma) at a tenth of the counts where it read +12.10%, and what parts the alpha rows at the full counts is the neutron's (V219) |
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
@@ -445,7 +445,7 @@ closed - the same question has the mechanism.
 | `G4UAtomicDeexcitation` and friends | fluorescence and Auger | constructed unconditionally by `G4EmBuilder`; emits only when the deexcitation flags are on, which QBBC leaves off |
 | `G4VEmModel::CorrectionsAlongStep` under `if(isIon)` | the `q²(E_mid)/q²(E_pre)` correction `G4VEnergyLossProcess::AlongStepDoIt` applies to a generic ion and He3, and not to an alpha | **closed by P26** (RISK V247): applied in `step_hadron` for He3 and every real nucleus after the mean loss and before the fluctuations, 4,080 oracle rows to 2.05e-15, the largest correction a factor 0.605; it moves only steps that lose 5% or more, and the alpha, deuteron and triton are not `isIon` and never reach it |
 | `G4IonTable::CreateIon`'s spin and magnetic moment | `ENSDFSTATE.dat`'s 2J and µ columns for the ground state | **closed by P26b** (RISK V259-V261): the 2,977 ground states' 2J and µ are a device table read as `CreateIon` reads them (0 mismatches against `G4IonTable::GetIon` over 13,320 nuclides), the delta-ray sampler's form-factor rejection is Geant4's deviate for deviate (8,160 draws exact; 816 Monte Carlo points, chi2 610), and `kIonDeltaRay` is at zero on every ion beam - the steps it used to book were Li6 to N14 in air below 2 MeV per nucleon, where `G4BraggIonModel` has no rejection at all. Still refused by name: a real nuclide with no ENSDFSTATE row (H4, H5, H7), which Geant4 samples on `CreateIon`'s J = 0 default; no beam reached one |
-| `G4NuclNuclDiffuseElastic` + `G4ComponentGGNuclNuclXsc` as `ionElastic` | the ion's OWN elastic scattering | both halves are ported; the channel is not wired, so a transported ion draws no hadronic interaction length. Bounded at ~1e-9 per recoil — a micrometre of range against a metre of mean free path |
+| `G4NuclNuclDiffuseElastic` + `G4ComponentGGNuclNuclXsc` as `ionElastic` | the ion's OWN elastic scattering | **closed by P25** (RISK V267-V271): wired for every real nuclide; the cross section per volume against `G4HadronicProcessStore` to 4.8e-16 at 5,112 points, `G4HadronElasticProcess::PostStepDoIt` replayed exactly under one generator over 2,728 calls, the recoil a GenericIon track. The bound that stood here (~1e-9 per recoil, a metre of mean free path) was wrong by two to four orders: the mean free path is 55-300 mm in water, tissue and bone, so `ionElastic` fires once per 6-30 cm of a real ion's track. It still moves no sweep row by a digit (V271), because every recoil of 650,000 primaries stayed under the 70 keV cut |
 | Penelope, PAI, Goudsmit-Saunderson, Livermore polarised, DNA, adjoint, PIXE, optical, transition radiation | alternative and specialist models | none are in QBBC's chain |
 
 A class-by-class inventory of all three Geant4 process trees — 568 electromagnetic headers,
@@ -631,9 +631,12 @@ send every one of them somewhere else.
     or their de-excitation. Nothing before P24 compared the ion arm with Geant4 beyond baryon
     number and charge, which a residual that keeps what should have evaporated still satisfies.
     It wants a package of its own, with the per-species rows `ftf_modelstat` gives the hadron arm.
+    P28 (RISK V264-V265) put the residual's de-excitation into `PropagateNuclNucl`'s path too, which
+    is where this deficit was placed; the ion grid has not been re-measured since, so the question
+    stays open until it is.
 
-  9. **The two 10 GeV beams sit above QBBC, and the excess predates P23a** (RISK V244, found at
-    P23a's beams). Example B1, 500,000 events, against Geant4 11.1.1 QBBC as it ships: the 10 GeV
+  9. **CLOSED by P28. The two 10 GeV beams sat above QBBC because FTFP's residual nucleus was
+    never de-excited** (RISK V244 found the excess at P23a's beams; V264-V266 closed it). Example B1, 500,000 events, against Geant4 11.1.1 QBBC as it ships: the 10 GeV
     proton +20.4% (+38.8 sigma), the 10 GeV pi+ +5.4% (+12.9 sigma); with the strange species
     refused, as before P23a, +19.6% and +3.9%, so the strange tracks move the rows by +0.7% and
     +1.5% and are not the excess. The 1 GeV proton agrees to +0.06%, and Geant4's EM-only and QBBC
@@ -642,9 +645,21 @@ send every one of them somewhere else.
     beams above 4 GeV per nucleon this port has run (the sweep's highest is alpha_4000), and the
     10 GeV proton's interactions are FTFP's (3 GeV up). Not diagnosed; it wants a package of its
     own, a step tape against Geant4 on the 10 GeV proton first.
+    The cause (V264): `G4GeneratorPrecompoundInterface::Propagate` ends with the residual's
+    de-excitation, and the port's hand-over stopped before it - the residual was emitted whole at
+    mass M0+E* and `fill_result_into` turned E* (294 MeV for the 10 GeV proton on O16, 534 on
+    Ca40) into the residual ion's kinetic energy, deposited within microns. With the residual
+    de-excited as Geant4 de-excites it (V265: 1,540 species comparisons inside 5 sigma, 464 of
+    them past it before), the 10 GeV proton is 2.11791 +/- 0.00614 uGy against Geant4's 2.12290
+    with the eta and eta' dropped on both sides (-0.24%, -0.6 sigma) and the 10 GeV pi+ 1.62469
+    +/- 0.00441 against 1.63668 (-0.73%, -1.9 sigma); against QBBC as it ships they sit -1.3% and
+    -3.3%, which is the eta and eta' share of Geant4's own dose on these beams (1.1% and 2.5%):
+    the `ParticleType` gap of V240, not an excess (V266). The 1 GeV proton and the B1 gate did not
+    move by a digit.
 
-  10. **The antiproton beam sits +20.5% above QBBC, and the excess is in FTFP's annihilation final
-     states** (RISK V255, found at P23c's beam). Example B1, 200,000 antiprotons of 1 GeV: Geant4
+  10. **CLOSED by P28. The antiproton beam sat +20.5% above QBBC for question 9's reason: the
+     residual of every FTFP final state carried its excitation as kinetic energy** (RISK V255
+     found the excess at P23c's beam; V264-V266 closed it). Example B1, 200,000 antiprotons of 1 GeV: Geant4
      QBBC as it ships 623.26 +/- 2.59 nGy; Geant4 with the antiproton's three hadronic processes
      inactivated 239.60; the port before P23c 239.34 (its EM transport was right and the whole gap
      was hadronic); the port after 751.09 +/- 3.95, +20.5% and +27 sigma. The port's hadronic
@@ -654,6 +669,12 @@ send every one of them somewhere else.
      transport. The same sign and size as question 9's 10 GeV excess, which is also FTFP's: one
      package should take both, a step tape against Geant4 on the 1 GeV antiproton first, since it
      is the cheaper beam and its interactions are all FTFP's.
+     The tape (V264) on 20,000 antiprotons: 10,868 FTFP interactions, 89.6% in flight at 900-1000
+     MeV and 1.6% at rest, the residual's mean excitation 164 MeV in flight and 36 at rest, all of
+     it booked as an ion's kinetic energy before the fix and spent on evaporation after. The beam
+     after (V266): 595.215 +/- 2.488 nGy against Geant4's 590.583 with the eta and eta' dropped on
+     both sides (+0.78%, +1.3 sigma), and -4.5% against QBBC as it ships, the eta and eta' share of
+     Geant4's dose on this beam being 5.2%.
 
 
 ---
