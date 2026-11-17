@@ -26,6 +26,18 @@
 # date, and for the run the two lines build_all.bat has always printed - "N passed, M failed" and
 # "FAILED: ..." - plus the tail of every failing test's output, which the old loop threw away.
 # Exit 1 on the first compile that fails (after the ones in flight finish) and when any test fails.
+#
+# A TEST UNCHANGED SINCE ITS LAST PASS IS NOT RUN AGAIN. Every test here is deterministic: a fixed
+# seed, a fixed oracle, no clock, no file written. So its answer is a function of its binary, of
+# the oracle directory it reads and, for a kernel test, of the card it runs on - and re-running it
+# when none of those changed proves what the last run proved (gate ba66, 2026-11-16: the 98 tests
+# ran for 25 minutes, test_bic_apply alone for 18, on a package that had not touched the
+# cascade). A pass is stamped in out\deps\<test>.pass with that function's inputs: the SHA-256
+# of the exe, a fingerprint of G4GPU_ORACLE (every *.csv's name, size and write time), the card
+# (CUDA_VISIBLE_DEVICES and nvidia-smi's names) for a kernel test; a run whose inputs match the
+# stamp is reported as "unchanged since its last pass" and counted as passed. Anything else -
+# a rebuilt exe, a regenerated oracle file, a different card, no stamp - runs. G4GPU_TESTS_ALL=1
+# runs every test regardless and restamps; a failure never stamps.
 param(
   [Parameter(Mandatory = $true)][string]$Root,
   [string]$Plain = "",
@@ -60,6 +72,7 @@ function New-Item2([string]$name, [bool]$isGpu) {
     Recipe = (Join-Path $deps "$name.recipe"); RecipeNow = $cmd; Args = $cmd
     Out = (Join-Path $deps "$name.out.log"); Err = (Join-Path $deps "$name.err.log")
     RunOut = (Join-Path $deps "$name.run.log"); RunErr = (Join-Path $deps "$name.runerr.log")
+    Pass = (Join-Path $deps "$name.pass")
     Proc = $null; Started = $null }
 }
 $items = @()
@@ -166,6 +179,37 @@ if ($Mode -eq "run" -or $Mode -eq "all") {
   foreach ($it in $items) {
     if (-not (Test-Path -LiteralPath $it.Exe)) { Write-Host ("FATAL: tests\{0}.exe does not exist - was it built?" -f $it.Name); exit 1 }
   }
+  # The inputs a pass depends on besides the exe: the oracle directory as it is now, and the card.
+  $oracleDir = $env:G4GPU_ORACLE
+  $oracleFp = ""
+  if (Test-Path -LiteralPath $oracleDir) {
+    $oracleFp = ((Get-ChildItem -LiteralPath $oracleDir -Filter *.csv | Sort-Object Name | ForEach-Object { "{0}:{1}:{2}" -f $_.Name, $_.Length, $_.LastWriteTimeUtc.Ticks }) -join ";")
+  }
+  $cardFp = ""
+  try { $cardFp = ((& nvidia-smi --query-gpu=name,uuid --format=csv,noheader 2>$null) -join ";") } catch { $cardFp = "" }
+  $cardFp = "CUDA_VISIBLE_DEVICES=" + $env:CUDA_VISIBLE_DEVICES + "|" + $cardFp
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  function Get-StringHash([string]$s) {
+    return ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s)))).Replace("-", "")
+  }
+  function Get-PassKey($it) {
+    $exeHash = (Get-FileHash -LiteralPath $it.Exe -Algorithm SHA256).Hash
+    $inputs = "exe=" + $exeHash + "|oracle=" + $oracleDir + "|" + (Get-StringHash $oracleFp)
+    if ($it.Gpu) { $inputs += "|card=" + (Get-StringHash $cardFp) }
+    return $inputs
+  }
+  $runAll = ($env:G4GPU_TESTS_ALL -eq "1")
+  $toRun = @(); $unchanged = @()
+  foreach ($it in $items) {
+    $it | Add-Member -NotePropertyName Key -NotePropertyValue (Get-PassKey $it) -Force
+    $stamped = ""
+    if (Test-Path -LiteralPath $it.Pass) { $stamped = (Get-Content -LiteralPath $it.Pass -Raw).Trim() }
+    if (-not $runAll -and $stamped -eq $it.Key) {
+      $unchanged += $it.Name
+      Write-Host ("  {0}: unchanged since its last pass ({1})" -f $it.Name, (Get-Item -LiteralPath $it.Pass).LastWriteTime.ToString("yyyy-MM-dd HH:mm"))
+    } else { $toRun += $it }
+  }
+  Write-Host ("running {0} of {1} tests ({2} unchanged since their last pass{3})" -f $toRun.Count, $items.Count, $unchanged.Count, $(if ($runAll) { "; G4GPU_TESTS_ALL=1" } else { "" }))
   $passed = @(); $failedNames = @()
   $launch = {
     param($it)
@@ -174,15 +218,20 @@ if ($Mode -eq "run" -or $Mode -eq "all") {
   }
   $onDone = {
     param($it, $code)
-    if ($code -eq 0) { $script:passed += $it.Name; return $true }
+    if ($code -eq 0) {
+      $script:passed += $it.Name
+      Set-Content -LiteralPath $it.Pass -Value $it.Key -Encoding ASCII
+      return $true
+    }
     $script:failedNames += $it.Name
     Write-Host ("--- {0} FAILED (exit {1}); the last lines of its output:" -f $it.Name, $code)
     Show-File $it.RunOut 40
     Show-File $it.RunErr 20
     return $false
   }
-  [void](Invoke-Scheduled $items $launch $onDone $false)
-  Write-Host ("{0} passed, {1} failed" -f $passed.Count, $failedNames.Count)
+  [void](Invoke-Scheduled $toRun $launch $onDone $false)
+  Write-Host ("{0} passed, {1} failed" -f ($passed.Count + $unchanged.Count), $failedNames.Count)
+  Write-Host ("  {0} ran and passed, {1} unchanged since their last pass" -f $passed.Count, $unchanged.Count)
   Write-Host ("tests ran in {0} s" -f [int]$swRun.Elapsed.TotalSeconds)
   if ($failedNames.Count -gt 0) { Write-Host ("FAILED: " + ($failedNames -join " ")); exit 1 }
 }
