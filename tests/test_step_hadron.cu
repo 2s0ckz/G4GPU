@@ -174,13 +174,15 @@ struct FinalState {
 };
 
 __global__ void RunElasticApply(had::ElasticTables<real_t> t, const data::Material<real_t>* m,
-                                const ParticleType* types, const real_t* ekins, int n,
-                                FinalState* out) {
+                                const ParticleType* types, const real_t* ekins,
+                                const unsigned short* zas, int n, FinalState* out) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   Philox<real_t> rng(7777u + static_cast<unsigned int>(i), 0u, 0x5E1Au);
+  // P25: the nuclide, read by the `kGenericIon` cases (ionElastic) and zero for every other.
+  const int iz = ion_z_of(zas[i]), ia = ion_a_of(zas[i]);
   hadronic::xs::MaterialXs<real_t> mxs{};
-  const real_t xs = had::elastic_xs_per_volume<real_t>(t, *m, types[i], ekins[i], mxs);
+  const real_t xs = had::elastic_xs_per_volume<real_t>(t, *m, types[i], ekins[i], mxs, iz, ia);
   // EVERY SECOND CASE IS HANDED A LARGER "start of step" CROSS SECTION, so the integral-approach
   // rejection is exercised. With `xs_at_step_start == xs` the test `xs < xs*u` can only pass for
   // u > 1 and the branch is dead code - which is what the first version of this test measured:
@@ -190,7 +192,7 @@ __global__ void RunElasticApply(had::ElasticTables<real_t> t, const data::Materi
   const real_t xs_start = ((i % 2) == 0) ? xs : real_t(2) * xs;
   const auto r = had::elastic_apply<real_t>(t, *m, types[i], ekins[i],
                                             Vec3<real_t>{0, 0, 1}, real_t(0.7), xs_start, mxs,
-                                            rng);
+                                            rng, iz, ia);
   FinalState f{};
   f.dx = r.dir.x; f.dy = r.dir.y; f.dz = r.dir.z;
   f.energy = r.energy;
@@ -429,6 +431,8 @@ int main() {
     ParticleType type;
     const char* name;
     real_t ekin;
+    /// P25: the nuclide of a `kGenericIon` beam, `ion_za_of(Z, A)`; zero for every other.
+    unsigned short za;
   };
   const Beam beams[] = {
       {ParticleType::kProton, "proton", real_t(200)},
@@ -437,6 +441,11 @@ int main() {
       {ParticleType::kKaonPlus, "K+", real_t(400)},
       {ParticleType::kAlpha, "alpha", real_t(840)},
       {ParticleType::kMuonMinus, "mu-", real_t(1000)},
+      // P25: a real nucleus, so `step_hadron`'s ionElastic branch - the nuclide threaded into
+      // `elastic_xs_per_volume` and `elastic_apply` - runs on the device and the host. C12 at
+      // 1 GeV per nucleon: ionElastic's mean free path in water is about 300 mm (printed below)
+      // against a step of tens of mm, so of order ten of the 150 tracks scatter.
+      {ParticleType::kGenericIon, "C12", real_t(12000), ion_za_of(6, 12)},
   };
   const int kPer = 150;
 
@@ -471,7 +480,7 @@ int main() {
     hadronic::xs::MaterialXs<real_t> m{};
     const real_t xe =
         had::elastic_xs_per_volume<real_t>(host_owner.view, mats[data::kWater], b.type, b.ekin,
-                                           m);
+                                           m, ion_z_of(b.za), ion_a_of(b.za));
     const real_t pdm = particle_def<real_t>(b.type).mass;
     const bool has_c = em::has_coulomb_scattering(b.type)
                        && b.ekin >= em::coulomb_table_min_energy<real_t>(
@@ -506,6 +515,7 @@ int main() {
       p.pos = Vec3<real_t>{0, 0, 0};
       p.dir = Vec3<real_t>{0, 0, 1};
       p.ekin = b.ekin;
+      p.ion_za = b.za;
       p.volume = 0;
       p.event = i;
       p.global_time = 0;
@@ -726,6 +736,11 @@ int main() {
     total_ion += n_ion;
     std::printf("  %-8s %6d %8d %8d %8d %8d %8d %10.3e\n", b.name, kPer, n_el, n_coul, n_dec,
                 n_delta, n_rec, worst);
+    // P25: a real nucleus's elastic process is ionElastic, and on this beam it must fire.
+    if (b.type == ParticleType::kGenericIon && n_el == 0) {
+      std::printf("  FAIL: %s: ionElastic never fired in %d steps\n", b.name, kPer);
+      ++g_fails;
+    }
     cudaFree(d_in);
     cudaFree(d_out);
   }
@@ -808,27 +823,43 @@ int main() {
     const real_t es[] = {real_t(20),   real_t(50),   real_t(100),  real_t(200),
                          real_t(399),  real_t(401),  real_t(600),  real_t(1000),
                          real_t(2000), real_t(5000), real_t(1e4),  real_t(2e4)};
+    std::vector<unsigned short> zas;
     for (ParticleType t : el_species) {
       for (real_t e : es) {
         types.push_back(t);
         ekins.push_back(e);
+        zas.push_back(0);
+      }
+    }
+    // P25: three real nuclides through ionElastic, at the same twelve points read as a quarter of
+    // the energy PER NUCLEON (5 MeV/u to 5 GeV/u) - so the lowest sit near the Glauber-Gribov
+    // Coulomb barrier, where the cross section opens.
+    const int ion_nuclides[3][2] = {{6, 12}, {8, 16}, {3, 7}};
+    for (const auto& q : ion_nuclides) {
+      for (real_t e : es) {
+        types.push_back(ParticleType::kGenericIon);
+        ekins.push_back(e * real_t(q[1]) / real_t(4));
+        zas.push_back(ion_za_of(q[0], q[1]));
       }
     }
     const int n = static_cast<int>(types.size());
     ParticleType* d_types = nullptr;
     real_t* d_ekins = nullptr;
+    unsigned short* d_zas = nullptr;
     FinalState* d_fs = nullptr;
     cudaMalloc(&d_types, sizeof(ParticleType) * n);
     cudaMalloc(&d_ekins, sizeof(real_t) * n);
+    cudaMalloc(&d_zas, sizeof(unsigned short) * n);
     cudaMalloc(&d_fs, sizeof(FinalState) * n);
     cudaMemcpy(d_types, types.data(), sizeof(ParticleType) * n, cudaMemcpyHostToDevice);
     cudaMemcpy(d_ekins, ekins.data(), sizeof(real_t) * n, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_zas, zas.data(), sizeof(unsigned short) * n, cudaMemcpyHostToDevice);
 
     auto run_pair = [&](const char* what, bool elastic) {
       cudaMemset(d_fs, 0, sizeof(FinalState) * n);
       if (elastic) {
         RunElasticApply<<<(n + 63) / 64, 64>>>(owner.view, d_mats + data::kWater, d_types,
-                                               d_ekins, n, d_fs);
+                                               d_ekins, d_zas, n, d_fs);
       } else {
         RunCoulombFire<<<(n + 63) / 64, 64>>>(d_mats + data::kWater, d_types, d_ekins, n,
                                               d_fs);
@@ -842,18 +873,20 @@ int main() {
       std::vector<FinalState> dev(n);
       cudaMemcpy(dev.data(), d_fs, sizeof(FinalState) * n, cudaMemcpyDeviceToHost);
       double worst = 0.0;
-      int n_fired = 0, n_emit = 0, n_bad = 0, n_rejected = 0;
+      int n_fired = 0, n_emit = 0, n_bad = 0, n_rejected = 0, n_ion_fired = 0;
       for (int i = 0; i < n; ++i) {
         FinalState h{};
         if (elastic) {
           Philox<real_t> rng(7777u + static_cast<unsigned int>(i), 0u, 0x5E1Au);
           hadronic::xs::MaterialXs<real_t> mxs{};
+          const int iz = ion_z_of(zas[i]), ia = ion_a_of(zas[i]);
           const real_t xs = had::elastic_xs_per_volume<real_t>(
-              host_owner.view, mats[data::kWater], types[i], ekins[i], mxs);
+              host_owner.view, mats[data::kWater], types[i], ekins[i], mxs, iz, ia);
           const real_t xs_start = ((i % 2) == 0) ? xs : real_t(2) * xs;
           const auto r = had::elastic_apply<real_t>(host_owner.view, mats[data::kWater],
                                                     types[i], ekins[i], Vec3<real_t>{0, 0, 1},
-                                                    real_t(0.7), xs_start, mxs, rng);
+                                                    real_t(0.7), xs_start, mxs, rng, iz, ia);
+          if (types[i] == ParticleType::kGenericIon && r.interacted) { ++n_ion_fired; }
           h.dx = r.dir.x; h.dy = r.dir.y; h.dz = r.dir.z;
           h.energy = r.energy; h.edep = r.edep; h.sec_ekin = r.recoil_ekin;
           h.sdx = r.recoil_dir.x; h.sdy = r.recoil_dir.y; h.sdz = r.recoil_dir.z;
@@ -917,12 +950,26 @@ int main() {
         // step comparison's 1e-11. It is the same amplification `xs/projectile.cuh` documents
         // for the kaon mass and docs/RISK.md V37 for the elastic boost.
         constexpr double kRecoilTol = 1e-9;
+        // P25: AND AN ABSOLUTE GATE FROM THE SAME MECHANISM, because ionElastic's recoils are
+        // not 0.03 MeV but 1e-8: G4NuclNuclDiffuseElastic's screened-Rutherford angles leave
+        // the target nucleus with eV, so the same few-ulp error of `lv.e()` (projectile total
+        // energy plus the target's mass) is 1e-4 of the answer. Measured on the C12/O16/Li7
+        // rows: 3.6e-12 MeV apart host to device on a 1.3e-8 MeV recoil, rel 2.7e-4. The bound
+        // is 16 ulps of that total, with the heaviest target in water (O16, 14,899 MeV).
+        const double m_proj = (types[i] == ParticleType::kGenericIon)
+                                  ? data::nuclear_mass<double>(ion_a_of(zas[i]),
+                                                               ion_z_of(zas[i]))
+                                  : double(particle_def<real_t>(types[i]).mass);
+        const double recoil_abs = 16.0 * 2.220446049250313e-16
+                                  * (double(ekins[i]) + m_proj + 14899.0);
         for (int k = 0; k < 9; ++k) {
           if (hv[k] == dv[k]) { continue; }
           const double rel = (dv[k] != 0.0) ? std::fabs(double(hv[k] - dv[k]) / double(dv[k]))
                                             : std::fabs(double(hv[k] - dv[k]));
           if (rel > worst) { worst = rel; }
-          if (rel > ((k == 4 || k == 5) ? kRecoilTol : kNumTol)) {
+          const bool recoil_field = (k == 4 || k == 5);
+          if (recoil_field && std::fabs(double(hv[k] - dv[k])) <= recoil_abs) { continue; }
+          if (rel > (recoil_field ? kRecoilTol : kNumTol)) {
             if (n_bad < 6) {
               std::printf("  FAIL: %s case %d field %d: host %.17g device %.17g (rel %.3e)\n",
                           what, i, k, double(hv[k]), double(dv[k]), rel);
@@ -969,6 +1016,15 @@ int main() {
                     "and the antiproton, which have no elastic process in QBBC\n");
         ++g_fails;
       }
+      // P25: the ion cases are ionElastic's, and the channel must be live for them.
+      if (elastic) {
+        std::printf("  of which %d GenericIon cases (C12, O16, Li7) interacted through "
+                    "ionElastic\n", n_ion_fired);
+        if (n_ion_fired == 0) {
+          std::printf("  FAIL: ionElastic never interacted on the grid\n");
+          ++g_fails;
+        }
+      }
     };
 
     std::printf("\n  the two final states, called directly, host against device:\n");
@@ -976,6 +1032,7 @@ int main() {
     run_pair("coulomb_fire", false);
 
     cudaFree(d_types);
+    cudaFree(d_zas);
     cudaFree(d_ekins);
     cudaFree(d_fs);
   }

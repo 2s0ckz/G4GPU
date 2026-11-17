@@ -34,8 +34,12 @@
 //  * THE LIGHT IONS GET Gheisha TOO, with the NUCL-NUCL component - `xsNN` in the constructor
 //    is `ElasticXS("Glauber-Gribov Nucl-nucl")` - while `G4NuclNuclDiffuseElastic` is
 //    `G4IonElasticPhysics`' model for GenericIon, a different constructor and a different
-//    process (named `"ionElastic"`, not `"hadElastic"`). P8c transports the ion and did NOT
-//    wire that channel; see `ElasticChannel::kIonDiffuseNotWired`, which is the row.
+//    process (named `"ionElastic"`, not `"hadElastic"`). `G4IonElasticPhysics::ConstructProcess`
+//    registers it on `G4GenericIon::GenericIon()->GetProcessManager()` and on nothing else, so
+//    d, t, He3 and alpha keep hadElastic and only the real nuclides get ionElastic
+//    (`ref/oracle/species_processes.csv`: GenericIon's manager holds ionInelastic, then
+//    ionElastic). P8c transported the ion without it; P25 wires it as `ElasticChannel::
+//    kIonDiffuse`, with the projectile built from the track's own (Z, A).
 //  * pbar, nbar AND THE FOUR LIGHT ANTI-NUCLEI SHARE ONE ROW (P23c). The data set is
 //    `G4ComponentAntiNuclNuclearXS` (`xs/anti_nucl_nuclear_xs.cuh`) and TWO models are registered
 //    on the one process: `lhep2`, a `G4HadronElastic` capped at 100.1 MeV, and `anuc`,
@@ -76,6 +80,7 @@
 #include "physics/hadronic/elastic/elastic_process.cuh"
 #include "physics/hadronic/elastic/hadron_elastic.cuh"
 #include "physics/hadronic/elastic/anti_nucl_elastic.cuh"
+#include "physics/hadronic/elastic/nucl_nucl_diffuse_elastic.cuh"
 #include "physics/hadronic/process.cuh"
 #include "physics/hadronic/xs/bgg_nucleon_xs.cuh"
 #include "physics/hadronic/xs/bgg_pion_xs.cuh"
@@ -109,22 +114,16 @@ enum class ElasticChannel : int {
   /// `G4GenericIon::GenericIon()->GetProcessManager()` with `AddDiscreteProcess` - and therefore
   /// active for every real nuclide, which shares that manager.
   ///
-  /// BOTH HALVES ARE PORTED AND NEITHER IS WIRED. `xs::ggnn_elastic_element` is the cross
-  /// section (`kGheishaLightIon` already reads it) and
-  /// `elastic/nucl_nucl_diffuse_elastic.cuh::sample_invariant_t` is the model. What is missing
-  /// is this row: the channel needs the projectile to be `xs::generic_ion(Z, A)` rather than a
-  /// species constant, which means threading the nuclide through `elastic_xs_fn`,
-  /// `elastic_sample_target` and `elastic_apply`.
-  ///
-  /// Structurally zero rather than booked, for the reason `HadronicRefusal::
-  /// kAntiNucleusElastic` gives at length: the gap is in the CROSS SECTION, so an ion draws no
-  /// hadronic interaction length at all and there is no interaction that could not be applied.
-  /// Booking it per step would count chances rather than interactions. The size is bounded by
-  /// what an ion this port produces could do with it: an elastic recoil of a 200 MeV proton in
-  /// water is an oxygen ion of a few hundred keV whose RANGE is about a micrometre, against a
-  /// nucleus-nucleus elastic mean free path of metres, so the probability that one scatters
-  /// before it stops is of order 1e-9.
-  kIonDiffuseNotWired,
+  /// WIRED BY P25 (it was `kIonDiffuseNotWired` from P8c to P25, both halves ported and the
+  /// channel refused). The cross section is `xs::ggnn_elastic_element` - the light-ion row's
+  /// component - with the projectile `xs::generic_ion(Z, A)` built from the TRACK's nuclide,
+  /// because `G4CrossSectionElastic::GetElementCrossSection` hands the component
+  /// `dp->GetDefinition()`, the real ion and not G4GenericIon's placeholder; the model is
+  /// `elastic/nucl_nucl_diffuse_elastic.cuh`, the one class whose `SampleInvariantT` reads the
+  /// projectile's own charge and baryon number. So every function below that answers for this
+  /// row takes the nuclide (`z`, `a`), defaulted to zero for the species that do not need it.
+  /// docs/RISK.md V267-V271.
+  kIonDiffuse,
 };
 
 __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
@@ -167,7 +166,7 @@ __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
     case ParticleType::kAntiTriton:
     case ParticleType::kAntiHe3:
     case ParticleType::kAntiAlpha:  return ElasticChannel::kAntiNucleus;
-    case ParticleType::kGenericIon: return ElasticChannel::kIonDiffuseNotWired;
+    case ParticleType::kGenericIon: return ElasticChannel::kIonDiffuse;
     default:                        return ElasticChannel::kNone;
   }
 }
@@ -186,26 +185,25 @@ __host__ __device__ inline const char* elastic_channel_name(ElasticChannel c) {
     case ElasticChannel::kAntiNucleus:
       return "G4CrossSectionElastic(G4ComponentAntiNuclNuclearXS) + G4HadronElastic (< 100.1 MeV) "
              "/ G4AntiNuclElastic (>= 100 MeV)";
-    case ElasticChannel::kIonDiffuseNotWired:
-      return "ionElastic: G4ComponentGGNuclNuclXsc + G4NuclNuclDiffuseElastic - both ported, "
-             "this channel not wired";
+    case ElasticChannel::kIonDiffuse:
+      return "ionElastic: G4CrossSectionElastic(G4ComponentGGNuclNuclXsc) + "
+             "G4NuclNuclDiffuseElastic";
   }
   return "unknown";
 }
 
 /// Does this channel have a cross section this port can evaluate?
 ///
-/// Two answers collapse to "no" and they are two different statements, which is why the
-/// enum keeps them apart and only this predicate merges them (a third, the anti-nucleus row
-/// whose data set P2 refused, was retired by P23c): `kNone` is a species Geant4 gives
-/// no elastic process to at all, and `kIonDiffuseNotWired` is a process whose data set and model are both ported and whose
-/// channel nobody has written. Both mean the same thing to `elastic_xs_per_volume` - zero,
-/// and therefore an infinite interaction length and no uniform drawn - and `elastic_apply` must
-/// refuse both for the reason its own guard gives (a zero `MaterialXs` makes
-/// `store_sample_za_rng` hand element 0 to the sampler on `cross <= cumulative[0]`, both sides
-/// zero, and the sampler is happy to scatter a muon off hydrogen).
+/// One answer is "no" since P25: `kNone`, a species Geant4 gives no elastic process to at all.
+/// Two others once collapsed into it and are retired - the anti-nucleus row whose data set P2
+/// refused (P23c) and the ion row whose channel was not written (`kIonDiffuseNotWired`, P25).
+/// "No" means zero to `elastic_xs_per_volume`, and therefore an infinite interaction length and
+/// no uniform drawn, and `elastic_apply` must refuse it for the reason its own guard gives (a
+/// zero `MaterialXs` makes `store_sample_za_rng` hand element 0 to the sampler on
+/// `cross <= cumulative[0]`, both sides zero, and the sampler is happy to scatter a muon off
+/// hydrogen).
 __host__ __device__ inline bool elastic_channel_has_xs(ElasticChannel c) {
-  return c != ElasticChannel::kNone && c != ElasticChannel::kIonDiffuseNotWired;
+  return c != ElasticChannel::kNone;
 }
 
 /// `G4ElasticHadrNucleusHE`'s table rows this port builds: pi+ at index 0 and pi- at 1, which
@@ -238,9 +236,17 @@ struct ElasticTables {
 /// The species as the cross sections ask about it. `xs::Projectile` and not `ParticleType`, for
 /// the reasons `xs/projectile.cuh` gives - and built through that file's own factories so the
 /// masses are the `x.yz * GeV` literals Geant4 writes and not a re-spelling of them.
+///
+/// `kGenericIon` is the one row that is not a constant (P25): `xs::generic_ion(z, a)`, the
+/// track's own nuclide - charge Z, baryon number A and `G4NucleiProperties::GetNuclearMass`,
+/// which is what `G4IonTable::CreateIon` gives a ground-state ion's PDG mass. It is
+/// `inelastic_projectile`'s row, written the same way. `z` and `a` are ignored for every
+/// other species.
 template <typename real_t>
-__host__ __device__ inline hxs::Projectile<real_t> elastic_projectile(ParticleType t) {
+__host__ __device__ inline hxs::Projectile<real_t> elastic_projectile(ParticleType t, int z = 0,
+                                                                      int a = 0) {
   switch (t) {
+    case ParticleType::kGenericIon: return hxs::generic_ion<real_t>(z, a);
     case ParticleType::kProton:     return hxs::proton<real_t>();
     case ParticleType::kNeutron:    return hxs::neutron<real_t>();
     case ParticleType::kAntiProton: return hxs::anti_proton<real_t>();
@@ -293,12 +299,16 @@ struct ElasticXsFn {
         // aeff[Z], which is a different number in the fifth digit.
         return hxs::ggh_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kGheishaLightIon:
+      // P25: ionElastic's data set is `new G4CrossSectionElastic(new G4ComponentGGNuclNuclXsc)`
+      // - the same class and the same component as the light-ion row's `xsNN` (a second
+      // instance; the component keeps no state between calls that its answer depends on) - so
+      // the same call, on the real ion's projectile, at the same NIST mean mass.
+      case ElasticChannel::kIonDiffuse:
         return hxs::ggnn_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kAntiNucleus:
         // G4CrossSectionElastic passes the NIST mean mass here too, as for the kaon row.
         return hxs::anu_elastic_element<real_t>(proj, ekin, Z, data::atomic_mass<real_t>(Z));
       case ElasticChannel::kNone:
-      case ElasticChannel::kIonDiffuseNotWired:
         break;
     }
     return {real_t(0), hxs::XsRefusal::kNone};
@@ -311,13 +321,18 @@ struct ElasticXsFn {
 
 template <typename real_t>
 __host__ __device__ inline ElasticXsFn<real_t> elastic_xs_fn(const ElasticTables<real_t>& t,
-                                                              ParticleType type, real_t ekin) {
-  return {&t, elastic_projectile<real_t>(type), elastic_channel(type), ekin};
+                                                              ParticleType type, real_t ekin,
+                                                              int z = 0, int a = 0) {
+  return {&t, elastic_projectile<real_t>(type, z, a), elastic_channel(type), ekin};
 }
 
 /// `hadElastic`'s macroscopic cross section, 1/mm, and the cumulative partial sums the target
-/// draw needs. Zero when the species has no such process, and zero when it has one this port
-/// cannot evaluate (the antiproton).
+/// draw needs. Zero when the species has no such process.
+///
+/// `z`, `a`: the nuclide, read by the `kGenericIon` row alone (`ionElastic`, P25) and ignored by
+/// every other. A `kGenericIon` with no nuclide (0, 0), or one outside AME2012, gets the
+/// component's `kNuclearMassNotTabulated` refusal and therefore zero - `step_hadron` refuses
+/// such a track by name (`kIonWithoutNuclide`) before it gets here.
 ///
 /// `G4CrossSectionDataStore::ComputeCrossSection` and nothing else: one call fills `mxs` and
 /// returns the total, and `elastic_sample_target` below must be called at the same energy and
@@ -333,14 +348,14 @@ __host__ __device__ inline ElasticXsFn<real_t> elastic_xs_fn(const ElasticTables
 template <typename real_t>
 __host__ __device__ __noinline__ real_t elastic_xs_per_volume(
     const ElasticTables<real_t>& t, const data::Material<real_t>& mat, ParticleType type,
-    real_t ekin, hxs::MaterialXs<real_t>& mxs) {
+    real_t ekin, hxs::MaterialXs<real_t>& mxs, int z = 0, int a = 0) {
   const ElasticChannel c = elastic_channel(type);
   if (!elastic_channel_has_xs(c)) {
     mxs.total = real_t(0);
     mxs.n_elements = 0;
     return real_t(0);
   }
-  const ElasticXsFn<real_t> fn = elastic_xs_fn<real_t>(t, type, ekin);
+  const ElasticXsFn<real_t> fn = elastic_xs_fn<real_t>(t, type, ekin, z, a);
   const hxs::XsValue<real_t> v = hxs::store_compute_cross_section_fn<real_t>(
       fn, mat, hxs::nist_isotopes_of<real_t>(mat), mxs);
   return (v.value > real_t(0)) ? v.value : real_t(0);
@@ -355,8 +370,8 @@ __host__ __device__ __noinline__ real_t elastic_xs_per_volume(
 template <typename real_t, typename Rng>
 __host__ __device__ inline hxs::TargetZA elastic_sample_target(
     const ElasticTables<real_t>& t, const data::Material<real_t>& mat, ParticleType type,
-    real_t ekin, const hxs::MaterialXs<real_t>& mxs, Rng& rng) {
-  const ElasticXsFn<real_t> fn = elastic_xs_fn<real_t>(t, type, ekin);
+    real_t ekin, const hxs::MaterialXs<real_t>& mxs, Rng& rng, int z = 0, int a = 0) {
+  const ElasticXsFn<real_t> fn = elastic_xs_fn<real_t>(t, type, ekin, z, a);
   return hxs::store_sample_za_rng<real_t>(fn, mat, hxs::nist_isotopes_of<real_t>(mat), mxs,
                                           rng);
 }
@@ -411,11 +426,13 @@ struct ElasticStepOutcome {
 ///        for the integral-approach rejection. For a charged hadron that is a real rejection -
 ///        `hadronic_xs_type` gives the pions and the proton `fHadTwoPeaks` and K+ `fHadOnePeak`
 ///        - and it consumes one uniform before anything else.
+/// @param ion_z, ion_a the track's nuclide for `kGenericIon` (P25's `ionElastic`), ignored
+///        otherwise. Named apart from the sampler's (z, a) below, which are the TARGET's.
 template <typename real_t, typename Rng>
 __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
     const ElasticTables<real_t>& t, const data::Material<real_t>& mat, ParticleType type,
     real_t ekin, const Vec3<real_t>& in_dir, real_t range_cut_mm, real_t xs_at_step_start,
-    const hxs::MaterialXs<real_t>& mxs, Rng& rng) {
+    const hxs::MaterialXs<real_t>& mxs, Rng& rng, int ion_z = 0, int ion_a = 0) {
   ElasticStepOutcome<real_t> out;
   out.dir = in_dir;
   out.energy = ekin;
@@ -434,7 +451,12 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
   // question it should refuse.
   if (!elastic_channel_has_xs(c)) { return out; }
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
-  const hxs::Projectile<real_t> pj = elastic_projectile<real_t>(type);
+  const hxs::Projectile<real_t> pj = elastic_projectile<real_t>(type, ion_z, ion_a);
+  // A nucleus with no nuclide, or one AME2012 does not tabulate, has no mass to scatter with.
+  // `step_hadron` refuses such a track before any process (`kIonWithoutNuclide`), and its cross
+  // section here is the component's refusal, zero - so this is the direct caller's guard, for
+  // the reason the one above gives.
+  if (c == ElasticChannel::kIonDiffuse && !(pj.mass > real_t(0))) { return out; }
 
   hp::HadProjectile<real_t> projectile;
   projectile.pdg = pj.pdg;
@@ -457,19 +479,34 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
   // recompute happened, the caller's `mxs` when it did not. Using the caller's array in the
   // charged case would select an element by the cross sections at an energy the track no
   // longer has, and nothing would complain.
-  const hp::HadXsType xt = hp::hadronic_xs_type<real_t>(
-      pj.pdg, pj.charge, pj.mass, hp::xs_type_atomic_number(pj.baryon_number), false, true);
+  //
+  // FOR ionElastic THE FLAG IS G4GenericIon's, not the track's (P25). `G4HadronicProcess::
+  // BuildPhysicsTable` decides `fXSType` once, for `firstParticle` - the particle the process
+  // was built for, G4GenericIon (charge +1, 938.2723 MeV, atomic number 1) - and every real
+  // nuclide sharing the manager runs with it: charged, not a lepton, `ok` on both counts, pdg
+  // neither 211 nor 2212 nor 321, so `fHadIncreasing`. Asked of the ion's own projectile the
+  // function gives the same answer (charge Z > 0, atomic number A > 1, pdg 100ZZZAAA0), so the
+  // two spellings agree for every nuclide; this one is the one Geant4 evaluates.
+  const ParticleDef<real_t> gi = particle_def<real_t>(ParticleType::kGenericIon);
+  const hp::HadXsType xt =
+      (c == ElasticChannel::kIonDiffuse)
+          ? hp::hadronic_xs_type<real_t>(pdg_code(ParticleType::kGenericIon), gi.charge,
+                                         gi.mass, 1, false, true)
+          : hp::hadronic_xs_type<real_t>(pj.pdg, pj.charge, pj.mass,
+                                         hp::xs_type_atomic_number(pj.baryon_number), false,
+                                         true);
   hxs::MaterialXs<real_t> now = mxs;
   real_t xs_now = xs_at_step_start;
   if (xt != hp::HadXsType::kNoIntegral) {
-    xs_now = elastic_xs_per_volume<real_t>(t, mat, type, ekin, now);
+    xs_now = elastic_xs_per_volume<real_t>(t, mat, type, ekin, now, ion_z, ion_a);
     if (hp::integral_xs_rejects<real_t>(xt, xs_now, xs_at_step_start, rng)) {
       out.rejected_by_integral_xs = true;
       return out;
     }
   }
 
-  const hxs::TargetZA tgt = elastic_sample_target<real_t>(t, mat, type, ekin, now, rng);
+  const hxs::TargetZA tgt =
+      elastic_sample_target<real_t>(t, mat, type, ekin, now, rng, ion_z, ion_a);
   if (tgt.a <= 0 || tgt.z <= 0) { return out; }
   hp::HadNucleus target;
   target.z = tgt.z;
@@ -548,6 +585,17 @@ __host__ __device__ __noinline__ ElasticStepOutcome<real_t> elastic_apply(
                                                                rr);
         }
         return tt;
+      }
+      // P25: G4NuclNuclDiffuseElastic::SampleInvariantT, which reads the projectile's
+      // DEFINITION - its PDG mass, its PDG charge (Z, not the effective charge the ion carries
+      // in matter) and its baryon number - and recomputes the CMS momentum by boosting rather
+      // than taking `plab`'s closed form. One uniform. Its `t` is always inside [0, pLocalTmax]
+      // (mu <= muC < 1), so ApplyYourself's resample to Gheisha is unreachable for it.
+      if (c == ElasticChannel::kIonDiffuse) {
+        bool refused_neutral = false;
+        return el::nucl_nucl_diffuse_sample_invariant_t<real_t>(
+            p, z, a, nuclear_mass, el::NuclNuclDiffuseParams<real_t>{}, rr, nullptr,
+            &refused_neutral);
       }
       if (use_anuc) { return el::anuc_sample_invariant_t<real_t>(pdg, plab, z, a, rr); }
       return el::hadron_elastic_sample_invariant_t<real_t>(pdg, plab, z, a, p_local_tmax, rr);

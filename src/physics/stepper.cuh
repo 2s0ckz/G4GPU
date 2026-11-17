@@ -1669,10 +1669,22 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     //
     // Conditional on the flag and on the species, so a proton run with elastic switched off and
     // every alpha, deuteron, triton and muon consume exactly the uniforms they consumed before.
+    //
+    // P25: FOR A REAL NUCLEUS THIS IS `ionElastic`, not hadElastic - `G4IonElasticPhysics`' own
+    // process on GenericIon's manager, `elastic_channel(kGenericIon) == kIonDiffuse` - and it
+    // needs the nuclide: `h.z`/`h.a` are the track's (Z, A), zero for every other species, which
+    // ignores them. The one flag gates both, as `HadronicWiring::hadron_elastic` gates every
+    // elastic channel. One thing about ties, measured as nothing and said rather than coded:
+    // GenericIon's manager holds `ionInelastic` BEFORE `ionElastic` (species_processes.csv), so
+    // an exact tie of the two lengths is the inelastic's in Geant4 and the elastic's below,
+    // where hadElastic is ahead for every other species. Two lengths drawn from independent
+    // uniforms are equal with probability zero; the selection order is not worth a branch in
+    // the one kernel whose ptxas this project has fought hardest (V195, V202).
     hadronic::xs::MaterialXs<real_t> el_mxs{};
     const real_t el_xs =
         had.hadron_elastic
-            ? had::elastic_xs_per_volume<real_t>(had.elastic, mm, type, p.ekin, el_mxs)
+            ? had::elastic_xs_per_volume<real_t>(had.elastic, mm, type, p.ekin, el_mxs, h.z,
+                                                 h.a)
             : real_t(0);
     const real_t d_elastic = (el_xs > real_t(0)) ? -log(rng.uniform()) / el_xs
                                                  : geom::kInfinity<real_t>();
@@ -2165,8 +2177,12 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // PRE-step energy - and `elastic_apply` recomputes it at this energy for the integral
     // approach, which for a pion or a proton is a real rejection (`fHadTwoPeaks`).
     if (scatters_elastic && p.ekin > real_t(0)) {
+      // P25: the nuclide for `ionElastic`, as above. The recoil below is pushed with
+      // `push_nucleus`, so an ion's elastic recoil off hydrogen is a PROTON track and off
+      // C, N, O, Ar, Ca or P a GenericIon one - `G4HadronElastic::ApplyYourself`'s species
+      // switch (theProton, theDeuteron, triton, He3, theAlpha, else GetIon(Z, A, 0)).
       const auto er = had::elastic_apply<real_t>(had.elastic, mm, type, p.ekin, p.dir,
-                                                 s.range_cut, el_xs, el_mxs, rng);
+                                                 s.range_cut, el_xs, el_mxs, rng, h.z, h.a);
       if (er.interacted) {
         p.dir = er.dir;
         p.ekin = er.energy;
