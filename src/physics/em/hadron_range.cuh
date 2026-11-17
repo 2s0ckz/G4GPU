@@ -21,6 +21,7 @@
 #include "core/units.cuh"
 #include "data/materials.cuh"
 #include "data/nuclei_mass_ame12.hh"
+#include "data/ensdf_ground_states.hh"
 #include "physics/em/bragg.cuh"
 #include "physics/em/em_corrections.cuh"
 #include "physics/em/hadron_ionisation.cuh"
@@ -432,31 +433,84 @@ __host__ __device__ inline real_t hadron_charge_sq_ratio(const data::Material<re
 ///       `particle_type_of_nucleus` answers with a species of their own, so anything reaching
 ///       here has Z >= 2 or is a nuclide with no natural isotope.
 ///
-/// **SPIN AND THE MAGNETIC MOMENT ARE NOT TRANSCRIBED AND ARE REFUSED RATHER THAN GUESSED.**
-/// Geant4 takes both from `G4IonTable::FindIsotope(Z,A,E)->GetiSpin()` and
-/// `->GetMagneticMoment()`, i.e. from columns 6 and 7 of `$G4ENSDFSTATEDATA/ENSDFSTATE.dat`
-/// (`G4NuclideTable::GenerateNuclide`), where column 6 is **2J**. This port reads
-/// PhotonEvaporation's level scheme but not ENSDFSTATE's ground-state spin and moment table, so
-/// `spin` is 0 and `mag_moment2` is -1 - which is the value Geant4 computes from a zero moment,
-/// and which is EXACTLY RIGHT for an even-even nuclide (C12, O16, Ca40 all have 2J = 0 in
-/// ENSDFSTATE) and wrong for one with spin (N14 has 2J = 2).
+/// spin  `G4IonTable::FindIsotope(Z, A, 0, no_Float)->GetiSpin()` / 2 (the G4Ions constructor's
+///       iSpin is 2J; `GetPDGSpin()` is half of it).
+/// mag_moment2  `G4BetheBlochModel::SetupParameters`' `magmom*magmom - 1.0`, with
+///       `magmom = GetPDGMagneticMoment()*mass*aMag` and `aMag = 1/(0.5*eplus*hbar_Planck*c_squared)`.
 ///
-/// The two are read in exactly one place that changes an answer - the projectile form-factor
-/// rejection inside `em::sample_hadron_delta`, and only on its Bethe-Bloch branch - and
-/// `step_hadron` refuses that branch for a real ion by name rather than sampling it with a spin
-/// it cannot state. It is unreachable for anything this port produces: an ion's delta-ray
-/// cross section is zero until `tmax > cut`, which in water's 350 keV cut needs
-/// `beta^2 gamma^2 > 342`, i.e. above about 17 GeV per nucleon.
+/// P26b: both from G4ENSDFSTATE's ground-state row - columns 6 and 7 of ENSDFSTATE.dat as
+/// `G4NuclideTable::GenerateNuclide` reads them, mu in J/T multiplied by `joule/tesla` as that
+/// function does (`data/ensdf_ground_states.hh`, written by tools/extract_ensdf_ground.pl, whose
+/// header says which rows `CreateIon` can find). N14 has 2J = 2 and a moment of 2.039e-27 J/T,
+/// 0.404 nuclear magnetons; C12, O16 and Ca40 have 2J = 0. Where ENSDFSTATE has NO ground row,
+/// `CreateIon` keeps its own defaults, J = 0 and mu = 0, and so does this - but
+/// `ion_ground_state(...).found` is false there, and `step_hadron` refuses that ion's delta rays
+/// by name (`kIonDeltaRay`) instead of sampling them on a default. docs/RISK.md V260.
+///
+/// Before P26b both were 0 and -1 for every nuclide - exactly right for an even-even one, wrong
+/// for one with spin - and the ion's whole delta-ray channel was refused by name because of it
+/// (V248). The one consumer is still the projectile form-factor rejection on
+/// `em::sample_hadron_delta`'s Bethe-Bloch branch: an ion's delta-ray RATE is GenericIon's table
+/// (`em::ion_delta_xs`), whose definition is G4GenericIon's and carries spin 1/2 whatever the ion.
+/// Nothing else in this port reads an ion's `spin` or `mag_moment2`: its dE/dx and range are
+/// GenericIon's tables scaled, and its multiple scattering is Urban's, which reads neither.
+template <typename real_t>
+struct IonGroundState {
+  real_t spin;         ///< 2J/2, or 0 where ENSDFSTATE has no ground row (CreateIon's default)
+  real_t mag_moment2;  ///< G4BetheBlochModel's magMoment2; -1 from a zero moment
+  bool found;          ///< ENSDFSTATE has a ground-state row for (Z, A)
+};
+
+/// CLHEP's `(joule/tesla)*aMag`: a moment of 1 J/T, per MeV of mass, in the units
+/// SetupParameters squares. Built from CLHEP 2.4.6's own definitions in its own order
+/// (Units/SystemOfUnits.h, Units/PhysicalConstants.h as installed with 11.1.1), so every
+/// intermediate rounds as Geant4's does. About 2.1101e23 /MeV: the proton's row,
+/// 1.41060674e-26 J/T, times its 938.272 MeV gives 2.7928, its g/2 in nuclear magnetons.
+__host__ __device__ inline double ion_moment_per_joule_tesla_mev() {
+  constexpr double eplus = 1.;
+  constexpr double e_SI = 1.602176634e-19;
+  constexpr double electronvolt = 1.e-6;
+  constexpr double joule = electronvolt / e_SI;
+  constexpr double second = 1.e+9;
+  constexpr double meter = 1000.;
+  constexpr double meter2 = meter * meter;
+  constexpr double megavolt = 1. / eplus;
+  constexpr double volt = 1.e-6 * megavolt;
+  constexpr double tesla = volt * second / meter2;
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double twopi = 2 * pi;
+  constexpr double h_Planck = 6.62607015e-34 * joule * second;
+  constexpr double hbar_Planck = h_Planck / twopi;
+  constexpr double c_light = 2.99792458e+8 * meter / second;
+  constexpr double c_squared = c_light * c_light;
+  constexpr double aMag = 1. / (0.5 * eplus * hbar_Planck * c_squared);
+  return (joule / tesla) * aMag;
+}
+
+/// The ground state's spin and magMoment2 for (Z, A) of nuclear mass `mass` (MeV).
+template <typename real_t>
+__host__ __device__ inline IonGroundState<real_t> ion_ground_state(int z, int a, double mass) {
+  const int i = data::ensdf_ground_index(z, a);
+  if (i < 0) { return {real_t(0), real_t(-1), false}; }
+  // Geant4: `ionMu *= (joule/tesla)` in GenerateNuclide, then `GetPDGMagneticMoment()*mass*aMag`
+  // in SetupParameters. Folding joule/tesla into aMag reorders one multiplication;
+  // tests/test_ion_delta.cu holds the result to Geant4's own magMoment2 at every nuclide.
+  const double magmom = data::ensdf_ground_mu()[i] * mass * ion_moment_per_joule_tesla_mev();
+  return {static_cast<real_t>(0.5 * data::ensdf_ground_two_j()[i]),
+          static_cast<real_t>(magmom * magmom - 1.0), true};
+}
+
 template <typename real_t>
 __host__ __device__ inline ParticleDef<real_t> ion_particle_def(int z, int a) {
-  const real_t m = data::nuclear_mass<real_t>(a, z);
-  return {m,
+  const double md = data::nuclear_mass<double>(a, z);
+  const IonGroundState<real_t> gs = ion_ground_state<real_t>(z, a, md);
+  return {static_cast<real_t>(md),
           static_cast<real_t>(z),
-          real_t(0),                 // spin - see above
+          gs.spin,                   // ENSDFSTATE's 2J / 2 - see above
           (z > 1),                   // is_ion, G4BetheBlochModel::Initialise's condition
           false,                     // is_alpha - (2,4) is kAlpha and never reaches here
           false,                     // is_lepton
-          real_t(-1)};               // mag_moment2 from a zero moment - see above
+          gs.mag_moment2};           // from ENSDFSTATE's moment - see above
 }
 
 /// The particle one step is stepping: the species AND its definition.
@@ -474,20 +528,28 @@ struct SteppedHadron {
   ParticleDef<real_t> def{};
   int z = 0;
   int a = 0;
+  /// P26b: a real nucleus whose spin and moment G4ENSDFSTATE states (`ion_ground_state().found`).
+  /// False for every species but a real nucleus, where it is never read.
+  bool spin_known = false;
   __host__ __device__ bool is_real_ion() const { return z > 0 && a > 0; }
 };
 
 template <typename real_t>
 __host__ __device__ inline SteppedHadron<real_t> stepped_hadron(ParticleType t) {
-  return {t, particle_def<real_t>(t), 0, 0};
+  return {t, particle_def<real_t>(t), 0, 0, false};
 }
 
 /// A real nuclide, stepped as `kGenericIon`. (Z, A) must be one `particle_type_of_nucleus` maps
 /// to `kGenericIon`; the five it maps elsewhere have species of their own and go through
-/// `stepped_hadron`.
+/// `stepped_hadron`. One ENSDFSTATE lookup a step: `ion_particle_def`'s body, inlined here so the
+/// `found` flag comes out of the same search.
 template <typename real_t>
 __host__ __device__ inline SteppedHadron<real_t> stepped_ion(int z, int a) {
-  return {ParticleType::kGenericIon, ion_particle_def<real_t>(z, a), z, a};
+  const double md = data::nuclear_mass<double>(a, z);
+  const IonGroundState<real_t> gs = ion_ground_state<real_t>(z, a, md);
+  const ParticleDef<real_t> def{static_cast<real_t>(md), static_cast<real_t>(z), gs.spin,
+                                (z > 1), false, false, gs.mag_moment2};
+  return {ParticleType::kGenericIon, def, z, a, gs.found};
 }
 
 /// `G4VEnergyLossProcess::massRatio` for the particle being stepped.

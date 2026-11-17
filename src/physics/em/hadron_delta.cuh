@@ -140,23 +140,30 @@ __host__ __device__ inline real_t hadron_delta_xs(const data::Material<real_t>& 
 // SampleSecondaries without proposing a change, and the difference between suppressing a
 // transfer and redistributing it is exactly the thing a rewrite gets wrong.
 
-/// Samples the knock-on electron with whichever model applies at this energy.
+/// Samples the knock-on electron for the projectile DEFINITION `pd` with the model `model`.
+///
+/// P26b split this out of `sample_hadron_delta` so that a real nucleus can be sampled on its own
+/// definition - G4BetheBlochModel::SampleSecondaries calls `MaxSecondaryEnergy(
+/// dp->GetDefinition(), ...)`, whose `SetupParameters(pd)` sets `mass`, `spin`, `magMoment2` and
+/// `formfact` from the ION (an O16, not G4GenericIon), and G4BraggIonModel's `SetParticle` does the
+/// same for its mass and `massRate` - while the model is chosen by the process the ion shares with
+/// G4GenericIon, at the SCALED energy. For every species with a definition of its own the two
+/// arguments are `particle_def(type)` and `hadron_ioni_model(type, pd, kinetic)`, which is
+/// exactly what `sample_hadron_delta` passes, so its uniforms and answers are the ones it drew
+/// before the split.
 ///
 /// @param cut  the electron production threshold in MeV: transfers below it are already in the
 ///             continuous loss and must not be double-counted as a secondary here.
 template <typename real_t, typename Rng>
-__host__ __device__ inline DeltaRay<real_t> sample_hadron_delta(ParticleType type, real_t kinetic,
-                                                               real_t cut,
-                                                               const Vec3<real_t>& dir,
-                                                               Rng& rng) {
+__host__ __device__ inline DeltaRay<real_t> sample_delta_for_definition(
+    const ParticleDef<real_t>& pd, HadronIoniModel model, real_t kinetic, real_t cut,
+    const Vec3<real_t>& dir, Rng& rng) {
   DeltaRay<real_t> out{dir, real_t(0), dir, kinetic, false};
 
-  const ParticleDef<real_t> pd = particle_def<real_t>(type);
   if (pd.mass <= real_t(0) || kinetic <= real_t(0)) { return out; }
 
   const real_t me = units::electron_mass_c2<real_t>();
   const real_t tmax = hadron_max_secondary_energy(pd, kinetic);
-  const HadronIoniModel model = hadron_ioni_model(type, pd, kinetic);
   // "Low energy" here means one of the three parameterised models, all of which sample the
   // same spin-0 form: a 1/T^2 spectrum accepted against (1 - beta^2 T/Tmax), majorant one.
   // G4BraggModel, G4BraggIonModel and G4ICRU73QOModel have identical SampleSecondaries bodies
@@ -212,7 +219,10 @@ __host__ __device__ inline DeltaRay<real_t> sample_hadron_delta(ParticleType typ
       f1 = real_t(0.5) * delta * delta / etot2;
       f += f1;
     }
-    accepted = (fmaj * r1 <= f);
+    // Bethe-Bloch loops `while (fmax*rndm[1] > f)`; the three parameterised models loop
+    // `while (grej*rndm[1] >= f)` with grej = 1. The two differ only at equality, a set of
+    // measure zero, and are transcribed each as written (P26b).
+    accepted = bragg ? (fmaj * r1 < f) : (fmaj * r1 <= f);
   }
   if (!accepted) { return out; }
 
@@ -250,6 +260,74 @@ __host__ __device__ inline DeltaRay<real_t> sample_hadron_delta(ParticleType typ
   const Vec3<real_t> pfin = pmom * dir - dmom * out.delta_dir;
   out.primary_dir = (mag(pfin) > real_t(0)) ? normalize(pfin) : dir;
   return out;
+}
+
+/// Samples the knock-on electron with whichever model applies at this energy, for a species
+/// that is its own definition (everything but a real nucleus: see `sample_ion_delta`).
+template <typename real_t, typename Rng>
+__host__ __device__ inline DeltaRay<real_t> sample_hadron_delta(ParticleType type, real_t kinetic,
+                                                               real_t cut,
+                                                               const Vec3<real_t>& dir,
+                                                               Rng& rng) {
+  const ParticleDef<real_t> pd = particle_def<real_t>(type);
+  return sample_delta_for_definition<real_t>(pd, hadron_ioni_model(type, pd, kinetic), kinetic,
+                                             cut, dir, rng);
+}
+
+// ------------------------------------------------------------------ a real nucleus's delta rays
+//
+// P26b. A real nucleus (an O16, a Li7 - anything stepped as `kGenericIon`) shares G4GenericIon's
+// `ionIoni`, so its delta rays are two different particles' business, and this pair keeps them
+// apart the way G4VEnergyLossProcess does:
+//
+//   * the RATE is GenericIon's. `PostStepGetPhysicalInteractionLength` reads GenericIon's lambda
+//     table at `preStepScaledEnergy = E*massRatio` (massRatio = 938.2723 MeV / the ion's mass) and
+//     multiplies it by `fFactor`, which for an `isIon` particle tracks
+//     `currentModel->ChargeSquareRatio(track)` - G4EmCorrections::EffectiveChargeSquareRatio at
+//     the ion's own energy. The table's nodes are G4BraggIonModel's (below 2 MeV scaled) or
+//     G4BetheBlochModel's CrossSectionPerVolume for G4GenericIon itself: mass 938.2723 MeV, charge
+//     1, SPIN 1/2, no effective-charge factor (both models apply one for `isAlpha` alone), and
+//     Bragg's 0.25 keV floor at GenericIon's massRate. So the ion's own spin is not in its rate.
+//   * the SPECTRUM is the ion's. PostStepDoIt hands the model the dynamic particle, and both
+//     models re-derive mass, spin, magMoment2, formfact and massRate from its definition.
+//
+// The rate is the model at the pre-step energy, not GenericIon's lambda table and not the
+// integral approach's rejection against the post-step lambda: the convention every hadron and
+// lepton in this stepper is drawn with (docs/PORTED.md, G4hIonisation's row; docs/RISK.md V78),
+// applied to the ion as to the alpha. ref/oracle/ion_delta.csv carries both of Geant4's numbers
+// (the model, `ComputeCrossSectionPerVolume`, and the table, `GetCrossSectionPerVolume`) so the
+// test can say how far apart they are at the nuclides and energies the beams reach.
+
+/// An ion's delta-ray production rate, 1/mm: GenericIon's cross section at the scaled energy
+/// times the dynamic charge-square ratio. Zero below the window, i.e. while GenericIon's tmax
+/// at the scaled energy is at or below the (floored) cut.
+template <typename real_t>
+__host__ __device__ inline real_t ion_delta_xs(const data::Material<real_t>& m,
+                                               const SteppedHadron<real_t>& h, real_t kinetic,
+                                               real_t cut, real_t max_energy) {
+  if (!h.is_real_ion() || !(h.def.mass > real_t(0)) || kinetic <= real_t(0)) { return real_t(0); }
+  const ParticleDef<real_t> gi = particle_def<real_t>(ParticleType::kGenericIon);
+  const real_t es = kinetic * hadron_mass_ratio(h);
+  const HadronIoniModel model = hadron_ioni_model(ParticleType::kGenericIon, gi, es);
+  real_t lo = cut;
+  if (is_bragg_family(model)) {
+    lo = fmax(cut, bragg_lowest_energy<real_t>() * (gi.mass / units::proton_mass_c2<real_t>()));
+  }
+  const real_t xs = bethe_bloch_delta_xs(m, ParticleType::kGenericIon, es, lo, max_energy);
+  if (!(xs > real_t(0))) { return real_t(0); }
+  return xs * hadron_charge_sq_ratio(m, h, kinetic);
+}
+
+/// Samples an ion's knock-on electron: the model GenericIon's process selects at the scaled
+/// energy, run on the ion's own definition (`h.def`: ENSDFSTATE's spin and moment since P26b).
+template <typename real_t, typename Rng>
+__host__ __device__ inline DeltaRay<real_t> sample_ion_delta(const SteppedHadron<real_t>& h,
+                                                            real_t kinetic, real_t cut,
+                                                            const Vec3<real_t>& dir, Rng& rng) {
+  const ParticleDef<real_t> gi = particle_def<real_t>(ParticleType::kGenericIon);
+  const HadronIoniModel model =
+      hadron_ioni_model(ParticleType::kGenericIon, gi, kinetic * hadron_mass_ratio(h));
+  return sample_delta_for_definition<real_t>(h.def, model, kinetic, cut, dir, rng);
 }
 
 }  // namespace g4gpu::em

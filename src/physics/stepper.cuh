@@ -1566,31 +1566,25 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
 
     // Discrete delta-ray production competes with the boundary and the step limits.
     //
-    // REFUSED BY NAME FOR A REAL ION, AND THE REFUSAL IS UNREACHABLE RATHER THAN APPROXIMATE.
+    // A REAL ION'S DELTA RAYS (P26b; until then refused by name on every step, V200/V248).
     //
-    // `em::hadron_delta_xs` and `em::sample_hadron_delta` both derive the projectile's
-    // definition from its SPECIES, and for `kGenericIon` that is G4GenericIon's placeholder - so
-    // handing either of them an oxygen recoil would compute the delta-ray rate of a singly
-    // charged 938 MeV particle. Threading `h.def` and `h.a` through them is a change in three
-    // shared EM headers. An ion's transfer window opens only when `tmax > cut`, and
-    // `tmax = 2 m_e b2g2 / (1 + 2 gamma m_e/M + (m_e/M)^2)`, so water's 350 keV cut needs
-    // `beta^2 gamma^2 > 0.342` - ABOUT 147 MeV PER NUCLEON.
+    // `em::hadron_delta_xs` derives the projectile's definition from its SPECIES, and for
+    // `kGenericIon` that is G4GenericIon's placeholder. A real nucleus is two particles here, as in
+    // G4VEnergyLossProcess: its RATE is GenericIon's cross section at the scaled energy times the
+    // dynamic charge-square ratio (`em::ion_delta_xs`), and its SPECTRUM is the ion's own
+    // definition's - mass, form factor, and the spin and magnetic moment G4IonTable::CreateIon
+    // reads from G4ENSDFSTATE (`em::sample_ion_delta`, below). The window opens at about
+    // 147 MeV per nucleon in water's 350 keV cut, far lower in air's 990 eV.
     //
-    // THIS COMMENT SAID `> 342` AND "ABOVE ABOUT 17 GeV PER NUCLEON" UNTIL P15'S SECOND PASS, a
-    // factor of a thousand (keV against MeV), and concluded the branch "cannot fire" because the
-    // ions this transport made were elastic recoils of tens of MeV. Both halves are gone: the
-    // threshold is 147 MeV/u, and since P9e's `Interact` a 1 GeV/u alpha beam's projectile
-    // fragments are GenericIons well above it. So this refusal is REACHABLE and is a named hole:
-    // those fragments' delta rays are counted here, per step, not sampled. docs/RISK.md V200.
-    //
-    // So the window is tested with the ion's OWN definition, which is exact, and an ion that
-    // opens it is counted rather than sampled. The count is per STEP and not per interaction,
-    // which is the opposite of every other entry in that ledger: what is missing here is the
-    // whole delta-ray channel of an ion above ~147 MeV/u, on every step of it, rather than one
-    // final state that could not be applied. `hadronic_refusal_name` says so.
+    // REFUSED BY NAME WHERE G4ENSDFSTATE HAS NO GROUND-STATE ROW (`!h.spin_known`). Geant4's
+    // CreateIon then keeps J = 0 and mu = 0 and samples on those; this port counts the step
+    // instead of leaning on that default, with the window tested on the ion's own definition as
+    // before P26b. The count is per STEP, as `hadronic_refusal_name` says. docs/RISK.md V260.
     real_t delta_xs = real_t(0);
     if (h.is_real_ion()) {
-      if (em::hadron_max_secondary_energy(pd, p.ekin) > cut) {
+      if (h.spin_known) {
+        delta_xs = em::ion_delta_xs(mm, h, p.ekin, cut, real_t(1e30));
+      } else if (em::hadron_max_secondary_energy(pd, p.ekin) > cut) {
         had::book_refusal<real_t>(had.books, had::HadronicRefusal::kIonDeltaRay, p.ekin);
       }
     } else {
@@ -2143,7 +2137,10 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     }
 
     if (emits_delta && p.ekin > real_t(0)) {
-      const auto d = em::sample_hadron_delta<real_t>(type, p.ekin, cut, p.dir, rng);
+      // A real ion reaches here only with `h.spin_known` (its rate is zero otherwise).
+      const auto d = h.is_real_ion() ? em::sample_ion_delta<real_t>(h, p.ekin, cut, p.dir, rng)
+                                     : em::sample_hadron_delta<real_t>(type, p.ekin, cut, p.dir,
+                                                                       rng);
       if (d.produced) {
         em.pos = p.pos;
         em.volume = p.volume;
