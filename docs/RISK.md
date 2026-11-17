@@ -16545,3 +16545,66 @@ compiled from c0c022b's tree (it instantiates no stepper; its only read of a cha
 **NOT DONE HERE**: the 1 GeV neutron and the proton rows (no real ion opens the window on them -
 neutron_1000's ledger was 0 before); a QBBC re-run (V232's column is the reference, unchanged since
 it reads exampleB1's own numbers).
+
+### V262: the gate measured - twelve hours of which one was checking - and trimmed to about three: one target on the Titan V, extras only when the diff reaches them, and a test unchanged since its last pass not run again
+
+**WHERE A GATE'S TIME WENT** (ba66, 2026-11-16, P23c on the RTX 3070 at the dual default of V239,
+build_all + build_extras):
+
+| stage | time | what it was |
+|---|--:|---|
+| the engine, 27 units at two targets | 2 h 40 | every ptxas twice; the seven interaction units one at a time |
+| the 98 tests built at two targets | 40 min | nine kernel tests are 3,680 of the 4,099 s (emextra_transport 895, bic_apply 676, neutron_general 530, step_hadron 422, emextra_models 332, neutron 250, lepton_transport 229, ftf_model 183, bertini_apply 161) |
+| the 98 tests run | 25 min | test_bic_apply alone finished 1,077 s after the test before it; test_bic_1h1 144 s, test_stopping 94 s |
+| the eleven dose gates | about 1 min | the B1 photon gates in seconds each since V239's warm figures, the proton depth-dose in 11 s |
+| build_extras | 5 h | the same 27 kernels compiled twice more, once per hook archive, at two targets; the viewer, the builder, their tests |
+| the Titan V stage, where run | 1 h | the same binaries, tests and gates on the second card |
+
+So about one hour of a twelve-hour chain was the checking, and the user asked whether the
+gates had bloated. They had, in three ways, each with its own fix.
+
+**ONE TARGET, ON THE TITAN V.** The dual default of V239 compiles every unit for both cards so
+that one build serves both; a gate needs one card. From ba68 the gate runs `build_all.bat` with
+the Titan V as the only visible card (`CUDA_VISIBLE_DEVICES=1`) at `-gencode
+arch=compute_70,code=[sm_70,compute_70]`: one ptxas per unit, the PTX embedded at no ptxas cost
+so the 3070 runs the same binaries through the driver's JIT (V239: about 25 minutes once per set
+of binaries, cached). The Titan V is the gate card because the slice of V256 made its hadron gates
+viable (6.67 GB of 12 left after the raise, the proton gate in 7 s), because it runs the beams at
+1.7 to 2.2x the 3070 (V239), because it is not the display card, and because with a lock of its
+own (`out\titan.lock`; the agents keep `out\gpu.lock` for the 3070) a gate and the agents' beams
+no longer serialise on one card, which on 2026-11-16 held three packages behind one gate for
+nine hours. Dual plus the 3070 stage stays for a change that touches memory or launch behaviour,
+as ba67 ran for the slice.
+
+**EXTRAS ONLY WHEN THE DIFF REACHES THEM.** The hook archives are the engine's kernels
+instantiated for another tap type; what can break them is a change to the tap interface
+(`src/core/step_hook.cuh`), to the host headers the hook units are generated from (`src/host/`),
+to the build scripts or to the viewer, the builder, the scenes and their tests. The gate wrapper
+decides from `git diff --name-only main...HEAD` against that list, logs the decision, and runs
+`build_extras.bat` only then - which is what the working rule had said since V221 and what the
+lead had stopped doing out of caution. P23c (a new ParticleType in `src/core/particle.cuh`) did
+not touch the list and its archives would have rebuilt at the next extras run; a change that
+compiles for the engine's tap compiles for the others.
+
+**A TEST UNCHANGED SINCE ITS LAST PASS IS NOT RUN AGAIN.** Every test on build_all.bat's lines is
+deterministic - a fixed seed, a fixed oracle, no clock, no file written - so its answer is a
+function of its binary, of the oracle directory it reads and, for a kernel test, of the card.
+`tools/build_tests.ps1` stamps a pass in `out\deps\<test>.pass` with those inputs (the exe's
+SHA-256, a fingerprint of every `*.csv` in `G4GPU_ORACLE` by name, size and write time, and for a
+kernel test `CUDA_VISIBLE_DEVICES` with nvidia-smi's names) and skips a test whose inputs match
+its stamp, reporting it as "unchanged since its last pass" and counting it as passed; a rebuilt
+exe, a regenerated oracle file, a different card or no stamp runs it; a failure never stamps;
+`G4GPU_TESTS_ALL=1` runs every test and restamps. Exercised on two host tests in a worktree
+before it went in: both ran on the first pass; the one that failed there (no oracle in a
+worktree) ran again while the one that had passed was skipped; the override ran both; a touched
+source rebuilt and ran its test; a different oracle directory ran both. A package that touches
+the stepper rebuilds every kernel test and still runs them, as it should; what it no longer
+reruns is the 18 minutes of a cascade campaign it did not touch. The eleven dose gates always
+run: they are the integration check, and they cost a minute.
+
+**WHAT A ROUTINE GATE COSTS NOW**, expected: the engine at one target about 1 h 25 (the
+interaction units still one at a time; two at a time when RAM allows is a later change to
+`build_engine.bat`), the kernel tests that went stale about 20 min, the tests that must run,
+the dose gates a minute - about three hours against twelve, with the same 98 tests and eleven
+gates as the acceptance. The first gate at the new target rebuilds everything once (the recipe
+changed), as ba68 does anyway for P26b's stepper change.
