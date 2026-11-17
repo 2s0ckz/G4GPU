@@ -16088,3 +16088,241 @@ proton 1000 MeV 200,000 events 391.883 nGy +/- 1.338 (391.883); the B1 photon ga
 exampleB1 -n 2000000, 426.028 pGy, -1.35734 pGy = 1.10452 sigma (426.028, 1.10452); b1_gpu_sched
 2000000 427.699 pGy, ratio 1.0007 (V244/V246's 427.699). GPU tests on this branch: test_step_hadron,
 test_neutron, test_strange_tracks (286 comparisons) and test_inelastic_transport PASS.
+### V256: where run_interaction<kBinary>'s 69,920 bytes were - 51,200 of them in sixteen 256-entry scratch lists that Propagate's call tree declared as locals
+
+THE STARTING POINT (main at c0c022b, out\ built 2026-11-15 from the same sources). The frames come
+from the units' own ptxas logs. The raise comes from the proton depth-dose gate's own line:
+
+| | sm_86 | sm_70 |
+|---|--:|--:|
+| `run_interaction<kBinary>` | 69,920 | 69,904 |
+| `run_interaction<kLightIon>` | 61,728 | 61,728 |
+| the raise, RTX 3070 (gate, 5,000-event batch) | 77,824 B a thread, 1.42 GB of 8.00 left | |
+| the raise, RTX 3070 (1 GeV proton beam, auto batch 1,713,680) | 77,824 B a thread, 0.00 GB of 8.00 left | |
+| the raise, Titan V | V239: 77,824 B a thread, 0.00 GB of 12.00 left, 48 min cold / ~1 h 45 in the gate | |
+
+The Titan V's before-gate was not re-run. The user's rule is that no run may page, and V239's
+numbers stand as the baseline.
+
+WHERE THE BYTES WERE. ptxas emits `apply_yourself`, `do_time_step`, `apply_collision`,
+`step_particles_out`, `fill_void_nucleus_products`, `bic_deexcite_fragment`, P6's `deexcite`,
+`run_arm_binary` and `run_inelastic` as separate functions. It reports each at 0 bytes and puts
+the whole tree's stack in the entry's frame (V196). `propagate` is not among them: it is inlined
+into `apply_yourself`, and so are `decay_void_nucleus`, `capture_secondaries` and the
+`find_collisions` lambda. The arrays below are therefore summed along one chain: apply_yourself's
+inlined body, plus a callee (`step_particles_out` -> `do_time_step`, or `apply_collision` with its
+inlined `find_collisions`), plus that callee's own locals.
+
+`sizeof` on the host, nvcc 12.9:
+
+| file | function | array | bytes |
+|---|---|---|--:|
+| cascade_propagate.cuh | `propagate` | `DecayTrack dl[256]` (88 B each) | 22,528 |
+| cascade_propagate.cuh | `propagate` | `int initial[256]` | 1,024 |
+| cascade_propagate.cuh | `capture_secondaries` (inlined into propagate) | `int captured[256]` | 1,024 |
+| cascade_deexcite.cuh | `decay_void_nucleus` (inlined into propagate) | `int idx[256]`, `double masses[256]`, `LorentzVector momenta[256]` | 1,024 + 2,048 + 8,192 |
+| cascade_find.cuh | `schedule_absorption` (inlined wherever `find_collisions` is) | `int charges[256]`, `Vec3d positions[256]`, `int ids[256]` | 1,024 + 6,144 + 1,024 |
+| cascade_finish.cuh | `step_particles_out` | `int secondaries[256]`, `int captured[256]` | 2,048 |
+| cascade_step.cuh | `do_time_step` | `was_outside`, `was_inside`, `gone_in`, `gone_out`, `captured` | 5,120 |
+| | | **all of them** | **51,200** |
+
+Nothing else in bic/ or the light-ion reaction is larger than a kilobyte. `BlirFrame` is 80 B,
+`RkPropagation` 720, `BicCascadeState` 232, `PropagateResult` 352, `BlirInteractReport` 464, and
+`decay_kinetic_tracks`' daughters are 4 x 88. `BlirStorage::initial`, the 38 kB local P9e
+measured, has been in the slot since P9e.
+
+THE ATTRIBUTION, measured by moving the arrays one function at a time and recompiling the binary
+unit at sm_86, is in this entry's addendum. The four snapshot compiles were waiting their turn on
+the compile lock when this was written.
+
+### V257: the scratch lists in the slot - run_interaction<kBinary> 69,920 -> 15,648 bytes, <kLightIon> 61,728 -> 20,368, the raise 77,824 -> 24,576 a thread, and the Titan V's proton gate in 7 seconds with 6.67 GB left
+
+**THE MOVE.** `bic::BicScratch` (`bic/cascade_scratch.cuh`) holds all sixteen arrays of V256's
+table, one member each, with a comment naming its function and the Geant4 loop it serves. It is a
+member of `had::InteractionSlot` (`bic_scratch`), and `CascadeWorkspace::scratch` points at it;
+`bic_storage_of` and `blir_storage_of` set it. `propagate` binds it once and hands it by reference
+to:
+
+  * `capture_secondaries`
+  * `find_collisions` -> `schedule_absorption`
+  * `do_time_step`
+  * `step_particles_out`
+  * `decay_void_nucleus`
+
+None of these functions took it before; the change is a parameter, and the local becomes a
+pointer into the member. `kCascadeMaxScratch` (256) moved from cascade_propagate.cuh into
+cascade_scratch.cuh. Every literal 256 bound on these lists now names it - the same number, so no
+clamp moved.
+
+The members are not shared. `step_particles_out`'s `secondaries` is still being read while
+`schedule_absorption` fills its cluster lists, and `do_time_step` runs inside
+`step_particles_out`. One array per declaration is the stack's semantics; no function in the tree
+recurses or re-enters itself.
+
+Nothing is read before it is written in the same call:
+
+  * every list is filled from 0 and read below its own count;
+  * `dl[n] = DecayTrack{}` is written before `decay_kinetic_tracks` reads entry n;
+  * that engine writes `tracks[n + k]` before it reads it.
+
+So a slot reused across events, kernels and the two arms reads nothing stale.
+
+A workspace without `scratch` is refused by `propagate` as `capacity` before a uniform is drawn.
+test_bic_imr asserts it on the first propagate case: refused, by capacity, tape at 0.
+Anti-vacuity: with the refusal set as `invalid_nucleus`, test_bic_imr FAILS ("no scratch: by
+capacity got 0 want 1").
+
+**THE SLOT.** `sizeof(InteractionSlot<double>)` is 1,566,472 -> 1,617,672 (+51,200, exactly
+`sizeof(BicScratch)`), pinned in interaction_apply.cuh and test_inelastic_transport.cu.
+Anti-vacuity: with `kCascadeMaxScratch` at 255 the pin fails to compile, "static assertion failed
+... InteractionSlot<double> changed size".
+
+| | before | after |
+|---|--:|--:|
+| one slot plus FTFP's workspace | 2,237,728 | 2,288,928 B |
+| 128 slots, both pools | 273.2 MiB (286.4 MB) | 279.4 MiB (293.0 MB) |
+
+The pool is built from one constructed host image as before, so the scratch costs no allocation of
+its own. The `interaction_queue.cuh` comment that quotes 1,566,472 is outside this package's files
+and was left for the lead.
+
+**THE FRAMES**, from the units' own ptxas logs (out\transport_run_int_*.log, both targets):
+
+| kernel | before sm_86 / sm_70 | after sm_86 / sm_70 | change |
+|---|--:|--:|--:|
+| `run_interaction<kBinary>` | 69,920 / 69,904 | **15,648 / 15,632** | -54,272 |
+| `run_interaction<kLightIon>` | 61,728 / 61,728 | **20,368 / 20,368** | -41,360 |
+| `run_interaction<kFtfp>` | 2,688 | 2,688 | 0 |
+| `run_interaction<kBertini>` | 12,720 | 12,720 | 0 |
+| `run_interaction<kAtRest>` | 14,368 | 14,368 | 0 |
+
+The Binary frame fell by 3,072 bytes MORE than the 51,200 moved. The sizes alone do not explain
+it: ptxas's layout of what is left (spill slots, alignment) changed with it. V256's step-by-step
+attribution is where it is measured.
+
+The light-ion frame fell by less (41,360). What is left on it, 20,368, belongs to a path that
+did not hold every one of the lists at once. That 20,368 is now the LARGEST interaction frame, so
+`run_interaction<kLightIon>` sets the raise. Cutting it further is the next step and is not part
+of this package.
+
+**THE RAISE**, as each run's own line prints it:
+
+| run | before | after |
+|---|---|---|
+| proton depth-dose gate, RTX 3070 | 77,824 B a thread off kBinary's 69,920, 1.42 GB of 8.00 left | **24,576 B a thread off kLightIon's 20,368, 4.92 GB of 8.00 left** |
+| 1 GeV proton beam, 200k, RTX 3070 (auto batch 1,713,680) | 77,824, **0.00 GB of 8.00 left** | 24,576, **1.40 GB of 8.00 left** |
+| 1.6 GeV alpha beam, 200k, RTX 3070 | 77,824, 0.00 GB left | 24,576, 1.40 GB left |
+| proton depth-dose gate, Titan V | V239: 77,824, 0.00 GB of 12.00 left | **24,576, 6.67 GB of 12.00 left** |
+
+The reservation itself (bytes a thread x resident threads):
+
+| card | resident threads | before | after |
+|---|--:|--:|--:|
+| RTX 3070 | 70,656 | 5.12 GiB | 1.62 GiB |
+| Titan V | 163,840 | 11.88 GiB | 3.75 GiB |
+
+What the raise asks over the stepping kernels' 16,384 (V258's arithmetic) is now 0.54 GiB on the
+3070 and 1.25 GiB on the Titan V. V239's "a 40 KB frame would be 6.5 GB" is beaten by the 24 kB
+raise.
+
+**BIT-IDENTITY.** Before = main's binaries (c0c022b, built 2026-11-15); after = this branch. All
+beams run on the RTX 3070 at the DEFAULT live tracks an event (4), `G4GPU_HADRONIC_STAGE=final`,
+the default seed, through examples/B1 as the sweep runs it. 32 live tracks paged the 3070 and were
+stopped (V258).
+
+| run | before | after |
+|---|---|---|
+| proton 1000 MeV, 200,000 events | 391.883 nanoGy rms = 1.33841 nanoGy | **391.883 nanoGy rms = 1.33841 nanoGy** |
+| alpha 1600 MeV, 200,000 events | 1.51719 microGy rms = 3.0031 nanoGy | **1.51719 microGy rms = 3.0031 nanoGy** |
+| proton depth-dose CSV, 3070 | - | byte-identical to before (cmp) |
+| proton depth-dose CSV, Titan V | - | byte-identical to the 3070's |
+| compare_depth | OK, R80 77.693 mm, contained 97.4439% | OK, the same digits on both cards |
+
+The scheduling counters (throttled track-steps, iterations, chunk launches) differ by a few per
+mille between before and after. They differ the same way between two runs of the SAME before
+binary: the gate's throttle read 562,121 and 561,783 track-steps. Nothing physical moved.
+
+The cascade tests against main's own 2026-11-15 run logs:
+
+| test | result |
+|---|---|
+| test_bic_void, test_bic_1h1, test_bic_nucleus, test_bic_apply (both campaigns), test_inelastic_models | byte-identical |
+| test_bic_imr | identical, except PropagateStructure counts 732 points where it counted 729 - the three new no-scratch assertions |
+| test_inelastic_transport | PASSED, every digit the same except the slot sizes above and the new section 1b |
+| test_step_hadron | PASSED, identical |
+
+**THE TITAN V GATE, which this slice was for.** The proton depth-dose gate as build_all runs it
+(6,000 protons of 100 MeV, `CUDA_VISIBLE_DEVICES=1`) ran in **7 s** wall, against V239's 48 min
+cold and about 1 h 45 inside the gate. It reported 6.67 GB of 12.00 left, and the host process
+stayed under the 4 GB watchdog.
+
+**THE BUILD.** The engine units the cascade change stales are the seven interaction units and
+transport_run_pool. V258's guard in transport_run_impl.cuh staled all 27, and build_engine.bat
+printed all 27 as `stale: newer ...transport_run_impl.cuh` (the pool: `...interaction_pool_build.cuh`).
+The full dual-target build held D:\g4gpu\out\ptxas.lock from 04:52 to 07:20 (2 h 28).
+
+### V258: a device allocation the card cannot hold is refused by name - the stack raise, the interaction pool and both interaction queues, with G4GPU_ALLOW_PAGING=1 for a deliberate measurement
+
+**WHY.** CUDA under WDDM does not fail an allocation larger than the card's free memory. It backs
+the difference with system memory and the run pages over PCIe. The batch's track buffers have been
+refused that way since `Upload`'s "Refused rather than attempted". The four allocations that come
+after it were not, and they are the ones that paged:
+
+  * the device stack raise (`RaiseStackForInteractions`). V239 measured it on the Titan V: 48 min
+    cold and about 1 h 45 inside the gate for the proton depth-dose, "0.00 GB of 12.00 GB left", and
+    the user watched the card report 12.6 GB.
+  * the interaction pool.
+  * the interaction queue.
+  * the photo-/lepto-nuclear queue.
+
+This package's first baseline beam, 200,000 1 GeV protons at the sweep's 32 live tracks an event on
+the 3070, drove exampleB1's host process to 26.7 GB of working set (33.6 GB committed). The user
+stopped it by hand. Every beam since runs at the default live tracks. The user's rule (2026-11-16):
+no run pages, the Titan V gate included.
+
+**WHAT WAS DONE.** `src/host/paging_guard.cuh` holds two functions:
+
+  * `paging_verdict(asked, free, allow)`: a request fits when it is at most the free memory.
+    Otherwise it is refused, or allowed when the switch is on.
+  * `refuse_if_paging(PagingRequest)`: silent when the request fits. On a refusal it prints a FATAL
+    and exits with status 2. The FATAL names what was asked, the bytes asked, the bytes free, the
+    card's total and the card, and for the stack also the resident threads, the bytes a thread and
+    the frame. On an allowed request it prints a notice.
+
+Each of the four allocations reads `cudaMemGetInfo` immediately before it allocates:
+
+| allocation | where | bytes asked |
+|---|---|---|
+| stack raise | `RaiseStackForInteractions`, before `cudaDeviceSetLimit` | `(want - have) x SMs x max threads per SM` |
+| interaction pool | `had::build_interaction_pool`, before the slots' `cudaMalloc` | slots plus FTFP's workspaces |
+| interaction queue | `Upload`, before its `cudaMalloc` | the queue's bytes |
+| photo-/lepto-nuclear queue | `Upload`, before its `cudaMalloc` | the queue's bytes |
+
+The stack's arithmetic: the driver reserves the limit for every resident thread, so going from
+`have` to `want` asks `want - have` bytes of each. That is V190's 270 MB per 4 kB over the 3070's
+70,656 threads. On V239's Titan V numbers, 77,824 raised from 16,384 over 163,840 threads asks
+10,066,329,600 B.
+
+`G4GPU_ALLOW_PAGING=1`, and only `1`, keeps the old behaviour for a deliberate measurement of the
+paging. It prints that it is on every time it lets a request through.
+
+**THE TEST.** `tests/test_inelastic_transport.cu`, section 1b, on the card's own `cudaMemGetInfo`:
+
+  * one byte past the free memory is refused;
+  * exactly the free memory fits, and so does half of it;
+  * the switch turns the refusal into a pass-through;
+  * `G4GPU_ALLOW_PAGING` set to `1` reads on and set to `0` reads off;
+  * the Titan V arithmetic above.
+
+PASSED, 6.932 GB free of 8.000 on the 3070. Anti-vacuity: with the verdict's `<=` made `<`,
+the same test FAILS, "a request of exactly the free memory was refused" (1 failure, exit 1).
+Restored.
+
+On every run since, none of the four allocations was refused. The tightest was the 1 GeV proton
+beam's raise on the 3070: 0.54 GiB asked, with 1.40 GB left after it. The raise V239 measured on
+the Titan V asked 10.07 GB, so the before tree's gate on that card would now stop with this FATAL
+instead of paging for an hour and three quarters.
+
+**WHAT IT COSTS.** Every engine unit includes `transport_run_impl.cuh`, so the guard staled all 27
+units (the cascade's own change staled the 7 interaction units and the pool). Nothing on a kernel
+path moved; the frames are V257's.
