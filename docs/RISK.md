@@ -16375,3 +16375,173 @@ instead of paging for an hour and three quarters.
 **WHAT IT COSTS.** Every engine unit includes `transport_run_impl.cuh`, so the guard staled all 27
 units (the cascade's own change staled the 7 interaction units and the pool). Nothing on a kernel
 path moved; the frames are V257's.
+### V259: P26b's scope, measured - which ions open the delta-ray window on the B1 ion beams, at what energy, and what Geant4's form factor does to them there
+
+**BEFORE: the ledger.** `kIonDeltaRay` is booked per step on which a real ion's own tmax exceeds the
+cut. The counts on record (V230, V232, V245 item 4; ledgers at G4GPU_LIVE_PER_EVENT=32): neutron
+100 MeV 9 steps, deuteron 2000 MeV 3, He3 3000 MeV 9, alpha 4000 MeV 25, alpha 840 MeV 11; neutron
+1000 MeV 0. The ledger carries an energy and no nuclide, so the nuclides were taken on this
+branch's own beams (V261) with a scratch build whose GenericIon unit printed one line per real-ion
+step on which either the old criterion or the new rate opened the window (`IONSTEP`, never
+committed; the rows were taken on it - V261 and its addendum):
+
+| beam | events | steps, window open | nuclides (Z, A: steps, kinetic energy) | material |
+|---|--:|--:|---|---|
+| deuteron 2000 MeV | 100,000 | 0 | - | - |
+| He3 3000 MeV | 100,000 | 227 | Be9 87 (10.2-11.3 MeV), B10 40 (5.0-6.2), C12 100 (5.5-8.5) | air |
+| alpha 4000 MeV | 100,000 | 264 | Li6 129 (2.7-5.3 MeV), Be7 135 (3.2-5.8) | air |
+| alpha 840 MeV | 300,000 | 504 | Li7 164 (3.2-6.7 MeV), C13 56 (5.9-8.4), N13 268 (6.1-11.8), N14 16 (6.6-7.4) | air |
+| neutron 100 MeV | 500,000 | 0 | - | - |
+
+**Every one is in AIR, at 0.45 to 1.25 MeV per nucleon** - not in the water phantom above
+147 MeV/u, where V200 and V245 put the window: no fragment heavier than He3 left an ion beam's
+nuclear reaction above 147 MeV/u in these runs, while air's 990 eV cut opens the window at about
+0.5 MeV/u, and B1's world is air. The step counts are larger than the ledger's because the steps
+are shorter: with the channel live an ion in air draws a delta ray every 0.03 mm (rate about
+30 /mm), so one fragment that was one or two refused steps before is tens of sampled ones now.
+Every line had the old criterion true (`old=1`) and the new rate positive - the two windows agree
+on every step - and every nuclide has an ENSDFSTATE ground row (`known=1`).
+
+**THE NUCLIDES' SPIN** (ENSDFSTATE, as `G4IonTable::GetIon` reports it; ion_spin.csv): Li6 2J = 2,
+Li7 3, Be7 3, Be9 3, B10 6, C12 0, C13 1, N13 1, N14 2 - eight of nine with spin, the one consumer
+of which is the Bethe-Bloch form-factor rejection.
+
+**WHAT GEANT4'S REJECTION DOES TO THEM: nothing, by construction.** At 0.45-1.25 MeV/u the scaled
+energy is below GenericIon's 2 MeV `eth`, so `ionIoni` samples with G4BraggIonModel, whose
+SampleSecondaries has no form factor and no spin term - the acceptance after the inner loop is 1
+exactly, in Geant4 and here. Where the form factor does act (Bethe-Bloch, above 2 MeV/u), a million
+Geant4 calls at 150-2000 MeV/u in water fail to produce 6.0 times in a million on average (at most
+23; ion_delta.csv, 34 nuclides), in air 0 or 1; the spin and moment move grej by 1e-8 to 6e-4
+(V260's tape). So the spin was never what kept these steps refused; the channel was.
+
+### V260: an ion carries ENSDFSTATE's spin and moment, and its delta rays are GenericIon's rate and its own spectrum - the sampler equal to Geant4's deviate for deviate over 8,160 scripted draws
+
+**THE SPIN.** `G4NuclideTable::GenerateNuclide` reads ENSDFSTATE.dat as seven fields a row and keeps
+every ground state (E = 0, flag "-") whatever its life; `G4IonTable::CreateIon(Z, A, 0)` takes
+`J = GetiSpin()` (2J) and `mu = GetMagneticMoment()` (J/T times `joule/tesla`) from it, or keeps
+J = 0, mu = 0 where there is no row. `tools/extract_ensdf_ground.pl` writes those rows as
+`src/data/ensdf_ground_states.hh`: 2977 of the file's 25,517 rows, 2168 with 2J > 0 (420 of them
+2J = 99, ENSDF's "unknown", which Geant4 reads as spin 49.5), 703 with a moment; it asserts the
+file's code order, one ground row per nuclide and no other kept state within GetIsotope's 0.5 eV.
+`em::ion_ground_state` binary-searches it (12 probes) and gives spin = 2J/2 and
+`G4BetheBlochModel::SetupParameters`' `magMoment2 = (mu*mass*aMag)^2 - 1` on CLHEP 2.4.6's own
+`joule/tesla` and `aMag`; `ion_particle_def` and `stepped_ion` read it, and `SteppedHadron` carries
+`spin_known`.
+
+**WHERE IT LIVES: a per-nuclide table, not a track field.** V22's question first: a field would be
+2J and a moment per track; the table costs the track nothing. `sizeof(TrackState<double>)` is 264
+bytes at c0c022b and on this branch (float: 152 and 152). The ion kernels' frames are in V261.
+
+**THE RATE AND THE SPECTRUM ARE TWO PARTICLES'.** A real ion shares G4GenericIon's `ionIoni`.
+`PostStepGetPhysicalInteractionLength` reads GenericIon's lambda at `E*massRatio` and multiplies it
+by `fFactor`, which for `isIon` follows `currentModel->ChargeSquareRatio(track)`; the table's nodes
+are G4BraggIonModel's (below 2 MeV scaled) or G4BetheBlochModel's `CrossSectionPerVolume` for
+G4GenericIon's own definition - 938.2723 MeV, charge 1, spin 1/2, no effective-charge factor (both
+models apply one for `isAlpha` alone). So the ion's own spin is NOT in its rate.
+`SampleSecondaries` then calls `MaxSecondaryEnergy(dp->GetDefinition())`, whose
+`SetupParameters`/`SetParticle` re-derive mass, spin, magMoment2, formfact and massRate from the
+ION. `em::ion_delta_xs` is the first, `em::sample_ion_delta` the second (the model GenericIon's
+process selects at the scaled energy, run through `sample_delta_for_definition` on `h.def`).
+`step_hadron` calls both for a real ion with a ground row.
+
+**AGAINST GEANT4** (`ref/dump/dump_ion_delta.cc`, `G4GPU_DUMP_ONLY=ion_delta`;
+`tests/test_ion_delta.cu`, host, in build_all's TESTS):
+
+| section | what | points | worst |
+|---|---|--:|--:|
+| 1 | the table against ENSDFSTATE.dat | 25,517 rows, 2977 ground | 0 mismatched |
+| 2 | `stepped_ion` against `G4IonTable::GetIon(Z,A,0)` - `found`, spin, mass, magMoment2 | 13,320 nuclides (2970 with a row, 2162 with spin) | 0 mismatched, magMoment2 7.4e-16 |
+| 3 | `ion_delta_xs` against GenericIon's model at `E*massRatio` times the model's own `GetChargeSquareRatio(ion)` | 1,632 (986 open) | 1.6e-15; q2 9.2e-16 |
+| 4 | `sample_ion_delta` against the models driven by a scripted engine: the transfer from (r0, 0); the inner loop's threshold f/fmax and the form-factor rejection's threshold grej, each by the same 64-step bisection; the final state | 8,160 draws (4,595 with f < 1, 2,985 with grej < 1) | transfer, f and grej EQUAL; final state 2.2e-16 |
+| 5 | a million calls a point on each side, the failures to produce | 816 | chi2 610 for 816, worst z -3.44 |
+
+34 nuclides (H4 through Fe56, with and without spin), B1's four materials, 0.5 to 2000 MeV per
+nucleon. The test drives the tape with Geant4's own electron cut: `build_b1_materials` writes the
+cuts to ten digits (water 1.3e-10, bone 1.2e-9 relative from Geant4's), which section 3 asserts to
+2e-9 and reports. **G4EmCalculator::ComputeCrossSectionPerVolume is not the oracle**: for a species
+with a base particle 11.1.1 computes `e *= kinEnergy*massRatio` (G4EmCalculator.cc:586), the
+energy squared; the dump composes Geant4's model and q2 calls instead, and also reads
+`GetCrossSectionPerVolume` - GenericIon's lambda TABLE - which section 3 reports: **up to 31% from
+the model at the window's edge** (H4 at 0.5 MeV/u in air; N14 at 150 MeV/u in water 0.849 against
+0.983 /mm, 14%), under 0.1% a factor of two above it. The stepper draws from the model at the
+pre-step energy - this port's convention for every charged particle, refused by name as the
+integral approach and the lambda tables (docs/PORTED.md row 60, V78) - so an ion's delta rays near
+their threshold inherit that gap; it is not new and not closed here.
+
+**Anti-vacuity**, each once and restored: the ion's spin and moment forced to 0 and -1 - section 2
+2162 mismatches, section 4 grej off by 5.9e-4 (Al27 at 2 GeV/u in bone) and f by 1.3e-7, section 5
+SILENT (worst z 2.89), which is why the tape exists; `ion_delta_xs` without q2 - section 3 off by
+0.999; the sampler's model chosen at the unscaled energy - section 4's transfer off by 0.75.
+
+**WHAT THE FORM FACTOR DOES** at the energies the beams' fragments reach: a million Geant4 calls in
+water at 150-2000 MeV/u fail to produce an electron 6.0 times in a million on average (at most 23);
+in air 0 to 1. The spin and moment move grej by 1e-8 to 6e-4 - unmeasurable in any beam, but they
+are Geant4's numbers now, and the tape holds them to the bit.
+
+**ALSO TRANSCRIBED**: the three parameterised models' inner loop is `while (grej*rndm[1] >= f)`,
+accepting on `r1 < f`; Bethe-Bloch's `while (fmax*rndm[1] > f)` accepts on `<=`. The sampler took
+`<=` for both; it now takes each as written - a set of measure zero, so no proton or alpha number
+moves.
+
+**REFUSED BY NAME**: a real ion with NO ground row in ENSDFSTATE - Geant4 samples it on CreateIon's
+J = 0, mu = 0 default; this port books `kIonDeltaRay` per step for it, the window tested on its own
+definition as before (H4, H5 and H7 have no row, H6 has one; every nuclide the B1 beams made above the window had
+one - V259, V261).
+
+### V261: the ion beams after - kIonDeltaRay at zero on all five, every dose row where V232 left it, and what the ion kernels' frames and the build paid
+
+**THE BEAMS** (examples\B1\exampleB1.exe on this branch, CUDA 12.9.86, the RTX 3070 alone,
+`G4GPU_HADRONIC_STAGE=final`, `G4GPU_ION_INELASTIC` cleared, `G4GPU_LIVE_PER_EVENT` UNSET - the
+default live-track count, the lead's rule of 2026-11-16, where V232 ran 32 - each row's own macro
+and count as ref/b1ngp/rows.ps1 writes them). Geant4 is QBBC as it ships (V232's column):
+
+| beam | events | port, P26b | Geant4 QBBC | diff | V232 (P22) | `kIonDeltaRay` before / after |
+|---|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 279.007 ± 1.403 | -0.07%, -0.1 σ | 278.780 | 3 / **0** |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 600.455 ± 1.952 | +0.25%, +0.5 σ | 601.955 | 9 / **0** |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 664.032 ± 2.206 | -0.45%, -1.0 σ | 661.007 | 25 / **0** |
+| alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.93621 ± 0.00917 | -0.85%, -3.2 σ | 4.89442 | 11 / **0** |
+| neutron 100 MeV | 500,000 | 226.393 ± 0.989 nGy | 224.945 ± 0.985 | +0.64%, +1.0 σ | 226.392 | 9 / **0** |
+
+"Before" is the ledger on record (V245 item 4); "after" is this branch's ledger, which books
+`kIonDeltaRay` only for an ion with no ENSDFSTATE ground row - none reached the window on any beam
+(V259's table: every nuclide that did has a row). Every row is within 0.03 nGy of V232's
+port column (alpha_840 within 0.07 nGy, 0.0014%), which ran before P26 at 32 live tracks an event; four are within 1.0 σ of QBBC and
+alpha_840 stays at V232's -3.2 σ, which V217/V232 put in the ion-inelastic chain at 210 MeV/u and
+not here. The rows CANNOT move much through this package: the only ions it reaches on these beams
+are fragments in the air around the phantom (V259), and the delta rays they now make carry a few
+keV each, in the air outside the phantom. The rows were taken on the scratch build that printed
+V259's lines (the GenericIon unit with one printf, nothing else different); the clean build's He3 row
+against it is the addendum below. Host working set 3.2-3.6 GB a run; every run printed
+`device stack raised to 77824 B ... 0.00 GB of 8.00 GB left` - Binary's 69,920-byte frame, the
+Binary-frame slice's business, at the edge and not over it.
+
+**THE ION KERNELS' FRAMES** (`run_step_hadron`, `cuobjdump -res-usage`, sm_86 / sm_70; all 255
+registers before and after; the 16,384-byte stepping stack):
+
+| unit | c0c022b | P26b |
+|---|--:|--:|
+| transport_run_generic_ion | 4,240 / 4,240 | **4,224 / 4,208** |
+| transport_run_alpha | 4,224 / 4,208 | 4,240 / 4,224 |
+| transport_run_he3 | 4,224 / 4,208 | 4,240 / 4,224 |
+| transport_run_deuteron | 4,528 / 4,512 | 4,528 / 4,512 |
+| transport_run_triton | 4,528 / 4,512 | 4,528 / 4,512 |
+
+The c0c022b column is that commit's own three units compiled clean for the generic-ion, alpha and
+He3 rows, and main's pre-P26 objects for the deuteron and triton (which P26 did not move, V247).
+The GenericIon kernel got 16-32 bytes SMALLER with a whole delta-ray channel added, and the alpha
+and He3 16 larger with none (their `is_real_ion()` is a compile-time false): the split of the
+sampler into `sample_delta_for_definition` moved ptxas's spill choices, not the work.
+`sizeof(TrackState<double>)` 264 bytes before and after (V260: a table, not a field).
+
+**WHAT WENT STALE.** Every engine unit's dependency file reaches `em/hadron_range.cuh`,
+`em/hadron_delta.cuh` and `stepper.cuh` (V233 split the hadronic headers, not these), so against
+c0c022b **26 of the 27 units are stale - all but transport_run_pool** - not the five ion units the
+brief hoped for. That is the cost of the stepper being one header. For this branch's measurements
+the 26 were compiled under the lead's lock rules of the day; `transport_run_int_atrest` was
+compiled from c0c022b's tree (it instantiates no stepper; its only read of a changed header is
+`ion_particle_def(...).mass`, which returns the same double) and the other 25 from this branch.
+
+**NOT DONE HERE**: the 1 GeV neutron and the proton rows (no real ion opens the window on them -
+neutron_1000's ledger was 0 before); a QBBC re-run (V232's column is the reference, unchanged since
+it reads exampleB1's own numbers).

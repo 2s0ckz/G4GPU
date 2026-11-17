@@ -675,3 +675,30 @@ on a beam with one model and an EM part that is Geant4's. Not diagnosed here (V2
 
 **The gates, to the digit.** exampleB1 -n 2000000: 426.028 pGy, 1.10452 sigma (unchanged);
 b1_gpu_sched 2000000: 427.699 pGy, ratio 1.0007 (unchanged).
+## P26b: an ion's delta rays, sampled (2026-11-16)
+
+P26b retires `kIonDeltaRay` for every real ion G4ENSDFSTATE has a ground-state row for: the rate is
+GenericIon's at the scaled energy times the dynamic q2, the spectrum is the ion's own definition's,
+with the spin and magnetic moment `G4IonTable::CreateIon` reads (docs/RISK.md V259-V261). The five
+ion-beam rows of V232, on this branch, at the DEFAULT live-track count (`G4GPU_LIVE_PER_EVENT`
+unset: the 32 this sweep used does not fit beside the desktop on the 3070, V244, and the lead's
+rule of 2026-11-16 forbids it), `G4GPU_HADRONIC_STAGE=final`, the 3070 alone:
+
+| beam | events | port, P26b | Geant4 QBBC | diff | port, V232 | ion delta-ray steps refused, before / after |
+|---|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 279.007 ± 1.403 | -0.07%, -0.1 σ | 278.780 | 3 / 0 |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 600.455 ± 1.952 | +0.25%, +0.5 σ | 601.955 | 9 / 0 |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 664.032 ± 2.206 | -0.45%, -1.0 σ | 661.007 | 25 / 0 |
+| alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.93621 ± 0.00917 | -0.85%, -3.2 σ | 4.89442 | 11 / 0 |
+| neutron 100 MeV | 500,000 | 226.393 ± 0.989 nGy | 224.945 ± 0.985 | +0.64%, +1.0 σ | 226.392 | 9 / 0 |
+
+**The ions that open the window on these beams are fragments in the AIR around the phantom, at
+0.45-1.25 MeV per nucleon** - Li6, Li7, Be7, Be9, B10, C12, C13, N13, N14 (V259) - where air's
+990 eV cut opens it; none heavier than He3 reached water's 147 MeV/u. At those energies the model
+is G4BraggIonModel, which has no form factor, so the spin the package reads is not exercised by any
+B1 beam; the channel is. Every row sits within 0.07 nGy of V232's, which ran before P26 at 32 live
+tracks an event, so what P26, this package and the pool size changed together moves no row by more than
+two hundredths of its rms; alpha_840's -3.2 σ is V232's, in the ion-inelastic chain.
+
+The 1 GeV neutron row (ledger 0 before) and the B1 gamma gate were not re-run: no real ion opens the
+window on the first, and the second has none.
