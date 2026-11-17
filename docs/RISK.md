@@ -16132,8 +16132,39 @@ Nothing else in bic/ or the light-ion reaction is larger than a kilobyte. `BlirF
 measured, has been in the slot since P9e.
 
 THE ATTRIBUTION, measured by moving the arrays one function at a time and recompiling the binary
-unit at sm_86, is in this entry's addendum. The four snapshot compiles were waiting their turn on
-the compile lock when this was written.
+unit at sm_86, is in the addendum below.
+
+**V256 ADDENDUM: THE ATTRIBUTION.** Four source snapshots, each moving one more function's lists
+than the last. `run_interaction<kBinary>` was compiled alone at `-arch=sm_86` with
+build_engine_unit.bat's flags, under the compile lock, 09:11-09:59:
+
+| step (cumulative) | bytes moved | frame | frame drop | drop / moved |
+|---|--:|--:|--:|--:|
+| as forked | - | 69,920 | - | - |
+| G1: `propagate`'s `dl`, `initial`, and `capture_secondaries`' `captured` | 24,576 | 46,384 | 23,536 | 0.96 |
+| G2: + `decay_void_nucleus`'s three | 11,264 | 36,160 | 10,224 | 0.91 |
+| G3: + `schedule_absorption`'s three | 8,192 | 15,648 | **20,512** | **2.50** |
+| G4: + `do_time_step`'s five | 5,120 | 15,648 | 0 | 0 |
+| G5 (the branch): + `step_particles_out`'s two | 2,048 | 15,648 | 0 | 0 |
+| total | 51,200 | | 54,272 | 1.06 |
+
+**The cluster lists were on the frame two and a half times.** `schedule_absorption` is inlined
+wherever `find_collisions` is, and `propagate`'s `find` closure is instantiated into more than one
+caller: `propagate` itself, which `apply_yourself` inlines, and the `apply_collision` and
+`step_particles_out` that take it as a template argument. A drop of 2.5 times the bytes is what
+more than one non-overlaid inlined copy on the deepest chain gives; the per-copy layout is ptxas's
+and was not dumped. G1 and G2 came in about 1 kB under their sizes each, and G3 12,320 over. Net,
+the whole move beat the sum of its sizes by 3,072 bytes.
+
+**`do_time_step`'s and `step_particles_out`'s lists cost nothing on the maximum.** They are on
+`do_time_step`'s and `step_particles_out`'s own frames, which are separate functions. Once G3 had
+taken the cluster lists off the chain below `apply_yourself`, the deepest path no longer ran
+through them. They were moved anyway: the brief names them, the rule is no capacity-sized local,
+and they would be on the maximum again the day the chain above them shrinks.
+
+What is left on the Binary kernel, 15,648 bytes, is spill (528 stores) and the
+`apply_yourself`/`run_inelastic` chain's small structs. What is left on the light-ion kernel,
+20,368, is the next target.
 
 ### V257: the scratch lists in the slot - run_interaction<kBinary> 69,920 -> 15,648 bytes, <kLightIon> 61,728 -> 20,368, the raise 77,824 -> 24,576 a thread, and the Titan V's proton gate in 7 seconds with 6.67 GB left
 
@@ -16196,9 +16227,10 @@ and was left for the lead.
 | `run_interaction<kBertini>` | 12,720 | 12,720 | 0 |
 | `run_interaction<kAtRest>` | 14,368 | 14,368 | 0 |
 
-The Binary frame fell by 3,072 bytes MORE than the 51,200 moved. The sizes alone do not explain
-it: ptxas's layout of what is left (spill slots, alignment) changed with it. V256's step-by-step
-attribution is where it is measured.
+The Binary frame fell by 3,072 bytes MORE than the 51,200 moved. V256's addendum measures where:
+`schedule_absorption`'s 8,192 bytes of cluster lists took 20,512 off the frame, because the
+lists sat in more than one inlined copy of `find_collisions`. `do_time_step`'s and
+`step_particles_out`'s lists took nothing off, because they were not on the deepest path.
 
 The light-ion frame fell by less (41,360). What is left on it, 20,368, belongs to a path that
 did not hold every one of the lists at once. That 20,368 is now the LARGEST interaction frame, so
