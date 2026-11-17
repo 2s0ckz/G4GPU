@@ -16608,3 +16608,41 @@ interaction units still one at a time; two at a time when RAM allows is a later 
 the dose gates a minute - about three hours against twelve, with the same 98 tests and eleven
 gates as the acceptance. The first gate at the new target rebuilds everything once (the recipe
 changed), as ba68 does anyway for P26b's stepper change.
+
+### V263: one card for everything - the Titan V under one lock, which build_all takes only from its tests to its last dose gate - and the 3070 left to the desktop
+
+**THE DECISION (the user, 2026-11-17).** V262 split the machine: gates on the Titan V under a
+lock of their own, agents' beams on the RTX 3070 under the old one, so that neither waited for
+the other. The user asked why not run everything on the Titan V, and the honest answer was that
+the split had been introduced for a reason the slice of V256 removed (a hadron gate could not run
+on the Titan V without paging) and that the parallelism it bought was mostly waiting for
+nothing: a gate holds its card for the whole chain, about three hours, of which the GPU is busy
+for about thirty minutes - the tests and the eleven dose gates - while the rest is compile with
+the card idle under the lock. So: every GPU run of this project - a gate, an agent's beam, a GPU
+test - runs on the Titan V (`CUDA_VISIBLE_DEVICES=1`) under the one lock `out\gpu.lock`, the
+file the agents have taken since V221's rule; one compile target everywhere, sm_70 with the
+compute_70 PTX, preset by the wrappers and the briefs (setupenv.bat's dual default of V239 is
+for other machines, and a build here that forgets the preset pays two ptxas per unit); and the
+RTX 3070 is the user's desktop card, on which nothing of this project runs. What an agent waits
+for is the gate's half-hour GPU phase, a few times a day.
+
+**THE LOCK MOVES INTO build_all.bat.** Everything from `--- running tests ---` to `ALL OK` runs
+on the GPU and nothing before it does, so build_all takes `out\gpu.lock` there and releases it
+after the last dose gate, whatever happens in between, and the gate wrappers hold no card lock
+at all. The GPU phase became a `call :gpu_phase` subroutine, because `exit /b N` inside a called
+label returns to the caller - the one way a batch file runs a release on every one of that
+phase's forty exits without touching any of them; a toy batch proved the semantics before the
+change went in (the subroutine's `exit /b 7` came back as 7 with the lock file gone). A caller
+that already holds the lock sets `G4GPU_CARD_HELD=1` and the phase runs directly. The compile
+lock and the turn order of V262 are unchanged: a gate still holds `out\ptxas.lock` for its whole
+chain, since the compile is what the RAM rule is about.
+
+**THE WRAPPER** is `out\lead\gate_titanv.bat <name> <branch>`: the compile lock and the turn
+order for the chain, the dump stage when the branch changes `ref\dump` (the registered names
+read by PowerShell - cmd's `for /f` cannot take a quote as a delimiter, and ba68's second launch
+died silently on that line with both locks left behind, the lesson being that a new wrapper
+stage is tried standalone before a launch, and that a lock whose holder has no process is the
+sign of a dead wrapper), extras when the diff reaches what extras compile, and `G4GPU_ARCH`
+and `CUDA_VISIBLE_DEVICES` preset. ba68, the first Titan V gate, took three launches: the first
+ran P26b's new test against no oracle (the generic wrapper had no dump stage; the test failed
+rather than passed, as it should), the second died at the dump stage, the third ran.
