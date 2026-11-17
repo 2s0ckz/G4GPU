@@ -17,6 +17,8 @@
 #include <vector>
 
 #include "data/level_data.cuh"
+#include "host/device_select.cuh"
+#include "host/paging_guard.cuh"
 #include "physics/hadronic/deexcitation/fermi_breakup.cuh"
 #include "physics/hadronic/interaction_apply.cuh"
 #include "physics/hadronic/interaction_pool.cuh"
@@ -127,6 +129,19 @@ InteractionPoolOwner<real_t> build_interaction_pool(int n_slots,
   // is zero, and `bert::NucleiModel` and `bic::CascadeBuffers` are the same shape of risk.
   // `ftf::entry::build` does exactly this for its own pool and says so.
   own.slots_bytes = own.slot_bytes * static_cast<std::size_t>(n_slots);
+  // The slots and FTFP's workspaces, the two that scale with `n_slots`, against what the card has
+  // free - refused by name rather than paged through system memory (docs/RISK.md V258).
+  {
+    size_t pf = 0, pt = 0;
+    cudaMemGetInfo(&pf, &pt);
+    host::PagingRequest r;
+    r.what = "the interaction pool";
+    r.asked = own.slots_bytes + ftfe::kWorkspaceBytes * static_cast<std::size_t>(n_slots);
+    r.free_bytes = pf;
+    r.total_bytes = pt;
+    r.card = host::select_device().prop.name;
+    host::refuse_if_paging(r);
+  }
   if (cudaError_t e = cudaMalloc(&own.slots, own.slots_bytes); e != cudaSuccess) {
     interaction_pool_fatal("allocate its slots", own.slots_bytes, e);
   }

@@ -47,6 +47,7 @@
 #include <cstdlib>
 
 #include "host/device_select.cuh"
+#include "host/paging_guard.cuh"
 #include "host/transport_run.cuh"
 
 namespace g4gpu::host {
@@ -1172,6 +1173,29 @@ void TransportEngine<real_t, StepHook>::RaiseStackForInteractions() {
   cudaDeviceGetLimit(&have, cudaLimitStackSize);
   stack_reserved_ = std::max(want, have);
   if (have >= want) { return; }
+  // THE CARD MUST HOLD IT, or the raise is refused by name (docs/RISK.md V258). The driver
+  // reserves the limit for every thread the card can hold resident, so raising it from `have`
+  // to `want` asks `(want - have)` bytes of each of them - V190's 270 MB per 4 kB on the 3070's
+  // 70,656 threads, V239's 11.9 GB on the Titan V's 163,840 - and WDDM does not fail a request
+  // the card cannot hold: it pages it through system memory. So it is read here, before the
+  // call, against what is free now that the pools and the queues are allocated.
+  {
+    const host::SelectedDevice& dev = host::select_device();
+    const long long threads = static_cast<long long>(dev.prop.multiProcessorCount) *
+                              static_cast<long long>(dev.prop.maxThreadsPerMultiProcessor);
+    size_t f0 = 0, t0 = 0;
+    cudaMemGetInfo(&f0, &t0);
+    host::PagingRequest r;
+    r.what = "the device stack raise for the interaction kernels";
+    r.asked = (want - have) * static_cast<std::size_t>(threads);
+    r.free_bytes = f0;
+    r.total_bytes = t0;
+    r.card = dev.prop.name;
+    r.resident_threads = threads;
+    r.frame = need;
+    r.per_thread = want;
+    host::refuse_if_paging(r);
+  }
   const cudaError_t e = cudaDeviceSetLimit(cudaLimitStackSize, want);
   size_t f = 0, t = 0;
   cudaMemGetInfo(&f, &t);
@@ -1781,6 +1805,19 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     {
       const std::size_t q_bytes =
           sizeof(had::PendingInteraction<real_t>) * static_cast<std::size_t>(queue_capacity_);
+      // Refused by name rather than paged (docs/RISK.md V258); the pool's own check is in
+      // `had::build_interaction_pool`, which knows its bytes.
+      {
+        size_t qf = 0, qt = 0;
+        cudaMemGetInfo(&qf, &qt);
+        host::PagingRequest r;
+        r.what = "the interaction queue";
+        r.asked = q_bytes + sizeof(int) * (1 + static_cast<std::size_t>(queue_capacity_));
+        r.free_bytes = qf;
+        r.total_bytes = qt;
+        r.card = host::select_device().prop.name;
+        host::refuse_if_paging(r);
+      }
       G4GPU_CUDA_CHECK(cudaMalloc(&d_queue_, q_bytes));
       G4GPU_CUDA_CHECK(cudaMalloc(&d_queue_cursor_, sizeof(int)));
       G4GPU_CUDA_CHECK(cudaMemset(d_queue_cursor_, 0, sizeof(int)));
@@ -1850,6 +1887,17 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
       emx_queue_capacity_ = static_cast<int>(e_cap);
       const std::size_t e_bytes =
           sizeof(had::PendingInteraction<real_t>) * static_cast<std::size_t>(emx_queue_capacity_);
+      {
+        size_t ef = 0, et = 0;
+        cudaMemGetInfo(&ef, &et);
+        host::PagingRequest r;
+        r.what = "the photo-/lepto-nuclear queue";
+        r.asked = e_bytes + sizeof(int);
+        r.free_bytes = ef;
+        r.total_bytes = et;
+        r.card = host::select_device().prop.name;
+        host::refuse_if_paging(r);  // docs/RISK.md V258
+      }
       G4GPU_CUDA_CHECK(cudaMalloc(&d_emx_queue_, e_bytes));
       G4GPU_CUDA_CHECK(cudaMalloc(&d_emx_cursor_, sizeof(int)));
       G4GPU_CUDA_CHECK(cudaMemset(d_emx_cursor_, 0, sizeof(int)));

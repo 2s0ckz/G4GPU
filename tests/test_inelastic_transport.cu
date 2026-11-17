@@ -51,6 +51,7 @@
 #include "core/rng.cuh"
 #include "data/materials.cuh"
 #include "host/hadronic_upload.cuh"
+#include "host/paging_guard.cuh"
 #include "physics/em/hadron_range.cuh"
 #include "physics/hadronic/interaction_apply.cuh"
 #include "physics/stepper.cuh"
@@ -180,14 +181,59 @@ static void section_sizes() {
   // fails the build here with the new figure in the message. Update the assertion and the prose
   // together, or not at all. 1,481,056 until P24; 1,566,472 since (V237), and P24 pinned it in
   // interaction_apply.cuh but not here - a GPU test its brief kept it from compiling, which gate
-  // ba61 found in eight seconds.
-  static_assert(sizeof(had::InteractionSlot<double>) == 1566472,
+  // ba61 found in eight seconds. 1,617,672 since docs/RISK.md V257: +51,200 for the Binary
+  // cascade's 256-entry working lists (`bic::BicScratch`), which were stack locals of
+  // run_interaction<kBinary> and <kLightIon> and set the device stack reservation (V256).
+  static_assert(sizeof(had::InteractionSlot<double>) == 1617672,
                 "had::InteractionSlot changed size. interaction_apply.cuh's header table, "
                 "docs/RISK.md V189 and V237 and this assertion all carry the number - update them together.");
   static_assert(sizeof(had::PendingInteraction<double>) == G4GPU_PENDING_BYTES,
                 "had::PendingInteraction changed size. The queue's byte cost is quoted in "
                 "interaction_queue.cuh and in the engine's own printout.");
   std::printf("\n");
+}
+
+// =============================================================================================
+// 1b. A device allocation the card cannot hold is refused, not paged (docs/RISK.md V258)
+// =============================================================================================
+//
+// `host::paging_verdict` is what the stack raise, the interaction pool and the two queues ask
+// before they allocate. Asserted against this card's own free memory: one byte more than is
+// free is refused, exactly what is free fits, and `G4GPU_ALLOW_PAGING=1` - read through the
+// same helper the engine reads - turns the refusal into a pass-through. And the stack raise's
+// own arithmetic, on V239's numbers: 77,824 bytes a thread raised from the stepping kernels'
+// 16,384 over the Titan V's 163,840 resident threads asks 10.07 GB, which the 12 GB card did not
+// have once the pools were allocated.
+static void section_paging() {
+  std::printf("-- 1b. paging refused by name --\n");
+  std::size_t f = 0, t = 0;
+  if (cudaMemGetInfo(&f, &t) != cudaSuccess || f == 0) {
+    fail("cudaMemGetInfo answered nothing");
+    return;
+  }
+  if (host::paging_verdict(f + 1, f, false) != host::PagingVerdict::kRefused) {
+    fail("a request one byte past the free memory was not refused");
+  }
+  if (host::paging_verdict(f, f, false) != host::PagingVerdict::kFits) {
+    fail("a request of exactly the free memory was refused");
+  }
+  if (host::paging_verdict(f / 2, f, false) != host::PagingVerdict::kFits) {
+    fail("half the free memory was refused");
+  }
+  if (host::paging_verdict(f + 1, f, true) != host::PagingVerdict::kAllowed) {
+    fail("G4GPU_ALLOW_PAGING did not let the request through");
+  }
+  _putenv_s("G4GPU_ALLOW_PAGING", "1");
+  const bool on = host::paging_allowed_by_env();
+  _putenv_s("G4GPU_ALLOW_PAGING", "0");
+  const bool off = host::paging_allowed_by_env();
+  _putenv_s("G4GPU_ALLOW_PAGING", "");
+  if (!on || off) { fail("G4GPU_ALLOW_PAGING=1 is the switch, and only 1"); }
+  const std::size_t titan_v_ask = (77824u - 16384u) * std::size_t(80 * 2048);
+  if (titan_v_ask != 10066329600ull) { fail("the stack raise's arithmetic on V239's numbers"); }
+  std::printf("  %.3f GB free of %.3f: free+1 refused, free fits, the switch lets it through; "
+              "V239's raise asks %zu B\n\n",
+              double(f) / 1073741824.0, double(t) / 1073741824.0, titan_v_ask);
 }
 
 // =============================================================================================
@@ -282,6 +328,7 @@ struct Cell {
 int main() {
   std::printf("== P15: the inelastic interaction and the at-rest capture, end to end ==\n\n");
   section_sizes();
+  section_paging();
   section_copies();
 
   // ---- the data every arm's de-excitation tail needs.
