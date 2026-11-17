@@ -16771,6 +16771,7 @@ behind it. That gap is the eta and eta' having no ParticleType (V240): not this 
 (V255's 391.883); the B1 photon gate (exampleB1 -n 2000000) 426.028 pGy, 1.10452 sigma; b1_gpu_sched
 2000000 427.699 pGy, ratio 1.0007.
 ### V267: P25's scope, measured - ionElastic fires once per 15-50 mm of a real ion's track, not once per metre, and in 50,000 C12 primaries and 600,000 light-ion primaries it never made a recoil above the 70 keV cut
+### V267: P25's scope, measured - ionElastic fires once per 6-30 cm of a real ion's track in B1's phantom, not once per metre, and in 50,000 C12 primaries and 600,000 light-ion primaries it never made a recoil above the 70 keV cut
 
 **WHO HAS THE PROCESS.** `G4IonElasticPhysics::ConstructProcess` (QBBC registers it, QBBC.cc:87)
 makes one `G4HadronElasticProcess("ionElastic")` - `G4CrossSectionElastic(new
@@ -16853,3 +16854,89 @@ src/host/transport_run_impl.cuh, which P25 may not edit) writes `ion_za = 0` for
 ref/b1hadron/C12_12000.mac is Geant4's alone until a package gives the gun a nuclide. The C12 rows
 that exist on the port side are tests/test_step_hadron.cu's 150 single steps of C12 at 1 GeV/u
 (V270).
+
+### V268: ionElastic's cross section through the wiring - 5,112 points per volume against G4HadronicProcessStore, worst 4.8e-16, on the real ion's projectile and GenericIon's integral flag
+
+**THE ROW.** `had::ElasticChannel::kIonDiffuseNotWired` is `kIonDiffuse`. The data set is
+`G4CrossSectionElastic(new G4ComponentGGNuclNuclXsc)` - the light-ion row's class and component,
+a second instance, whose only state is a cache on (particle, E, Z, A) - so `ElasticXsFn::element`
+answers it with the same `ggnn_elastic_element` at the NIST mean mass. What differs is the
+PROJECTILE: `G4CrossSectionElastic::GetElementCrossSection` hands the component
+`dp->GetDefinition()`, the real ion, whose charge Z and baryon number A the Glauber-Gribov radii and
+Coulomb barrier read. So `elastic_projectile(kGenericIon, z, a)` is `xs::generic_ion(Z, A)` (charge
+Z, A, `G4NucleiProperties::GetNuclearMass` - what `G4IonTable::CreateIon` gives a ground state), and
+the nuclide is threaded through `elastic_xs_fn`, `elastic_xs_per_volume`, `elastic_sample_target`
+and `elastic_apply` as trailing (z, a) defaulted to zero, so every other channel's call is the
+same call. `G4HadronicProcessStore::FindProcess` maps a nucleus of baryon number > 4 to GenericIon,
+which is how the oracle reaches ionElastic's own store; d, t, He3 and alpha (A <= 4) keep their
+hadElastic, which is what the constructed QBBC says (V267).
+
+**THE INTEGRAL FLAG IS G4GenericIon's.** `G4HadronicProcess::BuildPhysicsTable` decides `fXSType`
+once, for `firstParticle` - G4GenericIon (charge +1, 938.2723 MeV, atomic number 1): charged, not
+a lepton, mass under 1 GeV, pdg none of 211/2212/321 - so fHadIncreasing, which the dump reads off
+the process (`CrossSectionType() == 1`). `elastic_apply` evaluates exactly that; the ion's own
+projectile gives the same answer for every nuclide (test section 1 asks both).
+
+**MEASURED** (`tests/test_ion_elastic.cu` against `ref/dump/dump_ion_elastic.cc`): the component
+for 18 nuclides (Li6 to Pb208) on the 11 elements of B1's four materials, 0.01 MeV/u - 100 GeV/u,
+elastic and inelastic, **12,780 points at 0.0**; `elastic_xs_per_volume(kGenericIon, ..., Z, A)`
+against `GetElasticCrossSectionPerVolume` in B1's four materials, **5,112 points (4,736 non-zero),
+worst 4.8e-16**. Anti-vacuity: the per-volume store handed A+1 fails at 1.0 (Li7 in air at
+4.4 MeV: 0 against 2.8e-11 /mm, the barrier moved) and moves the replay's fates.
+
+### V269: G4HadronElasticProcess::PostStepDoIt of ionElastic, the REAL one, replayed - 2,728 calls and 120,000 campaign calls equal to the last bit, 48 of them recoils above the cut that had to be searched for
+
+**THE ORACLE IS THE PROCESS, NOT A TRANSCRIPTION OF IT.** dump_ion_elastic.cc builds a G4Track of
+a real ion in one of g4dump's material boxes (a navigator touchable; `G4Step::InitializeStep`, so
+`GetMaterial`/`GetMaterialCutsCouple` read the pre-step point as in tracking), calls
+`StartTracking` and `PostStepGetPhysicalInteractionLength` at E_start - which stores the cross
+section the integral approach rejects against - sets the track to E_end, resets dump_bertini's LCG
+to the row's phase and calls `PostStepDoIt`: the rejection, SampleZandA, ChooseHadronicInteraction
+(one model, no draw), `G4HadronElastic::ApplyYourself` through `G4NuclNuclDiffuseElastic::
+SampleInvariantT`, the 70 keV recoil threshold from the proton cuts vector, the rotation, and the
+particle change. The port runs `had::elastic_apply(kGenericIon, ..., Z, A)` with the cross section
+at E_start and its partial sums, as `step_hadron` hands them.
+
+Six nuclides (C12, O16, Li7, N14, B10, Be9) x B1's four materials x seven energies per nucleon
+(1-4000 MeV) x 16 phases, E_start = E_end and 1.25 E_end alternately: 2,680 calls (eight points in
+air below the barrier have no cross section and no call). **None emits a recoil above the cut** -
+the screened-Rutherford t (V267) puts P(T_recoil > 70 keV) at Am/mu_cut, 1e-5-1e-6 - so for six
+points the dump scans phases from 1,000 up and keeps the first eight that do: 48 rows, one in
+70,000 to 890,000 calls, 25 hydrogen recoils (protons, 0.075-13.6 MeV) and 23 C12/N14/O16
+GenericIons (0.079-3.5 MeV). Result: **2,728 calls, 0 draw-count mismatches, 0 fate mismatches
+(143 integral rejections on the 1.25 E_end rows), every recoil's species equal and pushed as the
+stepper pushes it (proton, else GenericIon), and Ef, direction, deposit, recoil energy and
+recoil direction all at 0.0.** Geant4's local and non-ionizing deposits are equal on every row.
+The campaign - 20,000 PostStepDoIt calls on one stream at six points (C12 at 1 GeV/u and
+100 MeV/u in water, 1 GeV/u in air, O16 300 MeV/u in bone, Li7 50 MeV/u in A-150, O16 20 MeV/u in
+water) - is equal in draws (98,903 to 100,000), recoil counts, 80 histogram bins (log10 of the
+recoil energy and of 1 - cos of the lab angle) and three sums: it came out exact, as V252's did.
+
+**ANTI-VACUITY**, each run once and restored: the recompute inside `elastic_apply` without the
+nuclide (zero cross section at the step's end) - 2,585 draw counts and every campaign point; the
+flag forced to kNoIntegral - 2,728 draw counts and all 48 recoils; Gheisha's sampler in place of
+NNDiffuse - 2,585 draw counts, 2,220 recoil fates, Ef out by 0.42.
+
+### V270: ionElastic on the device and in step_hadron - 36 grid cases and a C12 beam host against device, and a tolerance the eV recoils needed
+
+`step_hadron` passes `h.z`/`h.a` (zero for every species but a real nuclide) to its
+`elastic_xs_per_volume` and `elastic_apply` calls; the recoil goes out through `push_nucleus` as
+before, so an ion's hydrogen recoil is a proton track and its C/N/O recoil a GenericIon one -
+`G4HadronElastic::ApplyYourself`'s own species switch. `hadron_elastic` gates ionElastic as it
+gates every elastic channel (QBBC's `/process/inactivate ionElastic` has no port switch of its own;
+the host engine, which owns the flags, is not P25's to edit). GenericIon's manager holds
+ionInelastic BEFORE ionElastic, so an exact tie of the two lengths is the inelastic's in Geant4 and
+the elastic's in `step_hadron`, whose selection order is hadElastic-first for every species: two
+lengths from independent uniforms tie with probability zero, and the order is said, not coded.
+
+`tests/test_step_hadron.cu` gains a C12 beam at 12,000 MeV (150 single steps from the box's centre;
+ionElastic mfp 299.7 mm in water printed beside the others) and 36 GenericIon rows - C12, O16, Li7
+at 5 MeV/u to 5 GeV/u - on its host/device `elastic_apply` grid, 25 of which interact. The beam
+fired 1 ionElastic step in 150 (expected about 150 x 50 mm / 300 mm x the fraction of steps that
+are not cut short; the assertion is that it fires, and it failed with 0 when the stepper's call
+dropped `h.z`/`h.a`). The grid found the first host/device difference this file had to explain on
+a recoil field: an O16-target recoil of 1.3e-8 MeV, 3.6e-12 MeV apart, rel 2.7e-4. It is the same
+cancellation the 1e-9 gate already names (`lv.e() - mass2`, a few ulps of the projectile's total
+energy plus the target's mass) on a recoil a million times smaller, so the recoil fields gain an
+absolute gate of 16 ulps of (T + m + M_O16) beside the relative one; no other field moved
+(4.7e-15 worst). test_ion_transport (elastic off by design there) passes unchanged.
