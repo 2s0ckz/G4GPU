@@ -205,6 +205,20 @@ InteractionPoolOwner<real_t> build_interaction_pool(int n_slots,
   view.n_bic_channels = n_channels;
   view.ftf = ftf->view;
   view.fermi = fermi->view;
+  // P28: the FTFP tape, off unless asked for. One device int numbers the rows; the printf FIFO
+  // is widened to hold them (about 220 bytes a row) so that none is dropped at a synchronise.
+  if (const char* tape = std::getenv("G4GPU_FTFP_TAPE"); tape != nullptr && std::atoi(tape) > 0) {
+    view.ftfp_tape_max = std::atoi(tape);
+    if (cudaMalloc(&own.ftfp_tape_count, sizeof(int)) != cudaSuccess ||
+        cudaMemset(own.ftfp_tape_count, 0, sizeof(int)) != cudaSuccess) {
+      interaction_pool_fatal("allocate the FTFP tape's counter", sizeof(int), cudaGetLastError());
+    }
+    view.ftfp_tape_count = static_cast<int*>(own.ftfp_tape_count);
+    const std::size_t fifo = static_cast<std::size_t>(view.ftfp_tape_max) * 256u + (1u << 20);
+    cudaDeviceSetLimit(cudaLimitPrintfFifoSize, fifo);
+    std::printf("FTFP tape: the first %d FTFP interactions, printf FIFO %.1f MB\n",
+                view.ftfp_tape_max, double(fifo) / 1048576.0);
+  }
   InteractionPool<real_t>* d_view = nullptr;
   if (cudaError_t e = cudaMalloc(&d_view, sizeof(view)); e != cudaSuccess) {
     interaction_pool_fatal("allocate its view", sizeof(view), e);
@@ -243,6 +257,7 @@ void free_interaction_pool(InteractionPoolOwner<real_t>& own) {
   }
   cudaFree(own.slots);
   cudaFree(own.bic_channels);
+  cudaFree(own.ftfp_tape_count);
   cudaFree(const_cast<InteractionPool<real_t>*>(own.d_pool));
   own = InteractionPoolOwner<real_t>{};
 }

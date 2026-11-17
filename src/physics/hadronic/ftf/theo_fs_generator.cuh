@@ -58,9 +58,11 @@
 
 #include "core/units.cuh"
 #include "physics/hadronic/bic/kinetic_decay.cuh"
+#include "physics/hadronic/capture/neutron_rad_capture.cuh"
 #include "physics/hadronic/ftf/ftf_model.cuh"
 #include "physics/hadronic/ftf/string_fragmentation.cuh"
 #include "physics/hadronic/precompound/generator_interface.cuh"
+#include "physics/hadronic/precompound/precompound_model.cuh"
 #include "physics/hadronic/process.cuh"
 
 namespace g4gpu::hadronic::ftf {
@@ -111,6 +113,15 @@ struct FtfApplyReport {
   int decay_refused_pdg = 0;            ///< the code behind a kDecay* refusal
   int n_decayed = 0;                    ///< tracks the pass removed: `n_before - n_after + made`
   int n_decay_products = 0;             ///< tracks the pass added
+  /// P28: the TARGET residual `Propagate` (or `PropagateNuclNucl`) built and handed on - the
+  /// (Z, A) and the excitation energy the fragment carried into `DeExcite`. Zero when there was
+  /// no residual (hydrogen, every nucleon hit, or a refusal before the hand-over).
+  int residual_z = 0, residual_a = 0;
+  double residual_excitation = 0.0;
+  /// P28: whether the residual(s) went through `preco::deexcite` (a caller passed a
+  /// `ResidualDeexcitation`) and how many products that made, both residuals together.
+  bool residual_deexcited = false;
+  int n_deexcitation_products = 0;
 
   __host__ __device__ bool any() const {
     return refused != FtfRefusal::kNone || model.any() || generator.any() ||
@@ -750,6 +761,138 @@ __host__ __device__ inline void ftf_emit_residual(const preco::CascadeResidual& 
   if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
 }
 
+/// P28: what `G4GeneratorPrecompoundInterface` hands its residual to - `theDeExcitation`, which
+/// in QBBC is the registry's "PRECO", a `G4PreCompoundModel` (the interface's constructor,
+/// G4GeneratorPrecompoundInterface.cc:120-127, and G4HadronicAbsorptionFritiof.cc:68-74 for the
+/// at-rest instance) - as P6's `preco::deexcite` and the three things it reads: P3's level
+/// table, the Fermi break-up pool and a PreCompound workspace, all the caller's.
+///
+/// WHY THIS EXISTS, AND IT IS THE FTFP EXCESS. Until P28 the FTF hand-over stopped at
+/// `propagate_residual` and emitted the excited residual WHOLE, as one (Z, A) secondary whose mass
+/// was its ground state plus E* - "the de-excitation is invoked by the caller" - and no caller
+/// ever invoked it: not `run_arm_ftfp`, not the at-rest Fritiof arm. `G4HadronicProcess::
+/// FillResult`'s off-shell correction (`ekin += m_dyn - m_PDG`, interaction_apply.cuh's
+/// `fill_result_into`) then turned the whole of E* into the residual ion's KINETIC energy, and an
+/// ion with tens to hundreds of MeV and a range of microns deposits it where it stands. Measured on the host tape
+/// (tests/test_ftfp_tape.cu against ref/dump/dump_ftfp_tape.cc, QBBC's own instances): the
+/// residual carried 39-40 MeV of E* for a 1 GeV antiproton annihilating at rest on C, N, O and
+/// Ca, 207 MeV in flight at 1 GeV on O16, 302 MeV for a 10 GeV proton and 140 MeV for a 10 GeV
+/// pi+ on O16 - where Geant4's evaporation products carry it away as neutrons, protons, light
+/// ions and gammas, and as the separation energy that is mass and not kinetic energy at all.
+/// docs/RISK.md V264-V265.
+///
+/// Null, or a struct with a null member, is the old behaviour: the residual is emitted
+/// undecayed, which is what `tests/test_ftf_model.cu` compares the hand-over stage at.
+struct ResidualDeexcitation {
+  const data::LevelTable* levels = nullptr;
+  const deex::FermiPool* fermi = nullptr;
+  preco::PrecoWorkspace preco{};
+
+  __host__ __device__ bool on() const {
+    return levels != nullptr && fermi != nullptr && preco.products != nullptr &&
+           preco.products_capacity > 0;
+  }
+};
+
+/// `theDeExcitation->DeExcite(anInitialState)` and the loop that pushes its products onto
+/// `theTotalResult`, for ONE residual (G4GeneratorPrecompoundInterface.cc:326-349 for
+/// `Propagate`; 662-687 for `PropagateNuclNucl`'s target and 725-787 for its projectile).
+///
+/// `boost_back` is non-zero for `PropagateNuclNucl`'s PROJECTILE residual only: Geant4 boosts that
+/// fragment to its own rest frame (`findBoostToCM`) before `DeExcite` and every product back by
+/// `-bstToCM` after, which is the frame `propagate_nucl_nucl_residuals` already leaves it in.
+/// `anti` is `ProjectileIsAntiNucleus` on the same residual: the products are re-typed by
+/// `SetDefinitionAndUpdateE` - p, n, lambda, d, t, He3, He4 to their antiparticles and anything
+/// else KEEPS ITS DEFINITION (`propagate_nucl_nucl_anti_species`). The masses of a particle and
+/// its antiparticle are the same number, so `UpdateE` leaves the four-momentum as it was.
+///
+/// A product goes out the way `G4TheoFSGenerator` builds it, `G4DynamicParticle(def, E, p)`: the
+/// definition's mass for a nucleus is its ground state plus the level the handler left it in
+/// (`G4IonTable::GetIon(Z, A, E*)`), and `capture::set_four_momentum` is that constructor - the
+/// rule `bic::apply_yourself` applies to the same `preco::deexcite` products.
+///
+/// `__noinline__`: `preco::deexcite` is about 10 kB of frame (docs/PORTED.md 2.1.10), and behind
+/// a call it is a SIBLING of `ftf_scatter` in `apply_yourself`'s tree rather than added to it.
+template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS,
+          typename Rng>
+__host__ __device__ __noinline__ void ftf_deexcite_residual(
+    const preco::CascadeResidual& residual, const Vec3d& boost_back, bool anti,
+    const ResidualDeexcitation& dx, FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+    HadFinalState<real_t, kMaxSec>& out, Rng& rng) {
+  if (!residual.exists) { return; }
+  const preco::PrecoStatus st =
+      preco::deexcite(residual.fragment, residual.excitons, *dx.levels, *dx.fermi, dx.preco, rng);
+  ws->report.residual_deexcited = true;
+  // A refusal of PreCompound's or of the handler's is a final state Geant4 has and this port
+  // does not: refused by name before anything of the residual is emitted. The JustWarnings
+  // (`loop_limit`, `sampler_exhausted`, `zero_total_probability`) come with products, as in
+  // Geant4, and are not refusals.
+  if (st.ref.hetc || st.ref.hyper_fragment || st.ref.capacity || st.ref.exciton_count ||
+      st.deex.any_refusal()) {
+    ws->report.generator.deexcitation = true;
+    ws->report.generator.refused_z = residual.fragment.z;
+    ws->report.generator.refused_a = residual.fragment.a;
+    return;
+  }
+  const bool boost = (boost_back.x != 0.0 || boost_back.y != 0.0 || boost_back.z != 0.0);
+  for (int i = 0; i < st.n_products; ++i) {
+    const deex::DeexProduct& p = dx.preco.products[i];
+    deex::LorentzVector p4 = p.momentum;
+    if (boost) { p4.boost(boost_back); }
+    HadSecondary<real_t> s;
+    s.pdg = p.pdg;
+    s.z = p.z;
+    s.a = p.a;
+    s.time = real_t(0);  // a G4ReactionProduct's formation time is 0; the process adds its own
+    s.weight = real_t(1);
+    s.creator_model_id = -1;
+    const double def_mass =
+        (p.a > 0) ? (deex::nuclear_mass(p.a, p.z) + p.excitation)
+                  : ((p.pdg == deex::kPdgElectron) ? units::electron_mass_c2<double>() : 0.0);
+    g4gpu::physics::hadronic::capture::set_four_momentum(s, p4, def_mass);
+    if (anti) {
+      const int code = (p.a > 0 && p.pdg == 0) ? pdg_nuclear_code(p.z, p.a) : p.pdg;
+      const int anti_pdg = preco::propagate_nucl_nucl_anti_species(code, p.z, p.a);
+      if (anti_pdg < 0) {
+        // The six anti-species leave as SPECIES (z = a = 0), the way `ftf_emit_residual` sends
+        // an anti-residual and `ftf_emit_tracks` the string's anti-baryons.
+        s.pdg = anti_pdg;
+        s.z = 0;
+        s.a = 0;
+      }
+    }
+    if (!out.add_secondary(s)) { ws->report.secondary_overflow = true; }
+    ++ws->report.n_deexcitation_products;
+  }
+}
+
+/// The target residual's (Z, A, E*) into the report, for the tape (P28) and the tests.
+template <int kA, int kP, int kI, int kS, int kT, int kPS>
+__host__ __device__ inline void ftf_record_residual(const preco::CascadeResidual& residual,
+                                                    FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws) {
+  if (!residual.exists) { return; }
+  ws->report.residual_z = residual.fragment.z;
+  ws->report.residual_a = residual.fragment.a;
+  ws->report.residual_excitation = residual.fragment.excitation;
+}
+
+/// The residual, handed on: de-excited when the caller supplied the de-excitation, emitted
+/// whole otherwise (the hand-over stage alone, for the tests that compare it).
+template <typename real_t, int kMaxSec, int kA, int kP, int kI, int kS, int kT, int kPS,
+          typename Rng>
+__host__ __device__ inline void ftf_hand_on_residual(const preco::CascadeResidual& residual,
+                                                     const Vec3d& boost_back, bool anti,
+                                                     const ResidualDeexcitation* dx,
+                                                     FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
+                                                     HadFinalState<real_t, kMaxSec>& out,
+                                                     Rng& rng, int anti_pdg_whole = 0) {
+  if (dx != nullptr && dx->on()) {
+    ftf_deexcite_residual(residual, boost_back, anti, *dx, ws, out, rng);
+  } else {
+    ftf_emit_residual(residual, boost_back, ws, out, anti_pdg_whole);
+  }
+}
+
 /// G4TheoFSGenerator::ApplyYourself, as the package's entry point.
 ///
 /// @param proj       the projectile definition (xs/projectile.cuh)
@@ -770,7 +913,8 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
                                                const HadNucleus& target,
                                                HadFinalState<real_t, kMaxSec>& out,
                                                FtfWorkspace<kA, kP, kI, kS, kT, kPS>* ws,
-                                               const LundTables<double>* lund, Rng& rng) {
+                                               const LundTables<double>* lund, Rng& rng,
+                                               const ResidualDeexcitation* dx = nullptr) {
   out.clear();
   out.status = HadFinalStateStatus::kStopAndKill;
   ws->report = FtfApplyReport();
@@ -886,13 +1030,24 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
         ws, tnuc, pnuc, primary_p4, ws->model.projectile_baryon, rng);
     if (ws->report.generator.any()) { return; }
     ftf_emit_escaped(ws, out);
-    ftf_emit_residual(both.target, Vec3d{0.0, 0.0, 0.0}, ws, out);
+    ftf_record_residual(both.target, ws);
+    ftf_hand_on_residual(both.target, Vec3d{0.0, 0.0, 0.0}, /*anti=*/false, dx, ws, out, rng);
+    if (ws->report.generator.deexcitation) {
+      out.clear();
+      out.status = HadFinalStateStatus::kStopAndKill;
+      return;
+    }
     // The projectile residual comes back in its own rest frame; `projectile_boost_to_cm` is
     // `findBoostToCM()` = -p/E, so the way back to the lab is its negation.
     const Vec3d back{-both.projectile_boost_to_cm.x, -both.projectile_boost_to_cm.y,
                      -both.projectile_boost_to_cm.z};
+    const bool deexciting = (dx != nullptr && dx->on());
     int anti_pdg = 0;
-    if (both.projectile_is_anti && both.projectile.exists) {
+    if (!deexciting && both.projectile_is_anti && both.projectile.exists) {
+      // Emitted WHOLE, an anti-residual needs a species of its own to leave as. De-excited
+      // (P28), its PRODUCTS are re-typed one by one, as Geant4 re-types them, and an unbound
+      // anti-(Z, A) breaks up like any other fragment - so this refusal belongs to the
+      // undecayed hand-over alone.
       const int z = both.projectile.fragment.z, a = both.projectile.fragment.a;
       anti_pdg = preco::propagate_nucl_nucl_anti_species(pdg_nuclear_code(z, a), z, a);
       if (anti_pdg > 0) {
@@ -906,7 +1061,12 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
         return;
       }
     }
-    ftf_emit_residual(both.projectile, back, ws, out, anti_pdg);
+    ftf_hand_on_residual(both.projectile, back, both.projectile_is_anti, dx, ws, out, rng,
+                         anti_pdg);
+    if (ws->report.generator.deexcitation) {
+      out.clear();
+      out.status = HadFinalStateStatus::kStopAndKill;
+    }
     return;
   }
   // G4DecayStrongResonances::Propagate, for the event that hit EVERY target nucleon: there is no
@@ -929,7 +1089,12 @@ __host__ __device__ inline void apply_yourself(const HadProjectile<real_t>& proj
   if (ws->report.generator.any()) { return; }
 
   ftf_emit_escaped(ws, out);
-  ftf_emit_residual(residual, Vec3d{0.0, 0.0, 0.0}, ws, out);
+  ftf_record_residual(residual, ws);
+  ftf_hand_on_residual(residual, Vec3d{0.0, 0.0, 0.0}, /*anti=*/false, dx, ws, out, rng);
+  if (ws->report.generator.deexcitation) {
+    out.clear();
+    out.status = HadFinalStateStatus::kStopAndKill;
+  }
 }
 
 }  // namespace g4gpu::hadronic::ftf

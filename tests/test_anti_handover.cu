@@ -13,12 +13,23 @@
 // `GeneratorRefusal::anti_nucleus`; the same program compiled against main c0c022b's tree is how
 // docs/RISK.md V253's "before" column was measured (the `anti_residual_unbound` column is absent
 // there and reads 0).
+//
+// P28: A SECOND PASS, THE TRANSPORT'S. The interaction kernels hand FTFP a `ResidualDeexcitation`
+// since P28, so the residuals are de-excited as G4GeneratorPrecompoundInterface de-excites them
+// and the PROJECTILE residual's products are re-typed one by one (docs/RISK.md V264-V266). The
+// same grid runs again that way and asserts what the first pass cannot: no
+// `anti_residual_unbound` at all (an unbound anti-(Z, A) breaks up like any fragment), no
+// de-excitation refusal, and the books balanced over the products. An internal-conversion
+// electron is taken out of the charge sum: it is a shell electron, and the residual nucleus
+// keeps its Z (948 of 18,000 events on Ca40 and Pb208 carry one to five of them).
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 #include "core/rng.cuh"
+#include "data/level_data.cuh"
+#include "host/g4data.cuh"
 #include "physics/hadronic/ftf/ftf_entry.cuh"
 
 using namespace g4gpu;
@@ -48,6 +59,36 @@ static int pdg_charge(int pdg, int z, int a) {
 
 int main(int argc, char** argv) {
   const int n_events = (argc > 1) ? std::atoi(argv[1]) : 200;
+  // P28's de-excitation, built as tests/test_ftfp_tape.cu builds it.
+  const std::string pe = host::g4photon_evaporation_dir();
+  if (pe.empty()) {
+    std::printf("FAIL: PhotonEvaporation dataset not found (G4LEVELGAMMADATA)\n");
+    return 1;
+  }
+  data::LevelTableStorage lts;
+  data::read_all_level_data(
+      lts, pe, data::kLevelZMax,
+      [](int Z, int A) { return deex::shell_correction(A, Z); },
+      [](int Z, int A) { return deex::level_manager_level_density(Z, A); });
+  const data::LevelTable lt = lts.view();
+  deex::FermiPoolStorage fps;
+  deex::build_fermi_pool(fps, lt);
+  const deex::FermiPool fpool = fps.view();
+  static deex::Fragment evap[4096], results[1024], step[512];
+  static deex::DeexProduct deex_products[1024], preco_products[1024];
+  entry::ResidualDeexcitation dx;
+  dx.levels = &lt;
+  dx.fermi = &fpool;
+  dx.preco.deex.evap_list = evap;
+  dx.preco.deex.evap_capacity = 4096;
+  dx.preco.deex.results = results;
+  dx.preco.deex.results_capacity = 1024;
+  dx.preco.deex.step = step;
+  dx.preco.deex.step_capacity = 512;
+  dx.preco.deex.products = deex_products;
+  dx.preco.deex.products_capacity = 1024;
+  dx.preco.products = preco_products;
+  dx.preco.products_capacity = 1024;
   const int kSlots = 2;
   static entry::Workspace slots[kSlots];
   static g4gpu::hadronic::ftf::LundTables<double> lund;
@@ -66,7 +107,13 @@ int main(int argc, char** argv) {
   long long unbound_za[64] = {};
   long long tot_qx_events = 0;
   long long tot_ran = 0, tot_ev = 0, tot_anti_nuc = 0, tot_unbound = 0, tot_other_gen = 0;
+  long long deex_ran = 0, deex_unbound = 0, deex_refused = 0, deex_other = 0, deex_unbal = 0;
   std::printf("P23c tree: %d; %d events per row\n", P23C_TREE, n_events);
+  for (int pass = 0; pass < 2; ++pass) {
+  const bool deexcite = (pass == 1);
+  const entry::ResidualDeexcitation* dxp = deexcite ? &dx : nullptr;
+  std::printf("\n%s\n", deexcite ? "PASS 2: residuals de-excited (the transport since P28)"
+                                 : "PASS 1: the hand-over alone, residuals emitted whole");
   std::printf("%-13s %-6s %7s %6s %6s %6s %6s %6s %6s %6s %6s\n", "species", "target", "T/n MeV",
               "ran", "unchg", "antiN", "unbnd", "short", "dropr", "other", "unbal");
   for (const Sp& s : sp) {
@@ -90,7 +137,7 @@ int main(int argc, char** argv) {
           Philox<double> rng(static_cast<uint32_t>(ev), 0x23Cu, static_cast<uint32_t>(s.pdg));
           entry::Report rep;
           const int slot = ev % kSlots;
-          const entry::Status st = entry::apply(h, slot, p, nuc, out, rep, rng);
+          const entry::Status st = entry::apply(h, slot, p, nuc, out, rep, rng, dxp);
           const auto& g = slots[slot].report.generator;
           if (st == entry::Status::kRan) {
             ++ran;
@@ -99,6 +146,10 @@ int main(int argc, char** argv) {
               const auto& q = out.secondaries[i];
               bsum += pdg_baryon(q.pdg, q.z, q.a);
               qsum += pdg_charge(q.pdg, q.z, q.a);
+              // An internal-conversion electron of the de-excitation (pass 2) is a SHELL
+              // electron: the handler leaves the nucleus its Z, so the final state carries -1
+              // per electron in Geant4 as here, and the nuclear books are balanced without it.
+              if (q.pdg == 11 && q.a == 0) { ++qsum; }
             }
             const int bwant = s.b + t.a;
             const int qwant = static_cast<int>(s.q) + t.z;
@@ -126,6 +177,9 @@ int main(int argc, char** argv) {
             const int k = g.refused_z * 8 + g.refused_a;
             if (k >= 0 && k < 64) { ++unbound_za[k]; }
 #endif
+          } else if (g.deexcitation) {
+            ++other;
+            if (deexcite) { ++deex_refused; }
           } else if (g.short_lived_track) {
             ++shortl;
           } else if (g.dropped_residual) {
@@ -136,6 +190,14 @@ int main(int argc, char** argv) {
         }
         std::printf("%-13s %-6s %7.0f %6lld %6lld %6lld %6lld %6lld %6lld %6lld %6lld\n", s.name,
                     t.name, kpn, ran, unch, anti_nuc, unbound, shortl, dropped, other, unbal);
+        if (deexcite) {
+          deex_ran += ran;
+          deex_unbound += unbound;
+          deex_other += shortl + dropped + other;
+          deex_unbal += unbal;
+          if (unbal > 0 || unbound > 0) { ++fails; }
+          continue;
+        }
         tot_qx_events += q_excess_events;
         tot_ev += n_events;
         tot_ran += ran;
@@ -149,7 +211,12 @@ int main(int argc, char** argv) {
       }
     }
   }
-  std::printf("\nall rows: %lld events, %lld ran (%.2f%%), anti_nucleus %lld (%.2f%%), "
+  }
+  std::printf("\nPASS 2 (de-excited): %lld ran (%.2f%%), anti_residual_unbound %lld, de-excitation "
+              "refused %lld, other refusals %lld, unbalanced %lld\n", deex_ran,
+              100.0 * deex_ran / tot_ev, deex_unbound, deex_refused, deex_other, deex_unbal);
+  if (deex_refused > 0) { ++fails; }
+  std::printf("PASS 1 (whole): all rows: %lld events, %lld ran (%.2f%%), anti_nucleus %lld (%.2f%%), "
               "anti_residual_unbound %lld (%.2f%%), other refusals %lld (%.2f%%)\n",
               tot_ev, tot_ran, 100.0 * tot_ran / tot_ev, tot_anti_nuc,
               100.0 * tot_anti_nuc / tot_ev, tot_unbound, 100.0 * tot_unbound / tot_ev,

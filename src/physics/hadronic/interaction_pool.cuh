@@ -64,6 +64,8 @@ struct InteractionPoolOwner {
   void* bic_channels = nullptr;
   void* ftf_owner = nullptr;
   void* fermi_owner = nullptr;
+  /// P28: the FTFP tape's row counter, allocated only when `G4GPU_FTFP_TAPE` asks for rows.
+  void* ftfp_tape_count = nullptr;
 };
 
 /// Allocates and uploads @p n_slots slots - ONE constructed host image per slot, never a memset

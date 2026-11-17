@@ -22,8 +22,8 @@
 // distinction is the whole of the sizing problem, because the two numbers differ by four orders
 // of magnitude:
 //
-//   entry::kWorkspaceBytes       671,256   ion beams included (kMaxProjA = 64, 832 tracks)
-//   entry::kHadronWorkspaceBytes 458,088   projectile is a single hadron (kMaxProjA = 1)
+//   entry::kWorkspaceBytes       671,280   ion beams included (kMaxProjA = 64, 832 tracks)
+//   entry::kHadronWorkspaceBytes 458,112   projectile is a single hadron (kMaxProjA = 1)
 //
 //   slots      Workspace      HadronWorkspace
 //       64       41.0 MB           28.0 MB
@@ -54,6 +54,10 @@
 // heaviest corner, where 512 refused 63 of 500 events (docs/RISK.md V236). `HadronWorkspace`
 // keeps 512 - its campaigns never came near it. A 1 GB budget buys 1,599 `Workspace` slots
 // where it bought 1,991.
+//
+// Both grew by 24 bytes in P28, in the report and not in any list: `FtfApplyReport` carries the
+// target residual's (Z, A, E*) and the de-excitation's product count for the tape (docs/RISK.md
+// V264), 671,256 -> 671,280 and 458,088 -> 458,112. The 1 GB figure is unchanged.
 //
 // A 65,536-track batch does not need 65,536 workspaces and could not have them: 42 GB is past
 // every card this project targets. What it needs is as many as the launch runs concurrently, and
@@ -152,10 +156,10 @@ inline constexpr std::size_t kHadronWorkspaceBytes = sizeof(HadronWorkspace);
 /// The one table shared by every slot, whatever the type.
 inline constexpr std::size_t kLundTableBytes = sizeof(LundTables<double>);
 
-static_assert(kWorkspaceBytes == 671256,
+static_assert(kWorkspaceBytes == 671280,
               "entry::Workspace changed size. The header's sizing table, docs/PORTED.md 2.1.11b "
               "and this assertion all carry the number - update all three. docs/RISK.md V167.");
-static_assert(kHadronWorkspaceBytes == 458088,
+static_assert(kHadronWorkspaceBytes == 458112,
               "entry::HadronWorkspace changed size. The header's sizing table, docs/PORTED.md "
               "2.1.11b and this assertion all carry the number - update all three. "
               "docs/RISK.md V167.");
@@ -196,7 +200,19 @@ struct Report {
   /// its mass number named", and the name had nowhere to go: `capacity` is a bool and `refused`
   /// is `kNone` for a capacity. 0 when `capacity` is false. docs/RISK.md V168.
   int capacity_a = 0;
+  /// P28: the target residual the hand-over built - (Z, A) and the excitation it carried into
+  /// `DeExcite` - and whether it was de-excited here (the caller passed a
+  /// `ResidualDeexcitation`), with the number of products that made. The residual's E* is the
+  /// energy the undecayed hand-over turned into an ion's kinetic energy. docs/RISK.md V264.
+  int residual_z = 0, residual_a = 0;
+  double residual_excitation = 0.0;
+  bool residual_deexcited = false;
+  int n_deexcitation_products = 0;
 };
+
+/// The de-excitation a caller hands `apply`: P3's level table, the Fermi pool and a PreCompound
+/// workspace. See `ftf::ResidualDeexcitation`.
+using ResidualDeexcitation = g4gpu::hadronic::ftf::ResidualDeexcitation;
 
 /// What a kernel thread takes one slot of. Copied BY VALUE into a launch, like
 /// `had::HadronicWiring` and `had::ElasticTables` are (see `host/hadronic_upload.cuh`).
@@ -255,7 +271,8 @@ __host__ __device__ inline Status apply(const Handle<WS>& h, int slot_index,
                                         const physics::hadronic::HadProjectile<real_t>& proj,
                                         const physics::hadronic::HadNucleus& target,
                                         physics::hadronic::HadFinalState<real_t, kMaxSec>& out,
-                                        Report& rep, Rng& rng) {
+                                        Report& rep, Rng& rng,
+                                        const ResidualDeexcitation* dx = nullptr) {
   rep = Report();
   WS* ws = h.slot(slot_index);
   if (ws == nullptr || h.lund == nullptr) { return Status::kNoWorkspaceSlot; }
@@ -263,7 +280,12 @@ __host__ __device__ inline Status apply(const Handle<WS>& h, int slot_index,
   // The report is per call and the workspace is reused, so it is cleared here rather than
   // trusted to be clean - the same reason `apply_yourself` clears `out`.
   ws->report = FtfApplyReport();
-  apply_yourself(proj, target, out, ws, h.lund, rng);
+  apply_yourself(proj, target, out, ws, h.lund, rng, dx);
+  rep.residual_z = ws->report.residual_z;
+  rep.residual_a = ws->report.residual_a;
+  rep.residual_excitation = ws->report.residual_excitation;
+  rep.residual_deexcited = ws->report.residual_deexcited;
+  rep.n_deexcitation_products = ws->report.n_deexcitation_products;
 
   rep.attempts = ws->report.attempts;
   rep.n_secondaries = out.n_secondaries;

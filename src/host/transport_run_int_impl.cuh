@@ -219,6 +219,13 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     em.volume = p.volume;
     em.event = p.event;
     had::emit_interaction_result<real_t>(slot->filled, em, had.books);
+    // P28: the FTFP tape (`G4GPU_FTFP_TAPE`), one row per applied FTFP final state while the
+    // counter is under its limit. Before the primary's energy is overwritten below.
+    if (pool.ftfp_tape_max > 0 && outc.ftf_ran) {
+      const bool at_rest = (q.kind == had::InteractionKind::kAtRest);
+      had::ftfp_tape_row<real_t>(pool, at_rest ? 1 : 0, pdg_code(q.species),
+                                 at_rest ? real_t(0) : p.ekin, track_mass, outc, slot->filled);
+    }
     if (slot->filled.status == physics::hadronic::TrackStatusChange::kAlive) {
       p.ekin = slot->filled.energy;
       p.dir = slot->filled.momentum_direction;

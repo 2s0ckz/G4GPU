@@ -214,6 +214,14 @@ struct InteractionPool {
   /// `physics/stepper.cuh`. `level_data` can sit there because `data::LevelTable` is a view
   /// struct in `data/`, with no model behind it. docs/RISK.md V188.
   deex::FermiPool fermi{};
+  /// P28: THE FTFP TAPE. `G4GPU_FTFP_TAPE=N` (off when unset or 0) prints one `FTFPTAPE` row for
+  /// each of the first N FTFP interactions the run applies - in flight and at rest - from the
+  /// interaction kernel, after `FillResult`: the projectile, the target, the residual the
+  /// hand-over built and its E*, and the final state's kinetic energy by class as the transport
+  /// receives it. `ftfp_tape_count` is the device counter the rows are numbered by.
+  /// docs/RISK.md V264 and docs/B1_SWEEP.md's P28 section read it.
+  int ftfp_tape_max = 0;
+  int* ftfp_tape_count = nullptr;
 
   __host__ __device__ InteractionSlot<real_t>* slot(int i) const {
     return (slots != nullptr && i >= 0 && i < n_slots) ? &slots[i] : nullptr;
@@ -464,6 +472,13 @@ struct InteractionOutcome {
   /// `kBinaryRefused` that came from `Propagate` - P20's by-name rows, booked beside `refusal`
   /// by `book_cascade_refusal_names`. Default-constructed (nothing set) for every other outcome.
   bic::CascadeRefusal cascade_ref;
+  /// P28: an FTFP final state was applied (in flight or through the at-rest Fritiof arm), and
+  /// the target residual its hand-over built - (Z, A), the E* it carried into `DeExcite` and the
+  /// products that made. Read by the FTFP tape (`InteractionPool::ftfp_tape_max`) and nothing else.
+  bool ftf_ran = false;
+  int ftf_res_z = 0, ftf_res_a = 0;
+  double ftf_res_ex = 0.0;
+  int ftf_deex_products = 0;
 };
 
 /// Books P20's BY-NAME rows for a cascade refusal: one booking per flag `ref` carries, each with
@@ -517,11 +532,20 @@ template <typename real_t, typename Rng>
 __host__ __device__ __noinline__ bool run_arm_ftfp(
     const physics::hadronic::HadProjectile<real_t>& proj,
     const physics::hadronic::HadNucleus& tgt, InteractionSlot<real_t>& s,
-    const InteractionPool<real_t>& pool, int slot_index, Rng& rng, InteractionOutcome& out) {
+    const InteractionPool<real_t>& pool, int slot_index, const ftfe::ResidualDeexcitation& dx,
+    Rng& rng, InteractionOutcome& out) {
   ftfe::Report rep;
+  // P28: THE RESIDUAL IS DE-EXCITED, as `G4GeneratorPrecompoundInterface::Propagate` de-excites
+  // it, through the slot's PreCompound buffers. Without `dx` the hand-over emitted it whole and
+  // `fill_result_into` turned its E* into an ion's kinetic energy - the FTFP excess of the B1
+  // sweep (docs/RISK.md V264-V266).
   const ftfe::Status st =
       ftfe::apply<real_t, kInteractionSecondaryCap>(pool.ftf, slot_index, proj, tgt, s.fs, rep,
-                                                    rng);
+                                                    rng, &dx);
+  out.ftf_res_z = rep.residual_z;
+  out.ftf_res_a = rep.residual_a;
+  out.ftf_res_ex = rep.residual_excitation;
+  out.ftf_deex_products = rep.n_deexcitation_products;
   // `kPrimaryUnchanged` IS a final state - `G4VPartonStringModel::Scatter`'s 1,000-attempt
   // fallback returns the primary, and Geant4 calls that the answer with a JustWarning.
   //
@@ -531,7 +555,10 @@ __host__ __device__ __noinline__ bool run_arm_ftfp(
   // deposits its energy where it stands. The entry contract says a final state came back (it
   // is tested before the generic refusal for exactly that reason), so it is applied like any
   // other; `tests/test_inelastic_transport.cu` section 8 asserts what it holds.
-  if (st == ftfe::Status::kRan || st == ftfe::Status::kPrimaryUnchanged) { return true; }
+  if (st == ftfe::Status::kRan || st == ftfe::Status::kPrimaryUnchanged) {
+    out.ftf_ran = true;
+    return true;
+  }
   out.refusal = (st == ftfe::Status::kNoWorkspaceSlot) ? HadronicRefusal::kInteractionNoSlot
                                                        : HadronicRefusal::kFtfpRefused;
   return false;
@@ -677,7 +704,11 @@ __host__ __device__ inline bool run_one_model(
     const InteractionPool<real_t>& pool, int slot_index, const data::LevelTable& lt,
     const deex::FermiPool& fpool, Rng& rng, InteractionOutcome& out) {
   if constexpr (kModel == InelasticModel::kFtfp) {
-    return run_arm_ftfp<real_t>(proj, tgt, s, pool, slot_index, rng, out);
+    ftfe::ResidualDeexcitation dx;
+    dx.levels = &lt;
+    dx.fermi = &fpool;
+    dx.preco = preco_workspace_of<real_t>(s);
+    return run_arm_ftfp<real_t>(proj, tgt, s, pool, slot_index, dx, rng, out);
   } else if constexpr (kModel == InelasticModel::kBertini) {
     const preco::PrecoWorkspace pws = preco_workspace_of<real_t>(s);
     return run_arm_bertini<real_t>(proj, tgt, s, pws, lt, fpool, rng, out);
@@ -827,8 +858,9 @@ __host__ __device__ inline stop::StoppingRefusal fritiof_at_rest_wide(
     const ftfe::Handle<ftfe::Workspace>& h, int slot_index,
     const physics::hadronic::HadProjectile<real_t>& proj,
     const physics::hadronic::HadNucleus& target,
-    physics::hadronic::HadFinalState<real_t, kCap>& out, ftfe::Report& rep, Rng& rng) {
-  const ftfe::Status st = ftfe::apply(h, slot_index, proj, target, out, rep, rng);
+    physics::hadronic::HadFinalState<real_t, kCap>& out, ftfe::Report& rep, Rng& rng,
+    const ftfe::ResidualDeexcitation* dx = nullptr) {
+  const ftfe::Status st = ftfe::apply(h, slot_index, proj, target, out, rep, rng, dx);
   switch (st) {
     case ftfe::Status::kRan:             return stop::StoppingRefusal::kNone;
     case ftfe::Status::kNoWorkspaceSlot: return stop::StoppingRefusal::kFtfNoSlot;
@@ -879,8 +911,23 @@ __host__ __device__ __noinline__ InteractionOutcome run_at_rest(
                         physics::hadronic::HadFinalState<real_t, kInteractionSecondaryCap>& o,
                         Rng& g) -> stop::StoppingRefusal {
     ftfe::Report rep;
-    return fritiof_at_rest_wide<real_t, kInteractionSecondaryCap>(pool.ftf, slot_index, p, t, o,
-                                                                  rep, g);
+    // P28: G4HadronicAbsorptionFritiof's own G4GeneratorPrecompoundInterface de-excites the
+    // residual with the registry's PreCompound model (G4HadronicAbsorptionFritiof.cc:68-74),
+    // exactly as the in-flight instance does - so the at-rest arm hands FTFP the same
+    // de-excitation, through the same slot buffers. docs/RISK.md V264.
+    ftfe::ResidualDeexcitation dx;
+    dx.levels = &lt;
+    dx.fermi = &fpool;
+    dx.preco = pws;
+    const stop::StoppingRefusal sr = fritiof_at_rest_wide<real_t, kInteractionSecondaryCap>(
+        pool.ftf, slot_index, p, t, o, rep, g, &dx);
+    out.ftf_ran = (sr == stop::StoppingRefusal::kNone ||
+                   sr == stop::StoppingRefusal::kFtfPrimaryUnchanged);
+    out.ftf_res_z = rep.residual_z;
+    out.ftf_res_a = rep.residual_a;
+    out.ftf_res_ex = rep.residual_excitation;
+    out.ftf_deex_products = rep.n_deexcitation_products;
+    return sr;
   };
 
   r = stop::at_rest<real_t, kInteractionSecondaryCap>(
@@ -979,6 +1026,68 @@ __host__ __device__ inline int emit_interaction_result(
     book_refusal<real_t>(books, HadronicRefusal::kInelasticSecondaryOverflow, real_t(0));
   }
   return emitted;
+}
+
+/// P28: ONE ROW OF THE FTFP TAPE - an FTFP interaction as the transport receives it, after
+/// `FillResult` (`r`), so that every kinetic energy below is the one a track is pushed with.
+///
+///   FTFPTAPE k kind pdg T Z A resZ resA resE* nDeex nSec
+///            KEchg KEneu KElight KEheavy KEnorow Ebal edep
+///
+/// kind 0 is in flight and 1 at rest; T the projectile's kinetic energy (0 at rest); (Z, A) the
+/// target; (resZ, resA, resE*) the residual the hand-over built and the excitation it carried
+/// into `DeExcite`; nDeex the de-excitation's products. The kinetic energy is split into charged
+/// non-nuclear secondaries, neutral ones (n, gamma, pi0, K0L, anti-n ...), light nuclei (A = 2-4),
+/// heavier nuclei (A > 4 - the residual class) and secondaries with no ParticleType (eta, eta',
+/// refused at emission). Ebal is the final state's total energy minus the initial (projectile
+/// plus target ground state) and edep the local deposit. The rows are numbered by one device
+/// counter and only the first `ftfp_tape_max` print. `__noinline__`: a printf of nineteen
+/// arguments is a frame of its own and the kernel is not to carry it when the tape is off.
+template <typename real_t>
+__host__ __device__ __noinline__ void ftfp_tape_row(
+    const InteractionPool<real_t>& pool, int kind, int pdg, real_t t_in, real_t proj_mass,
+    const InteractionOutcome& o,
+    const physics::hadronic::HadronicStepResult<real_t, kInteractionSecondaryCap>& r) {
+#ifdef __CUDA_ARCH__
+  const int k = atomicAdd(pool.ftfp_tape_count, 1);
+#else
+  const int k = (*pool.ftfp_tape_count)++;
+#endif
+  if (k >= pool.ftfp_tape_max) { return; }
+  double ke_chg = 0.0, ke_neu = 0.0, ke_light = 0.0, ke_heavy = 0.0, ke_norow = 0.0;
+  double e_out = 0.0;
+  for (int i = 0; i < r.n_secondaries; ++i) {
+    const physics::hadronic::HadSecondary<real_t>& s = r.secondaries[i];
+    const double ke = static_cast<double>(s.kin_energy);
+    e_out += ke + static_cast<double>(s.mass);
+    if (secondary_is_nucleus(s)) {
+      if (s.a > 4) {
+        ke_heavy += ke;
+      } else if (s.a > 1) {
+        ke_light += ke;
+      } else if (s.z != 0) {
+        ke_chg += ke;
+      } else {
+        ke_neu += ke;
+      }
+      continue;
+    }
+    const ParticleType t = particle_type_of_pdg(s.pdg);
+    if (t == ParticleType::kNumTypes) {
+      ke_norow += ke;
+    } else if (particle_def<real_t>(t).charge != real_t(0)) {
+      ke_chg += ke;
+    } else {
+      ke_neu += ke;
+    }
+  }
+  const double e_in = static_cast<double>(t_in) + static_cast<double>(proj_mass) +
+                      deex::nuclear_mass(o.target_a, o.target_z);
+  printf("FTFPTAPE %d %d %d %.4f %d %d %d %d %.4f %d %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+         k, kind, pdg, static_cast<double>(t_in), o.target_z, o.target_a, o.ftf_res_z,
+         o.ftf_res_a, o.ftf_res_ex, o.ftf_deex_products, r.n_secondaries, ke_chg, ke_neu,
+         ke_light, ke_heavy, ke_norow, e_out - e_in,
+         static_cast<double>(r.local_energy_deposit));
 }
 
 // =============================================================================================

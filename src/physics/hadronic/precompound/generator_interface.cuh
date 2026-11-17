@@ -131,12 +131,19 @@ struct GeneratorRefusal {
   bool dropped_residual = false;    ///< Propagate's `anA >= aZ` with no else
   bool missing_primary = false;     ///< the QGS branch needs GetPrimaryProjectile()
   bool capacity = false;
+  /// P28: `theDeExcitation->DeExcite(anInitialState)` - QBBC's G4PreCompoundModel, P6's
+  /// `preco::deexcite` - reported a refusal of its own on the residual this interface built: a
+  /// buffer too small, a path P3 does not port (multifragmentation, the hypernucleus handler,
+  /// fission's 100 failed splits), or an exciton count G4Fragment's setters throw on. The
+  /// fragment is `refused_z`/`refused_a`. Geant4's JustWarnings (the 1000-iteration guard, an
+  /// exhausted sampler) are not this; they come with products and the products are kept.
+  bool deexcitation = false;
   int refused_z = 0, refused_a = 0;
 
   __host__ __device__ bool any() const {
     return short_lived_track || anti_nucleus || anti_residual_unbound || hyper_nucleus ||
            dropped_residual ||
-           missing_primary || capacity;
+           missing_primary || capacity || deexcitation;
   }
 };
 
