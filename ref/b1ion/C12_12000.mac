@@ -1,0 +1,13 @@
+# docs/RISK.md V267: a GenericIon beam - C12 at 1 GeV per nucleon - on QBBC AS IT SHIPS, through
+# ref\b1ion\run.bat, which counts ionElastic. The one B1 beam whose PRIMARY carries ionElastic:
+# the other four make real ions only as fragments. ref/b1hadron/C12_12000.mac is the same beam in
+# the sweep's shape.
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle ion
+/gun/ion 6 12
+/gun/energy 12000 MeV
+/run/printProgress 5000
+/run/beamOn 50000

@@ -16770,3 +16770,86 @@ behind it. That gap is the eta and eta' having no ParticleType (V240): not this 
 **The existing rows, to the digit:** proton 1000 MeV 200,000 events 391.883 nGy +/- 1.33841
 (V255's 391.883); the B1 photon gate (exampleB1 -n 2000000) 426.028 pGy, 1.10452 sigma; b1_gpu_sched
 2000000 427.699 pGy, ratio 1.0007.
+### V267: P25's scope, measured - ionElastic fires once per 15-50 mm of a real ion's track, not once per metre, and in 50,000 C12 primaries and 600,000 light-ion primaries it never made a recoil above the 70 keV cut
+
+**WHO HAS THE PROCESS.** `G4IonElasticPhysics::ConstructProcess` (QBBC registers it, QBBC.cc:87)
+makes one `G4HadronElasticProcess("ionElastic")` - `G4CrossSectionElastic(new
+G4ComponentGGNuclNuclXsc)` with `SetMinKinEnergy(0)`, `G4NuclNuclDiffuseElastic` with
+`SetMinEnergy(0)` - and adds it to `G4GenericIon::GenericIon()->GetProcessManager()` and nothing
+else. The constructed QBBC (`ion_elastic_scope.csv`, ref/dump/dump_ion_elastic.cc) agrees: GenericIon
+and a real C12 hold `ionInelastic` then `ionElastic` (NNDiffuseElastic, [0, 1e8] MeV,
+fXSType 1 = fHadIncreasing); d, t, He3 and alpha hold `hadElastic` (hElasticLHEP), as P8b wired
+them. So P25 is the GenericIon row alone.
+
+**BEFORE, ON THE PORT: nothing to count.** `had::elastic_channel(kGenericIon)` was
+`kIonDiffuseNotWired`, `elastic_channel_has_xs` false, so a real ion drew no ionElastic length:
+**0 steps booked** on every beam - not a refusal row in the ledger but a structural zero, as the
+enum's comment said. What the port missed is therefore a Geant4 number, taken with ref/b1ion: B1
+on QBBC as it ships, with a stepping action that calls B1's own and then counts, for every track
+on GenericIon's process manager, the steps, the track length, `sum of length x Sigma_el(E_pre)`
+from a private `G4ComponentGGNuclNuclXsc` (the expectation), the steps ionElastic defined, and what
+each made. It draws nothing: B1's dose with it is exampleB1's to the digit (deuteron_2000:
+ref/B1build's exampleB1, serial, on the same macro, 280.883 nGy, and ref/b1ion 280.883; every row
+twice, identical). Serial, ref/b1ion/<row>.mac, QBBC with nothing inactivated:
+
+| beam | events | real-ion steps | track, mm | ionElastic expected | counted | above 70 keV | sub-cut deposit, MeV (max) | B1 dose |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 132,109 | 704 | 5.44 | 2 | 0 | 4.9e-7 (4.9e-7) | 280.883 ± 1.421 nGy |
+| He3 3000 MeV | 100,000 | 175,816 | 992 | 7.91 | 8 | 0 | 3.7e-4 (1.8e-4) | 602.208 ± 1.973 nGy |
+| alpha 4000 MeV | 100,000 | 212,144 | 1,238 | 10.18 | 10 | 0 | 2.1e-5 (1.5e-5) | 663.423 ± 2.204 nGy |
+| alpha 840 MeV | 300,000 | 454,072 | 2,901 | 26.34 | 28 | 0 | 9.4e-4 (6.1e-4) | 4.93231 ± 0.00917 µGy |
+| C12 12000 MeV | 50,000 | 10,322,952 | 9,853,980 | 31,943 | 32,224 | 0 | 2.3e-3 (1.8e-4) | 1.59042 µGy ± 6.387 nGy |
+
+Per material on the C12 beam: water 26,850 counted against 26,587 expected, bone 4,309 / 4,371,
+A-150 1,064 / 984, air 1 / 1.8; on the light-ion beams the fragments' counts are 2-28 in all,
+three quarters of them in water. Counted against expected is +0.9% on C12 (32,224 against 31,943,
+1.6 sigma; the expectation reads Sigma at the pre-step energy, the process its own integral
+approach) and within one or two counts on the others.
+
+**THE MEAN FREE PATH IS CENTIMETRES, NOT METRES** - the bound the enum's comment and README's
+not-implemented row carried ("a nucleus-nucleus elastic mean free path of metres", ~1e-9 per recoil)
+was wrong by two to four orders. From the process store (`ion_elastic_xs_volume.csv`), mm:
+
+| nuclide | E/A | water | A-150 | bone | air |
+|---|--:|--:|--:|--:|--:|
+| C12 | 1 GeV | 300 | 248 | 170 | 2.54e5 |
+| C12 | 100 MeV | 278 | 230 | 159 | 2.40e5 |
+| C12 | 4 MeV | 93 | 79 | 63 | 1.24e5 |
+| C12 | 1 MeV | 151 | 133 | 134 | 3.05e6 |
+| Li6 | 4 MeV | 119 | 98 | 76 | 1.32e5 |
+| O16 | 4 MeV | 80 | 68 | 55 | 1.15e5 |
+| O16 | 0.05 MeV | 96 | 94 | 90 | infinite |
+
+The water, tissue and bone numbers are held up at low energy by HYDROGEN: on Z = A = 1 the
+component evaluates the hadron-nucleus Glauber-Gribov cross section at the inverse-kinematics
+energy `E * m_p / M_ion` with no Coulomb barrier, so an oxygen recoil of 0.8 MeV in water has a
+96 mm mean free path where air, which has no hydrogen, has none. Against the micrometre ranges of
+those recoils that is still 1e-5 per recoil, not 1e-9 - and it is why the light-ion beams count
+2-28 interactions and not none.
+
+**WHAT GEANT4'S RECOILS ARE: eV.** No ionElastic step on any beam made a secondary - 32,272
+interactions, every recoil under the 70 keV proton cut and deposited as NIEL: 2.3e-3 MeV in all on
+the C12 beam, 0 to 6.1e-4 MeV each, 61% of them under 1e-8 MeV. The model is why:
+`G4NuclNuclDiffuseElastic::SampleInvariantT` in 11.1.1 is screened Rutherford truncated at the
+grazing angle (`SampleCoulombMuCMS`; PORTED.md's G4NuclNuclDiffuseElastic rows), `mu = muC*r*Am/(Am + muC*(1-r))`
+with Am ~ 1e-9, so P(recoil > 70 keV) is about Am/mu_cut, 1e-6 to 1e-5 per interaction: the dump
+found one in 70,000 to 890,000 PostStepDoIt calls at 5-20 MeV/u (V269). So the "recoil nucleus as a
+GenericIon track" the brief names exists - V269 replays 48 of them, 25 protons and 23 C/N/O ions -
+and no B1 beam reaches it.
+
+**WHAT THAT PREDICTS FOR THE ROWS: nothing.** The deposit ionElastic makes is under 1e-3 MeV a
+beam; the deflections are milliradians and below on ions whose ranges are micrometres to
+millimetres (the fragments) or which cross the phantom (C12). The light-ion rows cannot move by a
+digit through P25; V271 measures it.
+
+**THE GEANT4 COLUMN.** These are exampleB1's doses on these macros today, serial, and they are the
+reference for V271; V232's QBBC column reads 279.007, 600.455, 664.032 and 4.93621 for the same
+four rows (taken through tools/b1_sweep.ps1's macros), 0.2-1.3 sigma from these. Both are QBBC as
+it ships; the difference is the random stream of a different run, not physics.
+
+**THE PORT'S C12 ROW IS REFUSED BY NAME.** `G4RunManager::CheckSpecies` stops a GenericIon
+primary - the port's gun has no `/gun/ion Z A` and `seed_track_slot` (called from
+src/host/transport_run_impl.cuh, which P25 may not edit) writes `ion_za = 0` for every primary - so
+ref/b1hadron/C12_12000.mac is Geant4's alone until a package gives the gun a nuclide. The C12 rows
+that exist on the port side are tests/test_step_hadron.cu's 150 single steps of C12 at 1 GeV/u
+(V270).

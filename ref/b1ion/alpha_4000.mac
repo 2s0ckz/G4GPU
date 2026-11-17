@@ -1,0 +1,11 @@
+# docs/RISK.md V267: the B1 sweep's alpha_4000 row on QBBC AS IT SHIPS - nothing inactivated,
+# ionElastic among the rest - through ref\b1ion\run.bat, which counts ionElastic. Its dose must be
+# the sweep's QBBC column (V232: 664.032 nGy) to the digit: the instrument draws nothing.
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle alpha
+/gun/energy 4000 MeV
+/run/printProgress 10000
+/run/beamOn 100000

@@ -44,3 +44,4 @@
 # The harness puts agent worktrees here; they are checkouts of this repo, not content of it.
 /.claude/worktrees/
 /.claude/settings.local.json
+/ref/b1ionbuild/
