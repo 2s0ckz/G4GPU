@@ -92,6 +92,33 @@ echo BUILD OK
 if "%MODE%"=="build" exit /b 0
 
 echo.
+rem ---------------------------------------------------------------------------- the card
+rem Everything from here to ALL OK runs on the GPU and nothing before it does, so the card's
+rem lock - out\gpu.lock, the one file every agent's beam and GPU test takes (docs/RISK.md V263;
+rem the user's rule of 2026-11-06: a card is never shared) - is taken HERE and released after
+rem the last dose gate, whatever happens in between. The build phases above hold no lock, so an
+rem agent's beam runs beside a gate's two and a half hours of compile instead of behind them;
+rem the GPU phase is about half an hour. The phase is a `call :gpu_phase` subroutine because
+rem `exit /b N` inside a called label RETURNS to the caller, which is the one way a batch file
+rem can run a release on every one of this phase's forty exits without touching them. A caller
+rem that already holds the lock (an older gate wrapper, a test harness) sets G4GPU_CARD_HELD=1
+rem and the phase runs directly.
+if "%G4GPU_CARD_HELD%"=="1" (
+  call :gpu_phase
+  exit /b %ERRORLEVEL%
+)
+:await_card
+if exist "%~dp0out\gpu.lock" (
+  ping -n 31 127.0.0.1 >nul
+  goto :await_card
+)
+echo build_all %MODE% %DATE% %TIME% > "%~dp0out\gpu.lock"
+call :gpu_phase
+set "GPU_RC=%ERRORLEVEL%"
+del /q "%~dp0out\gpu.lock" 2>nul
+exit /b %GPU_RC%
+
+:gpu_phase
 echo --- running tests ---
 if "%G4GPU_ORACLE%"=="" set G4GPU_ORACLE=%~dp0ref\oracle
 rem Six host-only tests at a time, the kernel-launching ones one at a time on the one GPU, and the
