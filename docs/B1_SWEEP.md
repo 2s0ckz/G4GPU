@@ -734,3 +734,38 @@ now spent on evaporation, and the A > 4 kinetic energy the transport receives 1.
 
 **The gates, to the digit.** exampleB1 -n 2000000: 426.028 pGy, 1.10452 sigma; b1_gpu_sched
 2000000: 427.699 pGy, ratio 1.0007.
+
+## P25: ionElastic wired for every real nuclide (2026-11-17)
+
+P25 gives the real nuclides (GenericIon) `G4IonElasticPhysics`' own process - `ionElastic`,
+G4ComponentGGNuclNuclXsc with G4NuclNuclDiffuseElastic - which the port had refused as a structural
+zero since P8c (docs/RISK.md V267-V271). d, t, He3 and alpha keep hadElastic: the constructed QBBC
+gives ionElastic to GenericIon's manager alone. The four ion rows, the port before and after on one
+engine that differs only in the GenericIon stepping kernel, `G4GPU_HADRONIC_STAGE=final`, the
+default live-track count, the Titan V alone. The Geant4 column is exampleB1 (serial) on the same
+macros through ref/b1ion, which reads the same dose and counts ionElastic:
+
+| beam | events | port before | port after | Geant4 QBBC | after vs QBBC | ionElastic in Geant4 (expected) |
+|---|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 278.805 ± 1.401 | 280.883 ± 1.421 | -0.74%, -1.0 σ | 2 (5.4) |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.970 | 602.208 ± 1.973 | -0.04%, -0.1 σ | 8 (7.9) |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.193 | 663.423 ± 2.204 | -0.36%, -0.8 σ | 10 (10.2) |
+| alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.89448 ± 0.00913 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ | 28 (26.3) |
+| C12 12000 MeV | 50,000 | refused | refused | 1.59042 µGy ± 6.39 nGy | - | 32,224 (31,943) |
+
+**ionElastic moved no row by a digit but alpha_840's last**, and that is the measurement, not a
+failure to reach the process: Geant4 itself makes 2-28 such interactions on these beams, every one
+with a recoil under the 70 keV cut (eV to sub-keV, deposited as NIEL, under 1e-3 MeV a beam), on
+fragments whose ranges are micrometres to millimetres against a 6-30 cm mean free path. Its value is
+completeness of QBBC: the per-volume cross section, the real PostStepDoIt and the recoils above the
+cut are Geant4's to the last bit (tests/test_ion_elastic.cu). The ion ledger has no elastic row
+before or after - it never had one, the gap was in the cross section.
+
+**The C12 beam is Geant4's alone.** It is the one beam whose PRIMARY carries ionElastic - 0.64
+interactions per primary across the phantom, 50 times the four rows above together - and the port
+cannot fire a GenericIon primary (no `/gun/ion`; the seeding kernel writes no nuclide), so the row
+is refused by name until a package gives the gun a nuclide. ref/b1hadron/C12_12000.mac is its macro.
+
+The Geant4 column differs from V232's (279.007, 600.455, 664.032, 4.93621) by 0.2-1.3 sigma: the
+same QBBC on another run's random stream. alpha_840 stays where V232 put it, in the ion-inelastic
+chain.

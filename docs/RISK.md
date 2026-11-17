@@ -16770,7 +16770,6 @@ behind it. That gap is the eta and eta' having no ParticleType (V240): not this 
 **The existing rows, to the digit:** proton 1000 MeV 200,000 events 391.883 nGy +/- 1.33841
 (V255's 391.883); the B1 photon gate (exampleB1 -n 2000000) 426.028 pGy, 1.10452 sigma; b1_gpu_sched
 2000000 427.699 pGy, ratio 1.0007.
-### V267: P25's scope, measured - ionElastic fires once per 15-50 mm of a real ion's track, not once per metre, and in 50,000 C12 primaries and 600,000 light-ion primaries it never made a recoil above the 70 keV cut
 ### V267: P25's scope, measured - ionElastic fires once per 6-30 cm of a real ion's track in B1's phantom, not once per metre, and in 50,000 C12 primaries and 600,000 light-ion primaries it never made a recoil above the 70 keV cut
 
 **WHO HAS THE PROCESS.** `G4IonElasticPhysics::ConstructProcess` (QBBC registers it, QBBC.cc:87)
@@ -16940,3 +16939,47 @@ cancellation the 1e-9 gate already names (`lv.e() - mass2`, a few ulps of the pr
 energy plus the target's mass) on a recoil a million times smaller, so the recoil fields gain an
 absolute gate of 16 ulps of (T + m + M_O16) beside the relative one; no other field moved
 (4.7e-15 worst). test_ion_transport (elastic off by design there) passes unchanged.
+
+### V271: the ion beams after - ionElastic moves no row by a digit but alpha_840's last, as V267 predicted; the GenericIon kernel's frame 48 bytes larger; and every engine unit stale for a change only one of them runs
+
+**THE A/B.** Both binaries are 304dcfb's engine for the Titan V (sm_70) as gate ba69 compiled it,
+copied from `D:\g4gpu\out` with their dependency files and recipes; "after" recompiles
+`transport_run_generic_ion` alone from this branch (build_engine.bat's own freshness pass found
+only it stale against the copied `.d` files) and relinks exampleB1. The other 26 units contain this
+branch's change only as code a non-ion species never takes - the trailing `(z, a)` are zero and
+`elastic_channel` is a function of the species - so the two binaries differ in exactly the kernel
+that steps a real nucleus. CUDA 12.9.86, the Titan V alone under `out\gpu.lock`,
+`G4GPU_HADRONIC_STAGE=final`, `G4GPU_ION_INELASTIC` cleared, `G4GPU_LIVE_PER_EVENT` unset,
+ref/b1ion's macros (rows.ps1's lines), every run "device stack raised to 28672 B ... 1.05 GB of
+12.00 GB left", the host process under 0.6 GB resident:
+
+| beam | events | port before | port after | Geant4 QBBC (V267) | after vs QBBC | V261 |
+|---|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 278.805 ± 1.401 | 280.883 ± 1.421 | -0.74%, -1.0 σ | 278.805 |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.970 | 602.208 ± 1.973 | -0.04%, -0.1 σ | 601.968 |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.193 | 663.423 ± 2.204 | -0.36%, -0.8 σ | 661.034 |
+| alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.89448 ± 0.00913 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ | 4.89449 |
+| C12 12000 MeV | 50,000 | refused (no nuclide) | refused | 1.59042 µGy ± 6.39 nGy | - | - |
+
+"Before" reproduces V261's P26b column to every printed digit. "After" moves alpha_840 by
+1e-5 µGy (He3's rms by one unit in the sixth digit) and nothing else: the fragments that ionElastic
+now reaches carry micrometres to millimetres of range against its 6-30 cm mean free path, and
+Geant4's own count on these beams is 2-28 interactions depositing under 1e-3 MeV in all (V267). It
+does draw - one uniform per real-ion step for the elastic length - so the fragments' streams moved
+and the dose did not. Against QBBC the rows are where V261 left them: within 1 sigma but alpha_840,
+-2.9 sigma here against this column (V232's -3.2 against its own), the ion-inelastic chain's and not
+this package's. The refusal ledger is unchanged, 58/57/76 inelastic secondaries with no PDG row
+and nothing else; it never had an ion-elastic row (V267), and it has nothing to book now.
+
+**THE KERNEL.** `run_step_hadron<kGenericIon>` (`-Xptxas -v`, sm_70): 4,496 B stack, 236/780 B
+spill at ba69 -> **4,544 B, 240/788** on this branch, compiled at ptxas's default -O3 (no `.o1`):
+the nucl-nucl sampler and the threaded nuclide inside the `__noinline__` `elastic_apply` and
+`elastic_xs_per_volume` cost 48 bytes of the caller's frame. The interaction units' 28,672-byte
+raise is unchanged.
+
+**WHAT GOES STALE.** Every unit's dependency file reaches `elastic_wiring.cuh` and all but
+`transport_run_pool` reach `stepper.cuh` (V261 has the same observation for P26b): against ba69 all
+**27 units** are stale for a gate, although 26 of them compile to code that runs as before. Not
+done here: a QBBC re-run through tools/b1_sweep.ps1 (V267's column is exampleB1 on these macros),
+the neutron rows (no real ion's elastic is reachable beyond what these rows show), and the port's
+C12 row (V267: refused by name until a package gives the gun a nuclide).
