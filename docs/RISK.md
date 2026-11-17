@@ -16166,6 +16166,23 @@ What is left on the Binary kernel, 15,648 bytes, is spill (528 stores) and the
 `apply_yourself`/`run_inelastic` chain's small structs. What is left on the light-ion kernel,
 20,368, is the next target.
 
+**V256 ADDENDUM (gate ba67, 2026-11-17, the slice on main after P23c, both cards).** The numbers
+above are the package's, measured on its own base (c0c022b). On the integrated tree P23c's
+anti-nuclei in the charged group add 224 bytes to the light-ion kernel's frame - 20,592 bytes at
+sm_86 against 20,368 - and that crosses the raise's 4 KB rounding: 28,672 bytes a thread where
+the package measured 24,576 (roundup4k(20,592) + 4,096). What the gate's own lines say:
+
+| | the raise | left after it | the proton depth-dose gate |
+|---|---|--:|---|
+| RTX 3070 (build_all + extras, 19:29 - 04:51) | 28,672 B a thread, kLightIon 20,592 B | 4.65 GB of 8.00 | OK inside the chain |
+| Titan V (build_all on the same binaries, 04:51 - 05:28) | 28,672 B a thread, kLightIon 20,592 B | **6.04 GB of 12.00** | OK; the whole Titan V stage - 98 tests and the eleven gates - 37 min |
+
+98 passed and every dose gate at main's digits on both cards (the B1 photon gate -1.35734 pGy =
+1.10452 sigma on each, the switches line for line), extras 10 passed with both hook archives
+rebuilt for the slot's new size. The Titan V's hadron gates are routine runs now: V239's 48
+minutes for the proton gate alone was the paging, and the stage that holds all eleven gates and
+the tests runs in 37. The light-ion frame is the raise's size on both cards, and the next slice.
+
 ### V257: the scratch lists in the slot - run_interaction<kBinary> 69,920 -> 15,648 bytes, <kLightIon> 61,728 -> 20,368, the raise 77,824 -> 24,576 a thread, and the Titan V's proton gate in 7 seconds with 6.67 GB left
 
 **THE MOVE.** `bic::BicScratch` (`bic/cascade_scratch.cuh`) holds all sixteen arrays of V256's

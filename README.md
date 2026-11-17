@@ -364,9 +364,9 @@ the lepton models' FTF arm refused by name, and V250-V255 for the anti-nucleon f
 component and the elastic model exact, the hand-over's anti-nucleus arm, five species on tracks,
 and the antiproton beam's +20.5% over QBBC, and V256-V258 for the Binary-frame slice: the
 cascade's working lists in the slot instead of on the stack, the Binary kernel's frame from
-69,920 to 15,648 bytes and the raise from 77,824 to 24,576 bytes a thread, the Titan V's proton
-gate from 48 minutes to 7 seconds with 6.67 GB of its 12 left, and a run that would page refused
-by name instead.
+69,920 to 15,648 bytes and the raise from 77,824 to 28,672 bytes a thread on main (the
+light-ion frame sets it now), the Titan V's proton gate from 48 minutes to seconds with 6.04 GB
+of its 12 left after the raise, and a run that would page refused by name instead.
 
 #### Tables, materials and framework
 
