@@ -16646,3 +16646,127 @@ sign of a dead wrapper), extras when the diff reaches what extras compile, and `
 and `CUDA_VISIBLE_DEVICES` preset. ba68, the first Titan V gate, took three launches: the first
 ran P26b's new test against no oracle (the generic wrapper had no dump stage; the test failed
 rather than passed, as it should), the second died at the dump stage, the third ran.
+### V264: the FTFP excess is the residual nucleus - FTF's hand-over emitted it undecayed, and FillResult turned its excitation into an ion's kinetic energy
+
+**THE STEP.** `G4GeneratorPrecompoundInterface::Propagate` ends with
+`theDeExcitation->DeExcite(anInitialState)` (G4GeneratorPrecompoundInterface.cc:326-349;
+`PropagateNuclNucl` does it for both residuals, :662-687 and :725-787) - QBBC's registry
+"PRECO", a G4PreCompoundModel, for the in-flight instances and for G4HadronicAbsorptionFritiof's
+(G4HadronicAbsorptionFritiof.cc:68-74). The port's FTF hand-over stopped at
+`preco::propagate_residual`: `ftf_emit_residual` (theo_fs_generator.cuh) emitted the excited
+residual as ONE (Z, A) secondary of mass `M0 + E*`, under a comment that said "the de-excitation
+itself is P3's and is invoked by the caller". No caller invoked it - not `run_arm_ftfp`, not the
+at-rest `fritiof_at_rest_wide`. `fill_result_into`'s off-shell correction (`ekin += m_dyn -
+m_PDG` past 1 keV, Geant4's FillResult) then gave the residual ion E* as kinetic energy, and an
+ion with tens to hundreds of MeV and a range of microns deposits it where it stands. V253's note
+("the port's FTF hand-over de-excites NO residual") and V236's open difference (the ion arm
+25-39% short of secondaries) were this, seen from two other sides.
+
+**THE TAPE THAT SHOWS IT** (the method of V99: a step, not an outcome). `ref/dump/dump_ftfp_tape.cc`
+runs QBBC's own instances - `anti_protonInelastic`'s and `hFritiofCaptureAtRest`'s FTFP,
+`protonInelastic`'s, `pi+Inelastic`'s - and `tests/test_ftfp_tape.cu` runs `ftf::entry::apply`,
+the one function both port arms call, on the same 40 cases (pbar at rest, 100, 300, 500, 700 and
+1000 MeV; p and pi+ at 10 GeV; on H1, C12, N14, O16 and Ca40), 5,000 interactions a side, per
+species: multiplicity and `E - m_PDG`, the kinetic energy the transport receives. The event's
+energy balance agreed (both conserve it; Geant4's FillResult has nothing to fix). The species did
+not. Port before, per interaction, against Geant4:
+
+| case | port: residual E*, MeV | port: A>4 fragment KE | G4: A>4 fragment KE | G4: n, p, d, t, He3, alpha per interaction |
+|---|--:|--:|--:|---|
+| pbar at rest on O16 | 40.5 | 41.5 | 2.2 | 0.58, 0.67, 0.21, 0.04, 0.04, 0.66 |
+| pbar at rest on Ca40 | 39.4 | 39.8 | 1.3 | 0.52, 1.07, 0.08, 0.01, 0.01, 0.13 |
+| pbar 100 MeV on O16 | 39.0 | 41.6 | 3.0 | |
+| pbar 1 GeV on O16 | 205.8 | 212.3 | 1.6 | 2.32, 2.19, 1.06, 0.24, 0.34, 0.86 |
+| p 10 GeV on O16 | 294.3 | 313.6 | 1.4 | 3.64, 3.70, 1.06, 0.24, 0.41, 0.77 |
+| p 10 GeV on Ca40 | 533.8 | 550.5 | 7.5 | 6.42, ... |
+| pi+ 10 GeV on O16 | 140.3 | 147.5 | 2.9 | 1.94, 2.13, 0.80, 0.19, 0.23, 0.95 |
+
+The port's final state had NO evaporation nucleon, light ion or de-excitation gamma at all on any
+nucleus (0.0000 in every one of those columns), 464 of 1,538 comparisons past 5 sigma, worst
+-106 (de-excitation gammas, pbar 100 MeV on Ca40). The string side - pions, kaons, eta, eta',
+leading baryons - agreed then as now: what the FTF model makes was Geant4's; what the hand-over did
+with the nucleus it leaves was not. (`G4GPU_FTFP_TAPE_UNDECAYED=1` reruns that column.)
+
+**ON THE BEAM, ON THE DEVICE.** `G4GPU_FTFP_TAPE=N` prints one row per applied FTFP final state
+from the interaction kernel after FillResult (interaction_apply.cuh `ftfp_tape_row`;
+`tools/ftfp_tape.pl` summarises). The 1 GeV antiproton, 20,000 events, 10,868 FTFP interactions:
+98.4% in flight, 89.6% of them between 900 and 1000 MeV (the phantom is 7% of the antiproton's
+range), 1.6% at rest. The residual carried a mean **163.6 MeV of E* per in-flight interaction**
+(198 on O, 209 on C, 261 on Ca, 244 on P) and 36 MeV at rest - which, before P28, became the
+kinetic energy of an A > 4 ion stopped within microns. After, that column (A > 4 kinetic
+energy) reads 1.39 MeV in flight and 1.64 at rest, and the energy balance of the applied final
+state is +0.0024 +/- 0.150 MeV in flight (at rest +3.3 MeV: the atomic cascade's binding energy,
+which the row's E_in leaves out). The 10 GeV proton, 20,000 events, 7,541 interactions: 271 MeV
+mean E* (302 on O, 357 on C, 561 on Ca), A > 4 kinetic energy after 1.41 MeV. The worst row of
+that run, +10.0 MeV on a 4.8 GeV neutron on C12, is `Propagate`'s QGS branch - a wounded nucleon
+off its mass shell downwards puts the one-nucleon residual 10 MeV above its ground state, which
+is Geant4's own `fMass + 10*MeV` (generator_interface.cuh), not a defect.
+
+### V265: the residual de-excited as Geant4 de-excites it - 1,540 comparisons inside 5 sigma, and the anti-residual refusal retired
+
+`ftf::ResidualDeexcitation` (P3's level table, the Fermi pool, a PreCompound workspace) is handed
+to `entry::apply`; `ftf_deexcite_residual` (__noinline__) runs `preco::deexcite` on each residual
+and pushes the products as `G4TheoFSGenerator` builds them (`G4DynamicParticle(def, E, p)`, the
+nucleus's definition mass its ground state plus the level the handler left: the rule
+`bic::apply_yourself` applies to the same products). `PropagateNuclNucl`'s projectile residual is
+de-excited in its own rest frame and its products boosted back by `-bstToCM`; for an anti-nucleus
+projectile they are re-typed one by one as `SetDefinitionAndUpdateE` re-types them - p, n,
+lambda, d, t, He3, He4 to their antiparticles, anything else keeping its definition. A
+PreCompound or handler refusal is `GeneratorRefusal::deexcitation`, by name. The in-flight arm
+(`run_one_model<kFtfp>`) and the at-rest Fritiof arm (`run_at_rest`'s invoke) hand it the slot's
+PreCompound buffers. A null pointer keeps the hand-over-only stage, which `test_ftf_model`
+compares and which `test_ftfp_tape` runs under `G4GPU_FTFP_TAPE_UNDECAYED=1`.
+
+**After:** `test_ftfp_tape`, the 40 cases at 5,000 events a side, **1,540 comparisons
+(multiplicity and kinetic energy of every species with 20 or more particles, and the event's
+energy balance), 0 past 5 sigma, worst -3.29** (eta at pbar 1 GeV on Ca40), 0 refused; the
+residual-class E* per event within 0.05 MeV + 10% of Geant4's in every case. Anti-vacuity: with the
+de-excitation removed the same test fails 464 comparisons and the E* check in 32 cases.
+
+**What it retires.** `GeneratorRefusal::anti_residual_unbound` (V253) is unreachable from the
+transport: de-excited, an unbound anti-(Z, A) breaks up like any fragment and its products are
+re-typed. `test_anti_handover`'s new second pass (the transport's configuration) runs the 18,000
+calls of V253's census: 18,000 ran (the whole-residual pass: 17,557, 443 unbound), 0 unbound, 0
+de-excitation refusals, baryon number and charge balanced once an internal-conversion electron is
+taken out of the charge sum (a shell electron: the handler leaves the nucleus its Z, and 948
+events on Ca40 and Pb208 carry one to five). Anti-vacuity: the anti re-typing removed, 6,237
+events unbalanced, 60 rows fail. On the transport's own grid (`test_inelastic_transport`,
+V254's six anti-nucleon beams in water, bone and air) every queued interaction now runs: anti-He3
+384 of 384 in water and 399 of 399 in bone, anti-alpha 379 and 398, where V254 counted 108 and 45
+FTFP refusals. V236's ion-arm deficit should close with the same change - the
+ion arm runs through `ftf_hand_on_residual` too - and is NOT re-measured here (its campaign is
+test_ftf_model's ion grid against `ftf_capacity.csv`, which compares the hand-over stage).
+
+**The cost.** `run_interaction<kFtfp>`'s frame is 19,248 bytes where main's is 2,864 (sm_70),
+the de-excitation tree's; `<kAtRest>` 21,392 against 14,368. The device stack raise is unchanged
+at 28,672 bytes a thread (set by the largest frame, which these do not pass). The FTF workspace
+grew 24 bytes, in the report: `entry::Workspace` 671,280, `HadronWorkspace` 458,112.
+
+### V266: the three FTFP beams after - inside their bands against Geant4 with the eta and eta' dropped on both sides; what is left below QBBC as it ships is the eta and eta' the port has no ParticleType for
+
+Example B1, this branch, `G4GPU_HADRONIC_STAGE=final`, the default live-track count, the Titan V
+alone (`device stack raised to 28672 B a thread ... 1.02 GB of 12.00 GB left`; no paging);
+Geant4 11.1.1 serial through ref/run/runb1.bat. "G4, eta/eta' dropped" is QBBC with
+`/process/inactivate Decay eta` and `Decay eta_prime`: an eta then leaves the world carrying its
+energy, which is what the port's refusal at emission does with it (`kInelasticSecondarySpecies`,
+V240) - the like-for-like column.
+
+| beam | events | port before (V244, V255) | port after | G4 QBBC as it ships | G4, eta/eta' dropped | after vs dropped | after vs as ships |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 751.091 nGy +/- 3.949 | 595.215 +/- 2.488 | 623.26 +/- 2.586 | 590.583 +/- 2.470 | +0.78%, +1.3 sigma | -4.5%, -7.8 sigma |
+| proton 10 GeV | 500,000 | 2.58393 uGy +/- 9.44 nGy | 2.11791 +/- 6.14 nGy | 2.14589 +/- 6.21 | 2.12290 +/- 6.21 | -0.24%, -0.6 sigma | -1.3%, -3.2 sigma |
+| pi+ 10 GeV | 500,000 | 1.77059 uGy +/- 5.41 nGy | 1.62469 +/- 4.41 nGy | 1.67928 +/- 4.55 | 1.63668 +/- 4.42 | -0.73%, -1.9 sigma | -3.3%, -8.6 sigma |
+
+**The excess is gone, and so is the reason the eta did not show.** Every beam moved down by more
+than the excess was: -20.8% (pbar), -18.0% (p), -8.2% (pi+). With the residual de-excited the
+three land within 1.9 sigma of Geant4 run the way the port runs - eta and eta' dropped - and below
+QBBC as it ships by exactly what the eta and eta' carry in Geant4 (5.2%, 1.1% and 2.5% of the
+dose, the Geant4 columns' own difference). The port's ledger on these runs: 18,926 eta/eta' and
+5.06e6 MeV (pbar), 17,621 and 2.28e7 MeV (p), 21,254 and 4.95e7 MeV (pi+) - kinetic energy only;
+their rest masses, which their decays hand to photons and pions, are lost as well. V244 and V255
+read that loss as a reason the true excess was larger; it was, and it was hiding a deficit
+behind it. That gap is the eta and eta' having no ParticleType (V240): not this package's.
+
+**The existing rows, to the digit:** proton 1000 MeV 200,000 events 391.883 nGy +/- 1.33841
+(V255's 391.883); the B1 photon gate (exampleB1 -n 2000000) 426.028 pGy, 1.10452 sigma; b1_gpu_sched
+2000000 427.699 pGy, ratio 1.0007.

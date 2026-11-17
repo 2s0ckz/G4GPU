@@ -702,3 +702,35 @@ two hundredths of its rms; alpha_840's -3.2 σ is V232's, in the ion-inelastic c
 
 The 1 GeV neutron row (ledger 0 before) and the B1 gamma gate were not re-run: no real ion opens the
 window on the first, and the second has none.
+## P28: the FTFP excess - the residual nucleus (2026-11-17)
+
+The three beams whose interactions are FTFP's sat 4-20% above QBBC (V244, V255; README open
+questions 9 and 10). The cause is one missing call: FTFP's hand-over never de-excited the residual
+nucleus, so `FillResult` turned its excitation - a mean 164 MeV per 1 GeV antiproton interaction
+in this phantom, 271 MeV per 10 GeV proton one - into the kinetic energy of an ion that stops in
+microns (docs/RISK.md V264). De-excited as `G4GeneratorPrecompoundInterface` de-excites it (V265),
+on this branch, `G4GPU_HADRONIC_STAGE=final`, the default live-track count, the Titan V; Geant4
+11.1.1 serial (ref/run/runb1.bat), as it ships and with `Decay` inactivated for eta and eta' - the
+port refuses both at emission (no ParticleType, V240), so that is the like-for-like column:
+
+| beam | events | port before | port after | G4 QBBC | G4, eta/eta' dropped | after vs dropped | after vs QBBC |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 751.091 nGy +/- 3.949 | 595.215 +/- 2.488 | 623.26 +/- 2.586 | 590.583 +/- 2.470 | +0.78%, +1.3 sigma | -4.5%, -7.8 sigma |
+| proton 10 GeV | 500,000 | 2.58393 uGy +/- 9.44 nGy | 2.11791 +/- 6.14 nGy | 2.14589 +/- 6.21 | 2.12290 +/- 6.21 | -0.24%, -0.6 sigma | -1.3%, -3.2 sigma |
+| pi+ 10 GeV | 500,000 | 1.77059 uGy +/- 5.41 nGy | 1.62469 +/- 4.41 nGy | 1.67928 +/- 4.55 | 1.63668 +/- 4.42 | -0.73%, -1.9 sigma | -3.3%, -8.6 sigma |
+| proton 1000 MeV | 200,000 | 391.883 nGy +/- 1.338 | 391.883 +/- 1.338 | 391.654 +/- 1.337 | - | - | +0.06%, unchanged |
+
+**Like for like, all three are inside their band.** Against QBBC as it ships they are now BELOW it
+by what the eta and eta' carry in Geant4 - 5.2%, 1.1% and 2.5% of the dose, the two Geant4
+columns' own difference. That is the gap the port's ledger has booked on every one of these runs
+(eta/eta' and their kinetic energy: 18,926 and 5.06e6 MeV, 17,621 and 2.28e7 MeV, 21,254 and
+4.95e7 MeV) and that V244 and V255 read as making the excess larger: it was, and the excess was
+hiding it. It closes with an eta and eta' ParticleType and their decays, not here.
+
+**The tape.** `G4GPU_FTFP_TAPE=N` prints one row per FTFP final state the interaction kernel
+applies (`tools/ftfp_tape.pl` summarises): for 20,000 antiprotons, 10,868 interactions, 89.6% in
+flight between 900 and 1000 MeV and 1.6% at rest; residual E* 164 MeV in flight and 36 at rest,
+now spent on evaporation, and the A > 4 kinetic energy the transport receives 1.4 MeV.
+
+**The gates, to the digit.** exampleB1 -n 2000000: 426.028 pGy, 1.10452 sigma; b1_gpu_sched
+2000000: 427.699 pGy, ratio 1.0007.

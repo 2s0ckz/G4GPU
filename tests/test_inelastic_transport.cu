@@ -1377,7 +1377,14 @@ int main() {
         Philox<real_t> rng(515151u + 104729u * static_cast<unsigned int>(k), 0u,
                            had::kInteractionRngPurpose);
         had::InteractionOutcome out;
-        const bool ok = c.ftfp ? had::run_arm_ftfp<real_t>(proj, tgt, slot, pool.view, 0, rng, out)
+        // P28: the arm de-excites FTFP's residual through the slot's PreCompound buffers, as
+        // `run_one_model` hands it them.
+        ftfe::ResidualDeexcitation dx;
+        dx.levels = &lt;
+        dx.fermi = &pool.view.fermi;
+        dx.preco = pws;
+        const bool ok = c.ftfp ? had::run_arm_ftfp<real_t>(proj, tgt, slot, pool.view, 0, dx, rng,
+                                                           out)
                                : had::run_arm_bertini<real_t>(proj, tgt, slot, pws, lt,
                                                               pool.view.fermi, rng, out);
         if (!ok) {
