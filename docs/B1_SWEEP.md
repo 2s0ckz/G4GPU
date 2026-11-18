@@ -769,3 +769,26 @@ is refused by name until a package gives the gun a nuclide. ref/b1hadron/C12_120
 The Geant4 column differs from V232's (279.007, 600.455, 664.032, 4.93621) by 0.2-1.3 sigma: the
 same QBBC on another run's random stream. alpha_840 stays where V232 put it, in the ion-inelastic
 chain.
+
+## P29: FTFP's ion arm re-measured with the de-excited residual (2026-11-17)
+
+README open question 8 (docs/RISK.md V236) said the port's FTFP ion arm left 25-39% fewer
+secondaries than QBBC's at the heavy corner of the ion grid. Re-measured on V236's own instrument
+(`ref/dump/dump_ion_arm.cc`, `tests/test_ion_arm.cu`), with the residual de-excitation P28 had
+already wired into the hand-over, the mean final state is inside 1 sigma of QBBC's at all five
+points (Fe56 on Pb207 at 20 GeV/n: 259.2 against 256.5, where it was 191.2) and 171 per-species
+comparisons are inside 2.7 sigma (V272). No line of the engine changed, so the four ion rows are
+V271's to the digit, on the same build (V273):
+
+| beam | events | port before (P25) | port after (P29) | Geant4 QBBC | after vs QBBC |
+|---|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 278.805 ± 1.401 | 280.883 ± 1.421 | -0.74%, -1.0 σ |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.970 | 602.208 ± 1.973 | -0.04%, -0.1 σ |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.193 | 663.423 ± 2.204 | -0.36%, -0.8 σ |
+| alpha 840 MeV | 300,000 | 4.89448 ± 0.00913 µGy | 4.89448 ± 0.00913 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ |
+
+None of these primaries reaches FTFP's ion arm (QBBC starts it at 3 GeV per nucleon; these are 1
+GeV per nucleon and below), so no row could move. alpha_840's -2.9 sigma is the light-ion
+reaction's, not FTFP's. The refusal ledgers are unchanged (58/57/76 secondaries with no PDG row,
+alpha_840 none). A B1 row that runs FTFP's ion arm needs a GenericIon primary above 3 GeV per
+nucleon, which the port's gun cannot fire yet (V267).

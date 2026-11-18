@@ -17044,3 +17044,38 @@ gap, and P29's deliverable 3 - a per-stage tape - is not needed. Nothing under `
 the assertions kept, "FAIL: 87 comparisons past 5 sigma"; both capacities lowered to 600, "FAIL: a
 capacity is under what an event needed"; one of the fifteen histograms perturbed, "1 of 15
 histograms differ ... FAIL: the instrument is not V236's".
+
+### V273: the ion beams after P29 - every row to the digit of V271's, because P29 changed no line of the engine and no B1 ion primary reaches FTFP's ion arm
+
+**THE BINARY.** P29 changed nothing under `src/` (V272: the deficit closed with P28's existing
+de-excitation), so the engine on this branch is main 6c15886's. The run used `D:\g4gpu`'s own
+build of it, copied: `diff -r --strip-trailing-cr` finds `src/` and `examples/B1/` identical
+between that checkout and this worktree; `tools/freshness.ps1` on all 27 units of `D:\g4gpu\out`
+against their own dependency files and recipe (`-gencode arch=compute_70,code=[sm_70,compute_70]`,
+CUDA 12.9.86) answers "fresh" for every one (built 11-17 16:24-17:29); and no file under
+`examples/B1` or `src` is newer than its `exampleB1.exe` (18:27), copied byte-for-byte (MD5
+db0f3cee...). No unit was compiled for P29, so the build's stale list is empty against that tree.
+
+The four rows, `G4GPU_HADRONIC_STAGE=final`, `G4GPU_LIVE_PER_EVENT` and `G4GPU_ION_INELASTIC`
+unset, ref/b1ion's macros, the Titan V alone (`CUDA_VISIBLE_DEVICES=1`) under `out\gpu.lock`, every
+run "device stack raised to 28672 B ... 1.02 GB of 12.00 GB left", peak host working set
+0.55-0.61 GB:
+
+| beam | events | port before (V271) | port after (P29) | Geant4 QBBC (V267) | after vs QBBC | ledger |
+|---|--:|--:|--:|--:|--:|--:|
+| deuteron 2000 MeV | 100,000 | 278.805 ± 1.401 nGy | 278.805 ± 1.40116 | 280.883 ± 1.421 | -0.74%, -1.0 σ | 58 |
+| He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.9695 | 602.208 ± 1.973 | -0.04%, -0.1 σ | 57 |
+| alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.19314 | 663.423 ± 2.204 | -0.36%, -0.8 σ | 76 |
+| alpha 840 MeV | 300,000 | 4.89448 ± 0.00913 µGy | 4.89448 ± 0.00913297 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ | 0 |
+
+**They did not move, and could not.** These primaries are 1 GeV per nucleon and below; QBBC gives a
+real ion's FTFP from 3 GeV per nucleon (`ftf_windows.csv`), so their inelastic interactions are the
+light-ion reaction's and their secondaries' are Binary's or Bertini's - FTFP's ion arm is reached
+on none of them, and its hadron arm (the protons' and pions' FTFP above 3 GeV) has been
+de-excited since P28, which V271's column already contains. The ledger is V271's: 58/57/76
+inelastic secondaries with no PDG row (`an inelastic secondary whose PDG code core/particle.cuh
+has no row for`), alpha_840 none, nothing else. alpha_840's -2.9 sigma stays where V232 and V271
+put it - in the light-ion reaction (`G4BinaryLightIonReaction`) at 210 MeV per nucleon, which is
+not this package's arm. The beam that would exercise P29's measurement is a GenericIon primary
+above 3 GeV per nucleon (B1_SWEEP's C12 12000 MeV row is 1 GeV per nucleon, and it is refused by
+name - no nuclide on the gun, V267): not runnable on the port today.
