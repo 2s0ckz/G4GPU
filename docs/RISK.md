@@ -16983,3 +16983,64 @@ raise is unchanged.
 done here: a QBBC re-run through tools/b1_sweep.ps1 (V267's column is exampleB1 on these macros),
 the neutron rows (no real ion's elastic is reachable beyond what these rows show), and the port's
 C12 row (V267: refused by name until a package gives the gun a nuclide).
+
+### V272: FTFP's ion arm re-measured with the de-excited residual - V236's deficit was the residuals emitted whole; with them de-excited the mean final state is inside 1 sigma of QBBC's at all five heavy points and 171 per-species comparisons inside 2.7
+
+**THE INSTRUMENT IS V236's, AND IT SAYS SO.** `ref/dump/dump_ion_arm.cc` (registered as
+`ion_arm`, writes `ion_arm.csv`) runs the GenericIon `ionInelastic` process's own "FTFP" with its
+transport swapped for a `G4GeneratorPrecompoundInterface` on the precompound model QBBC built for
+it (the interface's constructor sets `theDeExcitation` to that model, :120), counting the string
+products and the decayed list and then calling Geant4's own `PropagateNuclNucl` - whose two
+`theDeExcitation->DeExcite` calls (:668 for the target residual, :731 for the projectile's in its
+own rest frame) de-excite both residuals. So V236's Geant4 column always had them de-excited; the
+port's never did. The five points, their order, seeds and event counts are `dump_capacity`'s, and
+the accounting draws nothing: its `strings`, `decayed` and `fs` histograms are
+`ftf_capacity.csv`'s, **0 of 15 differ** (`tests/test_ion_arm.cu` checks it whenever both files are
+present). The port's side is `ftf::entry::apply` with the `ResidualDeexcitation` the transport's
+FTFP arm hands it (P28, V265), on test_ftf_model's ion-grid stream `Philox(ev, 53)`, so the string
+products and the decayed list of the first 500 events are V236's own.
+
+**V236's table, after** (2,000 events at the corner, 500 at the other four, both sides):
+
+| point (GeV/n) | Geant4: N | strings | tracks | fs | <fs> | port before (V236): fs | <fs> | port after: N | strings | tracks | fs | <fs> | z(<fs>) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Fe56 on Pb207, 20 | 2,000 | 543 | 663 | 680 | 256.5 | 640 | 191.2 | 2,000 | 536 | 652 | 679 | 259.2 | +0.48 |
+| Fe56 on Pb207, 8 | 500 | 396 | 456 | 483 | 202.3 | 433 | 137.0 | 500 | 395 | 449 | 468 | 206.8 | +0.54 |
+| Fe56 on Fe56, 20 | 500 | 289 | 363 | 364 | 138.2 | 378 | 103.7 | 500 | 307 | 377 | 379 | 136.4 | -0.34 |
+| O16 on Pb207, 20 | 500 | 262 | 311 | 373 | 158.2 | 334 | 104.2 | 500 | 285 | 342 | 390 | 164.7 | +0.95 |
+| C12 on Pb207, 20 | 500 | 218 | 243 | 329 | 141.2 | 244 | 86.4 | 500 | 214 | 252 | 328 | 142.9 | +0.30 |
+
+`G4GPU_ION_ARM_UNDECAYED=1` (the residuals handed on whole, as before P28) reproduces V236's port
+column to every printed digit at the four 500-event points; at the corner's 2,000 it reads 187.4
+(V236 ran 500 events there and read 191.2). The z is the mean final state's, from the per-event
+variance on both sides. The final state now exceeds the decayed list on the port's side as it does on
+Geant4's (C12 on Pb207: 328 against 252 tracks, Geant4 329 against 243) - V236's "the port's is
+below it" was the evaporation that never happened. The capacities hold: 832 tracks and 856
+secondaries against at most 663 and 680 on either side.
+
+**THE PER-SPECIES ROWS** (`tests/test_ion_arm.cu`, in TESTS): per event, the multiplicity and the
+kinetic energy `E - m_PDG` that FillResult hands the transport, of n, p, d, t, He3, alpha, A > 4
+fragments, pi+, pi-, pi0, kaons, eta/eta', gammas, anti-baryons, hyperons and the rest, each z from
+the per-event sums of squares on both sides (`count2`, `sum_ke2` in the CSV), plus the final state's
+size and the event's energy balance. **171 comparisons (every group with 20 or more particles),
+0 past 5 sigma, worst -2.63** - tritons at C12 on Pb207, 1.506 against 1.880 an event; 0 refused.
+The corner, per event, Geant4 against the port: n 74.23 / 74.77, p 48.96 / 49.29, d 9.85 / 9.75,
+t 1.80 / 1.70, He3 1.53 / 1.52, alpha 1.18 / 1.24, A > 4 1.30 / 1.25, pi+ 32.31 / 32.88, pi-
+35.81 / 36.43, pi0 36.40 / 37.30, kaons 3.14 / 3.17, eta/eta' 3.43 / 3.45, gamma 4.92 / 4.83; the
+energy balance +2.04 / +2.18 MeV on 1.1 TeV. The eta and eta' are compared like any group, because
+at this boundary the port makes them: V240's gap is the transport's (no ParticleType, refused at
+emission) and lies after it.
+
+**WHAT THE DEFICIT WAS.** With the residuals handed on whole the same rows put 87 of 171 past
+5 sigma: gammas 0.38 against 4.92 an event (-44.7 sigma), alphas 0.009 against 1.18, deuterons 2.7
+against 9.8, neutrons 36 against 74, protons 32 against 49 - and A > 4 fragments 1.87 against 1.30
+(+21 sigma) carrying 604 GeV of kinetic energy against 225 (the excitation of two residuals booked
+as their motion: V264's mechanism on both of `PropagateNuclNucl`'s residuals at once). Every one of
+them closes with the de-excitation P28 already wired. So no deficit remains and there is no stage
+to name: the capture into the two residuals (`PropagateNuclNucl`'s arithmetic, P11c) was never the
+gap, and P29's deliverable 3 - a per-stage tape - is not needed. Nothing under `src/` changed.
+
+**Anti-vacuity** (each run once, each restored before the commit): the de-excitation removed with
+the assertions kept, "FAIL: 87 comparisons past 5 sigma"; both capacities lowered to 600, "FAIL: a
+capacity is under what an event needed"; one of the fifteen histograms perturbed, "1 of 15
+histograms differ ... FAIL: the instrument is not V236's".
