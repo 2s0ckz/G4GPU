@@ -751,7 +751,7 @@ macros through ref/b1ion, which reads the same dose and counts ionElastic:
 | He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.970 | 602.208 ± 1.973 | -0.04%, -0.1 σ | 8 (7.9) |
 | alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.193 | 663.423 ± 2.204 | -0.36%, -0.8 σ | 10 (10.2) |
 | alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.89448 ± 0.00913 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ | 28 (26.3) |
-| C12 12000 MeV | 50,000 | refused | refused (P30: 1.17596 ± 0.00585 µGy, see below) | 1.59042 µGy ± 6.39 nGy | -26.1%, -47.8 σ (P30) | 32,224 (31,943) |
+| C12 12000 MeV | 50,000 | refused | 1.5713 µGy ± 6.33 nGy (P30 with V277's fix; the P30 section) | 1.59042 µGy ± 6.39 nGy | -1.20%, -2.1 σ | 32,224 (31,943) |
 
 **ionElastic moved no row by a digit but alpha_840's last**, and that is the measurement, not a
 failure to reach the process: Geant4 itself makes 2-28 such interactions on these beams, every one
@@ -835,3 +835,20 @@ running the light-ion reaction 100 times). The ledgers otherwise carry what ever
 carries: inelastic secondaries with no PDG row (eta/eta' and light anti-nuclei, V240) and the
 per-step ion delta-ray refusal for nuclides G4ENSDFSTATE has no ground row for (V260). The gamma
 gate is to the digit (`exampleB1 -n 2000000`, 1.10452 σ).
+
+**The official rows (the lead, 2026-11-18, docs/RISK.md V277).** Both defects fixed in the tree
+(commit 1645ebd: the projectile's code and charge from `ion_za`; the bound at 20,000), gate ba72's
+`exampleB1` (104 tests, every dose gate at main's digits), the same macros, conditions and card;
+the rows ran beside ba72's extras compile under `out\gpu.lock`. Each is the experiment's number
+to the digit, as a keyed generator and an identical fix require. Nothing abandoned (the Fe56
+batch drains at 10,030 iterations), nothing paged; ledgers: 81, 1,241 and 60 inelastic
+secondaries with no ParticleType row (V240), none refused otherwise.
+
+| beam | events | port (V277) | Geant4 QBBC | port vs QBBC | run |
+|---|--:|--:|--:|--:|--:|
+| C12 12000 MeV | 50,000 | 1.5713 µGy ± 6.33 nGy | 1.59042 µGy ± 6.39 nGy | -1.20%, -2.1 σ | 7 min 17 s, 114.4 events/s |
+| C12 48000 MeV | 20,000 | 717.252 nGy ± 4.11 | 714.608 nGy ± 4.10 | +0.37%, +0.5 σ | 4 min 51 s, 68.7 events/s |
+| Fe56 56000 MeV | 20,000 | 12.3686 µGy ± 106.6 nGy | 12.6159 µGy ± 107.3 nGy | -1.96%, -1.6 σ | 52 min 46 s, 6.32 events/s |
+
+The 12 GeV row's -1.20% is inside the band and outside its own 2.1 σ; at 0.4% statistics a side
+it cannot tell a 1% effect from a draw, and a 200,000-event pair is the next run on this beam.

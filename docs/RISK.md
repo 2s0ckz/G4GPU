@@ -17274,3 +17274,77 @@ kernel and the drain loop - the second wants a number that is a statement about 
 needs (Fe56 1 GeV/n peaks at 10,030 iterations here) or a loop that is bounded by progress rather
 than by count. Until they land, `/gun/ion` fires a nucleus the transport steps exactly (V275)
 and whose first inelastic interaction is wrong.
+
+### V277: a nucleus entered every inelastic interaction as a proton of charge +1 and the drain loop abandoned a 1 GeV per nucleon Fe56 at 1,000 iterations - both found by P30's rows, both fixed in the host, and the three ion rows re-measured with the gated binary: -2.1, +0.5 and -1.6 sigma of QBBC
+
+**WHAT P30 FOUND (V276).** The gun carried the nuclide and the seeded C12 was a fragmentation's
+C12 to the bit (V275), and still the C12 row at 12 GeV read 26% low and the Fe56 and 48 GeV probes
+were refusals and abandonments. With ion-inelastic off on both sides the 12 GeV row agreed to
+-0.6 sigma, so the seeding was right and the first interaction was not. Two causes, neither in
+P30's files:
+
+1. **The projectile's identity.** `G4HadProjectile` takes its PDG code and charge from the track's
+   definition, which for an ion is `G4IonTable`'s nuclide (10LZZZAAAI, charge Z) and never
+   `G4GenericIon`'s placeholder. The in-flight interaction of `src/host/transport_run_int_impl.cuh`
+   handed every `kGenericIon` the placeholder's 1000000000 and charge +1 - the baryon number had
+   been made the track's at P8c (its own comment says why), the code and the charge had not. The
+   light-ion reaction takes Z from the projectile's charge and FTF's ion arm reads the code, so a
+   C12 interacted as (A 12, Z 1): at 1 GeV per nucleon on O16 its fragments heavier than the alpha
+   carried 12 MeV where Geant4's carry 3,501, which is the 12 GeV row's deficit; and at 4 GeV per
+   nucleon on hydrogen, and for Fe56 on every target, every event failed `CheckResult` by 1-2.3 GeV,
+   was refused after 100 attempts, and the whole 47-56 GeV ion was deposited where it stood - 417
+   refusals in 2,000 C12 events at 48 GeV, 835 for Fe56. Every GenericIon SECONDARY's interactions
+   had it from P8c to P30, and nothing showed it: a recoil or a fragment below the reaction
+   thresholds never interacts, V236's grid and P29's rows call the models directly with the right
+   projectile, and the four ion sweep rows are light ions with definitions of their own. The fix is
+   the two lines the baryon number already had: `pdg_nuclear_code(Z, A)` and charge Z from
+   `ion_za`. The at-rest site keeps the definition's values, since no positive nucleus has an
+   at-rest process in QBBC.
+
+2. **The iteration bound.** `TransportEngine::BeamOn` bounds its drain at `kMaxIterations` so a
+   non-terminating track is an abandonment rather than a hang, and the bound was 1,000, set on
+   the photon beam that drains in about 110. An iteration is one step of every live track, and a
+   1 GeV per nucleon Fe56 takes about 3,400 steps to stop in B1's phantom (Geant4 takes 3,593
+   real-ion steps an event on that beam): its batch drains at 10,030 iterations, so every Fe56 was
+   abandoned before the bone and the row read 3.88 pGy against Geant4's 12.6 uGy. The bound is
+   20,000, twice the deepest drain measured, and `RunAction` still prints the abandoned count, so
+   a beam that needs more is reported and never hidden. `b1_gpu_sched.cu`'s own bound stays at
+   1,000: it schedules photons only.
+
+**THE ROWS, WITH THE FIX IN THE TREE.** Gate ba72's `exampleB1` (all 27 units rebuilt, 104 tests,
+every dose gate at main's digits), `G4GPU_HADRONIC_STAGE=final`, the default live-track count,
+the Titan V alone under `out\gpu.lock`, "1.02 GB of 12.00 GB left" on every run, the host process
+at 0.6 GB; Geant4 is `ref/b1ion` (exampleB1 serial, QBBC as it ships, ionElastic counted) on the
+same macros. The rows ran beside ba72's extras compile - the first use of V263's one-card design
+as designed, the card busy with a beam while the compile held only the compile lock.
+
+| beam | events | port | Geant4 QBBC | port vs QBBC | port, P30's experiment (V276) | run |
+|---|--:|--:|--:|--:|--:|--:|
+| C12 12 GeV | 50,000 | 1.5713 uGy +/- 6.33 nGy | 1.59042 uGy +/- 6.39 nGy | -1.20%, -2.1 sigma | 1.5713 +/- 6.33 | 7 min 17 s, 114.4 events/s |
+| C12 48 GeV | 20,000 | 717.252 nGy +/- 4.11 | 714.608 nGy +/- 4.10 | +0.37%, +0.5 sigma | 717.252 +/- 4.11 | 4 min 51 s, 68.7 events/s |
+| Fe56 56 GeV | 20,000 | 12.3686 uGy +/- 106.6 nGy | 12.6159 uGy +/- 107.3 nGy | -1.96%, -1.6 sigma | 12.3686 +/- 106.6 | 52 min 46 s, 6.32 events/s |
+
+Each row is P30's experiment to every printed digit, which is what it should be: the committed
+fix is the experiment's two changes and nothing else, and the generator is keyed. Nothing was
+abandoned on any row (the Fe56 batch drained at 10,030 iterations under the bound of 20,000),
+nothing paged, and the ledgers carry what every hadron row carries: inelastic secondaries with no
+`ParticleType` row - 81 in the 12 GeV row (10.2 GeV in all), 1,241 in the 48 GeV row (830 GeV, 41
+MeV an event, 0.09% of the beam) and 60 in the Fe56 row - which are the eta, the eta' and the
+light anti-nuclei of V240; and the carried-away neutrinos (18,489, 15,732 and 16,912). The 48 GeV
+row is the first B1 beam whose primary reaches FTFP's ion arm (one interaction in three in the
+3-6 GeV per nucleon transition) and it sits inside half a sigma; the Fe56 row, the
+galactic-cosmic-ray workhorse, inside 1.6.
+
+**WHAT IS NOT SETTLED.** The 12 GeV row at -1.20% is inside the sweep's 3-sigma band and outside
+its own 2.1: at this count the statistics are 0.4% a side, so the row cannot tell a 1% effect from
+a two-sigma draw. At 1 GeV per nucleon the primary's interactions are the light-ion reaction's,
+so neither the eta gap nor FTFP's arm is a candidate; it is not diagnosed. A 200,000-event pair
+(0.2% a side) is the measurement that would decide it, and it is the next thing to run on this
+beam, not a question to argue.
+
+**THE LESSON** is V236's again, one layer down: the hadron arm had been compared with Geant4
+projectile by projectile and the ion arm by its final state, and both comparisons handed the
+models the right projectile themselves. What the TRANSPORT hands the models was never on a tape
+until a primary made every interaction an ion's. The acceptance sweep (P27) is the instrument
+that would have found this on its first ion row, which is one more reason it comes before the
+performance phase.
