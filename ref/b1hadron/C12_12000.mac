@@ -2,11 +2,9 @@
 # nucleon, 50,000 events, QBBC as it ships on the Geant4 side (ref/B1build's exampleB1, or
 # ref\b1ion\run.bat for the same dose with ionElastic counted).
 #
-# THE PORT CANNOT FIRE IT, and refuses it by name: `G4RunManager::CheckSpecies` stops a
-# GenericIon primary because this port's gun has no `/gun/ion Z A` and its seeding kernel
-# (`seed_track_slot`, called from src/host/transport_run_impl.cuh) writes `ion_za = 0` for every
-# primary - so the nuclide has nowhere to come from. P25 may not edit the host engine; the C12 row
-# is Geant4's alone until a package gives the gun a nuclide.
+# P30 gave the port the gun it lacked - `/gun/particle ion` + `/gun/ion Z A`, with the nuclide
+# seeded onto the track (Primary::ion_za) - so this macro now runs on both sides unchanged;
+# docs/B1_SWEEP.md's C12 row and docs/RISK.md V274-V276 have the numbers.
 /run/initialize
 /control/verbose 0
 /run/verbose 1

@@ -1,0 +1,16 @@
+# P30 (docs/RISK.md V274+): Fe56 at 1 GeV per nucleon - 56 GeV TOTAL, which is what /gun/energy
+# means for an ion in Geant4 (G4ParticleGun::GeneratePrimaryVertex: the primary's kinetic energy,
+# not per nucleon) and in the port. The galactic-cosmic-ray workhorse, in the B1 sweep's shape:
+# one macro for both sides - ref\b1ion\run.bat on QBBC as it ships (ionElastic counted), and the
+# port's exampleB1 with G4GPU_HADRONIC_STAGE=final at the default live-track count.
+# A GenericIon primary below QBBC's 3 GeV/n FTFP threshold, so its own inelastic interactions are
+# G4BinaryLightIonReaction's.
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle ion
+/gun/ion 26 56
+/gun/energy 56000 MeV
+/run/printProgress 2000
+/run/beamOn 20000

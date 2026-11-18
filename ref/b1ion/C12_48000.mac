@@ -1,0 +1,17 @@
+# P30 (docs/RISK.md V274+): C12 at 4 GeV per nucleon - 48 GeV TOTAL (/gun/energy is the ion's
+# whole kinetic energy, G4ParticleGun's). The first B1 beam above 3 GeV/n, where QBBC's
+# ionInelastic hands a real ion to FTFP (ref/oracle/ftf_windows.csv: Binary light-ion 0-6 GeV/n,
+# FTFP from 3): at 4 GeV/n, inside the 3-6 GeV/n transition, the primary's own interactions are
+# FTFP's ion arm with probability (4-3)/(6-3) = 1/3 and the light-ion reaction's otherwise - so
+# the arm P29 measured on V236's grid (V272) is exercised in a beam for the first time.
+# One macro for both sides: ref\b1ion\run.bat on QBBC as it ships (ionElastic counted), and the
+# port's exampleB1 with G4GPU_HADRONIC_STAGE=final at the default live-track count.
+/run/initialize
+/control/verbose 0
+/run/verbose 1
+
+/gun/particle ion
+/gun/ion 6 12
+/gun/energy 48000 MeV
+/run/printProgress 2000
+/run/beamOn 20000
