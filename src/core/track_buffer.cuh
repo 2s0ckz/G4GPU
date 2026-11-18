@@ -1142,7 +1142,9 @@ struct BufferEmitter {
         && (is_strange_charged_track(type) || is_strange_neutral_track(type))
         // P23c: the anti-neutron and the four anti-nuclei share the group kernels but are not
         // the sixteen this knob was made to refuse; it leaves them on tracks.
-        && type != ParticleType::kAntiNeutron && !is_light_anti_ion(type)) {
+        && type != ParticleType::kAntiNeutron && !is_light_anti_ion(type)
+        // P31: nor the eta and the eta_prime, which share the neutral group kernel.
+        && type != ParticleType::kEta && type != ParticleType::kEtaPrime) {
       disp = SpeciesDisposition::kRefused;  // see EmitterBooks::refuse_strange
     }
     if (disp != SpeciesDisposition::kStepped) {

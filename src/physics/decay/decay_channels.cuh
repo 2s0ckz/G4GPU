@@ -100,8 +100,14 @@ __host__ __device__ inline real_t channel_slot_max_kinetic_energy(const ChannelR
 }
 
 /// True when G4PhaseSpaceDecayChannel would take its `withWidth` branch and resample a
-/// daughter mass from a Breit-Wigner through G4VDecayChannel::DynamicalMass. No daughter of
-/// any ported table reaches it; the samplers refuse rather than approximate if one ever does.
+/// daughter mass from a Breit-Wigner through G4VDecayChannel::DynamicalMass: some daughter's
+/// PDG width is above 1e-3 of its PDG mass (TwoBodyDecayIt, G4PhaseSpaceDecayChannel.cc:180).
+///
+/// P31: REACHED, by the eta_prime's rho0 gamma (149.1 MeV against 775.26) and omega gamma
+/// (8.49 against 782.65) - both TWO-body, which is the branch `phase_space_two_body` now
+/// transcribes. No three- or many-body channel in decay_tables.hh has a daughter that wide
+/// (the widest is the eta's 1.31 keV against 548 MeV, 2.4e-6), so those two samplers' own
+/// `withWidth` arms stay refused by name rather than half-written: `channel_decay_it` checks.
 __host__ __device__ inline bool channel_needs_dynamical_mass(const ChannelRow& ch) {
   for (int i = 0; i < ch.n_daughters; ++i) {
     const double m = particle_mass(ch.daughter[i]);
@@ -109,6 +115,35 @@ __host__ __device__ inline bool channel_needs_dynamical_mass(const ChannelRow& c
     if (w > 1.0e-3 * m) { return true; }
   }
   return false;
+}
+
+/// G4VDecayChannel::DynamicalMass (G4VDecayChannel.cc:586) - a daughter mass drawn from a
+/// Breit-Wigner of the daughter's PDG width, truncated to [m - rangeMass*width,
+/// m + maxDev*width] with maxDev itself capped at rangeMass (2.5). P31.
+///
+/// Random draws, in order: x, y, then (x, y) again per rejection - the Breit-Wigner's
+/// `y * (w^2 x^2 + m^2 w^2) <= m^2 w^2` written as Geant4 writes it, operation for operation.
+/// MAX_LOOP 10000 with the fall-through to the last x, as Geant4 (the file header's rule).
+/// A zero width, or a maxDev that leaves no interval, returns the PDG mass with no draw.
+template <typename real_t, typename rng_t>
+__host__ __device__ inline real_t dynamical_mass(real_t mass_pdg, real_t width, real_t max_dev,
+                                                 rng_t& rng) {
+  const real_t range = static_cast<real_t>(range_mass());
+  if (width <= real_t(0)) { return mass_pdg; }
+  if (max_dev > range) { max_dev = range; }
+  if (max_dev <= -range) { return mass_pdg; }
+  real_t x = rng.uniform() * (max_dev + range) - range;
+  real_t y = rng.uniform();
+  const int kMaxLoop = 10000;
+  for (int loop = 0; loop < kMaxLoop; ++loop) {
+    if (y * (width * width * x * x + mass_pdg * mass_pdg * width * width)
+        <= mass_pdg * mass_pdg * width * width) {
+      break;
+    }
+    x = rng.uniform() * (max_dev + range) - range;
+    y = rng.uniform();
+  }
+  return mass_pdg + x * width;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -147,11 +182,49 @@ __host__ __device__ inline void phase_space_one_body(const ChannelRow& ch, real_
 /// `G4DynamicParticle(def, direction, Ekin, mass)` from `Ekin = sqrt(p^2+m^2) - m` - so the
 /// kinetic energy is the stored quantity and the momentum is recomputed from it, which is
 /// what DecayProduct does.
+///
+/// P31: THE `withWidth` BRANCH (G4PhaseSpaceDecayChannel.cc:178-224), taken when either
+/// daughter's PDG width is above 1e-3 of its mass - the eta_prime's rho0 gamma and omega gamma.
+/// maxDev = (M - m0 - m1)/sqrt(w0^2 + w1^2); at or below -rangeMass the channel answers
+/// PART112's empty list; otherwise each daughter WITH a width draws its mass through
+/// `dynamical_mass` (a zero-width one, the photon, keeps its PDG mass and draws nothing), and
+/// both are redrawn while their sum exceeds M. Geant4's `while` has no bound; one wide daughter
+/// cannot re-enter it (its draw is capped at M - m_other), and the 10000 here refuses by name
+/// rather than spin on a device - unreachable for every table in decay_tables.hh. The daughter
+/// is built with the four-argument G4DynamicParticle, so its STORED mass is the snapped one
+/// (`snapped_dynamical_mass`): within 1e-5 MeV of the PDG mass it is the PDG mass, the photon's
+/// zero stays zero, and a rho0 keeps the mass it drew - which is what its own decay reads.
 template <typename real_t, typename rng_t>
 __host__ __device__ inline void phase_space_two_body(const ChannelRow& ch, real_t parent_mass,
                                                     rng_t& rng, DecayProducts<real_t>& out) {
-  const real_t m0 = static_cast<real_t>(particle_mass(ch.daughter[0]));
-  const real_t m1 = static_cast<real_t>(particle_mass(ch.daughter[1]));
+  real_t m0 = static_cast<real_t>(particle_mass(ch.daughter[0]));
+  real_t m1 = static_cast<real_t>(particle_mass(ch.daughter[1]));
+  const real_t w0 = static_cast<real_t>(particle_width(ch.daughter[0]));
+  const real_t w1 = static_cast<real_t>(particle_width(ch.daughter[1]));
+  const bool with_width = (w0 > real_t(1.0e-3) * m0) || (w1 > real_t(1.0e-3) * m1);
+  if (with_width) {
+    const real_t sum_w2 = w0 * w0 + w1 * w1;
+    const real_t max_dev = (parent_mass - m0 - m1) / sqrt(sum_w2);
+    if (max_dev <= -static_cast<real_t>(range_mass())) {
+      out.fail(DecayStatus::kDaughterMassTooLarge);
+      return;
+    }
+    real_t dm1 = m0;
+    if (w0 > real_t(0)) { dm1 = dynamical_mass<real_t>(m0, w0, max_dev, rng); }
+    real_t dm2 = m1;
+    if (w1 > real_t(0)) { dm2 = dynamical_mass<real_t>(m1, w1, max_dev, rng); }
+    int loop = 0;
+    while (dm1 + dm2 > parent_mass) {
+      if (++loop > 10000) {
+        out.fail(DecayStatus::kDynamicalMassLoopBound);
+        return;
+      }
+      dm1 = dynamical_mass<real_t>(m0, w0, max_dev, rng);
+      dm2 = dynamical_mass<real_t>(m1, w1, max_dev, rng);
+    }
+    m0 = dm1;
+    m1 = dm2;
+  }
   if (parent_mass < m0 + m1) {
     // G4Exception PART112, JustWarning, and `return products` with nothing in it. The parent
     // is then killed with no secondaries and its kinetic energy deposited locally. Reported
@@ -166,8 +239,17 @@ __host__ __device__ inline void phase_space_two_body(const ChannelRow& ch, real_
   const real_t dx = sintheta * cos(phi);
   const real_t dy = sintheta * sin(phi);
   const real_t dz = costheta;
-  out.push(ch.daughter[0], 0, m0, sqrt(p * p + m0 * m0) - m0, dx, dy, dz);
-  out.push(ch.daughter[1], 1, m1, sqrt(p * p + m1 * m1) - m1, -dx, -dy, -dz);
+  // The kinetic energy is built from the mass the channel used; the stored mass is what the
+  // four-argument constructor keeps of it. Outside the `withWidth` branch both masses ARE the
+  // PDG masses and the snap is the identity, so every earlier table's products are unchanged.
+  const real_t s0 = with_width ? static_cast<real_t>(snapped_dynamical_mass(
+                                     particle_mass(ch.daughter[0]), static_cast<double>(m0)))
+                               : m0;
+  const real_t s1 = with_width ? static_cast<real_t>(snapped_dynamical_mass(
+                                     particle_mass(ch.daughter[1]), static_cast<double>(m1)))
+                               : m1;
+  out.push(ch.daughter[0], 0, s0, sqrt(p * p + m0 * m0) - m0, dx, dy, dz);
+  out.push(ch.daughter[1], 1, s1, sqrt(p * p + m1 * m1) - m1, -dx, -dy, -dz);
 }
 
 /// G4PhaseSpaceDecayChannel::ThreeBodyDecayIt - "originally written in GDECA3 of GEANT3".
@@ -902,7 +984,9 @@ __host__ __device__ inline void channel_decay_it(const ChannelRow& ch, int paren
   const double pdg_parent_mass = particle_mass(parent_pdg);
   switch (ch.kind) {
     case ChannelKind::kPhaseSpace: {
-      if (channel_needs_dynamical_mass(ch)) {
+      // P31: the TWO-body `withWidth` branch is transcribed (phase_space_two_body); the three-
+      // and many-body ones are not, and no table here reaches them.
+      if (ch.n_daughters != 2 && channel_needs_dynamical_mass(ch)) {
         out.fail(DecayStatus::kDynamicalMassNotPorted);
         return;
       }

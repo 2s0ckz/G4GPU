@@ -97,9 +97,10 @@ enum class DecayStatus : int {
   /// then killed with no secondaries. Reproduced as a status rather than as silence.
   kDaughterMassTooLarge,
   /// G4PhaseSpaceDecayChannel's `withWidth` branch, where a daughter's own width is more than
-  /// a thousandth of its mass and its mass is resampled from a Breit-Wigner. Unreachable for
-  /// every daughter in decay_tables.hh - the widest is pi0 at 7.73e-6 MeV against 135 MeV,
-  /// which is 6e-8 of its mass - so the branch is refused rather than left half-written.
+  /// a thousandth of its mass and its mass is resampled from a Breit-Wigner. P31 wrote the
+  /// TWO-body branch (the eta_prime's rho0 gamma and omega gamma reach it); this status is the
+  /// three- and many-body branches, which no daughter in decay_tables.hh reaches (the widest
+  /// three-body daughter is the eta, 2.4e-6 of its mass) and which stay refused by name.
   kDynamicalMassNotPorted,
   /// G4PhaseSpaceDecayChannel::ManyBodyDecayIt gave up: more than 100 tries produced no set
   /// of virtual subsystem masses that closes. Geant4 raises PART113 (JustWarning) and returns
@@ -107,6 +108,17 @@ enum class DecayStatus : int {
   /// different outcome from SelectADecayChannel finding nothing - so it has its own status
   /// rather than borrowing kNoChannel's.
   kKinematicsFailed,
+  /// P31: TwoBodyDecayIt's `withWidth` resampling - `while (dm1 + dm2 > parentmass)` - ran
+  /// 10,000 times. Geant4's loop has no bound; this one refuses by name rather than spin a GPU
+  /// thread. Unreachable for every table here: with one wide daughter (the only case
+  /// decay_tables.hh has) DynamicalMass's own cap keeps the sum at or under the parent mass.
+  kDynamicalMassLoopBound,
+  /// P31: a short-lived daughter (G4ParticleDefinition::IsShortLived - the rho0 and omega)
+  /// whose own decay at its first step came back without products, or whose products would not
+  /// fit beside its siblings. Geant4 would kill that track with its products' list empty;
+  /// neither happens for the tables here (the rho0's dynamic mass is at least 402.5 MeV against
+  /// 279.1 for its pions; the omega's at least 761.4 against 414.1; at most four products).
+  kShortLivedDaughter,
 };
 
 __host__ __device__ inline const char* decay_status_message(DecayStatus s) {
@@ -127,6 +139,10 @@ __host__ __device__ inline const char* decay_status_message(DecayStatus s) {
     case DecayStatus::kKinematicsFailed:
       return "N-body kinematics did not close in 100 tries "
              "(G4PhaseSpaceDecayChannel PART113: null product list)";
+    case DecayStatus::kDynamicalMassLoopBound:
+      return "two-body DynamicalMass resampling passed 10000 rounds (unbounded in Geant4)";
+    case DecayStatus::kShortLivedDaughter:
+      return "a short-lived daughter's own decay produced nothing or overflowed the products";
   }
   return "unknown";
 }

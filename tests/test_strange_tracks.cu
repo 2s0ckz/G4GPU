@@ -1,5 +1,6 @@
-// P23a: the sixteen strange species QBBC transports, as TRACKS - and since P23c the anti-neutron
-// and the four light anti-nuclei, which the same two group kernels step (21 species). Their
+// P23a: the sixteen strange species QBBC transports, as TRACKS - since P23c the anti-neutron
+// and the four light anti-nuclei, and since P31 the eta and the eta_prime, which the same two
+// group kernels step (23 species). Their
 // model windows come from anti_scope.csv (ref/dump/dump_anti_nucleon.cc), in strange_scope.csv's
 // layout, and every other section reads the same files the sixteen do.
 //
@@ -204,7 +205,11 @@ int main() {
                   bert_rest ? "Bertini" : (ftf_rest ? "Fritiof" : "-"));
     }
     ++g_compared;
-    if (n_species != 21) { fail("expected 21 group species, found " + std::to_string(n_species)); }
+    // P31: 23 - the eta and the eta_prime ride the neutral group kernel, and their rows above
+    // are Geant4's `Transportation, Decay` and nothing else (G4HadronInelasticQBBC and
+    // G4HadronElasticPhysicsXS construct no process for either, and no EM process applies to a
+    // neutral meson).
+    if (n_species != 23) { fail("expected 23 group species, found " + std::to_string(n_species)); }
   }
 
   // ======================================================================== 2. model windows
@@ -412,6 +417,7 @@ int main() {
     std::vector<double> ref_e(ref_n.size(), 0.0);
     long long decays = 0, rest_decays = 0, elastic = 0, queued_n = 0, bad = 0, steps = 0;
     long long an_seen = 0;
+    long long eta_decays[4] = {0, 0, 0, 0};  // eta flight, eta rest, eta_prime flight, rest
     double worst_e = 0;
     for (int mi : {data::kWater, data::kBoneCompact}) {
       geom::Volume<real_t> vols[1] = {{{geom::SolidType::kBox, {500, 500, 500}},
@@ -477,6 +483,9 @@ int main() {
                                       ? (at_rest ? pd.mass : static_cast<double>(p.ekin) + pd.mass)
                                       : e_parent;
               if (at_rest) { ++rest_decays; } else { ++decays; }
+              if (pt == ParticleType::kEta || pt == ParticleType::kEtaPrime) {
+                ++eta_decays[(pt == ParticleType::kEtaPrime ? 2 : 0) + (at_rest ? 1 : 0)];
+              }
               // P23c: an anti-neutron daughter is a TRACK now, pushed like any product and
               // balanced by `push` itself; the named row it was booked under until then must
               // stay at zero (asserted below).
@@ -513,6 +522,15 @@ int main() {
       fail("an anti-neutron was booked by name - it has a ParticleType since P23c");
     }
     g_compared += 4;
+    // P31: the eta and the eta_prime decay at their first step, in flight and at rest, and every
+    // one of those decays went through the balance above - the eta_prime's rho0 and omega
+    // decayed inside it.
+    ++g_compared;
+    if (eta_decays[0] == 0 || eta_decays[1] == 0 || eta_decays[2] == 0 || eta_decays[3] == 0) {
+      fail("an eta or eta_prime branch (in flight, at rest) was never stepped");
+    }
+    std::printf("  eta: %lld decays in flight, %lld at rest; eta_prime: %lld and %lld\n",
+                eta_decays[0], eta_decays[1], eta_decays[2], eta_decays[3]);
     if (an_seen == 0) { fail("no anti-neutron daughter was met - the track is untested"); }
     if (bad > 0) { fail(std::to_string(bad) + " decays do not conserve charge, baryon number or energy"); }
     if (decays == 0 || rest_decays == 0 || elastic == 0 || queued_n == 0) {
@@ -538,7 +556,11 @@ int main() {
                        {3322, 0, 1, ParticleType::kXiZero},
                        {3334, -1, 1, ParticleType::kOmegaMinus},
                        {2212, 1, 1, ParticleType::kProton},
-                       {2112, 0, 1, ParticleType::kNeutron}};
+                       {2112, 0, 1, ParticleType::kNeutron},
+                       // P31: FTFP's eta and eta_prime (z = a = 0), booked as "no ParticleType
+                       // row" until P31 and tracks since.
+                       {221, 0, 0, ParticleType::kEta},
+                       {331, 0, 0, ParticleType::kEtaPrime}};
     for (const S& c : cases) {
       hp::HadronicStepResult<real_t, had::kInteractionSecondaryCap> r{};
       r.n_secondaries = 1;
@@ -566,7 +588,8 @@ int main() {
         fail("a D+ was not booked under kBcHadronSecondary");
       }
     }
-    std::printf("  six cascade baryons emitted as themselves; a D+ booked by name\n");
+    std::printf("  six cascade baryons, the eta and the eta_prime emitted as themselves; a D+ "
+                "booked by name\n");
   }
 
   // ======================================================================= 8. b/c predicate

@@ -230,6 +230,14 @@ __host__ __device__ inline InelasticChannel inelastic_channel(ParticleType t) {
     case ParticleType::kAntiTriton:
     case ParticleType::kAntiHe3:
     case ParticleType::kAntiAlpha:  return InelasticChannel::kAntiNucleus;
+    // P31: NO inelastic process, QBBC's own answer. G4HadronInelasticQBBC::ConstructProcess
+    // builds on the nucleons, the pions, then hands G4HadronicBuilder the kaons, the hyperons,
+    // the anti-hyperons, the light anti-ions and (EnableBCParticles) the b/c hadrons - the eta
+    // and eta_prime are in none of G4HadParticles' lists - and G4IonPhysics takes the ions. The
+    // store answers 0 per volume for both (strange_tracks_xs.csv), and tests/test_strange_
+    // tracks.cu holds the port's channel to that zero.
+    case ParticleType::kEta:
+    case ParticleType::kEtaPrime:   return InelasticChannel::kNone;
     default:                        return InelasticChannel::kNone;
   }
 }

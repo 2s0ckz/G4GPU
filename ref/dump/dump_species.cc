@@ -110,6 +110,9 @@ static void dump_species(const DumpContext&) {
       G4ParticleTable::GetParticleTable()->FindParticle(-1000010030),
       G4ParticleTable::GetParticleTable()->FindParticle(-1000020030),
       G4ParticleTable::GetParticleTable()->FindParticle(-1000020040),
+      // P31: the eta and the eta_prime (G4Eta.cc, G4EtaPrime.cc), in core/particle.cuh's order.
+      G4ParticleTable::GetParticleTable()->FindParticle(221),
+      G4ParticleTable::GetParticleTable()->FindParticle(331),
   };
 
   FILE* f = std::fopen("species_tables.csv", "w");

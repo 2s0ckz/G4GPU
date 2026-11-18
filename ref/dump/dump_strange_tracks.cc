@@ -72,7 +72,10 @@ const int kCharged[] = {3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334,
                         -1000010020, -1000010030, -1000020030, -1000020040};
 const int kAll[] = {310, 130, 3122, 3212, 3322, -3122, -3212, -3322,
                     3222, 3112, 3312, 3334, -3222, -3112, -3312, -3334,
-                    -2112, -1000010020, -1000010030, -1000020030, -1000020040};
+                    -2112, -1000010020, -1000010030, -1000020030, -1000020040,
+                    // P31: the eta and the eta_prime, which the neutral group kernel steps: the
+                    // store must answer zero for both hadronic processes (QBBC builds none).
+                    221, 331};
 
 void dump_tables(const DumpContext& ctx) {
   FILE* f = std::fopen("strange_hadron_tables.csv", "w");

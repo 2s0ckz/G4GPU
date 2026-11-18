@@ -162,6 +162,9 @@ enum : int {
   kPdgAntiSigmabPlus = -5222,
   kPdgAntiSigmabZero = -5212,
   kPdgAntiSigmabMinus = -5112,
+  // P31: the two SHORT-LIVED daughters of the eta_prime's table (G4ShortLivedConstructor).
+  kPdgRhoZero = 113,
+  kPdgOmega = 223,
 };
 
 /// CLHEP's unit prefixes, so that a mass can be written exactly as its G4ParticleDefinition
@@ -203,6 +206,12 @@ struct ParticleRow {
   double lifetime;  ///< ns, G4ParticleDefinition::GetPDGLifeTime(); -1 for the stable ones
   bool stable;      ///< G4ParticleDefinition::GetPDGStable()
   const char* name; ///< Geant4's own particle name, for messages and for the oracle join
+  /// G4ParticleDefinition::IsShortLived() - P31. True for the two G4ShortLivedConstructor
+  /// mesons below and false (the default every earlier row takes) for everything else. It
+  /// changes nothing about G4Decay itself, which registers on a short-lived particle like any
+  /// other; what it marks is a daughter `sample_decay` decays where it was made instead of
+  /// handing it to a transport that has no species for it (`resolve_short_lived`, decay.cuh).
+  bool short_lived = false;
 };
 
 /// Every particle that appears as a parent or a daughter in the tables below, from its own
@@ -217,7 +226,7 @@ struct ParticleRow {
 /// A function returning a function-local static rather than a namespace-scope array, because
 /// nvcc cannot see a namespace-scope `constexpr` object from device code - the same idiom
 /// data/barashenkov.hh uses, and for the same reason.
-constexpr int kNumParticles = 81;   // 16, the seven hyperons P10c added, and P23b's 58
+constexpr int kNumParticles = 83;   // 16, P10c's seven hyperons, P23b's 58, P31's rho0, omega
 
 __host__ __device__ inline const ParticleRow* particle_rows() {
   static const ParticleRow v[kNumParticles] = {
@@ -403,6 +412,15 @@ __host__ __device__ inline const ParticleRow* particle_rows() {
      "anti_sigma_b0"},
     {kPdgAntiSigmabMinus, 5.8155 * gev(), 4.9 * mev(), 0.0 * nanosecond(), false,
      "anti_sigma_b-"},
+    // P31: G4ShortLivedConstructor::ConstructMesons, the two the eta_prime's table names -
+    //   new G4ExcitedMesons("omega", 782.65*MeV, 8.49*MeV, ..., 223, false, 0.0, NULL)
+    //   new G4ExcitedMesons("rho0", 775.26*MeV, 149.1*MeV, ..., 113, false, 0.0*ns, NULL)
+    // Lifetime 0, stable false and SHORT-LIVED (G4VShortLivedParticle). Both carry G4Decay in
+    // QBBC (decay_atrest.csv; decay_chain.csv's process rows: Transportation, Decay) and are the
+    // only daughters in these tables whose width passes 1e-3 of their mass, which is what sends
+    // the eta_prime's rho0 gamma and omega gamma channels into DynamicalMass.
+    {kPdgRhoZero, 775.26 * mev(), 149.1 * mev(), 0.0 * nanosecond(), false, "rho0", true},
+    {kPdgOmega, 782.65 * mev(), 8.49 * mev(), 0.0, false, "omega", true},
   };
   return v;
 }
@@ -472,7 +490,7 @@ struct DecayTableRow {
 
 /// Every channel, grouped by parent, each group in G4DecayTable::Insert's descending-BR
 /// order. The comment on each row is the line in the Geant4 definition file it came from.
-constexpr int kNumChannels = 99;   // 19, the eleven hyperon channels P10c added, P23b's 68, P23c's 1
+constexpr int kNumChannels = 108;  // 19, P10c's eleven, P23b's 68, P23c's 1, P31's 9
 
 __host__ __device__ inline const ChannelRow* channel_rows() {
   static const ChannelRow v[kNumChannels] = {
@@ -668,9 +686,9 @@ __host__ __device__ inline const ChannelRow* channel_rows() {
     // after the pions and kaons, and transport is what needs it there.
     //   mode[0] ("eta",0.3942,2,"gamma","gamma")  mode[1] ("eta",0.3256,3,"pi0","pi0","pi0")
     //   mode[2] ("eta",0.226,3,"pi0","pi+","pi-")  mode[3] ("eta",0.0468,3,"gamma","pi+","pi-")
-    // The eta_prime's own table is NOT here: two of its five channels have a rho0 and an omega
-    // daughter, whose widths take G4PhaseSpaceDecayChannel into DynamicalMass, which this port
-    // does not have. It is refused by name below.
+    // The eta_prime's own table was not here until P31 (channels 99-103 below): two of its
+    // five channels have a rho0 and an omega daughter, whose widths take
+    // G4PhaseSpaceDecayChannel into DynamicalMass, which the port did not have until then.
     {ChannelKind::kPhaseSpace, 0.3942, 2, {kPdgGamma, kPdgGamma, 0}, 0.0, 0.0},
     {ChannelKind::kPhaseSpace, 0.3256, 3, {kPdgPiZero, kPdgPiZero, kPdgPiZero}, 0.0, 0.0},
     {ChannelKind::kPhaseSpace, 0.226, 3, {kPdgPiZero, kPdgPiPlus, kPdgPiMinus}, 0.0, 0.0},
@@ -696,13 +714,37 @@ __host__ __device__ inline const ChannelRow* channel_rows() {
     // whose constructor's "anti_neutron" branch sets the daughters to e+, nu_e, anti_proton in
     // that order (G4NeutronBetaDecayChannel.cc:62-69) - the neutron's three, charge-conjugated.
     {ChannelKind::kNeutronBeta, 1.00, 3, {kPdgPositron, kPdgNuE, kPdgAntiProton}, 0.0, 0.0},
+    // ---- eta_prime (P31), channels 99 through 103: G4EtaPrime.cc's five, inserted
+    //   mode[0] ("eta_prime",0.429,3,"eta","pi+","pi-")  mode[1] ("eta_prime",0.222,3,"eta","pi0","pi0")
+    //   mode[2] ("eta_prime",0.291,2,"rho0","gamma")     mode[3] ("eta_prime",0.0220,2,"gamma","gamma")
+    //   mode[4] ("eta_prime",0.0275,2,"omega","gamma")
+    // and G4DecayTable::Insert's strict `br > GetBR()` leaves them 0.429, 0.291, 0.222, 0.0275,
+    // 0.0220 (decay_tables.csv, channel by channel). The rho0 gamma and omega gamma channels are
+    // the first in these tables with a daughter wider than 1e-3 of its mass, so they sample the
+    // daughter's mass through G4VDecayChannel::DynamicalMass (decay_channels.cuh), and that
+    // daughter is decayed where it was made (decay.cuh, `resolve_short_lived`).
+    {ChannelKind::kPhaseSpace, 0.429, 3, {kPdgEta, kPdgPiPlus, kPdgPiMinus}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.291, 2, {kPdgRhoZero, kPdgGamma, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.222, 3, {kPdgEta, kPdgPiZero, kPdgPiZero}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.0275, 2, {kPdgOmega, kPdgGamma, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.0220, 2, {kPdgGamma, kPdgGamma, 0}, 0.0, 0.0},
+    // ---- rho0 (P31), channel 104: G4ShortLivedConstructor's
+    //   new G4PhaseSpaceDecayChannel("rho0",1.000, 2, "pi+","pi-")
+    {ChannelKind::kPhaseSpace, 1.000, 2, {kPdgPiPlus, kPdgPiMinus, 0}, 0.0, 0.0},
+    // ---- omega (P31), channels 105 through 107: G4ShortLivedConstructor's three, inserted in
+    // descending BR already -
+    //   ("omega",0.891,3,"pi+","pi-","pi0")  ("omega",0.0890,2,"gamma","pi0")
+    //   ("omega",0.0170,2,"pi+","pi-")
+    {ChannelKind::kPhaseSpace, 0.891, 3, {kPdgPiPlus, kPdgPiMinus, kPdgPiZero}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.0890, 2, {kPdgGamma, kPdgPiZero, 0}, 0.0, 0.0},
+    {ChannelKind::kPhaseSpace, 0.0170, 2, {kPdgPiPlus, kPdgPiMinus, 0}, 0.0, 0.0},
   };
   return v;
 }
 
 /// The parents, and where each one's channels start. Order here is irrelevant to the physics
 /// (the lookup is by PDG code); the channel order WITHIN a group is not.
-constexpr int kNumTables = 71;   // 8, the seven hyperons P10c added, P23b's 55, P23c's 1
+constexpr int kNumTables = 74;   // 8, P10c's seven hyperons, P23b's 55, P23c's 1, P31's 3
 
 __host__ __device__ inline const DecayTableRow* table_rows() {
   static const DecayTableRow v[kNumTables] = {
@@ -740,6 +782,8 @@ __host__ __device__ inline const DecayTableRow* table_rows() {
       {kPdgAntiSigmabPlus, 95, 1},     {kPdgAntiSigmabZero, 96, 1}, {kPdgAntiSigmabMinus, 97, 1},
       // P23c: the anti-neutron, channel 98.
       {kPdgAntiNeutron, 98, 1},
+      // P31: the eta_prime, 99 through 103; the rho0, 104; the omega, 105 through 107.
+      {kPdgEtaPrime, 99, 5},          {kPdgRhoZero, 104, 1},       {kPdgOmega, 105, 3},
   };
   return v;
 }
@@ -772,9 +816,7 @@ __host__ __device__ inline const char* decay_refusal_reason(int pdg) {
       return "K0/anti-K0: G4KaonZero's table is two ONE-BODY channels into K0L and K0S; no "
              "generator in QBBC emits a K0 (G4KineticTrack and Bertini both mix it first) - "
              "refused";
-    case 331:
-      return "eta_prime: two of its five G4PhaseSpaceDecayChannels have a rho0 or an omega "
-             "daughter, wide enough for G4VDecayChannel::DynamicalMass, which is not ported";
+    // eta_prime (331) was refused here until P31 ported DynamicalMass and wrote its table.
     case 15:
     case -15:
       return "tau: G4TauLeptonicDecayChannel and friends - refused, not transported";
@@ -795,6 +837,16 @@ __host__ __device__ inline bool particle_is_stable(int pdg) {
 __host__ __device__ inline double particle_lifetime(int pdg) {
   const int i = particle_index(pdg);
   return (i >= 0) ? particle_rows()[i].lifetime : -1.0;
+}
+
+/// G4ParticleDefinition::IsShortLived() for a code the tables know (P31), false otherwise.
+///
+/// A SWITCH AND NOT A ROW LOOKUP, because `sample_decay` asks it of every product of every decay
+/// - a pi+'s muon and neutrino on every pion decay of every run - and `particle_index` is a
+/// linear walk of 83 rows. The two codes are the rows flagged `short_lived` above, and
+/// tests/test_decay.cu holds the switch to the flags row for row.
+__host__ __device__ inline bool particle_is_short_lived(int pdg) {
+  return pdg == kPdgRhoZero || pdg == kPdgOmega;
 }
 
 }  // namespace g4gpu::decay

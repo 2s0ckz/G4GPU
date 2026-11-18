@@ -358,9 +358,9 @@ int main() {
     }
     ++compared;
     // P23c: 21 - the sixteen strange species, the anti-neutron in the neutral group and the four
-    // light anti-nuclei in the charged one.
-    if (n_group_members != 21) {
-      std::printf("  FAIL %d species in the group kernels, expected 21\n", n_group_members);
+    // light anti-nuclei in the charged one. P31: 23 - the eta and the eta_prime in the neutral.
+    if (n_group_members != 23) {
+      std::printf("  FAIL %d species in the group kernels, expected 23\n", n_group_members);
       ++fails;
     }
     ++compared;

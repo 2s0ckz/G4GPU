@@ -209,6 +209,9 @@ const Perturbation kPerturbations[] = {
     {"k0l-order", "K0L's pi0 pi+ pi- channel moves ahead of its two Kmu3 channels"},
     {"bc-daughter", "lambda_b's fourth daughter becomes a pi+"},
     {"antihyperon-br", "anti_omega-'s second branching ratio, +1e-10 relative"},
+    {"rho-width", "the rho0's width, +5% (DynamicalMass's Breit-Wigner, IsOKWithParentMass)"},
+    {"etap-order", "eta_prime's rho0 gamma and eta pi0 pi0 channels exchanged in the table"},
+    {"omega-br", "omega's gamma pi0 branching ratio, x1.2"},
 };
 
 
@@ -290,6 +293,23 @@ void apply_perturbation() {
   }
   if (perturbing("bc-daughter")) { crow[lb.first].daughter[3] = kPdgPiPlus; }
   if (perturbing("antihyperon-br")) { crow[ao.first + 1].br *= 1.0 + 1e-10; }
+  // P31's three: a datum of the short-lived daughter (the table blocks and the chain's mass
+  // spectrum), the eta_prime's channel order (the table, selection and chain blocks), and a
+  // short-lived daughter's own branching ratio (its table and the chain's multiplicities).
+  const DecayTableRow ep = decay_table_for(kPdgEtaPrime);
+  const DecayTableRow om = decay_table_for(kPdgOmega);
+  if (ep.count != 5 || om.count != 3) {
+    std::printf("  FAIL: eta_prime or omega changed shape; the P31 perturbations are stale\n");
+    ++g_fails;
+    return;
+  }
+  if (perturbing("rho-width")) { prow[particle_index(kPdgRhoZero)].width *= 1.05; }
+  if (perturbing("etap-order")) {
+    const ChannelRow t = crow[ep.first + 1];
+    crow[ep.first + 1] = crow[ep.first + 2];
+    crow[ep.first + 2] = t;
+  }
+  if (perturbing("omega-br")) { crow[om.first + 1].br *= 1.2; }
 }
 
 /// The `select-normalise` perturbation, which is a code path and not a datum: the cumulative
@@ -546,6 +566,15 @@ int main(int argc, char** argv) {
                   dir.c_str(), names[i]);
       return 1;
     }
+  }
+
+  // P31: G4Decay on the eta and eta_prime with their short-lived daughters carried on. Read
+  // apart from the list above so the message can name the dump that writes it.
+  Csv chain;
+  if (!load_csv(dir + "/decay_chain.csv", chain)) {
+    std::printf("cannot read %s/decay_chain.csv - run ref/dump/build.bat, then the decay dump\n",
+                dir.c_str());
+    return 1;
   }
 
   apply_perturbation();
@@ -816,8 +845,10 @@ int main(int argc, char** argv) {
       // with a table is not refused and has no refusal message to name it by. K0L, K0S and the
       // seven anti-hyperons came off it when P23b gave them theirs. What stays is the strong
       // K0 pair, the tau, and two daughters P23b's tables made reachable without tabulating:
-      // the anti-neutron (P23c's) and the eta' (its rho0 and omega need DynamicalMass).
-      const int named[] = {311, -311, 331, 15, -15};  // -2112 left with P23c: it has a table
+      // the anti-neutron (P23c's) and the eta' (its rho0 and omega needed DynamicalMass). Both
+      // left: -2112 with P23c and 331 with P31, which wrote DynamicalMass and the eta_prime's
+      // table.
+      const int named[] = {311, -311, 15, -15};
       for (int pdg : named) {
         const char* why = decay_refusal_reason(pdg);
         require(std::strcmp(why, generic) != 0,
@@ -1425,6 +1456,29 @@ int main(int argc, char** argv) {
         // below tests that far more sharply and without the heavy tail. The ratios are still
         // printed, because a gross disagreement in them is worth seeing.
         const double lim = moments.num(r, m_limit);
+        // P31: A CHANNEL WITH A WIDE DAUGHTER HAS NO FIXED ENERGIES. The eta_prime's rho0 gamma
+        // and omega gamma draw the daughter's mass through DynamicalMass, so the dump's
+        // `ekin_limit` (built from PDG masses) is not a bound and a two-body energy is not a
+        // line: Geant4's own extremes pass both (decay_moments.csv). What does bound every slot
+        // is the two-body momentum with each wide daughter at the bottom of its truncated
+        // Breit-Wigner, m - rangeMass*width; that is asserted instead, and the spectrum's shape
+        // is the 40-bin comparison below and section 10's.
+        if (channel_needs_dynamical_mass(*job.ch) && job.ch->n_daughters == 2) {
+          const int od = st.daughter;
+          double mlo[2];
+          for (int d = 0; d < 2; ++d) {
+            mlo[d] = particle_mass(job.ch->daughter[d]) -
+                     range_mass() * particle_width(job.ch->daughter[d]);
+          }
+          const double pmax = pmx<double>(job.parent_mass, mlo[0], mlo[1]);
+          const double bound = std::sqrt(pmax * pmax + mlo[od] * mlo[od]) - mlo[od];
+          require(st.max_e <= bound * (1 + 1e-12),
+                  "%s: sampled max %.10g exceeds the DynamicalMass bound %.10g", buf, st.max_e,
+                  bound);
+          require(moments.num(r, m_max) <= bound * (1 + 1e-12),
+                  "%s: GEANT4's max %.10g exceeds the DynamicalMass bound %.10g - the bound is "
+                  "wrong", buf, moments.num(r, m_max), bound);
+        } else {
         require(st.max_e <= lim * (1 + 1e-12),
                 "%s: sampled max %.10g exceeds the kinematic limit %.10g", buf, st.max_e, lim);
         require(lim - st.max_e <= 0.05 * lim,
@@ -1444,6 +1498,7 @@ int main(int argc, char** argv) {
           const double mb = moments.num(r, m_min) + floor;
           minc.note((ma > mb) ? ma / mb : mb / ma, buf);
         }
+        }  // fixed-mass channels
 
         // Isotropy, against a fixed axis: 0 and 1/3 for every slot of every channel here.
         const double sez = stderr_of_mean(st.cz1, st.cz2, n);
@@ -1645,7 +1700,8 @@ int main(int argc, char** argv) {
     // one unmixed), the anti-neutron and the eta' - daughters of P23b's tables whose own tables
     // are not here - and the tau. The two daughters are the point of listing: a table that
     // makes a species nothing can decay must say so where the decay would have happened.
-    const int refused[] = {311, -311, 331, -15, 999999};  // P23c tabulated -2112
+    // P23c tabulated -2112 and P31 331 (the eta_prime, with DynamicalMass under it).
+    const int refused[] = {311, -311, -15, 999999};
     DecayProducts<real_t> out;
     const real_t dir[3] = {0, 0, 1};
     for (int pdg : refused) {
@@ -1829,6 +1885,246 @@ int main(int argc, char** argv) {
     }
     std::printf("  five parent masses around pi+'s: the boost mass snaps inside 1e-5 MeV and "
                 "the kinematics never do\n\n");
+  }
+
+  // ==================================================================================
+  // 10. P31: G4Decay on the eta and the eta_prime, the short-lived daughters carried on.
+  // ==================================================================================
+  //
+  // `sample_decay` at rest against decay_chain.csv - G4Decay::DecayIt's body run in Geant4 on
+  // 1,000,000 of each, with every rho0 and omega an eta_prime makes decayed as its first step
+  // decays it (ref/dump/dump_decay.cc, dump_chain). The port does that second decay inside
+  // `sample_decay` (decay.cuh, `resolve_short_lived`), so what is compared is the FINAL state
+  // a transport receives: which channel fired, how many photons, pi0s, pi+, pi- and etas each
+  // channel leaves, their rest-frame kinetic energies (mean and 40 bins), and the dynamic
+  // mass the short-lived daughter decayed at - the invariant mass of the products that came
+  // from it (`DecayProduct::daughter`), which is G4VDecayChannel::DynamicalMass's Breit-Wigner
+  // as the parent's two-body channel truncated it. Different generators (Philox against
+  // MixMax), the same N: six combined standard errors on every mean, five on every bin.
+  {
+    std::printf("== the eta and eta_prime through G4Decay, the rho0 and omega decayed as "
+                "tracks ==\n");
+    if (!chain.rows.empty()) {
+      const int c_kind = chain.col("kind");
+      const int c_pdg = chain.col("pdg");
+      const int c_a = chain.col("a"), c_b = chain.col("b"), c_c = chain.col("c"),
+                c_d = chain.col("d"), c_e = chain.col("e");
+      const int kFinal[5] = {kPdgGamma, kPdgPiZero, kPdgPiPlus, kPdgPiMinus, kPdgEta};
+      Cell w_chan, w_mult, w_spec, w_hist, w_mass, w_mhist;
+      int n_rows = 0, n_unresolved = 0, n_bad_status = 0;
+      double worst_closure = 0;
+      for (const int parent : {kPdgEta, kPdgEtaPrime}) {
+        const DecayTableRow tab = decay_table_for(parent);
+        const int nch = tab.count;
+        require(nch > 0, "pdg %d: no decay table in the port", parent);
+        if (nch < 1) { continue; }
+        const double M = particle_mass(parent);
+        // Geant4's side.
+        std::vector<double> g_chan(nch, 0), g_ms(nch * 5, 0), g_ms2(nch * 5, 0),
+            g_en(nch * 5, 0), g_es(nch * 5, 0), g_es2(nch * 5, 0),
+            g_h(nch * 5 * kHistBins, 0), g_sn(nch, 0), g_ss(nch, 0), g_ss2(nch, 0),
+            g_lo(nch, 0), g_hi(nch, 0), g_mh(nch * kHistBins, 0);
+        double n_total = 0;
+        auto jof = [&](int pdg) {
+          for (int j = 0; j < 5; ++j) {
+            if (kFinal[j] == pdg) { return j; }
+          }
+          return -1;
+        };
+        for (std::size_t r = 0; r < chain.rows.size(); ++r) {
+          if (chain.i32(r, c_pdg) != parent) { continue; }
+          const std::string& k = chain.get(r, c_kind);
+          const int c = chain.i32(r, c_a);
+          if (c < 0 || c >= nch) { continue; }
+          ++n_rows;
+          if (k == "chan") {
+            g_chan[c] = chain.num(r, c_b);
+            n_total = chain.num(r, c_c);
+          } else if (k == "mult") {
+            const int j = jof(chain.i32(r, c_b));
+            if (j >= 0) {
+              g_ms[c * 5 + j] = chain.num(r, c_c);
+              g_ms2[c * 5 + j] = chain.num(r, c_d);
+            }
+          } else if (k == "spec") {
+            const int j = jof(chain.i32(r, c_b));
+            if (j >= 0) {
+              g_en[c * 5 + j] = chain.num(r, c_c);
+              g_es[c * 5 + j] = chain.num(r, c_d);
+              g_es2[c * 5 + j] = chain.num(r, c_e);
+            }
+          } else if (k == "hist") {
+            const int j = jof(chain.i32(r, c_b));
+            const int bin = chain.i32(r, c_c);
+            if (j >= 0 && bin >= 0 && bin < kHistBins) {
+              g_h[(c * 5 + j) * kHistBins + bin] = chain.num(r, c_d);
+            }
+          } else if (k == "mass") {
+            g_sn[c] = chain.num(r, c_c);
+            g_ss[c] = chain.num(r, c_d);
+            g_ss2[c] = chain.num(r, c_e);
+            g_lo[c] = chain.num(r, chain.col("f"));
+            g_hi[c] = chain.num(r, chain.col("g"));
+          } else if (k == "mhist") {
+            const int bin = chain.i32(r, c_c);
+            if (bin >= 0 && bin < kHistBins) { g_mh[c * kHistBins + bin] = chain.num(r, c_d); }
+          }
+        }
+        require(n_total > 0, "pdg %d: decay_chain.csv has no chan rows", parent);
+        if (n_total <= 0) { continue; }
+        // The port's side, the same N.
+        std::vector<double> p_chan(nch, 0), p_ms(nch * 5, 0), p_ms2(nch * 5, 0),
+            p_en(nch * 5, 0), p_es(nch * 5, 0), p_es2(nch * 5, 0),
+            p_h(nch * 5 * kHistBins, 0), p_sn(nch, 0), p_ss(nch, 0), p_ss2(nch, 0),
+            p_mh(nch * kHistBins, 0);
+        // Which daughter slot of each channel is short-lived, -1 for none.
+        std::vector<int> sl_slot(nch, -1);
+        for (int c = 0; c < nch; ++c) {
+          const ChannelRow& ch = channel_rows()[tab.first + c];
+          for (int d = 0; d < ch.n_daughters; ++d) {
+            if (particle_is_short_lived(ch.daughter[d])) { sl_slot[c] = d; }
+          }
+        }
+        Philox<real_t> rng(31031u + static_cast<unsigned>(parent), 3u, 5u);
+        const real_t dir[3] = {0, 0, 1};
+        DecayProducts<real_t> out;
+        const long long N = static_cast<long long>(n_total);
+        for (long long k = 0; k < N; ++k) {
+          sample_decay<real_t>(parent, static_cast<real_t>(M), real_t(0), dir, true, rng, out);
+          if (out.status != DecayStatus::kOK || out.channel < 0 || out.channel >= nch) {
+            ++n_bad_status;
+            continue;
+          }
+          const int c = out.channel;
+          p_chan[c] += 1;
+          int cnt[5] = {0, 0, 0, 0, 0};
+          double sx = 0, sy = 0, sz = 0, se = 0, mx = 0, my = 0, mz = 0, me = 0;
+          for (int i = 0; i < out.n; ++i) {
+            const DecayProduct<real_t>& q = out.p[i];
+            if (particle_is_short_lived(q.pdg)) { ++n_unresolved; }
+            const FourVector<real_t> p4 = q.four_momentum();
+            sx += p4.x; sy += p4.y; sz += p4.z; se += p4.t;
+            if (q.daughter == sl_slot[c]) {
+              mx += p4.x; my += p4.y; mz += p4.z; me += p4.t;
+            }
+            const int j = jof(q.pdg);
+            if (j < 0) { continue; }
+            ++cnt[j];
+            const double e = static_cast<double>(q.ekin);
+            p_en[c * 5 + j] += 1;
+            p_es[c * 5 + j] += e;
+            p_es2[c * 5 + j] += e * e;
+            int b = static_cast<int>(e / M * kHistBins);
+            if (b < 0) { b = 0; }
+            if (b >= kHistBins) { b = kHistBins - 1; }
+            p_h[(c * 5 + j) * kHistBins + b] += 1;
+          }
+          for (int j = 0; j < 5; ++j) {
+            p_ms[c * 5 + j] += cnt[j];
+            p_ms2[c * 5 + j] += cnt[j] * cnt[j];
+          }
+          const double clos = std::fmax(std::sqrt(sx * sx + sy * sy + sz * sz),
+                                        std::fabs(se - M)) / M;
+          if (clos > worst_closure) { worst_closure = clos; }
+          if (sl_slot[c] >= 0) {
+            const double m = std::sqrt(std::fmax(me * me - mx * mx - my * my - mz * mz, 0.0));
+            p_sn[c] += 1;
+            p_ss[c] += m;
+            p_ss2[c] += m * m;
+            int b = static_cast<int>((m - g_lo[c]) / (g_hi[c] - g_lo[c]) * kHistBins);
+            if (b < 0) { b = 0; }
+            if (b >= kHistBins) { b = kHistBins - 1; }
+            p_mh[c * kHistBins + b] += 1;
+          }
+        }
+        // The comparisons.
+        for (int c = 0; c < nch; ++c) {
+          char who[160];
+          std::snprintf(who, sizeof who, "%s channel %d", parent == kPdgEta ? "eta" : "eta_prime",
+                        c);
+          // The branching fraction: binomial, six combined sigma.
+          {
+            const double pg = g_chan[c] / n_total, pp = p_chan[c] / n_total;
+            const double se1 = std::sqrt(pg * (1 - pg) / n_total);
+            double sig = 0;
+            const bool ok = within_sigma(pp, pg, se1, 6.0, 0.0, &sig);
+            w_chan.note(sig, who);
+            require(ok, "%s: fraction %.6f, Geant4 %.6f (%.1f sigma)", who, pp, pg, sig);
+          }
+          for (int j = 0; j < 5; ++j) {
+            const int x = c * 5 + j;
+            char w2[200];
+            std::snprintf(w2, sizeof w2, "%s pdg %d", who, kFinal[j]);
+            // The multiplicity: its mean per decay of this channel. A fixed multiplicity has
+            // zero variance on both sides and must be equal.
+            if (g_chan[c] > 0 && p_chan[c] > 0) {
+              const double mg = g_ms[x] / g_chan[c], mp = p_ms[x] / p_chan[c];
+              const double se1 = stderr_of_mean(p_ms[x], p_ms2[x], p_chan[c]);
+              double sig = 0;
+              const bool ok = within_sigma(mp, mg, se1, 6.0, 1e-12, &sig);
+              w_mult.note(sig, w2);
+              require(ok, "%s: multiplicity %.6f, Geant4 %.6f (%.1f sigma)", w2, mp, mg, sig);
+            }
+            // The rest-frame kinetic energy.
+            require((g_en[x] > 0) == (p_en[x] > 0), "%s: %s has this species, the other side "
+                    "does not", w2, g_en[x] > 0 ? "Geant4" : "the port");
+            if (g_en[x] > 0 && p_en[x] > 0) {
+              const double mg = g_es[x] / g_en[x], mp = p_es[x] / p_en[x];
+              const double se1 = stderr_of_mean(p_es[x], p_es2[x], p_en[x]);
+              double sig = 0;
+              const bool ok = within_sigma(mp, mg, se1, 6.0, 1e-12, &sig);
+              w_spec.note(sig, w2);
+              require(ok, "%s: <Ekin> %.6f MeV, Geant4 %.6f (%.1f sigma)", w2, mp, mg, sig);
+              for (int b = 0; b < kHistBins; ++b) {
+                const double a = p_h[x * kHistBins + b], g = g_h[x * kHistBins + b];
+                const double s = std::fabs(a - g) / std::sqrt(a + g + 1.0);
+                w_hist.note(s, w2);
+                require(s <= 5.0, "%s: Ekin bin %d holds %.0f, Geant4 %.0f (%.1f sigma)", w2,
+                        b, a, g, s);
+              }
+            }
+          }
+          // The short-lived daughter's mass.
+          require((g_sn[c] > 0) == (sl_slot[c] >= 0),
+                  "%s: Geant4 and the port disagree on whether it has a short-lived daughter",
+                  who);
+          if (g_sn[c] > 0 && p_sn[c] > 0) {
+            const double mg = g_ss[c] / g_sn[c], mp = p_ss[c] / p_sn[c];
+            const double se1 = stderr_of_mean(p_ss[c], p_ss2[c], p_sn[c]);
+            double sig = 0;
+            const bool ok = within_sigma(mp, mg, se1, 6.0, 0.0, &sig);
+            w_mass.note(sig, who);
+            require(ok, "%s: short-lived mass <m> %.5f MeV, Geant4 %.5f (%.1f sigma)", who, mp,
+                    mg, sig);
+            std::printf("  %-20s short-lived pdg %d: <m> %.3f MeV against Geant4's %.3f "
+                        "(%.2f sigma), %.0f decays\n", who, channel_rows()[tab.first + c]
+                        .daughter[sl_slot[c]], mp, mg, sig, p_sn[c]);
+            for (int b = 0; b < kHistBins; ++b) {
+              const double a = p_mh[c * kHistBins + b], g = g_mh[c * kHistBins + b];
+              const double s = std::fabs(a - g) / std::sqrt(a + g + 1.0);
+              w_mhist.note(s, who);
+              require(s <= 5.0, "%s: mass bin %d holds %.0f, Geant4 %.0f (%.1f sigma)", who, b,
+                      a, g, s);
+            }
+          }
+          std::printf("  %-20s %8.0f decays, Geant4 %8.0f\n", who, p_chan[c], g_chan[c]);
+        }
+      }
+      require(n_rows > 0, "decay_chain.csv holds no eta or eta_prime rows");
+      require(n_unresolved == 0, "%d short-lived products reached the final state undecayed",
+              n_unresolved);
+      require(n_bad_status == 0, "%d decays came back without products", n_bad_status);
+      require(worst_closure <= 1e-9, "four-momentum closure %.3e of the parent mass",
+              worst_closure);
+      std::printf("  worst: fraction %.2f sigma (%s), multiplicity %.2f (%s), <Ekin> %.2f (%s), "
+                  "Ekin bin %.2f (%s), mass %.2f (%s), mass bin %.2f (%s); closure %.2e\n\n",
+                  w_chan.worst, w_chan.where.c_str(), w_mult.worst, w_mult.where.c_str(),
+                  w_spec.worst, w_spec.where.c_str(), w_hist.worst, w_hist.where.c_str(),
+                  w_mass.worst, w_mass.where.c_str(), w_mhist.worst, w_mhist.where.c_str(),
+                  worst_closure);
+    } else {
+      require(false, "cannot read decay_chain.csv - run the decay dump");
+    }
   }
 
   if (g_perturb != nullptr) {

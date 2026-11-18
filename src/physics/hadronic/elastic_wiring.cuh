@@ -167,6 +167,14 @@ __host__ __device__ inline ElasticChannel elastic_channel(ParticleType t) {
     case ParticleType::kAntiHe3:
     case ParticleType::kAntiAlpha:  return ElasticChannel::kAntiNucleus;
     case ParticleType::kGenericIon: return ElasticChannel::kIonDiffuse;
+    // P31: NO hadElastic, and that is QBBC's answer and not a refusal. G4HadronElasticPhysicsXS
+    // (G4HadronElasticPhysics::ConstructProcess) builds on the nucleons, the pions, the kaons
+    // (G4HadParticles::GetKaons()), the hyperons and anti-hyperons, the light anti-ions and the
+    // light ions - and `GetKaons()` is K+, K-, K0S, K0L; no list holds 221 or 331. The
+    // constructed QBBC agrees: species_processes.csv gives both Transportation and Decay alone,
+    // and strange_tracks_xs.csv's G4HadronicProcessStore answers 0 per volume at every energy.
+    case ParticleType::kEta:
+    case ParticleType::kEtaPrime:   return ElasticChannel::kNone;
     default:                        return ElasticChannel::kNone;
   }
 }

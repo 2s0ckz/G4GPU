@@ -401,6 +401,66 @@ __host__ __device__ inline int select_a_decay_channel(const DecayTableRow& table
   return -1;
 }
 
+/// P31: A SHORT-LIVED DAUGHTER'S FIRST STEP, which is its decay - the rho0 and omega an
+/// eta_prime makes, as 11.1.1 handles them.
+///
+/// What Geant4 does, read off the source and the constructed QBBC: G4ShortLivedConstructor
+/// builds both with lifetime 0.0, stable false and IsShortLived true;
+/// G4VUserPhysicsList::InitializeProcessManager gives every particle a process manager,
+/// AddTransportation gives it Transportation, and G4DecayPhysics registers its one G4Decay on
+/// it because `IsApplicable` reads only the lifetime (>= 0) and the mass (> 0) - so
+/// decay_atrest.csv and decay_chain.csv's process rows show `Transportation, Decay` for both,
+/// the same list the eta's. G4Decay::DecayIt puts the daughter on the stack as an ordinary
+/// G4Track whose G4DynamicParticle carries the DynamicalMass its parent's channel drew
+/// (`phase_space_two_body`); G4StackManager::PushOneTrack accepts it (it has a definition ID);
+/// and on its first step G4Decay's mean free path is DBL_MIN (c*tau = 0 < DBL_MIN,
+/// G4Decay.cc:144) against Transportation's geometric step, so the step is DBL_MIN times
+/// -log(U) long and ends in G4Decay::DecayIt's PostStep branch: SelectADecayChannel and the
+/// channel's DecayIt at the track's DYNAMIC mass, the products boosted by its total energy
+/// (floored at its mass, DECAY102) and its direction. Neutral, it deposits nothing on the way.
+///
+/// What this function does is that decay, here, at the parent's decay point and time - and it
+/// is the one thing in P31 that is not a track, named so (docs/RISK.md V280): this transport
+/// has no `ParticleType` for a rho0 or an omega and its tracks carry no dynamic mass, and the
+/// step it does not take is DBL_MIN x -log(U) long - 2.2e-308 mm, below every coordinate's last
+/// bit, zero time - and draws one uniform for that length which this transport, as for sigma0's
+/// DBL_MIN length (`had::decay_in_flight_length`), does not draw. The daughter's products take
+/// its slot and append after the parent's others, each carrying the short-lived daughter's own
+/// `daughter` index, so a reader can still tell which products came from it (the invariant
+/// mass of those is the dynamic mass it decayed at - tests/test_decay.cu section 10). A
+/// short-lived daughter of a short-lived daughter does not occur in these tables (the rho0's and
+/// omega's daughters are pions and photons) and is not looked for.
+template <typename real_t, typename rng_t>
+__host__ __device__ inline void resolve_short_lived(rng_t& rng, DecayProducts<real_t>& out) {
+  const int n0 = out.n;
+  for (int i = 0; i < n0; ++i) {
+    if (!particle_is_short_lived(out.p[i].pdg)) { continue; }
+    const DecayProduct<real_t> q = out.p[i];
+    const DecayTableRow table = decay_table_for(q.pdg);
+    const int ich = select_a_decay_channel<real_t>(table, q.mass, rng);
+    if (ich < 0) {
+      out.fail(DecayStatus::kShortLivedDaughter);
+      return;
+    }
+    DecayProducts<real_t> sub;
+    channel_decay_it<real_t>(channel_rows()[table.first + ich], q.pdg, q.mass, rng, sub);
+    if (sub.status != DecayStatus::kOK || sub.n < 1 || out.n - 1 + sub.n > out.kMaxProducts) {
+      out.fail(DecayStatus::kShortLivedDaughter);
+      return;
+    }
+    // G4Decay::DecayIt: ParentEnergy = GetTotalEnergy(), floored at the dynamic mass; the
+    // PostStep branch boosts. A daughter born with exactly zero kinetic energy would take the
+    // AtRest branch instead (SetInitialStep's fStopButAlive), which does not boost - and a
+    // boost by zero momentum is the identity, so the one test covers both.
+    real_t e = q.ekin + q.mass;
+    if (e < q.mass) { e = q.mass; }
+    if (q.ekin > real_t(0)) { boost_products(sub, e, q.dir); }
+    for (int j = 0; j < sub.n; ++j) { sub.p[j].daughter = q.daughter; }
+    out.p[i] = sub.p[0];
+    for (int j = 1; j < sub.n; ++j) { out.p[out.n++] = sub.p[j]; }
+  }
+}
+
 /// The device-callable entry point: a parent in, its daughters out.
 ///
 /// `pdg`             the parent's PDG code. A code with no transcribed table is refused by
@@ -471,6 +531,7 @@ __host__ __device__ inline void sample_decay(int pdg, real_t mass, real_t kineti
   // the channel's parent mass and not necessarily `mass` (the muon, KL3, Dalitz and neutron
   // channels all build their products with the PDG mass whatever `mass` was).
   if (!at_rest) { boost_products(out, parent_energy, direction); }
+  resolve_short_lived<real_t>(rng, out);
 }
 
 /// G4Decay::DecayIt's `energyDeposit`: the parent's kinetic energy in the AtRest case and

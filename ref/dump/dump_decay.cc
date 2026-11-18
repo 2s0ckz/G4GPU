@@ -81,6 +81,9 @@
 #include "G4PhaseSpaceDecayChannel.hh"
 #include "G4ProcessManager.hh"
 #include "G4ProcessVector.hh"
+#include "G4Step.hh"
+#include "G4VParticleChange.hh"
+#include "G4LorentzVector.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4ThreeVector.hh"
 #include "G4Track.hh"
@@ -127,8 +130,14 @@ const char* const kSpecies[] = {
     "anti_sigma_b-",
     // P23c, appended last so every earlier species keeps its seed: G4AntiNeutron.cc's
     // G4NeutronBetaDecayChannel("anti_neutron") - e+, nu_e, anti_proton.
-    "anti_neutron"};
-constexpr int kNumSpecies = 71;
+    "anti_neutron",
+    // P31, appended last for the same reason: G4EtaPrime.cc's five G4PhaseSpaceDecayChannels,
+    // and the two SHORT-LIVED daughters two of them name - G4ShortLivedConstructor's rho0
+    // (775.26 MeV, 149.1 MeV wide, rho0 -> pi+ pi-) and omega (782.65, 8.49; pi+ pi- pi0,
+    // gamma pi0, pi+ pi-). Their widths take the eta_prime's rho0 gamma and omega gamma
+    // channels into G4VDecayChannel::DynamicalMass, which this block now samples.
+    "eta_prime", "rho0", "omega"};
+constexpr int kNumSpecies = 74;
 
 G4ParticleDefinition* find(const char* name) {
   return G4ParticleTable::GetParticleTable()->FindParticle(G4String(name));
@@ -767,6 +776,193 @@ void dump_spectra(FILE* fm, FILE* fp, FILE* fh, FILE* fc) {
 }
 
 // -------------------------------------------------------------------------------------
+/// P31: G4Decay ITSELF on the eta and the eta_prime, at rest, with every SHORT-LIVED daughter
+/// carried on as Geant4 carries it - decay_chain.csv.
+///
+/// HOW AN eta_prime's rho0 OR omega BECOMES PIONS IN 11.1.1, which is what this block is the
+/// measurement of. G4ShortLivedConstructor builds both with lifetime 0.0 and stable false;
+/// G4VUserPhysicsList::InitializeProcessManager gives EVERY particle in the table a process
+/// manager (G4VUserPhysicsList.cc:229-251, short-lived or not), G4PhysicsListHelper::
+/// AddTransportation gives every one Transportation, and G4DecayPhysics::ConstructProcess
+/// registers its one G4Decay on every particle `IsApplicable` accepts - lifetime >= 0 and mass
+/// > 0, which both are. decay_atrest.csv already shows the result: rho0 and omega carry Decay.
+/// So G4Decay::DecayIt puts the rho0 on the stack as an ordinary G4Track carrying the
+/// DynamicalMass its parent's channel drew (G4PhaseSpaceDecayChannel::TwoBodyDecayIt's
+/// `withWidth` branch), the stack takes it (it has a definition ID: G4StackManager::
+/// PushOneTrack), and its first step is Transportation against G4Decay, whose mean free path
+/// is DBL_MIN (c*tau = 0 < DBL_MIN, G4Decay.cc:144) - so it decays where it was made, through
+/// the same G4Decay::DecayIt, at its own dynamic mass, boosted by its own energy and direction.
+///
+/// That is what this block does, with Geant4's own objects: G4Decay::DecayIt's body written out
+/// for a parent at rest (its AtRest branch: SelectADecayChannel and the channel's DecayIt at the
+/// parent's mass, no boost), then the same body's PostStep branch on every product whose
+/// definition IsShortLived() - the G4DynamicParticle G4Decay would have handed that track, its
+/// dynamic mass and all, SelectADecayChannel and DecayIt at THAT mass and G4DecayProducts::
+/// Boost by its energy and direction. (Calling G4Decay::DecayIt on bare G4Tracks was tried
+/// first: a track with no creator process and no stepping context ends in an access violation
+/// inside the particle change's checks, which is a harness problem and not physics, so the
+/// body's five calls are made directly.) The eta an eta_prime makes is NOT decayed here: it is
+/// not short-lived, it is a track of its own in Geant4 and in the port (P31), and its decays
+/// are the eta rows of this file.
+///
+/// Rows, keyed by `kind`:
+///   chan  parent,pdg,channel,count,N          which table channel fired, identified by the
+///                                             multiset of first-generation products
+///   mult  parent,pdg,channel,final_pdg,sum,sum2   final-state multiplicity per species
+///   spec  parent,pdg,channel,final_pdg,n,sum_e,sum_e2,emax   rest-frame kinetic energy
+///   hist  parent,pdg,channel,final_pdg,bin,count  40 bins of [0, emax), emax = parent mass
+///   mass  parent,pdg,channel,sl_pdg,n,sum_m,sum_m2,lo,hi   a short-lived daughter's mass
+///   mhist parent,pdg,channel,sl_pdg,bin,count     40 bins of [lo, hi): m -+ 2.5 widths
+///   clos  parent,pdg,worst_|sum p|,worst_|sum E - M|   over the whole sample, final state
+///   proc  name,pdg,index,process_name             a short-lived daughter's process list
+constexpr int kChainDecays = 1000000;
+
+
+void dump_chain(FILE* f) {
+  std::fprintf(f, "kind,parent,pdg,a,b,c,d,e,f,g\n");
+  for (const char* sl : {"rho0", "omega"}) {
+    G4ParticleDefinition* p = find(sl);
+    G4ProcessManager* pm = p->GetProcessManager();
+    G4ProcessVector* pv = (pm != nullptr) ? pm->GetProcessList() : nullptr;
+    const int n = (pv != nullptr) ? static_cast<int>(pv->size()) : -1;
+    if (n <= 0) {
+      std::fprintf(f, "proc,%s,%d,-1,%s,,,,,\n", sl, p->GetPDGEncoding(),
+                   (pm == nullptr) ? "no_process_manager" : "no_process");
+    }
+    for (int i = 0; i < n; ++i) {
+      std::fprintf(f, "proc,%s,%d,%d,%s,%d,,,,\n", sl, p->GetPDGEncoding(), i,
+                   (*pv)[i]->GetProcessName().c_str(), p->IsShortLived() ? 1 : 0);
+    }
+  }
+  const int kFinal[] = {22, 111, 211, -211, 221};
+  constexpr int kNumFinal = 5;
+  for (const char* name : {"eta", "eta_prime"}) {
+    G4ParticleDefinition* parent = find(name);
+    const double M = parent->GetPDGMass();
+    G4DecayTable* dt = parent->GetDecayTable();
+    const int nch = dt->entries();
+    std::vector<double> chan(nch, 0.0);
+    std::vector<double> msum(nch * kNumFinal, 0.0), msum2(nch * kNumFinal, 0.0);
+    std::vector<double> en(nch * kNumFinal, 0.0), es(nch * kNumFinal, 0.0),
+        es2(nch * kNumFinal, 0.0);
+    std::vector<double> eh(nch * kNumFinal * kHistBins, 0.0);
+    // The short-lived daughter's mass, per channel: at most one per channel in these tables.
+    std::vector<double> sn(nch, 0.0), ss(nch, 0.0), ss2(nch, 0.0);
+    std::vector<int> spdg(nch, 0);
+    std::vector<double> slo(nch, 0.0), shi(nch, 0.0);
+    std::vector<double> sh(nch * kHistBins, 0.0);
+    for (int c = 0; c < nch; ++c) {
+      G4VDecayChannel* ch = dt->GetDecayChannel(c);
+      for (int d = 0; d < ch->GetNumberOfDaughters(); ++d) {
+        if (ch->GetDaughter(d)->IsShortLived()) {
+          spdg[c] = ch->GetDaughter(d)->GetPDGEncoding();
+          slo[c] = ch->GetDaughter(d)->GetPDGMass() - 2.5 * ch->GetDaughter(d)->GetPDGWidth();
+          shi[c] = ch->GetDaughter(d)->GetPDGMass() + 2.5 * ch->GetDaughter(d)->GetPDGWidth();
+        }
+      }
+    }
+    double worst_p = 0.0, worst_e = 0.0;
+    CLHEP::HepRandom::setTheSeed(31000UL + static_cast<unsigned long>(parent->GetPDGEncoding()));
+    for (int k = 0; k < kChainDecays; ++k) {
+      // G4Decay::DecayIt's AtRest branch (G4Decay.cc:254-335) for a parent at rest, written out
+      // with Geant4's own objects: SelectADecayChannel at the dynamic mass, the channel's
+      // DecayIt, and no boost (the AtRest branch boosts only pre-assigned products).
+      G4VDecayChannel* ch = dt->SelectADecayChannel(M);
+      int c_fired = -1;
+      for (int c = 0; c < nch; ++c) {
+        if (dt->GetDecayChannel(c) == ch) { c_fired = c; }
+      }
+      G4DecayProducts* pr = ch->DecayIt(M);
+      std::vector<G4DynamicParticle*> fin;
+      while (pr->entries() > 0) {
+        G4DynamicParticle* q = pr->PopProducts();
+        if (!q->GetDefinition()->IsShortLived()) {
+          fin.push_back(q);
+          continue;
+        }
+        const double m = q->GetMass();
+        sn[c_fired] += 1;
+        ss[c_fired] += m;
+        ss2[c_fired] += m * m;
+        int b = static_cast<int>((m - slo[c_fired]) / (shi[c_fired] - slo[c_fired]) * kHistBins);
+        if (b < 0) { b = 0; }
+        if (b >= kHistBins) { b = kHistBins - 1; }
+        sh[c_fired * kHistBins + b] += 1;
+        // The short-lived track's first step: G4Decay::DecayIt's PostStep branch on the
+        // G4DynamicParticle G4Decay hands its G4Track (`new G4Track(products->PopProducts(),
+        // ...)`, G4Decay.cc:363) - the channel picked at that particle's DYNAMIC mass, DecayIt at
+        // it, the products boosted by its total energy (floored at the mass, DECAY102) and its
+        // direction.
+        G4DecayTable* dt2 = q->GetDefinition()->GetDecayTable();
+        G4VDecayChannel* ch2 = dt2->SelectADecayChannel(q->GetMass());
+        G4DecayProducts* pr2 = ch2->DecayIt(q->GetMass());
+        double e_parent = q->GetTotalEnergy();
+        if (e_parent < q->GetMass()) { e_parent = q->GetMass(); }
+        pr2->Boost(e_parent, q->GetMomentumDirection());
+        while (pr2->entries() > 0) { fin.push_back(pr2->PopProducts()); }
+        delete pr2;
+        delete q;
+      }
+      delete pr;
+      chan[c_fired] += 1;
+      int cnt[kNumFinal] = {0, 0, 0, 0, 0};
+      G4LorentzVector sum(0, 0, 0, 0);
+      for (G4DynamicParticle* t : fin) {
+        const int pdg = t->GetDefinition()->GetPDGEncoding();
+        sum += t->Get4Momentum();
+        for (int j = 0; j < kNumFinal; ++j) {
+          if (pdg != kFinal[j]) { continue; }
+          cnt[j] += 1;
+          const double e = t->GetKineticEnergy() / MeV;
+          const int x = c_fired * kNumFinal + j;
+          en[x] += 1;
+          es[x] += e;
+          es2[x] += e * e;
+          int b = static_cast<int>(e / M * kHistBins);
+          if (b < 0) { b = 0; }
+          if (b >= kHistBins) { b = kHistBins - 1; }
+          eh[x * kHistBins + b] += 1;
+        }
+        delete t;
+      }
+      for (int j = 0; j < kNumFinal; ++j) {
+        msum[c_fired * kNumFinal + j] += cnt[j];
+        msum2[c_fired * kNumFinal + j] += cnt[j] * cnt[j];
+      }
+      const double rp = sum.vect().mag() / M, re = std::fabs(sum.t() - M) / M;
+      if (rp > worst_p) { worst_p = rp; }
+      if (re > worst_e) { worst_e = re; }
+    }
+    for (int c = 0; c < nch; ++c) {
+      std::fprintf(f, "chan,%s,%d,%d,%.17g,%d,,,,\n", name, parent->GetPDGEncoding(), c,
+                   chan[c], kChainDecays);
+      for (int j = 0; j < kNumFinal; ++j) {
+        const int x = c * kNumFinal + j;
+        std::fprintf(f, "mult,%s,%d,%d,%d,%.17g,%.17g,,,\n", name, parent->GetPDGEncoding(), c,
+                     kFinal[j], msum[x], msum2[x]);
+        std::fprintf(f, "spec,%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,\n", name,
+                     parent->GetPDGEncoding(), c, kFinal[j], en[x], es[x], es2[x], M / MeV);
+        for (int b = 0; b < kHistBins; ++b) {
+          std::fprintf(f, "hist,%s,%d,%d,%d,%d,%.17g,,,\n", name, parent->GetPDGEncoding(), c,
+                       kFinal[j], b, eh[x * kHistBins + b]);
+        }
+      }
+      if (spdg[c] != 0) {
+        std::fprintf(f, "mass,%s,%d,%d,%d,%.17g,%.17g,%.17g,%.17g,%.17g\n", name,
+                     parent->GetPDGEncoding(), c, spdg[c], sn[c], ss[c], ss2[c], slo[c],
+                     shi[c]);
+        for (int b = 0; b < kHistBins; ++b) {
+          std::fprintf(f, "mhist,%s,%d,%d,%d,%d,%.17g,,,\n", name, parent->GetPDGEncoding(), c,
+                       spdg[c], b, sh[c * kHistBins + b]);
+        }
+      }
+    }
+    std::fprintf(f, "clos,%s,%d,%.17g,%.17g,,,,,\n", name, parent->GetPDGEncoding(), worst_p,
+                 worst_e);
+  }
+}
+
+// -------------------------------------------------------------------------------------
 void dump_decay(const DumpContext&) {
   {
     FILE* f = std::fopen("decay_applicable.csv", "w");
@@ -814,6 +1010,11 @@ void dump_decay(const DumpContext&) {
     std::fclose(fh);
     std::fclose(fc);
   }
+  {
+    FILE* f = std::fopen("decay_chain.csv", "w");
+    dump_chain(f);
+    std::fclose(f);
+  }
 }
 
 }  // namespace
@@ -821,5 +1022,6 @@ void dump_decay(const DumpContext&) {
 G4GPU_REGISTER_DUMP("decay",
                     "decay_applicable.csv decay_tables.csv decay_process.csv "
                     "decay_select.csv decay_dalitz.csv decay_atrest.csv decay_boost.csv "
-                    "decay_moments.csv decay_pairs.csv decay_hist.csv decay_closure.csv",
+                    "decay_moments.csv decay_pairs.csv decay_hist.csv decay_closure.csv "
+                    "decay_chain.csv",
                     dump_decay);

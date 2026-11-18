@@ -128,7 +128,15 @@ enum class ParticleType : int {
   kAntiTriton = 42,
   kAntiHe3 = 43,
   kAntiAlpha = 44,
-  kNumTypes = 45
+  // P31 - the eta and the eta_prime, the two mesons QBBC's FTFP makes in quantity (21,245 of
+  // them in 500,000 10 GeV pi+ events, docs/RISK.md V240 and V278) and that were booked at
+  // emission as "no ParticleType row", their energy and their rest masses lost. G4Eta.cc and
+  // G4EtaPrime.cc give both lifetime 0.0 ns and stable false, so G4Decay decays each at its first
+  // step (DBL_MIN mean free path), and QBBC builds no other process for either (species_processes
+  // .csv: Transportation, Decay). The neutral group kernel steps them (`is_strange_neutral_track`).
+  kEta = 45,
+  kEtaPrime = 46,
+  kNumTypes = 47
 };
 
 /// Static properties the EM models need: PDG mass, charge and spin.
@@ -380,6 +388,16 @@ __host__ __device__ inline ParticleDef<real_t> particle_def(ParticleType t) {
     case ParticleType::kAntiAlpha:
       // G4AntiAlpha.cc: `3.727379*GeV`, -2 eplus, 2*spin = 0, no moment.
       return {real_t(3727.379), real_t(-2), real_t(0), false, false, false, real_t(-1)};
+    // P31. Each mass is written as its definition writes it, `x*GeV`, product and all: that is the
+    // double FTFP's own hadron table carries for both (data/ftf_hadrons.hh: 547.86199999999997,
+    // 957.77999999999997) and the one `fill_result` holds a secondary's dynamic mass against, so
+    // a decimal literal one ulp away would move every FTFP eta's kinetic energy by that ulp.
+    case ParticleType::kEta:
+      // G4Eta.cc: `0.547862*GeV`, neutral, 2*spin = 0, no moment.
+      return {real_t(0.547862 * 1000.0), real_t(0), real_t(0), false, false, false, real_t(-1)};
+    case ParticleType::kEtaPrime:
+      // G4EtaPrime.cc: `0.95778*GeV`, neutral, 2*spin = 0, no moment.
+      return {real_t(0.95778 * 1000.0), real_t(0), real_t(0), false, false, false, real_t(-1)};
     case ParticleType::kNumTypes:
       break;
   }
@@ -455,6 +473,8 @@ __host__ __device__ inline const char* particle_name(ParticleType t) {
     case ParticleType::kAntiTriton: return "anti_triton";
     case ParticleType::kAntiHe3: return "anti_He3";
     case ParticleType::kAntiAlpha: return "anti_alpha";
+    case ParticleType::kEta: return "eta";
+    case ParticleType::kEtaPrime: return "eta_prime";
     default: return "?";
   }
 }
@@ -520,6 +540,8 @@ __host__ __device__ inline int pdg_code(ParticleType t) {
     case ParticleType::kAntiTriton: return -1000010030;
     case ParticleType::kAntiHe3: return -1000020030;
     case ParticleType::kAntiAlpha: return -1000020040;
+    case ParticleType::kEta: return 221;
+    case ParticleType::kEtaPrime: return 331;
     case ParticleType::kNumTypes: break;
   }
   return 0;
@@ -613,6 +635,8 @@ __host__ __device__ inline ParticleType particle_type_of_pdg(int pdg) {
     case -1000010030: return ParticleType::kAntiTriton;
     case -1000020030: return ParticleType::kAntiHe3;
     case -1000020040: return ParticleType::kAntiAlpha;
+    case 221: return ParticleType::kEta;
+    case 331: return ParticleType::kEtaPrime;
     default: break;
   }
   return ParticleType::kNumTypes;
@@ -704,7 +728,11 @@ __host__ __device__ inline bool is_strange_neutral_track(ParticleType t) {
          || t == ParticleType::kAntiSigmaZero || t == ParticleType::kAntiXiZero
          // P23c: the anti-neutron - Transportation, Decay (880.2 s), hadElastic and
          // anti_neutronInelastic on AntiAGlauber, Fritiof at rest - is the same shape of step.
-         || t == ParticleType::kAntiNeutron;
+         || t == ParticleType::kAntiNeutron
+         // P31: the eta and the eta_prime - Transportation and Decay alone, sigma0's shape: a
+         // lifetime of 0.0 ns is a DBL_MIN mean free path, so each decays at its first step,
+         // and at rest (born at rest) G4Decay's at-rest length is 0 x tau = 0.
+         || t == ParticleType::kEta || t == ParticleType::kEtaPrime;
 }
 
 /// Is G4ionIonisation the ionisation process Geant4 registers for this species, rather than
