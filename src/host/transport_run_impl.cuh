@@ -2160,8 +2160,14 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       G4GPU_CUDA_CHECK(cudaGetLastError());
 
       // Bounded so a non-terminating track shows up as an explicit abandonment rather than a
-      // hang. B1 drains in about 110 iterations.
-      constexpr int kMaxIterations = 1000;
+      // hang - RunAction prints the count. B1's photon beam drains in about 110 iterations, but
+      // an iteration is one step of every live track and a real nuclide takes thousands: a
+      // 1 GeV per nucleon Fe56 takes about 3,400 steps to stop in B1's phantom (Geant4 takes
+      // 3,593 real-ion steps an event on that beam) and its batch drained at 10,030 iterations,
+      // so the old bound of 1,000 abandoned every Fe56 before the bone and the row read 3.88 pGy
+      // against Geant4's 12.6 uGy (P30, docs/RISK.md V276-V277). 20,000 is twice the deepest
+      // drain measured; a beam that needs more is still reported, never hidden.
+      constexpr int kMaxIterations = 20000;
       int leftover = 0;
       for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
         // How many tracks are alive, of any species. One number, because there is one pool.

@@ -1519,9 +1519,9 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // ---- a nucleus with no nuclide, or one outside AME2012, is refused by name.
   //
   // Two ways to get here and both are loud rather than fast. A `kGenericIon` track whose
-  // `ion_za` is zero is a bug in whatever emitted it - `BufferEmitter::push_nucleus` is the only
-  // thing that sets the field and `seed_track_slot` sets it to zero, so a primary ion would be
-  // one (and `G4RunManager::CheckSpecies` refuses that by name before a run starts). A nuclide
+  // `ion_za` is zero is a bug in whatever emitted it - `BufferEmitter::push_nucleus` sets the
+  // field for a secondary and `seed_track_slot` for a primary from the gun's `/gun/ion Z A`
+  // (P30), and the bare GenericIon placeholder is what `/run/beamOn` refuses by name. A nuclide
   // outside `data::nuclear_mass`'s AME2012 table gives mass zero, which
   // `dynamic_particle_beta` reads as a photon: beta exactly 1, no stopping power, and a nucleus
   // that crosses the geometry depositing nothing. That is the shape of failure this project

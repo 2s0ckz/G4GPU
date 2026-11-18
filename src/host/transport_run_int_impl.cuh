@@ -140,8 +140,23 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     edep += static_cast<real_t>(ar.local_deposit_MeV);
   } else {
     physics::hadronic::HadProjectile<real_t> proj;
-    proj.pdg = pdg_code(q.species);
-    proj.charge = particle_def<real_t>(q.species).charge;
+    // THE NUCLIDE IS THE TRACK'S, and for a `kGenericIon` that is not the definition's either.
+    // `G4HadProjectile` takes its PDG code and charge from the track's definition, which for an
+    // ion is G4IonTable's nuclide (10LZZZAAAI, charge Z) and never G4GenericIon's placeholder
+    // (1000000000, charge +1). The light-ion reaction reads Z from the projectile's charge and
+    // FTF's ion arm reads the code, so with the placeholder a C12 at 1 GeV per nucleon on O16
+    // left 12 MeV in fragments heavier than the alpha where Geant4 leaves 3,501, and every C12
+    // on hydrogen at 4 GeV per nucleon and every Fe56 at 1 GeV per nucleon failed CheckResult
+    // by 1-2.3 GeV and was refused after 100 attempts with the whole ion's energy deposited
+    // where it stood: the C12 row 26% low, the Fe56 row empty (P30, docs/RISK.md V276-V277).
+    // Every GenericIon secondary's interactions had it from P8c to P30; a recoil below the
+    // reaction thresholds never showed it.
+    const int pz = (q.species == ParticleType::kGenericIon) ? ion_z_of(p.ion_za) : 0;
+    const int pa = (q.species == ParticleType::kGenericIon) ? ion_a_of(p.ion_za) : 0;
+    proj.pdg = (q.species == ParticleType::kGenericIon)
+                   ? physics::hadronic::pdg_nuclear_code(pz, pa) : pdg_code(q.species);
+    proj.charge = (q.species == ParticleType::kGenericIon)
+                      ? static_cast<real_t>(pz) : particle_def<real_t>(q.species).charge;
     proj.mass = track_mass;
     proj.kin_energy = p.ekin;
     // THE BARYON NUMBER IS THE TRACK'S, and for a `kGenericIon` that is not the definition's.
@@ -149,8 +164,6 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     // number arrived as G4GenericIon's placeholder 1 would be offered FTFP at 4 GeV where
     // Geant4 offers the light-ion reaction at 0.33 GeV per nucleon.
     proj.baryon_number = had::baryon_number_of(q.species, ion_a_of(p.ion_za));
-    const int pz = (q.species == ParticleType::kGenericIon) ? ion_z_of(p.ion_za) : 0;
-    const int pa = (q.species == ParticleType::kGenericIon) ? ion_a_of(p.ion_za) : 0;
     // The neutron reads its own data set, which is `NeutronSubTables::inelastic` and not one of
     // the five `G4ParticleInelasticXS` ones - see `had::InelasticTables`'s own note.
     had::InelasticTables<real_t> xs = had.inelastic;
