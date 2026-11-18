@@ -851,7 +851,8 @@ secondaries with no ParticleType row (V240), none refused otherwise.
 | Fe56 56000 MeV | 20,000 | 12.3686 µGy ± 106.6 nGy | 12.6159 µGy ± 107.3 nGy | -1.96%, -1.6 σ | 52 min 46 s, 6.32 events/s |
 
 The 12 GeV row's -1.20% is inside the band and outside its own 2.1 σ; at 0.4% statistics a side
-it cannot tell a 1% effect from a draw, and a 200,000-event pair is the next run on this beam.
+it cannot tell a 1% effect from a draw. P31 ran that 200,000-event pair (its section, V282):
+6.35997 +/- 0.01273 uGy against Geant4's 6.35774 +/- 0.01275, +0.035% and +0.12 sigma - a draw.
 
 ## P31: the eta and the eta' on tracks (2026-11-18)
 

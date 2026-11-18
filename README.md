@@ -430,7 +430,7 @@ closed - the same question has the mechanism.
 | He3 | **transported**, like the alpha: `G4ionIonisation`'s Bragg/Bethe-Bloch split through GenericIon's tables at a scaled energy, `G4IonFluctuations` with the dynamic effective charge, `hadElastic`, and `G4UrbanMscModel` multiple scattering, the model Geant4 gives it (open question 2) |
 | `G4GenericIon` itself | not a particle — a placeholder definition whose tables every real nuclide reads |
 | neutrinos | created and counted per event as energy carried away, never stepped - QBBC does not transport them either |
-| b/c hadrons | **refused by name** at emission (`kBcHadronSecondary`), fatal as a primary. The hyperons, the anti-hyperons and K⁰L/K⁰S are tracks since P23a (RISK V240-V244) and the anti-neutron, anti-deuteron, anti-triton, anti-He3 and anti-alpha since P23c (V254: five `ParticleType`s routed by two predicates into P23a's two group kernels, no unit added; the anti-neutron's beta decay and its at-rest annihilation compete as `G4Decay` and the capture do); `G4GPU_STRANGE_TRACKS=0` refuses the strange sixteen as before. The charm and bottom hadrons QBBC's FTF does produce (30 in 640,000 FTFP events, none on either 10 GeV beam) have no `ParticleType` |
+| b/c hadrons | **refused by name** at emission (`kBcHadronSecondary`), fatal as a primary. The hyperons, the anti-hyperons and K⁰L/K⁰S are tracks since P23a (RISK V240-V244) and the anti-neutron, anti-deuteron, anti-triton, anti-He3 and anti-alpha since P23c (V254: five `ParticleType`s routed by two predicates into P23a's two group kernels, no unit added; the anti-neutron's beta decay and its at-rest annihilation compete as `G4Decay` and the capture do); `G4GPU_STRANGE_TRACKS=0` refuses the strange sixteen as before. The eta and eta' are tracks since P31 (RISK V278-V282), with decay as their only process, which is what QBBC gives them; the eta' decay's rho0 and omega are decayed where they are made, as V280 records. The charm and bottom hadrons QBBC's FTF does produce (30 in 640,000 FTFP events, none on either 10 GeV beam) have no `ParticleType` |
 
 ### Not implemented
 
@@ -665,7 +665,10 @@ send every one of them somewhere else.
     +/- 0.00441 against 1.63668 (-0.73%, -1.9 sigma); against QBBC as it ships they sit -1.3% and
     -3.3%, which is the eta and eta' share of Geant4's own dose on these beams (1.1% and 2.5%):
     the `ParticleType` gap of V240, not an excess (V266). The 1 GeV proton and the B1 gate did not
-    move by a digit.
+    move by a digit. P31 then gave the eta and eta' tracks (V278-V282), and against QBBC AS IT
+    SHIPS the 10 GeV proton is 2.15246 +/- 0.00621 uGy against 2.14589 (+0.31%, +0.75 sigma) and
+    the 10 GeV pi+ 1.67198 +/- 0.00453 against 1.67928 (-0.43%, -1.14 sigma), with the ledger's
+    no-row group at zero. Nothing is dropped on either side any more.
 
   10. **CLOSED by P28. The antiproton beam sat +20.5% above QBBC for question 9's reason: the
      residual of every FTFP final state carried its excitation as kinetic energy** (RISK V255
@@ -684,7 +687,8 @@ send every one of them somewhere else.
      it booked as an ion's kinetic energy before the fix and spent on evaporation after. The beam
      after (V266): 595.215 +/- 2.488 nGy against Geant4's 590.583 with the eta and eta' dropped on
      both sides (+0.78%, +1.3 sigma), and -4.5% against QBBC as it ships, the eta and eta' share of
-     Geant4's dose on this beam being 5.2%.
+     Geant4's dose on this beam being 5.2%. With the eta and eta' as tracks (P31, V278-V282) the
+     beam is 622.679 +/- 2.583 nGy against 623.26 as it ships: -0.09%, -0.16 sigma.
 
 
 ---
