@@ -528,12 +528,13 @@ __host__ __device__ inline int pdg_code(ParticleType t) {
 /// The species of a nucleus (Z, A), as every hadronic model in Geant4 resolves one: six light
 /// nuclei by name and `G4IonTable::GetIon` for the rest.
 ///
-/// Returns `kGenericIon` for everything heavier, which in this port is a REFUSED species - it
-/// has no kernel, so `species_disposition` reports it and the run counts it. That is the honest
-/// answer and not a shortcut: `particle_def(kGenericIon)` carries G4GenericIon's own
-/// 938.2723 MeV placeholder mass, so transporting a carbon recoil as one would step a nucleus
-/// twelve times too light. Whoever gives this port real ion transport replaces this line, not
-/// the ParticleDef.
+/// Returns `kGenericIon` for everything heavier: the species every real nucleus is STEPPED as
+/// (since P8c), with its nuclide carried beside it in `TrackState::ion_za` - a secondary's from
+/// `BufferEmitter::push_nucleus`, a primary's from `/gun/ion Z A` through `Primary::ion_za`
+/// (P30). The species alone is not a particle: `particle_def(kGenericIon)` is G4GenericIon's
+/// 938.2723 MeV placeholder, the particle the dE/dx tables belong to, so the mass, charge and
+/// spin a step uses come from the nuclide (`em::stepped_ion`), never from this ParticleDef -
+/// a carbon stepped on the placeholder would be twelve times too light.
 ///
 /// (Z, A) = (0, 1) is a neutron and (1, 1) a proton, which are not ions at all - the mapping is
 /// here rather than at the call sites because a de-excitation product list holds all of them.

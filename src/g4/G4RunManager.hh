@@ -338,28 +338,14 @@ class G4RunManager {
     using g4gpu::ParticleType;
     using g4gpu::SpeciesDisposition;
     const ParticleType t = src.particle;
-    // `GenericIon` IS stepped now and is still not a primary, which is why this test is ahead
-    // of the disposition one.
-    //
-    // A `kGenericIon` track is a real nuclide and carries its (Z, A) in `TrackState::ion_za`;
-    // `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder, which is the
-    // particle the dE/dx TABLES belong to and not a particle anything can be. Every ion this
-    // transport steps arrives as a secondary through `BufferEmitter::push_nucleus`, which is
-    // the only thing that sets the nuclide; there is no `/gun/ion Z A` in this port's
-    // G4UImanager, so a primary GenericIon would be a nucleus with no nuclide - and
-    // `step_hadron` would refuse every one of them as `kIonWithoutNuclide` and deposit its
-    // energy where it stood. Refusing here says so once instead of a million times.
-    if (t == ParticleType::kGenericIon) {
-      std::printf(
-          "\nFATAL: \"GenericIon\" is not a primary this transport will fire.\n"
-          "  G4GenericIon is a PLACEHOLDER definition - 938.2723 MeV, charge 1 - whose\n"
-          "  G4ionIonisation owns the dE/dx and range tables every real nuclide reads at a\n"
-          "  scaled energy. It is not a particle: firing one would step a nucleus of unknown\n"
-          "  (Z, A). Real ions ARE transported, as secondaries: an elastic recoil arrives\n"
-          "  through BufferEmitter::push_nucleus carrying its own nuclide.\n"
-          "  A primary ion needs a gun that takes (Z, A) - Geant4's `/gun/ion` - which this\n"
-          "  port does not have. Add it, and `em::stepped_ion(Z, A)` is what it feeds.\n");
-      std::exit(2);
+    // A NUCLEUS IS A PRIMARY WHEN IT HAS A NUCLIDE (P30). `/gun/particle ion` + `/gun/ion Z A`
+    // gives the gun G4IonTable::GetIon's definition, which carries (Z, A); the bare
+    // `GenericIon` name gives the placeholder, which does not, and is refused here as in
+    // RunEvents.
+    if (t == ParticleType::kGenericIon
+        && (gun_ == nullptr || gun_->GetParticleDefinition() == nullptr
+            || gun_->GetParticleDefinition()->GetIonZA() == 0)) {
+      RefuseBareGenericIon();
     }
     if (g4gpu::species_disposition(t) == SpeciesDisposition::kStepped) { return; }
     const G4String name = (gun_ != nullptr) ? gun_->GetParticleName() : G4String("?");
@@ -381,7 +367,7 @@ class G4RunManager {
         "\n"
         "  Stepped today: gamma, e-, e+, mu-, mu+, pi+, pi-, kaon+, kaon-, proton,\n"
         "  anti_proton, deuteron, triton, alpha, He3, neutron, pi0, and every real nuclide\n"
-        "  (as a secondary - see the GenericIon message above).\n"
+        "  (/gun/particle ion + /gun/ion Z A, or as a secondary).\n"
         "\n"
         "  What each remaining species needs:\n"
         "\n"
@@ -391,6 +377,26 @@ class G4RunManager {
         "\n"
         "  Refusing rather than transporting \"%s\" as something it is not.\n",
         name.c_str(), name.c_str());
+    std::exit(2);
+  }
+
+  /// A primary of the bare `GenericIon` definition: refused, by name.
+  ///
+  /// `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder, the particle the
+  /// dE/dx TABLES belong to and not one anything can be. A real nucleus is G4IonTable's
+  /// definition of (Z, A) - `/gun/particle ion` then `/gun/ion Z A`, as in Geant4 - and that
+  /// one carries its nuclide onto the track (Primary::ion_za, P30). Without it `step_hadron`
+  /// would refuse every step as `kIonWithoutNuclide` and deposit the energy where it stood;
+  /// refusing here says so once instead of a million times.
+  static void RefuseBareGenericIon() {
+    std::printf(
+        "\nFATAL: \"GenericIon\" is not a primary this transport will fire.\n"
+        "  G4GenericIon is a PLACEHOLDER definition - 938.2723 MeV, charge 1 - whose\n"
+        "  G4ionIonisation owns the dE/dx and range tables every real nuclide reads at a\n"
+        "  scaled energy. It is not a particle: firing one would step a nucleus of unknown\n"
+        "  (Z, A). Name the nucleus as Geant4 does:\n"
+        "      /gun/particle ion\n"
+        "      /gun/ion 6 12          (Z A [Q]; a ground state)\n");
     std::exit(2);
   }
 
@@ -649,6 +655,13 @@ inline g4gpu::host::RunStats G4RunManager::RunEvents(G4int n_events, std::vector
                    pp.GetMomentumDirection().z()};
         rec.ekin = pp.GetKineticEnergy();
         rec.particle = SpeciesOf(pp.GetParticleDefinition());
+        // P30: the nuclide, for a nucleus G4IonTable::GetIon made (`/gun/ion Z A`); zero for
+        // every other definition. `seed_from_primaries` writes it into the track, and from it
+        // the transport derives the mass, the charge and the tables - see Primary::ion_za.
+        rec.ion_za = pp.GetParticleDefinition()->GetIonZA();
+        if (rec.particle == g4gpu::ParticleType::kGenericIon && rec.ion_za == 0) {
+          RefuseBareGenericIon();
+        }
         primaries_.push_back(rec);
       }
     }

@@ -11,26 +11,53 @@
 #include <string>
 #include <vector>
 #include "core/particle.cuh"
+#include "core/track_buffer.cuh"      // ion_za_of: the nuclide's encoding on a track
+#include "data/nuclei_mass_ame12.hh"  // G4NucleiProperties::GetNuclearMass, an ion's mass
 #include "g4/G4SystemOfUnits.hh"
 #include "g4/G4ThreeVector.hh"
 #include "g4/G4Types.hh"
 #include "physics/source.cuh"
 
 /// A particle definition. Thin: the transport only needs mass, charge and species.
+///
+/// A REAL NUCLEUS IS A DEFINITION OF ITS OWN (P30), as `G4IonTable::CreateIon` makes one per
+/// (Z, A): the species is `kGenericIon` - the one the transport steps every nucleus heavier than
+/// an alpha as - and the definition adds the nuclide, which is what the species cannot say.
+/// Its mass is `G4IonTable::GetNucleusMass(Z, A)`, i.e. G4NucleiProperties::GetNuclearMass
+/// (`data::get_nuclear_mass`, every level P24 transcribed), and its PDG charge Z - CreateIon's
+/// `charge = G4double(Z)*eplus`. Built only by G4IonTable::GetIon below.
 class G4ParticleDefinition {
  public:
   G4ParticleDefinition(const G4String& name, g4gpu::ParticleType type)
       : name_(name), type_(type) {}
+  G4ParticleDefinition(const G4String& name, G4int z, G4int a)
+      : name_(name), type_(g4gpu::ParticleType::kGenericIon), z_(z), a_(a),
+        ion_za_(g4gpu::ion_za_of(z, a)) {}
   const G4String& GetParticleName() const { return name_; }
   g4gpu::ParticleType GetType() const { return type_; }
   G4double GetPDGMass() const {
+    if (ion_za_ != 0) { return g4gpu::data::get_nuclear_mass(a_, z_) * MeV; }
     return g4gpu::particle_def<G4double>(type_).mass * MeV;
   }
-  G4double GetPDGCharge() const { return g4gpu::particle_def<G4double>(type_).charge; }
+  G4double GetPDGCharge() const {
+    if (ion_za_ != 0) { return static_cast<G4double>(z_); }
+    return g4gpu::particle_def<G4double>(type_).charge;
+  }
+  /// G4ParticleDefinition::GetAtomicNumber/GetAtomicMass: Z and A for a nucleus made by
+  /// G4IonTable, zero for everything else (the port's light nuclei - d, t, He3, alpha - are
+  /// species of their own and carry them in their ParticleType, not here).
+  G4int GetAtomicNumber() const { return z_; }
+  G4int GetAtomicMass() const { return a_; }
+  /// The nuclide as `TrackState::ion_za` encodes it, for the run manager to put on the primary
+  /// record (`g4gpu::Primary::ion_za`). Zero for every definition that is not a real nucleus.
+  unsigned short GetIonZA() const { return ion_za_; }
 
  private:
   G4String name_;
   g4gpu::ParticleType type_;
+  G4int z_ = 0;
+  G4int a_ = 0;
+  unsigned short ion_za_ = 0;
 };
 
 class G4ParticleTable {
@@ -74,6 +101,104 @@ class G4ParticleTable {
   std::vector<std::unique_ptr<G4ParticleDefinition>> defs_;
 };
 
+/// G4IonTable, for the one thing a gun asks of it: the definition of a nucleus (Z, A).
+///
+/// `GetIon(Z, A, E)` is 11.1.1's `G4IonTable::GetIon(Z, A, E, flb, J)` for what this port
+/// transports - a ground state:
+///
+///   - `(A<1) || (Z<=0) || (E<0.0) || (A>999)` returns nullptr, Geant4's own test (G4IonTable.cc
+///     :642), and the messenger then prints Geant4's own "Ion with Z=.. A=..is not defined";
+///   - Z <= 2 and one of (1,1) (1,2) (1,3) (2,4) (2,3) is `GetLightIon` - the proton, deuteron,
+///     triton, alpha or He3 definition, a species of its own here as there;
+///   - everything else is a definition named `GetIonName(Z, A, 0)` - "C12", "Fe56" - created
+///     once and kept, as CreateIon does.
+///
+/// AND IT REFUSES BY NAME what the port cannot carry, where Geant4 would make a particle
+/// (`RefusalReason` says which, and GetIon returns nullptr for it):
+///
+///   - an EXCITATION ENERGY: E > 0 makes an excited ion, `C12[4438.900]`, and the transport
+///     steps ground states only - a track has no excitation field and no isomer decay;
+///   - a (Z, A) whose nuclear mass G4NucleiProperties sets to zero (Z > A): Geant4 warns
+///     "Wrong values for A = .. and Z = .." and builds an ion of mass zero, which this transport
+///     would step at beta 1 (`step_hadron`'s `kIonWithoutNuclide`);
+///   - Z >= 128 or A >= 512, past `ion_za_of`'s encoding (`TrackState::ion_za`). AME2012 stops
+///     at Z 110, A 273 and the theoretical table at Z 136, A 339; Geant4 goes to A 999 on the
+///     formula, which no B1 or AstroRad beam is.
+///
+/// A (Z, A) past AME2012 with a positive mass is NOT refused: since P24 (docs/RISK.md V238)
+/// `data::get_nuclear_mass` is all four of GetNuclearMass's levels and gives the mass Geant4
+/// gives, and a secondary of that nuclide is already transported on it.
+class G4IonTable {
+ public:
+  static G4IonTable* GetIonTable() {
+    static G4IonTable inst;
+    return &inst;
+  }
+
+  /// Why `GetIon(Z, A, E)` returns nullptr when Geant4 would have made a particle, or nullptr
+  /// when it would not refuse. Geant4's own illegal-argument test is not a refusal of this
+  /// port's and returns nullptr here too - the messenger reports that one in Geant4's words.
+  static const char* RefusalReason(G4int z, G4int a, G4double e) {
+    if ((a < 1) || (z <= 0) || (e < 0.0) || (a > 999)) { return nullptr; }
+    if (e > 0.0) {
+      return "an excited ion (E > 0): the transport steps ground states only - a track carries "
+             "no excitation energy and no isomer level";
+    }
+    if (!g4gpu::data::nuclear_mass_known(a, z)) {
+      return "G4NucleiProperties::GetNuclearMass(A, Z) is zero for it (Z > A), and a nucleus "
+             "of mass zero would be stepped at beta 1";
+    }
+    if (g4gpu::ion_za_of(z, a) == 0) {
+      return "Z >= 128 or A >= 512 is past TrackState::ion_za's encoding";
+    }
+    return nullptr;
+  }
+
+  G4ParticleDefinition* GetIon(G4int z, G4int a, G4double e = 0.0) {
+    if ((a < 1) || (z <= 0) || (e < 0.0) || (a > 999)) { return nullptr; }
+    if (RefusalReason(z, a, e) != nullptr) { return nullptr; }
+    // GetLightIon: the five light nuclei are particles of their own, in Geant4 and here.
+    const g4gpu::ParticleType light = g4gpu::particle_type_of_nucleus(z, a);
+    if (light != g4gpu::ParticleType::kGenericIon) {
+      return G4ParticleTable::GetParticleTable()->FindParticle(g4gpu::particle_name(light));
+    }
+    const unsigned short za = g4gpu::ion_za_of(z, a);
+    for (auto& d : ions_) {
+      if (d->GetIonZA() == za) { return d.get(); }
+    }
+    ions_.emplace_back(new G4ParticleDefinition(GetIonName(z, a), z, a));
+    return ions_.back().get();
+  }
+
+  /// G4IonTable::GetIonName(Z, A, lvl = 0): the element's symbol and the mass number, or
+  /// "E<Z>-<A>" past the 118 elements G4IonTable names (G4IonTable.cc:1229).
+  static G4String GetIonName(G4int z, G4int a) {
+    // G4IonTable::elementName, 11.1.1, in order.
+    static const char* const kElementName[118] = {
+        "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si",
+        "P",  "S",  "Cl", "Ar", "K",  "Ca", "Sc", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni",
+        "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y",  "Zr", "Nb", "Mo",
+        "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I",  "Xe", "Cs", "Ba",
+        "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+        "Lu", "Hf", "Ta", "W",  "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po",
+        "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U",  "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+        "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn",
+        "Nh", "Fl", "Mc", "Lv", "Ts", "Og"};
+    G4String name;
+    if (z > 0 && z <= 118) {
+      name = kElementName[z - 1];
+    } else if (z > 118) {
+      name = "E" + std::to_string(z) + "-";
+    } else {
+      return "?";
+    }
+    return name + std::to_string(a);
+  }
+
+ private:
+  std::vector<std::unique_ptr<G4ParticleDefinition>> ions_;
+};
+
 /// Declared here so the gun can take one; defined with the rest of the event API in
 /// G4UserActions.hh, which includes this header.
 class G4Event;
@@ -87,7 +212,31 @@ class G4ParticleGun {
     src_.particle = d->GetType();
     particle_name_ = d->GetParticleName();
     definition_ = d;
+    // G4ParticleGun::SetParticleDefinition: `particle_charge = GetPDGCharge()`, so a gun moved
+    // off an ion forgets the ion's charge state as Geant4's does.
+    charge_ = d->GetPDGCharge();
   }
+  /// G4ParticleGun::SetParticleCharge - the primary's DYNAMIC charge, e+ units. `/gun/ion Z A Q`
+  /// sets it after the definition (G4ParticleGunMessenger::IonCommand).
+  ///
+  /// HELD, NOT TRANSPORTED, AND THAT IS EXACT FOR WHAT THIS PORT RUNS (P30, docs/RISK.md V274).
+  /// Geant4 copies it onto the G4PrimaryParticle and G4PrimaryTransformer onto the track's
+  /// G4DynamicParticle, and in 11.1.1 the processes QBBC gives a nucleus never read it back:
+  /// G4ionIonisation's charge is `G4EmCorrections::EffectiveChargeSquareRatio`, recomputed from
+  /// the definition, the material and the energy on every step (`em::hadron_charge_sq_ratio` is
+  /// that), msc and the hadronic processes read the definition's PDG charge, and the one reader
+  /// of the dynamic charge on this path is G4Transportation's field propagation - and this port
+  /// has no magnetic field. A track here carries no dynamic-charge field, so there is nothing to
+  /// seed it into; a Q other than Z changes nothing Geant4 would compute for a B1 geometry.
+  void SetParticleCharge(G4double q) { charge_ = q; }
+  G4double GetParticleCharge() const { return charge_; }
+
+  /// G4ParticleGunMessenger::fShootIon - `/gun/particle ion` sets it and `/gun/ion` requires
+  /// it. Geant4 keeps it on the messenger, one per gun; this port's one macro interpreter
+  /// (G4UImanager) serves whichever gun is registered, so the flag lives with the gun it
+  /// describes rather than with the interpreter.
+  void SetShootIon(G4bool on) { shoot_ion_ = on; }
+  G4bool GetShootIon() const { return shoot_ion_; }
   void SetParticleEnergy(G4double e) {
     src_.energy_shape = g4gpu::EnergyShape::kMonoenergetic;
     src_.energy = e / MeV;
@@ -226,6 +375,8 @@ class G4ParticleGun {
   G4int n_particle_ = 1;
   G4String particle_name_ = "gamma";
   G4ParticleDefinition* definition_ = nullptr;
+  G4double charge_ = 0;
+  G4bool shoot_ion_ = false;
   std::vector<G4double> spec_e_, spec_cdf_;
 };
 

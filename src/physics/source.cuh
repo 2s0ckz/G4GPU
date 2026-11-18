@@ -62,15 +62,28 @@ struct EnergySpectrum {
 /// the gun happened to offer, and nothing else. A Gaussian beam spot, a phase-space file, a
 /// different species on alternate events - none of them could be written.
 ///
-/// Sixteen bytes of position, sixteen of direction, one energy and one species: 56 bytes at
-/// double precision. Two million events is 112 MB uploaded over a run, in batch-sized pieces,
-/// against about a second of transport. That is the price of the generality and it is worth it.
+/// Twenty-four bytes of position, twenty-four of direction, one energy, one species and its
+/// nuclide, and a time: 72 bytes at double precision. Two million events is 144 MB uploaded
+/// over a run, in batch-sized pieces, against about a second of transport. That is the price of the generality and it is worth it.
 template <typename real_t>
 struct Primary {
   Vec3<real_t> pos;
   Vec3<real_t> dir;
   real_t ekin;
   ParticleType particle;
+  /// The nuclide of a `kGenericIon` primary, `ion_za_of(Z, A)`; zero for every other species.
+  ///
+  /// P30. Geant4's primary carries its nuclide in its DEFINITION - `/gun/ion 6 12` makes
+  /// `G4IonTable::GetIon(6, 12, 0)`'s C12, a particle of its own - and this record carries the
+  /// species, which for every real nucleus is the one `kGenericIon`. So the nuclide travels
+  /// beside it, as it does on a track (`TrackState::ion_za`), and `seed_from_primaries` copies it
+  /// into the slot: the track then has the mass, the charge and the tables a secondary C12 has,
+  /// because every one of them is derived from this field (`em::stepped_ion`).
+  ///
+  /// It costs the record nothing: `particle` is a 4-byte int at offset 56 and `t0` an 8-byte
+  /// real at 64, so in the double build these two bytes sit in padding that was already there
+  /// and `sizeof(Primary<double>)` stays 72 (tests/test_ion_primary.cu asserts it).
+  unsigned short ion_za = 0;
   /// G4PrimaryVertex::GetT0 - the time the vertex occurs at, ns. It becomes the track's global
   /// time, so a stepping action reading GetGlobalTime() sees the gun's clock rather than always
   /// zero. Defaulted, so a generator that does not set it still compiles and still behaves.

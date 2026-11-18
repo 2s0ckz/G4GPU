@@ -903,12 +903,16 @@ template <typename real_t>
 __host__ __device__ inline void seed_track_slot(TrackBuffer<real_t>& v, int slot,
                                                 const Vec3<real_t>& pos,
                                                 const Vec3<real_t>& dir, real_t ekin, int vol,
-                                                real_t t0) {
-  // No nuclide: a primary ion would need one, and there is no gun command that supplies (Z, A)
-  // - `G4RunManager::CheckSpecies` refuses `GenericIon` as a primary by name for exactly that
-  // reason. Written rather than left to the caller's memset because this function is the one
-  // place a primary's slot is filled.
-  v.ion_za[slot] = 0;
+                                                real_t t0, unsigned short ion_za = 0) {
+  // The nuclide, for a `kGenericIon` primary (P30: `/gun/ion Z A`, carried on
+  // `Primary::ion_za`), and zero for every other species. It is the ONLY thing a primary ion
+  // needs that a primary proton does not: `step_hadron` derives the mass (AME2012 and the rest of
+  // G4NucleiProperties' levels), the charge, the spin and the scaled tables from it through
+  // `em::stepped_ion`, and `run_step_hadron` the track's velocity through `ion_particle_def` -
+  // exactly as for a secondary ion, whose `BufferEmitter::push_nucleus` writes the same field.
+  // Written rather than left to the caller's memset because this function is the one place a
+  // primary's slot is filled. Defaulted because `b1_gpu_sched` seeds gammas only.
+  v.ion_za[slot] = ion_za;
   v.status[slot] = static_cast<int>(TrackStatus::fAlive);
   // A primary begins its life inside a volume, so its first step is the first in that volume.
   v.flags[slot] = kFirstStepInVolume;

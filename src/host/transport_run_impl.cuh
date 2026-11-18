@@ -143,7 +143,11 @@ __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
   // is what Geant4 reports too - GetParentID() 0 and GetCreatorProcess() null - and its clock
   // starts at the vertex time the generator asked for rather than at zero, so a stepping
   // action reading GetGlobalTime() sees the gun's clock.
-  seed_track_slot(*buf, slot, p.pos, p.dir, p.ekin, buf->volume[slot], p.t0);
+  //
+  // The nuclide goes in with it (P30): a `kGenericIon` primary from `/gun/ion Z A` carries
+  // `ion_za_of(Z, A)` on its record, and that one field is what makes it the same track a
+  // secondary C12 is - see seed_track_slot. Zero for every other species.
+  seed_track_slot(*buf, slot, p.pos, p.dir, p.ekin, buf->volume[slot], p.t0, p.ion_za);
 }
 
 
@@ -2022,6 +2026,27 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       const ParticleType p = primaries[i].particle;
       const SpeciesDisposition disp = species_disposition(p);
       if (disp == SpeciesDisposition::kStepped) {
+        // P30: A REAL NUCLEUS NEEDS ITS NUCLIDE. `kGenericIon` is a species with no particle of
+        // its own - `particle_def(kGenericIon)` is G4GenericIon's 938.2723 MeV placeholder - so
+        // a primary of it is only a particle when `ion_za` names one, with a mass Geant4 gives
+        // it (G4NucleiProperties::GetNuclearMass > 0). Without that `step_hadron` would refuse
+        // every step as `kIonWithoutNuclide` and deposit the energy where it stood; refusing
+        // the run says so once, by name, before anything is launched. The G4 layer's gun cannot
+        // build such a primary (`/gun/ion` refuses it, G4RunManager::RunEvents too); this is
+        // the guard for a caller that fills `Primary` records itself.
+        if (p == ParticleType::kGenericIon
+            && (primaries[i].ion_za == 0
+                || !data::nuclear_mass_known(ion_a_of(primaries[i].ion_za),
+                                             ion_z_of(primaries[i].ion_za)))) {
+          std::printf(
+              "\nFATAL: a \"GenericIon\" primary with no nuclide (event %d, ion_za %u).\n"
+              "  GenericIon is the placeholder whose tables every real nucleus reads; a primary\n"
+              "  nucleus is `/gun/particle ion` + `/gun/ion Z A` (Primary::ion_za), and its\n"
+              "  (Z, A) must have a nuclear mass. Refusing rather than stepping a nucleus of\n"
+              "  unknown mass.\n",
+              i, static_cast<unsigned int>(primaries[i].ion_za));
+          std::exit(2);
+        }
         // Every charged hadron is stepped from the hadron dE/dx and range tables. A scene
         // uploaded without them (b1_gpu_sched builds a gamma-only Scene deliberately) would
         // step the primary once, find a null table, and drop it. That is a silent zero, so it
