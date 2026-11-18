@@ -17348,3 +17348,200 @@ models the right projectile themselves. What the TRANSPORT hands the models was 
 until a primary made every interaction an ion's. The acceptance sweep (P27) is the instrument
 that would have found this on its first ion row, which is one more reason it comes before the
 performance phase.
+
+### V278: P31's scope, measured - the "no ParticleType row" group is the eta and the eta' and nothing else, on every hadron and ion row, and not only FTFP's
+
+The ledger has booked "an inelastic secondary whose PDG code core/particle.cuh has no row for" on
+every hadron row since P1, by count and energy and never by code; V240 named it from a
+137-secondary host probe (81 eta, 56 eta'), V277 guessed "eta, eta' and light anti-nuclei" for the
+ion rows. P31 put the codes on a tape: `NOROWTAPE pdg T proj_pdg ftf`, one line per booked
+secondary from every model, printed while `G4GPU_FTFP_TAPE` > 0 (commit eb2b1e5; no physics
+changed - the eight interaction units and the pool unit were the only ones rebuilt, main's other
+19 objects linked as they were). Main's engine (fa023f7) with that tape, the Titan V,
+`G4GPU_HADRONIC_STAGE=final`, the default live-track count, 1.02 GB left, host process 0.6 GB:
+
+| beam | events | eta: count, T (MeV) | eta': count, T (MeV) | ledger row | from FTFP | dose (main, to the digit) |
+|---|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 11,525, 3.176e6 | 7,401, 1.889e6 | 18,926, 5.065e6 | 18,747 | 595.213 nGy +/- 2.488 |
+| proton 10 GeV | 500,000 | 12,560, 1.451e7 | 5,061, 8.320e6 | 17,621, 2.283e7 | 17,035 | 2.11791 uGy +/- 6.14 nGy |
+| pi+ 10 GeV | 500,000 | 13,815, 2.769e7 | 7,439, 2.183e7 | 21,254, 4.952e7 | 20,700 | 1.62469 uGy +/- 4.41 nGy |
+| C12 12 GeV | 50,000 | 80, 1.016e4 (+1, below) | - | 81, 1.019e4 | 0 | 1.5713 uGy +/- 6.33 nGy |
+| C12 48 GeV | 20,000 | 1,201, 7.843e5 | 40, 4.550e4 | 1,241, 8.298e5 | 341 | 717.252 nGy +/- 4.11 |
+| proton 1000 MeV | 200,000 | 38, 4,101 (+1, below) | - | 39, 4,295 | 0 | 391.883 nGy +/- 1.338 |
+
+**Nothing else is in the group.** No light anti-nucleus (P23c made all five tracks; V277's guess
+was wrong), no rho, omega or phi (FTFP's own decay pass, `G4DecayKineticTracks`, decays every
+short-lived string product), no b/c hadron (those are booked by name, `kBcHadronSecondary`). The
+tape and the ledger agree to the count except two rows where the ledger holds ONE more eta than
+the tape: the photo-/lepto-nuclear drain emits through the same `emit_interaction_result` and was
+not taped. Every eta and eta' is a QBBC track (Transportation and Decay, V279), so all of them
+are P31's scope and nothing stays booked.
+
+**Not only FTFP's.** 2-5% of the etas on the hadron beams, all of the C12 12 GeV row's and the
+1 GeV proton's, and three quarters of the C12 48 GeV row's come from final states FTFP did not make - the
+pi+-, nucleon and nucleus interactions below FTFP's window, whose cascades decay N* and Delta
+resonances into an eta. So proton_1000 carries 39 of them, and it is the one existing row P31
+moves (V282).
+
+The antiproton row reads 595.213 nGy on main where V266 printed 595.215: V266 measured P28's branch
+before P25, P29 and P30 landed. Every other row is V266's or V277's to the printed digit.
+
+### V279: the eta and the eta' on tracks - two ParticleTypes, decay only, the eta_prime's table, and G4VDecayChannel::DynamicalMass
+
+**The rows.** ParticleType 45 `kEta` and 46 `kEtaPrime`, from G4Eta.cc and G4EtaPrime.cc: masses
+`0.547862*GeV` and `0.95778*GeV` written as those products (FTFP's hadron table carries the same
+doubles, 547.86199999999997 and 957.77999999999997, which `fill_result` holds a secondary's
+dynamic mass against), neutral, 2*spin 0, no moment, lifetime 0.0 ns, not stable. `test_species`
+holds both to `species_tables.csv` (836 comparisons, 0 failures; tlimit included) and
+`test_wiring` closes the round trip over every code in `decay_applicable.csv`.
+
+**What QBBC gives them**, read off the constructed physics list and not the builders alone:
+`species_processes.csv` lists `Transportation, Decay` for both and nothing else; the
+G4HadronicProcessStore answers 0 per volume for hadElastic and inelastic at every energy in all
+four materials (`strange_tracks_xs.csv`, 2 x 81 x 4 points each); the source agrees -
+`G4HadronInelasticQBBC` builds on the nucleons and pions and hands `G4HadronicBuilder` the kaons,
+hyperons, anti-hyperons, light anti-ions and b/c hadrons, `G4HadronElasticPhysics` the same lists,
+and `G4HadParticles` holds neither 221 nor 331 anywhere; neutral, they get no EM process.
+`elastic_channel` and `inelastic_channel` answer `kNone` for both by name (the honest entry: no
+refusal is booked, because there is nothing to refuse). The neutral group kernel steps them
+(`is_strange_neutral_track`), sigma0's shape: the zero lifetime is G4Decay's DBL_MIN mean free
+path, so each decays at its first step; born at rest, G4Decay's at-rest length is 0 x tau = 0.
+`test_strange_tracks`: 23 group species against the managers (section 1), the mean free path to
+the DBL_MIN sentinel (sections 3-4), and 1,200 eta and eta' tracks stepped in water and bone (540
+decays in flight and 60 at rest each), every decay balanced in charge, baryon number and energy
+(section 6). No engine unit added.
+
+**The table.** G4EtaPrime.cc's five G4PhaseSpaceDecayChannels, inserted 0.429, 0.222, 0.291,
+0.0220, 0.0275 and stored by `G4DecayTable::Insert` as 0.429 eta pi+ pi-, 0.291 rho0 gamma, 0.222
+eta pi0 pi0, 0.0275 omega gamma, 0.0220 gamma gamma (channels 99-103; read back off the running
+Geant4, `decay_tables.csv`: 108 channels, every field 0.000e+00). The eta's four were P23b's.
+
+**DynamicalMass.** The rho0 (149.1 MeV wide at 775.26) and the omega (8.49 at 782.65) are the first
+daughters in these tables above 1e-3 of their mass, so `G4PhaseSpaceDecayChannel::TwoBodyDecayIt`
+takes its `withWidth` branch: maxDev = (M - m0 - m1)/sqrt(w0^2 + w1^2), PART112's empty list at or
+below -rangeMass, each daughter WITH a width drawn by `G4VDecayChannel::DynamicalMass` (a
+Breit-Wigner truncated to [m - 2.5 w, m + min(maxDev, 2.5) w], two uniforms a try, MAX_LOOP 10000
+with the fall-through), both redrawn while their sum exceeds M, and the daughter built with the
+four-argument G4DynamicParticle (its stored mass snapped within 1e-5 MeV). Transcribed draw for
+draw (`decay::dynamical_mass`, `phase_space_two_body`). Geant4's resampling `while` is unbounded;
+the port's refuses past 10,000 rounds by name (`kDynamicalMassLoopBound`) - unreachable with one
+wide daughter, which is all these tables have. The three- and many-body `withWidth` branches stay
+refused by name (`kDynamicalMassNotPorted`): no channel here reaches them.
+
+**The campaign.** `test_decay`'s sampled block runs every channel 400,000 times against Geant4's
+own (`decay_moments.csv`, `decay_hist.csv`); for the two DynamicalMass channels the fixed-mass
+limit does not bound the spectrum (Geant4's own extremes pass it), so the bound asserted is the
+two-body momentum with the wide daughter at the bottom of its Breit-Wigner, which Geant4's maxima
+respect too. Section 10 is new: `decay_chain.csv` is G4Decay's body on 1,000,000 eta and 1,000,000
+eta_prime at rest with every rho0 and omega decayed as V280 says Geant4 decays it, and the port's
+`sample_decay` on as many. Worst rows: branching fraction 1.53 sigma (eta_prime channel 2),
+final-state multiplicity 2.14 sigma and rest-frame <Ekin> 2.56 sigma (eta_prime's omega gamma
+channel, pi0), a 40-bin spectrum bin 3.02 sigma (eta_prime eta pi0 pi0, pi0); the rho0's dynamic
+mass <m> 680.271 MeV against Geant4's 680.205 (0.16 sigma, 293,157 decays), the omega's 782.680
+against 782.633 (0.45 sigma, 28,027); four-momentum closure 5.9e-11 of the parent mass.
+
+Anti-vacuity, each restored: the rho0's width +5% fires 18 assertions (10 in the chain: the
+photon's <Ekin> 18 sigma); eta_prime channels 1 and 2 exchanged, 45; omega's gamma pi0 BR x1.2,
+11; `withWidth` forced off, 132 (rho0 <m> 775.26 against 680.20); `resolve_short_lived` removed,
+the chain fails on the pi+- multiplicities and the omega gamma channel's photons (223 sigma).
+
+### V280: how an eta_prime's rho0 or omega becomes pions in 11.1.1 - a track that decays at its first step - and the one thing in P31 that is not a track
+
+**Settled from the source and the constructed QBBC.** G4ShortLivedConstructor builds the rho0 and
+the omega as G4ExcitedMesons (G4VShortLivedParticle: IsShortLived true) with lifetime 0.0 and
+stable false. `G4VUserPhysicsList::InitializeProcessManager` (G4VUserPhysicsList.cc:229-251) gives
+EVERY particle in the table a process manager, short-lived or not;
+`G4PhysicsListHelper::AddTransportation` gives every one Transportation; and
+`G4DecayPhysics::ConstructProcess` registers its one G4Decay wherever `G4Decay::IsApplicable` says
+yes - which reads only `lifetime >= 0` and `mass > 0`, true for both (RegisterProcess would be a
+FatalException on a particle with no manager, and QBBC runs). Measured: `decay_atrest.csv` lists
+Decay at rest for both, and `decay_chain.csv`'s process rows give `Transportation, Decay`, flagged
+short-lived. Only `BuildPhysicsTable` skips a short-lived particle, and G4Decay builds no table.
+
+So in Geant4, `G4Decay::DecayIt` on the eta_prime makes a G4Track of the rho0 from the
+G4DynamicParticle its channel built - carrying the DynamicalMass V279 describes;
+`G4StackManager::PushOneTrack` takes it (it has a definition ID); on its first step G4Decay's
+`GetMeanFreePath` is DBL_MIN (c*tau = 0 < DBL_MIN, G4Decay.cc:144) against Transportation's
+geometric step, so the step is DBL_MIN x -log(U) long and ends in `G4Decay::DecayIt`'s PostStep
+branch: `SelectADecayChannel` and the channel's `DecayIt` at the track's DYNAMIC mass, the products
+boosted by its total energy (floored at its mass, DECAY102) and direction. Neutral, it deposits
+nothing on the way. (FTFP's own decay pass, `G4DecayKineticTracks`, decays the short-lived
+resonances the STRINGS make before they leave the model; it never sees a decay product, and it
+was not touched.)
+
+**What the port does** is that decay, in `decay::resolve_short_lived`, called at the end of
+`sample_decay`: every product flagged short-lived (`particle_is_short_lived`, the two rows above)
+is decayed at its dynamic mass, boosted by its lab energy and direction, and replaced by its
+products, which carry its `daughter` index. It is NOT A TRACK, and that is the named difference:
+this transport has no `ParticleType` for a rho0 or an omega and `TrackState` carries no dynamic
+mass (a field every species would pay for in every kernel, V22's register budget, for a species
+whose whole existence is one step). What that costs, exactly: the step not taken is 2.2e-308 mm
+times -log(U), below the last bit of every coordinate, with zero time; its one uniform for that
+length is not drawn, as the port draws none for sigma0's DBL_MIN length
+(`had::decay_in_flight_length`); and a step hook (`G4VUserDeviceSteppingAction`) sees no rho0 or
+omega step, where Geant4's stepping action would see one. The final state is G4Decay's, and
+`test_decay` section 10 holds it to Geant4's (V279). A short-lived daughter of a short-lived
+daughter does not occur in these tables and is not looked for; a short-lived daughter whose own
+decay comes back empty is refused by name (`kShortLivedDaughter`) - unreachable, since the rho0's
+dynamic mass is at least 402.5 MeV against 279.1 for its pions and the omega's at least 761.4
+against 414.1.
+
+**One inherited property this measured.** A boosted photon's E^2 - p^2 is rounding, and
+`G4DynamicParticle::Set4Momentum` (`set_four_momentum`, P4's transcription) keeps it as a dynamic
+mass once it passes EnergyMRA2 = 1e-10 MeV^2 - so a photon from a 1-2 GeV eta_prime leaves with
+up to 3e-5 MeV less kinetic energy than its share. Geant4 does the same, and its photon processes
+read that kinetic energy. `test_strange_tracks`' balance (1e-9 of the parent energy) failed 76
+eta and eta_prime decays on it; it now allows each photon sqrt(8 eps) of the parent energy, the
+mass a rounding of E^2 can be. The sixteen strange species' photons never reached it.
+
+### V281: the emission - every eta and eta' is a track, and the "no row" group is empty on all six rows
+
+There was nothing to write at the emission sites: `emit_interaction_result` and
+`emit_decay_products` push any code `particle_type_of_pdg` has a row for, so FTFP's string products,
+the cascades' resonance-decay etas, the photo-/lepto-nuclear drain's and an eta_prime's own eta
+became tracks with the rows. `definition_mass_of` now answers the eta's definition mass where it
+answered the model's dynamic mass; the two are the same double for FTFP's (V279), so
+`fill_result`'s kinetic energy is unchanged. `test_strange_tracks` section 7 hands the emitter a
+221 and a 331 and gets `kEta` and `kEtaPrime` back. The decay table's `kNoTable` refusal of the
+eta_prime is retired, and `G4GPU_STRANGE_TRACKS=0` leaves both on tracks (they are not strange).
+
+The six rows of V278 again, P31's engine, the same tape: **0 secondaries with no ParticleType row
+on every one** - the antiproton's ledger is empty, the 10 GeV pi+ keeps the one Bertini refusal it
+had (`bert::apply_yourself`, 4,027 MeV), the C12 rows keep their per-step ion delta-ray rows (V260)
+and nothing else. Residue: none.
+
+### V282: the beams after - the three FTFP beams inside 1.2 sigma of QBBC as it ships, and the 200,000-event C12 pair says V277's -1.20% was a draw
+
+Example B1, this branch (all 27 engine units rebuilt: `particle.cuh` reaches every one), the
+Titan V alone under `out\gpu.lock`, `G4GPU_HADRONIC_STAGE=final`, the default live-track count,
+"1.01 GB of 12.00 GB left" on every run, the host process at most 0.69 GB; Geant4 11.1.1 as in
+B1_SWEEP's P28 section (ref/run/runb1.bat, QBBC as it ships) and, for the ions, ref/b1ion
+(exampleB1 serial, QBBC as it ships):
+
+| beam | events | port before (main) | port after | G4 QBBC as it ships | before vs QBBC | after vs QBBC | moved |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 595.213 nGy +/- 2.488 | 622.679 +/- 2.583 | 623.26 +/- 2.586 | -4.50%, -7.8 sigma | **-0.09%, -0.16 sigma** | +4.61% |
+| proton 10 GeV | 500,000 | 2.11791 uGy +/- 6.14 nGy | 2.15246 +/- 6.21 | 2.14589 +/- 6.21 | -1.30%, -3.2 sigma | **+0.31%, +0.75 sigma** | +1.63% |
+| pi+ 10 GeV | 500,000 | 1.62469 uGy +/- 4.41 nGy | 1.67198 +/- 4.53 | 1.67928 +/- 4.55 | -3.25%, -8.6 sigma | **-0.43%, -1.14 sigma** | +2.91% |
+| C12 12 GeV | 50,000 | 1.5713 uGy +/- 6.33 nGy | 1.57139 +/- 6.33 | 1.59042 +/- 6.39 | -1.20%, -2.1 sigma | -1.20%, -2.1 sigma | +0.006% |
+| C12 48 GeV | 20,000 | 717.252 nGy +/- 4.11 | 718.831 +/- 4.12 | 714.608 +/- 4.10 | +0.37%, +0.5 sigma | +0.59%, +0.73 sigma | +0.22% |
+| proton 1000 MeV | 200,000 | 391.883 nGy +/- 1.338 | 391.931 +/- 1.339 | 391.654 +/- 1.337 | +0.06%, +0.12 sigma | +0.07%, +0.15 sigma | +0.012% |
+
+Each FTFP beam moved by what V266 said the eta and eta' carry in Geant4's own dose (5.2%, 1.1%,
+2.5% - the difference between QBBC as it ships and QBBC with their Decay inactivated) and a little
+more, and all three now sit inside 1.2 sigma of QBBC as it ships with nothing dropped on either
+side. proton_1000 is NOT unchanged to the digit: its 39 cascade etas (V278) are tracks now, which
+moves it by 0.04 of its own sigma; that is the expected direction and size, not a regression. The
+B1 photon gate is to the digit: exampleB1 -n 2000000, 426.028 pGy, 1.10452 sigma.
+
+**The 200,000-event C12 12 GeV pair (V277's open question).** Port: ref/b1ion/C12_12000.mac with
+`/run/beamOn 200000`, 1,541 s (129.8 events/s), 6.35997 uGy +/- 12.7264 nGy. Geant4: ref/b1ion's
+serial exampleB1 on the same macro, 628 s, 6.35774 uGy +/- 12.7487 nGy. **+0.035%, +0.12 sigma.**
+At 0.2% a side the row is inside an eighth of a sigma; the -1.20% (-2.1 sigma) of the 50,000-event
+pair was a draw. The port's first 50,000 events are the 50,000-event run's to the digit (keyed
+generator): 1.57139 of the 6.35997, so its other 150,000 average 1.59619 a 50,000, against
+Geant4's 1.58944 over its whole 200,000. Nothing to chase.
+
+**Refused or not done, by name.** The rho0/omega step itself (V280). The three- and many-body
+DynamicalMass branches (unreached). The photo-/lepto-nuclear drain is not on the NOROW tape
+(V278's two one-eta differences); its etas are tracks like every other's.

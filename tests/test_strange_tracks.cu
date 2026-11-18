@@ -125,7 +125,7 @@ struct BalanceEmitter {
   int last_secondary = -1;
   const StepReport<real_t>* report = nullptr;
   had::HadronicRefusalBooks books{};
-  int charge = 0, baryon = 0, n = 0, n_antineutron = 0;
+  int charge = 0, baryon = 0, n = 0, n_antineutron = 0, n_gamma = 0;
   double etot = 0;
   ParticleType last = ParticleType::kNumTypes;
   __host__ __device__ int push(ParticleType t, const Vec3<real_t>&, real_t ekin, int,
@@ -134,6 +134,7 @@ struct BalanceEmitter {
     ++n;
     last = t;
     if (t == ParticleType::kAntiNeutron) { ++n_antineutron; }
+    if (t == ParticleType::kGamma) { ++n_gamma; }
     charge += static_cast<int>(std::lrint(particle_def<real_t>(t).charge));
     baryon += had::baryon_number_of(t, ion_a_of(za));
     etot += static_cast<double>(ekin) + (particle_def<real_t>(t).mass > 0
@@ -497,7 +498,17 @@ int main() {
               if (de > worst_e) { worst_e = de; }
               // A neutrino's energy is booked by `push` here like any other product, so the
               // sum is complete. 1e-9: the decay kinematics are double precision throughout.
-              if (!ok_q || !ok_b || de > 1e-9) {
+              //
+              // P31: PLUS, PER PHOTON, THE MASS G4DynamicParticle::Set4Momentum GIVES IT. A
+              // boosted photon's E^2 - p^2 is rounding - a few ulp of E^2 - and Set4Momentum
+              // (decay_products.cuh's `set_four_momentum`, transcribed) keeps it as a dynamic
+              // mass once it passes EnergyMRA2 = 1e-10 MeV^2, so the photon leaves with
+              // Ekin = E - sqrt(mass2): up to 3e-5 MeV short at the eta_prime's 1-2 GeV (measured,
+              // P31's probe). Geant4's photon does the same and its processes read that kinetic
+              // energy. The allowance is sqrt(8 eps) E_parent a photon - the mass of a rounding
+              // of E^2 - and the sixteen strange species' photons (sigma0's) never reached it.
+              const double tol = 1e-9 + static_cast<double>(em.n_gamma) * 4.2e-8;
+              if (!ok_q || !ok_b || de > tol) {
                 ++bad;
                 if (bad <= 5) {
                   std::printf("  bad decay of %s: charge %d/%d baryon %d/%d energy %.9g/%.9g\n",

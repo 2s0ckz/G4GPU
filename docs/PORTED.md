@@ -1934,6 +1934,22 @@ no `ParticleType`). Both used to be lumped into `kDecayChannel` / `kInelasticSec
 `G4GPU_STRANGE_TRACKS=0` refuses the sixteen at emission as before P23a (a study knob; the beams
 of docs/RISK.md V244 use it to measure the strange species' share).
 
+#### 2.1.18 The eta and the eta' on tracks (P31)
+
+The eta (221) and the eta' (331) - the only codes of the ledger's "no ParticleType row" group on
+the three FTFP beams and the two C12 rows (docs/RISK.md V278) - are ParticleType 45 and 46 since
+P31, stepped by the neutral group kernel. Before it every one was booked at emission with its
+kinetic energy, and its rest mass, which its decay hands to photons and pions, was lost too.
+
+| Geant4 | QBBC | | Where |
+|---|:--:|:--:|---|
+| `G4Eta`, `G4EtaPrime`: 0.547862 and 0.95778 GeV, neutral, spin 0, lifetime 0.0 ns, not stable | y | **V** | `particle_def` rows (the masses as `x*GeV` products, FTFP's own doubles); `test_species` against `species_tables.csv`, `test_wiring`'s round trip over `decay_applicable.csv` |
+| process list `Transportation, Decay` - no hadElastic (`G4HadronElasticPhysics`'s lists hold neither), no inelastic (`G4HadronInelasticQBBC`'s neither), no EM (neutral) | y | **V** | `elastic_channel`/`inelastic_channel` answer `kNone` explicitly; `test_strange_tracks` section 1 against `species_processes.csv`, section 3 against `G4HadronicProcessStore`'s zeros (`strange_tracks_xs.csv`) |
+| `G4Decay` with a zero lifetime: DBL_MIN mean free path in flight, 0 at rest | y | **V** | `step_neutral_strange` as for sigma0; section 3's mean free path to the DBL_MIN sentinel, section 6's decays balanced in charge, baryon number and energy, in flight and at rest |
+| the emission: FTFP's string products, the Binary cascade's and the light-ion reaction's resonance decays, and the eta_prime's own eta | y | **V** | `emit_interaction_result` and `emit_decay_products` push a rowed code as a track; `test_strange_tracks` section 7 |
+
+`G4GPU_STRANGE_TRACKS=0` leaves both on tracks (they are not strange).
+
 
 ### 2.2 What QBBC needs and is not there
 
@@ -2067,7 +2083,7 @@ for which `IsApplicable` is true. Invisible for gamma / e± / p / alpha - all st
 | G4DecayTable (`SelectADecayChannel`, `Insert`'s order) | y | **T** | `physics/decay/decay.cuh`, `physics/decay/decay_tables.hh` |
 | G4DecayProducts (`Boost`) | y | **T** | `physics/decay/decay_products.cuh` |
 | G4DynamicParticle (`Set4Momentum`, `SetMomentum`, `Get4Momentum`, the mass snap) | y | **T** | `physics/decay/decay_products.cuh`; and `Set4Momentum` again in `hadronic/capture/neutron_rad_capture.cuh`, where the `EnergyMRA2` branch that the decay path never reaches decides a capture residual's kinetic energy - see 2.1.5 |
-| G4VDecayChannel (`IsOKWithParentMass`, `rangeMass`) | y | **P** | `physics/decay/decay_channels.cuh` - `DynamicalMass`'s Breit-Wigner resampling is refused; no daughter of any ported table has a width above 1e-3 of its mass |
+| G4VDecayChannel (`IsOKWithParentMass`, `rangeMass`) | y | **P** | `physics/decay/decay_channels.cuh` - `DynamicalMass`'s Breit-Wigner resampling is refused; no daughter of any ported table has a width above 1e-3 of its mass *(P31: **V** - `dynamical_mass` transcribed draw for draw, and `G4PhaseSpaceDecayChannel::TwoBodyDecayIt`'s `withWidth` branch with it, reached by the eta_prime's rho0 gamma and omega gamma; the three- and many-body `withWidth` branches stay refused by name (`kDynamicalMassNotPorted`), no table reaching them. `test_decay`: the two channels' spectra and the decay chain's rho0/omega mass, 0.16 and 0.45 sigma - docs/RISK.md V279)* |
 | G4PhaseSpaceDecayChannel (1-, 2-, 3- and N-body) | y | **T** | `physics/decay/decay_channels.cuh` |
 | G4MuonDecayChannel | y | **T** | `physics/decay/decay_channels.cuh` - the plain channel is what `G4MuonPlus.cc`/`G4MuonMinus.cc` install |
 | G4KL3DecayChannel (+ `DalitzDensity`) | y | **T** | `physics/decay/decay_channels.cuh` |
@@ -2083,7 +2099,8 @@ for which `IsApplicable` is true. Invisible for gamma / e± / p / alpha - all st
 | `G4HadronicBuilder::BuildDecayTableForBCHadrons` - the thirty b/c hadrons of `sBCHadrons`, etac, J/psi, Upsilon - and the sigma_c/sigma_b definitions' own tables | y | **V** | same file. One `G4PhaseSpaceDecayChannel` each at BR 1.0 - the builder's "dummy" channel, the definitions passing NULL - and lambda_b's and anti_lambda_b's are FOUR-body, the first real callers of `ManyBodyDecayIt`. Reached in QBBC because `EnableBCParticles` is set and FTFP's strings make c and b quarks (2e-4, 5e-5 per split); the twelve sigma_c/sigma_b are lifetime-0 tracks, not short-lived. docs/RISK.md V229 |
 | G4KaonZero's table (K0, anti-K0 -> K0L or K0S, one-body) | y | **-** | refused by name - `decay_refusal_reason(311)`, `DecayStatus::kNoTable` at the decay. No generator emits an unmixed K0: Bertini's `makeDynamicParticle`, `G4KineticTrack` and `G4HadronicProcess` each mix it to K0S/K0L first |
 | G4AntiNeutron's `G4NeutronBetaDecayChannel` | y | **V** | P23c: channel 98, e+ nu_e anti_proton, against `decay_tables.csv` and the 400,000-sample final states in `test_decay`; the anti-neutron is a track (the neutral group kernel) and `kAntiNeutronSecondary` is unreachable. Before P23c: refused by name, P23c's (the anti-light ions). A daughter of the anti-lambda, anti-sigma+ and anti-sigma-, so it is reached the moment P23a transports them: `kNoTable` if one is asked to decay, and - since it has no `ParticleType` - booked as `HadronicRefusal::kDecayChannel` by `emit_decay_products` when a parent's decay makes one. *(P23a: it IS reached - 1,006 anti-neutron daughters in `test_strange_tracks`'s 8,181 strange decays - and is booked under its own name, `kAntiNeutronSecondary`, with its kinetic energy, from a decay or a model)* |
-| G4EtaPrime's table | y | **-** | refused by name: its rho0 gamma and omega gamma channels take `G4PhaseSpaceDecayChannel` into `DynamicalMass`, which is the one `G4VDecayChannel` arm not ported. Reached as the Upsilon's daughter and out of FTFP's strings; booked like the anti-neutron. The eta, the D mesons and every other b/c daughter without a `ParticleType` are booked the same way until P23a gives them rows. *(P23a gave the strange species rows and left the b/c ones without: a b/c daughter or secondary is `kBcHadronSecondary` by name, the eta and the eta' stay in the generic rows)* |
+| G4EtaPrime's table | y | **-** | refused by name: its rho0 gamma and omega gamma channels take `G4PhaseSpaceDecayChannel` into `DynamicalMass`, which is the one `G4VDecayChannel` arm not ported. Reached as the Upsilon's daughter and out of FTFP's strings; booked like the anti-neutron. The eta, the D mesons and every other b/c daughter without a `ParticleType` are booked the same way until P23a gives them rows. *(P23a gave the strange species rows and left the b/c ones without: a b/c daughter or secondary is `kBcHadronSecondary` by name, the eta and the eta' stay in the generic rows)* *(P31: **V** - channels 99-103 in Insert order (0.429, 0.291, 0.222, 0.0275, 0.022), exact against `decay_tables.csv`; the eta and the eta' are tracks (2.1.18) - docs/RISK.md V279)* |
+| G4ShortLivedConstructor's rho0 and omega, and what 11.1.1 does with one an eta_prime makes | y | **V** | P31: `decay_tables.hh` rows (775.26 / 149.1 MeV, pi+ pi-; 782.65 / 8.49 MeV, three channels) flagged `short_lived`, exact against `decay_tables.csv`. In Geant4 each is an ordinary G4Track with Transportation and G4Decay, carrying the DynamicalMass its parent drew, decayed at its first (DBL_MIN) step; the port does that decay in `decay::resolve_short_lived` at the parent's decay point, without a track - named in docs/RISK.md V280. `test_decay` section 10 against `decay_chain.csv` (G4Decay's body on 1,000,000 of each parent, short-lived daughters decayed): fractions, multiplicities, rest-frame spectra and the daughter's dynamic mass |
 
 Species with a transcribed table: pi+, pi-, pi0, mu+, mu-, K+, K-, neutron, **and since P10c the
 seven hyperons** - lambda, sigma+, sigma0, sigma-, xi0, xi-, omega-. The refused set is K0L, K0S,

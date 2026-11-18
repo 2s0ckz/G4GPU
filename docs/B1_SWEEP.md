@@ -852,3 +852,35 @@ secondaries with no ParticleType row (V240), none refused otherwise.
 
 The 12 GeV row's -1.20% is inside the band and outside its own 2.1 σ; at 0.4% statistics a side
 it cannot tell a 1% effect from a draw, and a 200,000-event pair is the next run on this beam.
+
+## P31: the eta and the eta' on tracks (2026-11-18)
+
+The gap P28 left (V266): the three FTFP beams sat below QBBC as it ships by what the eta and eta'
+carry in Geant4's own dose, because the port booked every one at emission ("no ParticleType
+row") and lost its kinetic energy and its rest mass. P31 named the group with a tape on main's
+engine - the eta and the eta' and nothing else, on every hadron and ion row (docs/RISK.md V278) -
+and made both tracks of the neutral group kernel with G4Decay alone, the eta_prime's table with
+G4VDecayChannel::DynamicalMass under it, and its rho0 and omega daughters decayed as 11.1.1
+decays them (V279, V280). This branch, all 27 engine units rebuilt, `G4GPU_HADRONIC_STAGE=final`,
+the default live-track count, the Titan V alone, "1.01 GB of 12.00 GB left" on every run:
+
+| beam | events | port before (main) | port after | G4 QBBC as it ships | after vs QBBC | "no row" before -> after |
+|---|--:|--:|--:|--:|--:|--:|
+| anti_proton 1000 MeV | 200,000 | 595.213 nGy +/- 2.488 | 622.679 +/- 2.583 | 623.26 +/- 2.586 | -0.09%, -0.16 sigma | 18,926 -> 0 |
+| proton 10 GeV | 500,000 | 2.11791 uGy +/- 6.14 nGy | 2.15246 +/- 6.21 | 2.14589 +/- 6.21 | +0.31%, +0.75 sigma | 17,621 -> 0 |
+| pi+ 10 GeV | 500,000 | 1.62469 uGy +/- 4.41 nGy | 1.67198 +/- 4.53 | 1.67928 +/- 4.55 | -0.43%, -1.14 sigma | 21,254 -> 0 |
+| C12 12000 MeV | 50,000 | 1.5713 uGy +/- 6.33 nGy | 1.57139 +/- 6.33 | 1.59042 +/- 6.39 | -1.20%, -2.1 sigma | 81 -> 0 |
+| C12 12000 MeV | 200,000 | - | 6.35997 uGy +/- 12.73 nGy | 6.35774 +/- 12.75 | **+0.035%, +0.12 sigma** | 0 |
+| C12 48000 MeV | 20,000 | 717.252 nGy +/- 4.11 | 718.831 +/- 4.12 | 714.608 +/- 4.10 | +0.59%, +0.73 sigma | 1,241 -> 0 |
+| proton 1000 MeV | 200,000 | 391.883 nGy +/- 1.338 | 391.931 +/- 1.339 | 391.654 +/- 1.337 | +0.07%, +0.15 sigma | 39 -> 0 |
+
+**All three FTFP beams are inside 1.2 sigma of QBBC as it ships, nothing dropped on either
+side.** Each moved up by what V266 measured the eta and eta' to be in Geant4's dose (+4.61%,
++1.63%, +2.91% against 5.2%, 1.1%, 2.5%).
+
+**The 200,000-event C12 pair** that V277 asked for (Geant4: ref/b1ion's serial exampleB1, 628 s;
+port 1,541 s): +0.12 sigma at 0.2% a side. The 50,000-event row's -1.20% (-2.1 sigma) was a draw.
+
+**proton_1000 moves**, by 0.04 of its sigma: its 1 GeV cascades make 39 etas (resonance decays
+below FTFP's window, V278), tracks now. **The B1 photon gate is to the digit:** exampleB1
+-n 2000000, 426.028 pGy, 1.10452 sigma.
