@@ -623,8 +623,9 @@ send every one of them somewhere else.
    The track state grew from 248 to 264 bytes, the pool holds 6.3% fewer tracks, and the gamma
    gate's event loop did not slow.
 
- 8. **FTFP's ion arm leaves a quarter to a third fewer secondaries than QBBC's** (RISK V236,
-    found by P24). At all five heavy points of the ion grid - 86.4 per event against Geant4's
+ 8. **CLOSED by P29. FTFP's ion arm left a quarter to a third fewer secondaries than QBBC's
+    because its two residuals were handed on undecayed** (RISK V236 found it at P24's grid; P28's
+    de-excitation closed it, measured by P29 as V272-V273). At all five heavy points of the ion grid - 86.4 per event against Geant4's
     141.2 for C12 on Pb207, 191.2 against 256.5 for Fe56 on Pb207 at 20 GeV per nucleon - the
     string products and the decayed list agree with Geant4's to a few per cent, so what is
     missing comes after the decay pass, in `PropagateNuclNucl`'s capture into the two residuals
@@ -632,8 +633,17 @@ send every one of them somewhere else.
     number and charge, which a residual that keeps what should have evaporated still satisfies.
     It wants a package of its own, with the per-species rows `ftf_modelstat` gives the hadron arm.
     P28 (RISK V264-V265) put the residual's de-excitation into `PropagateNuclNucl`'s path too, which
-    is where this deficit was placed; the ion grid has not been re-measured since, so the question
-    stays open until it is.
+    is where this deficit was placed. P29 re-measured the grid on the same instrument, 500 events a
+    point and 2,000 at the corner: the mean final state is 259.2 against Geant4's 256.5 for Fe56 on
+    Pb207 at 20 GeV per nucleon (+0.48 sigma), 142.9 against 141.2 for C12 on Pb207 (+0.30), every
+    point inside one sigma, and with the residuals handed on whole the port's old column comes back
+    to the digit. Per species (`tests/test_ion_arm.cu`, 16 groups at five points), 171 comparisons
+    and none past 5 sigma, the worst the triton at C12 on Pb207 at -2.6; undecayed, 87 of them fail,
+    gammas at -44.7 sigma and alphas 0.009 an event against 1.18. The capture arithmetic of
+    `PropagateNuclNucl` was never the gap. The four ion sweep rows cannot move: their primaries are
+    below 1 GeV per nucleon and QBBC's ion FTFP starts at 3, so alpha_840's -2.9 sigma stays with the
+    light-ion reaction. The beam that would exercise this arm, a real nuclide above 3 GeV per
+    nucleon, waits on a gun that carries a nuclide.
 
   9. **CLOSED by P28. The two 10 GeV beams sat above QBBC because FTFP's residual nucleus was
     never de-excited** (RISK V244 found the excess at P23a's beams; V264-V266 closed it). Example B1, 500,000 events, against Geant4 11.1.1 QBBC as it ships: the 10 GeV
