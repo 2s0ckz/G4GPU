@@ -1090,6 +1090,30 @@ __host__ __device__ __noinline__ void ftfp_tape_row(
          static_cast<double>(r.local_energy_deposit));
 }
 
+/// P31: THE "NO ROW" GROUP BY NAME - one line per inelastic secondary `emit_interaction_result`
+/// books because `particle_type_of_pdg` has no row for its code, from EVERY model and not FTFP's
+/// alone, while the FTFP tape is on (`G4GPU_FTFP_TAPE` > 0; the call site gates it):
+///
+///   NOROWTAPE pdg T proj_pdg ftf
+///
+/// T the kinetic energy it was booked with, proj_pdg the interacting track's code and ftf 1 when
+/// FTFP made the final state. The ledger has carried this group's count and energy since P1 and
+/// never its codes; docs/RISK.md V240 named them from a 137-secondary host probe, V278 from these
+/// lines. Not bounded by the tape's row counter: the point is the whole run's census. A nucleus
+/// never reaches the test below - `secondary_is_nucleus` takes it first, as in the emitter.
+template <typename real_t>
+__host__ __device__ __noinline__ void norow_tape_rows(
+    int proj_pdg, bool ftf_ran,
+    const physics::hadronic::HadronicStepResult<real_t, kInteractionSecondaryCap>& r) {
+  for (int i = 0; i < r.n_secondaries; ++i) {
+    const physics::hadronic::HadSecondary<real_t>& s = r.secondaries[i];
+    if (secondary_is_nucleus(s)) { continue; }
+    if (particle_type_of_pdg(s.pdg) != ParticleType::kNumTypes) { continue; }
+    printf("NOROWTAPE %d %.6f %d %d\n", s.pdg, static_cast<double>(s.kin_energy), proj_pdg,
+           ftf_ran ? 1 : 0);
+  }
+}
+
 // =============================================================================================
 // P19: G4EmExtraPhysics' four processes - photonNuclear, electronNuclear, positronNuclear,
 // muonNuclear - from the queue entry to the final state

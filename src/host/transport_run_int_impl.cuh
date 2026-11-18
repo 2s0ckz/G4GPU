@@ -239,6 +239,10 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
       had::ftfp_tape_row<real_t>(pool, at_rest ? 1 : 0, pdg_code(q.species),
                                  at_rest ? real_t(0) : p.ekin, track_mass, outc, slot->filled);
     }
+    // P31: and, from every model, the codes of the secondaries booked as "no ParticleType row".
+    if (pool.ftfp_tape_max > 0) {
+      had::norow_tape_rows<real_t>(pdg_code(q.species), outc.ftf_ran, slot->filled);
+    }
     if (slot->filled.status == physics::hadronic::TrackStatusChange::kAlive) {
       p.ekin = slot->filled.energy;
       p.dir = slot->filled.momentum_direction;
