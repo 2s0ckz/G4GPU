@@ -751,7 +751,7 @@ macros through ref/b1ion, which reads the same dose and counts ionElastic:
 | He3 3000 MeV | 100,000 | 601.968 ± 1.970 nGy | 601.968 ± 1.970 | 602.208 ± 1.973 | -0.04%, -0.1 σ | 8 (7.9) |
 | alpha 4000 MeV | 100,000 | 661.034 ± 2.193 nGy | 661.034 ± 2.193 | 663.423 ± 2.204 | -0.36%, -0.8 σ | 10 (10.2) |
 | alpha 840 MeV | 300,000 | 4.89449 ± 0.00913 µGy | 4.89448 ± 0.00913 | 4.93231 ± 0.00917 | -0.77%, -2.9 σ | 28 (26.3) |
-| C12 12000 MeV | 50,000 | refused | refused | 1.59042 µGy ± 6.39 nGy | - | 32,224 (31,943) |
+| C12 12000 MeV | 50,000 | refused | refused (P30: 1.17596 ± 0.00585 µGy, see below) | 1.59042 µGy ± 6.39 nGy | -26.1%, -47.8 σ (P30) | 32,224 (31,943) |
 
 **ionElastic moved no row by a digit but alpha_840's last**, and that is the measurement, not a
 failure to reach the process: Geant4 itself makes 2-28 such interactions on these beams, every one
@@ -761,10 +761,13 @@ completeness of QBBC: the per-volume cross section, the real PostStepDoIt and th
 cut are Geant4's to the last bit (tests/test_ion_elastic.cu). The ion ledger has no elastic row
 before or after - it never had one, the gap was in the cross section.
 
-**The C12 beam is Geant4's alone.** It is the one beam whose PRIMARY carries ionElastic - 0.64
-interactions per primary across the phantom, 50 times the four rows above together - and the port
-cannot fire a GenericIon primary (no `/gun/ion`; the seeding kernel writes no nuclide), so the row
-is refused by name until a package gives the gun a nuclide. ref/b1hadron/C12_12000.mac is its macro.
+**The C12 beam was Geant4's alone** when P25 measured it. It is the one beam whose PRIMARY carries
+ionElastic - 0.64 interactions per primary across the phantom, 50 times the four rows above
+together - and the port could not fire a GenericIon primary (no `/gun/ion`; the seeding kernel wrote
+no nuclide). **P30 gave the gun its nuclide** and the port fires it now, 26% low: the transport of
+the seeded C12 is Geant4's (-0.6 σ with ion-inelastic off on both sides), and the deficit is the
+interaction kernel handing every nucleus charge 1 (docs/RISK.md V276; the P30 section below).
+ref/b1hadron/C12_12000.mac is its macro.
 
 The Geant4 column differs from V232's (279.007, 600.455, 664.032, 4.93621) by 0.2-1.3 sigma: the
 same QBBC on another run's random stream. alpha_840 stays where V232 put it, in the ion-inelastic
@@ -792,3 +795,43 @@ GeV per nucleon and below), so no row could move. alpha_840's -2.9 sigma is the 
 reaction's, not FTFP's. The refusal ledgers are unchanged (58/57/76 secondaries with no PDG row,
 alpha_840 none). A B1 row that runs FTFP's ion arm needs a GenericIon primary above 3 GeV per
 nucleon, which the port's gun cannot fire yet (V267).
+
+## P30: a GenericIon primary - the first rows above the light ions (2026-11-18)
+
+P30 gives the gun a nuclide: `/gun/particle ion` + `/gun/ion Z A [Q]` as G4ParticleGunMessenger
+defines them, the definition G4IonTable::GetIon would make, and the nuclide carried onto the track
+by the seeding (`Primary::ion_za`). A C12 seeded as a primary is the C12 a fragmentation makes,
+to the bit - slot, first step, range, dE/dx and both interaction lengths in water, bone, air and
+Al (docs/RISK.md V274-V275). The three rows, this branch's engine (all 27 units rebuilt),
+`G4GPU_HADRONIC_STAGE=final`, the default live-track count, the Titan V alone, "1.02 GB of
+12.00 GB left" on every run; Geant4 is ref/b1ion (exampleB1 serial, QBBC as it ships) on the same
+macros - ref/b1ion/C12_12000.mac, Fe56_56000.mac (1 GeV/n) and C12_48000.mac (4 GeV/n):
+
+| beam | events | port, P30 | port, both defects mended (experiment) | Geant4 QBBC | experiment vs QBBC |
+|---|--:|--:|--:|--:|--:|
+| C12 12000 MeV | 50,000 | 1.17596 µGy ± 5.85 nGy (-26.1%, -47.8 σ) | 1.5713 µGy ± 6.33 nGy | 1.59042 ± 6.39 nGy | -1.20%, -2.1 σ |
+| C12 48000 MeV | 20,000 | 2,000-event probe: 200.988 nGy ± 24.8, 417 interactions refused | 717.252 nGy ± 4.11 | 714.608 ± 4.10 | +0.37%, +0.5 σ |
+| Fe56 56000 MeV | 20,000 | 2,000-event probe: 3.88 pGy, 835 refused, 4,075 tracks abandoned | 12.3686 µGy ± 106.6 nGy | 12.6159 ± 107.3 nGy | -1.96%, -1.6 σ |
+
+**The seeded primary is right and its first interaction is not.** With ion-inelastic off on both
+sides C12 at 12 GeV agrees to -0.6 σ (471.939 ± 3.513 against 474.960 ± 3.508 nGy over 10,000).
+What parts them is two defects outside the gun (V276). The INTERACTION KERNEL builds a nucleus's
+projectile with G4GenericIon's placeholder charge 1 and PDG code, and the light-ion reaction takes
+Z from that charge: a C12 interacts as (A 12, Z 1), its spectator fragments come apart into
+neutrons (3,501 MeV of A > 4 fragment energy an event becomes 12 on O16), which is the 12 GeV
+row's deficit; and at 4 GeV/n on hydrogen and for Fe56 on everything, every event fails
+`CheckResult` by 1-2.3 GeV, so the interaction is refused after 100 attempts and the 47-56 GeV
+ion is deposited where it stood - the 48 GeV row's excess. The DRAIN LOOP abandons a track past
+1,000 iterations, and a Fe56 at 1 GeV/n takes about 3,400 steps (Geant4: 3,593 real-ion steps an
+event on this beam), so no Fe56 reaches the bone. Neither file is P30's; both were mended in an
+uncommitted experiment (charge Z and the nuclear PDG code from `ion_za`; the limit at 20,000),
+which is the fourth column. With them the 48 GeV row - the first B1 beam whose primary reaches
+FTFP's ion arm, one interaction in three in the 3-6 GeV/n transition - is inside half a sigma,
+and the galactic-cosmic-ray workhorse is inside 1.6.
+
+The 20,000-event rows were not run on P30's own code: the probes show their numbers are the
+disposal's and the abandonment's (the Fe56 probe ran at 0.49 events/s, each refused interaction
+running the light-ion reaction 100 times). The ledgers otherwise carry what every hadron row
+carries: inelastic secondaries with no PDG row (eta/eta' and light anti-nuclei, V240) and the
+per-step ion delta-ray refusal for nuclides G4ENSDFSTATE has no ground row for (V260). The gamma
+gate is to the digit (`exampleB1 -n 2000000`, 1.10452 σ).

@@ -17079,3 +17079,198 @@ put it - in the light-ion reaction (`G4BinaryLightIonReaction`) at 210 MeV per n
 not this package's arm. The beam that would exercise P29's measurement is a GenericIon primary
 above 3 GeV per nucleon (B1_SWEEP's C12 12000 MeV row is 1 GeV per nucleon, and it is refused by
 name - no nuclide on the gun, V267): not runnable on the port today.
+
+### V274: a GenericIon primary - `/gun/particle ion` + `/gun/ion Z A [Q E flb]` as G4ParticleGunMessenger defines them, and what the port refuses by name where Geant4 would make a particle
+
+**WHAT WAS MISSING WAS ONLY THE PRIMARY.** Every real nuclide has been stepped since P8c, always
+as a secondary (`BufferEmitter::push_nucleus` writes `TrackState::ion_za`). The port's
+G4UImanager had no `ion` - `G4ParticleTable::FindParticle("ion")` exited with "unknown
+particle" - and no `/gun/ion`; the seeding wrote `ion_za = 0`. P30 adds the messenger's two
+commands, transcribed from 11.1.1's `G4ParticleGunMessenger::SetNewValue` and `IonCommand`:
+
+- `/gun/particle ion` sets the ion MODE (`fShootIon`) and leaves the definition alone until
+  `/gun/ion` names the nucleus, as Geant4 does; the flag lives on the gun because the port has one
+  interpreter for every gun. Any other name clears it.
+- `/gun/ion Z A [Q E flb]`: Z and A non-omittable integers, Q defaulting to Z (Geant4's default is
+  -1 and `if (StoI(sQ) >= 0)` keeps Z otherwise), E in keV defaulting to 0, flb one of
+  `noFloat X Y Z U V W R S T A B C D E`. Without the mode: Geant4's own "Set /gun/particle to ion
+  before using /gun/ion command". For `G4IonTable::GetIon`'s own illegal arguments
+  (`A<1 || Z<=0 || E<0 || A>999`, G4IonTable.cc:642): Geant4's own "Ion with Z=.. A=..is not
+  defined", missing space included.
+- A new `G4IonTable::GetIon(Z, A, E)` (g4/G4ParticleGun.hh) makes ONE definition per nuclide,
+  named `GetIonName(Z, A, 0)`'s way (element symbol + A, "E<Z>-" past 118: "C12", "Fe56"),
+  species `kGenericIon`, mass `G4NucleiProperties::GetNuclearMass` (`data::get_nuclear_mass`, all
+  four levels since P24), PDG charge Z - CreateIon's definition. (1,1) (1,2) (1,3) (2,3) (2,4) are
+  `GetLightIon`'s proton, deuteron, triton, He3 and alpha, species of their own here as there.
+  The run banner is exampleB1's own `GetParticleName()`: "The run consists of 50000 C12 of 12 GeV".
+- `/gun/energy` is the ion's TOTAL kinetic energy (`G4ParticleGun::GeneratePrimaryVertex` sets
+  `particle_energy` as the primary's kinetic energy); nothing changed there.
+
+**REFUSED BY NAME, where Geant4 would make a particle** (each returns 1, leaves the gun as it was
+and says why): an excitation energy E > 0 (Geant4 makes `C12[4438.900]`; a track here carries no
+excitation and no isomer level); a floating level base other than `noFloat`; `/gun/ionL` (the
+deprecated level form - 11.1.1 prints "THIS COMMAND IS DEPRECATED"); a (Z, A) whose
+GetNuclearMass is zero (Z > A: Geant4 warns "Wrong values" and builds a massless ion, which
+`step_hadron` would see as beta 1); and Z >= 128 or A >= 512, past `ion_za_of`'s encoding.
+
+**ONE DEPARTURE FROM THE BRIEF, AND WHY.** The brief asked for "a (Z, A) outside AME2012 refused
+by name". That was the rule before P24; since V238 `data::get_nuclear_mass` is all four of
+GetNuclearMass's levels (AME2012, the Moller-Nix table, A*m_p/A*m_n, Weizsaecker) and gives the
+mass Geant4 gives, and a secondary of such a nuclide is already transported on it. So a nuclide
+past AME2012 with a positive mass is ACCEPTED, as Geant4 accepts it (`tests/test_ion_gun.cu`
+fires C30, on the formula level), and the refusal is where Geant4's own mass is zero.
+
+**Q IS HELD, NOT TRANSPORTED, AND THAT IS EXACT HERE.** `/gun/ion 6 12 4` sets
+`G4ParticleGun::SetParticleCharge(4)`, which Geant4 copies onto the G4PrimaryParticle and
+G4PrimaryTransformer onto the track's dynamic particle. In 11.1.1 no process QBBC gives a nucleus
+reads it back without a field: `G4ionIonisation`'s charge is
+`G4EmCorrections::EffectiveChargeSquareRatio`, recomputed from the definition, the material and
+the energy on every step (`PostStepGetPhysicalInteractionLength`'s `if(isIon)`; the port's
+`em::hadron_charge_sq_ratio`); Urban msc and the hadronic processes read the PDG charge; the
+only `GetCharge()` readers on the path are `G4Transportation`'s and `G4CoupledTransportation`'s
+field propagation (grep of source/processes, 11.1.1), and the port has no magnetic field. A track
+here has no dynamic-charge field, so there is nothing to seed; the gun says so when Q != Z.
+
+**THE RUN MANAGER AND THE ENGINE.** `G4RunManager::RunEvents` puts the definition's `ion_za` on
+each `Primary` record and refuses the bare `GenericIon` placeholder (no nuclide) by name;
+`CheckSpecies` (still uncalled) says the same. The engine's `BeamOn` refuses a `kGenericIon`
+record with `ion_za == 0` or a zero nuclear mass before any launch - the guard for a caller that
+fills `Primary` records itself. `/gun/particle GenericIon` still resolves (it is in the table)
+and is refused at `/run/beamOn`.
+
+`tests/test_ion_gun.cu` (TESTS, host, drives `G4UImanager::ApplyGunCommand` - split out of
+`ApplyCommand` so a parser test does not link the engine): the mode, the defaults, Q given /
+negative / with E = 0 and noFloat spelt out, `/gun/energy` in MeV and GeV, the vertex's
+definition and energy, Fe56, the five light nuclei, C30, GetIonName past 118, 8 parser errors,
+5 of GetIon's illegal arguments, 6 refusals by name, and leaving the mode. Anti-vacuity: the
+mode check removed and the default Q set to 0 - FAIL (11): `/gun/ion` accepted before
+`/gun/particle ion`, the default charge not Z, a negative Q not Z, Fe56's charge.
+
+### V275: a C12 seeded as a primary is the C12 a fragmentation makes, to the bit - the slot, the first step, range, dE/dx and both interaction lengths in water, bone, air and Al
+
+**THE SEEDING.** `Primary` gains `unsigned short ion_za` in padding that was already there
+(`particle` int at 56, `t0` double at 64: `sizeof(Primary<double>)` stays 72, asserted);
+`seed_from_primaries` passes it to `seed_track_slot`, which writes it where it wrote 0. That is
+the whole change on the device side: the mass (`em::stepped_ion` in `step_hadron`,
+`em::ion_particle_def` for `run_step_hadron`'s velocity), the charge, the spin and the scaled
+tables all derive from that field, for a primary exactly as for a secondary.
+
+**THE PROOF** (`tests/test_ion_primary.cu`, TESTS_GPU). C12 at 12,000 MeV from the centre of a
+400 mm box of G4_WATER, G4_BONE_COMPACT_ICRU, G4_AIR and G4_Al (G4NistManager +
+`G4Material::Build`, 0.7 mm cut), 150 tracks each, seeded by the engine's own
+`host::seed_from_primaries` and, separately, emitted by `BufferEmitter::push_nucleus`:
+
+| material | range (mm) | dE/dx (MeV/mm) | ionInelastic mfp (mm) | ionElastic mfp (mm) | slots | primary vs secondary | host vs device |
+|---|--:|--:|--:|--:|--|--|--:|
+| G4_WATER | 1168.5 | 7.2035 | 185.1 | 299.7 | equal | identical | 2.4e-14 |
+| G4_BONE_COMPACT_ICRU | 664.93 | 12.586 | 115.9 | 170.42 | equal | identical | 2.6e-14 |
+| G4_AIR | 1.6081e6 | 0.0053092 | 2.009e5 | 2.5432e5 | equal | identical | 1.0e-14 |
+| G4_Al | 535.76 | 15.764 | 121.27 | 143.17 | equal | identical | 2.4e-13 |
+
+"Slots equal": every field a step reads - species, ion_za, position, direction, energy, volume,
+step, msc and neutron-general state, status, weight. The lineage differs as Geant4's does (key
+61453 against a child key, parent 0 against the emitter's, `kFirstStepInVolume` set on the
+primary only - `step_hadron` does not read flags). "Identical": both stepped on the device with
+the PRIMARY's key, every outcome field equal to the bit with tolerance zero - the deposit, the
+energy after, the true path, the position and direction, status, the process, the secondaries,
+and the range, dE/dx, both cross sections and the mass (11174.863388 MeV, GetNuclearMass(12, 6))
+each recomputed from the slot's own `ion_za`. Host against device for the primary: discrete
+fields exact, numeric 1e-11 except an ionElastic recoil's non-ionizing energy in Al
+(1.37e-8 MeV, 3.6e-12 apart, rel 2.7e-4) - V270's cancellation on an Al27 target, given V270's
+absolute gate of 16 ulps of (T + m_C12 + m_Ca40). 600 first steps, 5 ending in a discrete process.
+
+**THE LEDGER** after the 600 primary steps: every `HadronicRefusal` row zero, host and device. So
+that the zero means something, a control seeds the same 150 primaries with `ion_za = 0` (what
+`seed_track_slot` wrote before P30) and the `kIonWithoutNuclide` row counts all 150.
+
+Anti-vacuity: `seed_track_slot` writing 0 again - FAIL (22): every slot's ion_za differs, every
+primary step 5/11 (StopAndKill, BelowTrackingCut) against the secondary's 3/6, range and cross
+sections zero, the ledger 600 `kIonWithoutNuclide`. Restored. test_ion_transport,
+test_step_hadron, test_wiring, test_neutron_general (which seeds a primary neutron through
+`seed_track_slot`) and test_gun_position pass unchanged.
+
+### V276: the first GenericIon-primary rows - C12 at 12 GeV is 26% low (-47.8 sigma), C12 at 48 GeV and Fe56 at 56 GeV are refusal- and abandonment-dominated, and two defects OUTSIDE the gun are the whole of it; with both mended in an uncommitted experiment all three rows are inside 2.2 sigma
+
+**THE SETUP.** This branch's engine, all 27 units compiled from it under `out\ptxas.lock`
+(examples\B1\build.bat, 83 min, CUDA 12.9.86, `-gencode arch=compute_70,code=[sm_70,compute_70]`;
+in a fresh worktree every unit is "stale: no product", and against `D:\g4gpu\out` every one of
+the 27 `.d` files reaches `core/track_buffer.cuh` and `core/particle.cuh`, 26 reach
+`physics/source.cuh` and `host/transport_run_impl.cuh` - so all 27 are stale for the gate).
+The Titan V alone (`CUDA_VISIBLE_DEVICES=1`) under `out\gpu.lock`, `G4GPU_HADRONIC_STAGE=final`,
+`G4GPU_LIVE_PER_EVENT` and `G4GPU_ION_INELASTIC` unset, every run "device stack raised to
+28672 B ... 1.02 GB of 12.00 GB left", peak host working set 0.58-0.63 GB. The Geant4 column is
+ref/b1ion (exampleB1 on QBBC as it ships, serial, ionElastic counted) on the same macros:
+ref/b1ion/C12_12000.mac (V267's 1.59042 uGy), Fe56_56000.mac and C12_48000.mac (new, 20,000
+events each). The 6 MeV gamma gate is to the digit: `exampleB1 -n 2000000` 1.10452 sigma.
+
+**THE ROWS ON THIS BRANCH'S CODE:**
+
+| beam | events | port | Geant4 QBBC | diff | ledger |
+|---|--:|--:|--:|--:|---|
+| C12 12000 MeV | 50,000 | 1.17596 uGy +/- 5.852 nGy | 1.59042 +/- 6.39 nGy (V267) | -26.1%, -47.8 sigma | 133 inelastic secondaries with no PDG row; nothing else |
+| C12 48000 MeV | 2,000 | 200.988 nGy +/- 24.81 | 714.608 +/- 4.100 per 20,000 | (x2.8 per event) | **417 `kInelasticReentryExhausted`**, 1.97e7 MeV; 34 of them disposed inside the scorer, 1.57e6 MeV |
+| Fe56 56000 MeV | 2,000 | 3.88 pGy +/- 0.32 | 12.6159 uGy +/- 107.3 nGy per 20,000 | (x 3e-6 per event) | **835 `kInelasticReentryExhausted`**, 4.41e7 MeV; **4,075 tracks abandoned at the iteration limit** |
+
+The two 20,000-event rows were not run on this code: their 2,000-event probes (the machine's rule)
+show the numbers are the disposal's and the abandonment's, not physics, and the Fe56 probe ran at
+0.49 events/s (each refused interaction runs the light-ion reaction 100 times).
+
+**THE BISECTION.** C12 at 12 GeV, 10,000 events, ion-inelastic off on both sides
+(`/process/inactivate` d/t/He3/alpha/ionInelastic; `G4GPU_ION_INELASTIC=0`): port 471.939 +/-
+3.513 nGy, Geant4 474.96 +/- 3.508 - **-0.64%, -0.6 sigma**. The seeded primary's transport (EM,
+msc, delta rays, ionElastic) is Geant4's; the 26% is in the ion-inelastic chain.
+
+**DEFECT 1 - THE INTERACTION KERNEL HANDS EVERY NUCLEUS CHARGE 1.** `src/host/transport_run_int_
+impl.cuh` builds the in-flight projectile with `proj.pdg = pdg_code(q.species)` and `proj.charge =
+particle_def(q.species).charge` - for `kGenericIon` the PLACEHOLDER's 1000000000 and 1. The baryon
+number and mass beside them are the track's (`ion_a_of`, `ion_particle_def`); the charge is not.
+`bic::blir_apply_yourself` takes the projectile's Z from `projectile.charge`
+(`blir_set_lighter_as_projectile(..., lrint(projectile.charge), ...)`) and FTFP's
+`InitForInteraction`/`ftf_model.cuh` read it too, so a C12 interacts as (A 12, Z 1). Measured with
+the models called directly (scratch probes, 300 events a point): **light-ion reaction, C12 at
+1 GeV/n on O16 - the A > 4 fragments' kinetic energy 3,501 MeV an event with Z = 6, 12 MeV with
+Z = 1** (the "12H" projectile comes apart into neutrons); C12 at 4 GeV/n on H1 and Fe56 at 1 GeV/n
+on H1, O16 and Ca40 - **every event fails CheckResult**, by -1,052 and -2,311 MeV, against 0 of
+300 with Z right (worst 0.1 MeV); FTFP's balance holds either way (worst 0.8 MeV) but its
+projectile is still a Z = 1 nucleus. That is the C12 row's deficit (the spectator fragments that
+carry the dose to the bone are lost), the 48 GeV row's 417 and the Fe56 row's 835 refusals - each
+disposal deposits a 47-56 GeV ion where it stands. It is not P30's: every GenericIon SECONDARY's
+interaction has had it since P15 wired the kernel, and the five ion rows before this one never
+put a nucleus heavier than an alpha into the light-ion reaction at an energy where it matters.
+
+**DEFECT 2 - THE DRAIN LOOP ABANDONS A TRACK PAST 1,000 ITERATIONS.** `kMaxIterations = 1000` in
+`TransportEngine::BeamOn` ("B1 drains in about 110 iterations"). A Fe56 at 1 GeV/n takes about
+3,400 steps (port, ion-inelastic off: 3,395 track-steps an event; Geant4's own real-ion steps on
+this beam, b1ion: 71.86 M over 20,000 events, 3,593 an event, 0.07 mm a step in water), so every
+Fe56 primary is abandoned before the bone: with ion-inelastic off, 6,888 abandoned in 2,000
+events and 5.2 pGy against Geant4's 2.834 uGy. The abandonment is printed ("WARNING: ... tracks
+abandoned at the iteration limit") and is not in the hadronic ledger. C12 at 12 GeV is under it
+(892 iterations on this code, 2,090 with defect 1 mended - 4 tracks abandoned, no dose moved).
+
+**NEITHER FILE IS P30'S TO EDIT** (`transport_run_int_impl.cuh` is not on the brief's list;
+`transport_run_impl.cuh` only where the primary is seeded), so both are measured, not fixed. **THE
+EXPERIMENT, UNCOMMITTED:** the kernel's projectile given `pdg_nuclear_code(Z, A)` and charge Z
+from `ion_za` for `kGenericIon` (two lines, `transport_run_int_lightion` and `_ftfp` recompiled
+into `out\p30exp`), `kMaxIterations` 20,000 (`transport_run` recompiled), archived with the other
+24 units of this branch's build and linked as `exampleB1_exp.exe`; both edits reverted the moment
+the units compiled, the tree clean (`git status`):
+
+| beam | events | port, experiment | Geant4 QBBC | diff | ledger | iterations |
+|---|--:|--:|--:|--:|---|--:|
+| C12 12000 MeV | 50,000 | 1.5713 uGy +/- 6.332 nGy | 1.59042 +/- 6.390 nGy | -1.20%, -2.1 sigma | 81 no-PDG-row secondaries; 29 ion delta-ray steps | 2,090 |
+| C12 48000 MeV | 20,000 | 717.252 nGy +/- 4.108 | 714.608 +/- 4.100 | +0.37%, +0.5 sigma | 1,241 no-PDG-row; 5 ion delta-ray steps | 765 |
+| Fe56 56000 MeV | 20,000 | 12.3686 uGy +/- 106.6 nGy | 12.6159 +/- 107.3 nGy | -1.96%, -1.6 sigma | 60 no-PDG-row; 35 ion delta-ray steps | 10,030 |
+
+No `kInelasticReentryExhausted`, no abandoned track. The C12 48 GeV row is the first B1 beam whose
+primary reaches FTFP's ion arm (one third of its interactions, 3-6 GeV/n transition) and it is
+inside half a sigma. The no-PDG-row rows are inelastic secondaries `core/particle.cuh` has no
+row for (eta/eta' and light anti-nuclei, V240) - the same refusal every hadron row carries; the
+ion delta-ray rows are V260's (no G4ENSDFSTATE ground row) and are per step. Geant4's ionElastic
+on the new rows: 11,638 (Fe56: 38,998) counted against 11,851 (38,638) expected. Throughput:
+114 events/s at 12 GeV, 69 at 48 GeV, 6.3 for Fe56 (12,406 track-steps an event).
+
+**WHAT THIS LEAVES FOR THE LEAD.** The two edits above, owned by whoever owns the interaction
+kernel and the drain loop - the second wants a number that is a statement about what a heavy ion
+needs (Fe56 1 GeV/n peaks at 10,030 iterations here) or a loop that is bounded by progress rather
+than by count. Until they land, `/gun/ion` fires a nucleus the transport steps exactly (V275)
+and whose first inelastic interaction is wrong.
