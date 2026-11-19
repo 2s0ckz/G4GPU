@@ -236,6 +236,64 @@ __global__ void scatter_species(TrackBuffer<real_t> pool, int n,
   list[atomicAdd(&cursors[sp * kSortKeys + sort_subkey(pool, volumes, i, keyed)], 1)] = i;
 }
 
+/// P37 (docs/RISK.md V304): the host's prefix sum over the bucket counts, on the card.
+///
+/// The same exclusive sum in the same species-major order - each bucket's count becomes its
+/// starting cursor, so a species' buckets are one contiguous range from `base[sp]` - computed
+/// by one block of `kSortScanThreads`, each thread summing `kSortScanPer` consecutive buckets
+/// and the block scanning the thread sums. Integer adds, so the cursors are the host's to the
+/// bit whatever the order they are summed in. `summary` receives `base[sp]` and then the
+/// species' track counts, the 40 integers the host needs to size the launches - which is all
+/// that crosses the bus now, where the 5,120 counts went down and their 5,120 cursors came back.
+constexpr int kSortScanThreads = 1024;
+constexpr int kSortScanPer = (kNumTrackSpecies * kSortKeys + kSortScanThreads - 1) / kSortScanThreads;
+__global__ void __launch_bounds__(kSortScanThreads) scan_species_buckets(int* counts,
+                                                                         int* summary,
+                                                                         int* host_out) {
+  constexpr int kBuckets = kNumTrackSpecies * kSortKeys;
+  __shared__ int part[kSortScanThreads];
+  const int t = threadIdx.x;
+  const int b0 = t * kSortScanPer;
+  int own = 0;
+  for (int k = 0; k < kSortScanPer; ++k) {
+    const int b = b0 + k;
+    if (b < kBuckets) { own += counts[b]; }
+  }
+  part[t] = own;
+  __syncthreads();
+  for (int d = 1; d < kSortScanThreads; d <<= 1) {
+    const int v = (t >= d) ? part[t - d] : 0;
+    __syncthreads();
+    part[t] += v;
+    __syncthreads();
+  }
+  int at = part[t] - own;  // exclusive
+  for (int k = 0; k < kSortScanPer; ++k) {
+    const int b = b0 + k;
+    if (b < kBuckets) {
+      const int c = counts[b];
+      counts[b] = at;
+      if (b % kSortKeys == 0) { summary[b / kSortKeys] = at; }
+      at += c;
+    }
+  }
+  __syncthreads();
+  if (t < kNumTrackSpecies) {
+    const int next = (t + 1 < kNumTrackSpecies) ? summary[t + 1] : part[kSortScanThreads - 1];
+    summary[kNumTrackSpecies + t] = next - summary[t];
+  }
+  __syncthreads();
+  if (host_out != nullptr && t < 2 * kNumTrackSpecies) { host_out[t] = summary[t]; }
+}
+
+/// P37 (V304): one device integer into mapped pinned host memory, the loop's read-back of an
+/// append cursor. On this card under WDDM a `cudaMemcpy` of four bytes after a launch costs 62 us
+/// and the launch plus a synchronisation 25 us (V304's probe); a kernel writing the host's
+/// memory and a stream synchronisation is the second.
+__global__ void copy_int_to_host(const int* src, int* host_out) {
+  if (threadIdx.x == 0) { *host_out = *src; }
+}
+
 // ---------------------------------------------------------------- P15: binning the queue
 //
 // `count_species` and `scatter_species` again, over the interaction queue instead of the track
@@ -1642,6 +1700,43 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     // P32: off unless G4GPU_LOOP_PROFILE asks; see LoopProfile.
     LoopProfile prof;
     prof.init();
+    // P37 (V304): the counting sort's 40-integer summary, on the card and in pinned host memory.
+    // A failed allocation leaves both null and the sort takes the host's prefix sum.
+    // The host side is MAPPED: the kernels write it themselves, and the loop's other two
+    // read-backs (the pool's append cursor, the interaction queue's) land in its last slots.
+    constexpr int kMapCount = 2 * kNumTrackSpecies;      // the pool's count
+    constexpr int kMapQueued = 2 * kNumTrackSpecies + 1; // the interaction queue's cursor
+    int* d_sort_summary = nullptr;
+    int* h_sort_summary = nullptr;
+    int* d_map = nullptr;
+    if (cudaMalloc(&d_sort_summary, sizeof(int) * 2 * kNumTrackSpecies) != cudaSuccess
+        || cudaHostAlloc(&h_sort_summary, sizeof(int) * (2 * kNumTrackSpecies + 2),
+                         cudaHostAllocMapped) != cudaSuccess
+        || cudaHostGetDevicePointer(&d_map, h_sort_summary, 0) != cudaSuccess) {
+      cudaGetLastError();
+      if (d_sort_summary != nullptr) { cudaFree(d_sort_summary); }
+      if (h_sort_summary != nullptr) { cudaFreeHost(h_sort_summary); }
+      d_sort_summary = nullptr;
+      h_sort_summary = nullptr;
+      d_map = nullptr;
+    }
+    // A device integer read back: through the mapped slot when there is one, else as before.
+    auto read_back = [&](const int* dsrc, int slot) -> int {
+      if (d_map == nullptr) {
+        int c = 0;
+        G4GPU_CUDA_CHECK(cudaMemcpy(&c, dsrc, sizeof(int), cudaMemcpyDeviceToHost));
+        return c;
+      }
+      copy_int_to_host<<<1, 32>>>(dsrc, d_map + slot);
+      G4GPU_CUDA_CHECK(cudaGetLastError());
+      G4GPU_CUDA_CHECK(cudaStreamSynchronize(0));
+      return reinterpret_cast<volatile int*>(h_sort_summary)[slot];
+    };
+    // TrackBuffer::count's clamp, on the mapped read.
+    auto live_count = [&](const DeviceTracks<real_t>& b) -> int {
+      const int c = read_back(b.view.count, kMapCount);
+      return (c > b.view.capacity) ? b.view.capacity : c;
+    };
 
     // ---- P34: THE DEFERRED DRAIN (docs/RISK.md V294).
     //
@@ -1866,7 +1961,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       for (int iteration = 0; iteration - last_seed < kMaxIterations; ++iteration) {
         // How many tracks are alive, of any species. One number, because there is one pool.
         prof.start_iteration();
-        int n_live = tracks_[cur].count();
+        int n_live = live_count(tracks_[cur]);  // P37 (V304): a mapped read-back
         prof.sync();  // TrackBuffer::count is a device-to-host copy of the append cursor
 
         // ---- P32: the refill. The window's next primaries go into the room the pool has
@@ -1898,7 +1993,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                 || static_cast<long long>(pending_n) * max_secondaries_per_step(kSpeciesProton)
                        > (static_cast<long long>(tracks_[nxt].view.capacity) - n_live) / 2)) {
           drain_pending(tracks_[cur].view, last_wiring, last_books);
-          n_live = tracks_[cur].count();
+          n_live = live_count(tracks_[cur]);
           prof.sync();
         }
 
@@ -1922,37 +2017,66 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           constexpr int kBuckets = kNumTrackSpecies * kSortKeys;
           static thread_local std::vector<int> bucket(kBuckets);
           prof.begin(LoopProfile::kSort);
+          // P37 (V304): the prefix sum on the card, and the 40 integers the launches need written
+          // by it into mapped host memory - no copy, one synchronisation. `G4GPU_SORT_DEVICE=0` is
+          // the host's sum below, as before. (A one-launch sort for small pools, count, sum and
+          // scatter in one block, was measured as no faster - 40.44 against 40.55 s - and is not
+          // kept: what the sort costs on the ion beams is the synchronisation, not its launches.)
+          static const bool sort_device = [] {
+            const char* v = std::getenv("G4GPU_SORT_DEVICE");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+          }();
+          const bool on_device = sort_device && d_sort_summary != nullptr;
           G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kBuckets));
           count_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
                                                       scene_.geometry.volumes, sort_keyed,
                                                       idx_n_[cur], d_unknown_);
           G4GPU_CUDA_CHECK(cudaGetLastError());
-          G4GPU_CUDA_CHECK(cudaMemcpy(bucket.data(), idx_n_[cur], sizeof(int) * kBuckets,
-                                      cudaMemcpyDeviceToHost));
-          prof.memop(2);
-          prof.launch(2);
-          prof.sync();
-          // Each bucket's count becomes its starting cursor, in species-major order, so a
-          // species' buckets stay one contiguous range starting at `off.base[sp]`.
-          int at = 0;
-          for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
-            off.base[sp] = at;
-            for (int k = 0; k < kSortKeys; ++k) {
-              const int c = bucket[sp * kSortKeys + k];
-              bucket[sp * kSortKeys + k] = at;
-              at += c;
+          if (on_device) {
+            scan_species_buckets<<<1, kSortScanThreads>>>(idx_n_[cur], d_sort_summary, d_map);
+            G4GPU_CUDA_CHECK(cudaGetLastError());
+            scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
+                                                          scene_.geometry.volumes, sort_keyed,
+                                                          idx_[cur], idx_n_[cur]);
+            G4GPU_CUDA_CHECK(cudaGetLastError());
+            G4GPU_CUDA_CHECK(cudaStreamSynchronize(0));
+            const volatile int* hs = h_sort_summary;
+            for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
+              off.base[sp] = hs[sp];
+              nsp[sp] = hs[kNumTrackSpecies + sp];
             }
-            nsp[sp] = at - off.base[sp];
+            prof.memop();
+            prof.launch(3);
+            prof.sync();
+            prof.end(LoopProfile::kSort, n_live);
+          } else {
+            G4GPU_CUDA_CHECK(cudaMemcpy(bucket.data(), idx_n_[cur], sizeof(int) * kBuckets,
+                                        cudaMemcpyDeviceToHost));
+            prof.memop(2);
+            prof.launch(2);
+            prof.sync();
+            // Each bucket's count becomes its starting cursor, in species-major order, so a
+            // species' buckets stay one contiguous range starting at `off.base[sp]`.
+            int at = 0;
+            for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
+              off.base[sp] = at;
+              for (int k = 0; k < kSortKeys; ++k) {
+                const int c = bucket[sp * kSortKeys + k];
+                bucket[sp * kSortKeys + k] = at;
+                at += c;
+              }
+              nsp[sp] = at - off.base[sp];
+            }
+            // Overwritten with the cursors and reused by the scatter; see scatter_species.
+            G4GPU_CUDA_CHECK(cudaMemcpy(idx_n_[cur], bucket.data(), sizeof(int) * kBuckets,
+                                        cudaMemcpyHostToDevice));
+            prof.memop();
+            scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
+                                                          scene_.geometry.volumes, sort_keyed,
+                                                          idx_[cur], idx_n_[cur]);
+            G4GPU_CUDA_CHECK(cudaGetLastError());
+            prof.end(LoopProfile::kSort, n_live);
           }
-          // Overwritten with the cursors and reused by the scatter; see scatter_species.
-          G4GPU_CUDA_CHECK(cudaMemcpy(idx_n_[cur], bucket.data(), sizeof(int) * kBuckets,
-                                      cudaMemcpyHostToDevice));
-          prof.memop();
-          scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
-                                                        scene_.geometry.volumes, sort_keyed,
-                                                        idx_[cur], idx_n_[cur]);
-          G4GPU_CUDA_CHECK(cudaGetLastError());
-          prof.end(LoopProfile::kSort, n_live);
         }
         if (n_live == 0) {
           st.max_iterations = std::max(st.max_iterations, iteration);
@@ -2458,8 +2582,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // device - the counting sort above already reads `idx_n_` back for the same reason.
         if (any_hadron && d_queue_cursor_ != nullptr && interaction_pool_.ok) {
           int n_queued = 0;
-          G4GPU_CUDA_CHECK(cudaMemcpy(&n_queued, d_queue_cursor_, sizeof(int),
-                                      cudaMemcpyDeviceToHost));
+          n_queued = read_back(d_queue_cursor_, kMapQueued);  // P37 (V304)
           prof.sync();
           if (n_queued > queue_capacity_) { n_queued = queue_capacity_; }
           if (n_queued > 0) {
@@ -2719,6 +2842,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       }
     }
     prof.release();
+    if (d_sort_summary != nullptr) { cudaFree(d_sort_summary); }
+    if (h_sort_summary != nullptr) { cudaFreeHost(h_sort_summary); }
     if (d_pending != nullptr) {
       if (deferred_drains > 0) {
         std::printf("deferred drain: %lld interactions waited, drained in %lld launches of the "
