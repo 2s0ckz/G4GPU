@@ -124,6 +124,10 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | **real time, primaries generated host-side through `GeneratePrimaries()`** | **1.71 × 10⁶** | 1172 ms |
 | reference driver, primaries generated on the device | 2.40 × 10⁶ | 832 ms |
 | *GPU kernels alone, B1 (measures less - see below)* | *2.09 × 10⁶* | *959 ms* |
+| Titan V, P32 (RISK V283-V285): example B1 2M 6 MeV gammas, GPU time, best of 3 | 3.83 × 10⁶ | 522 ms (516 before P32) |
+| Titan V, P32: proton 1 GeV, 200,000 events, final stage | 12,624 (1,872 before) | 15.8 s (106.8 s) |
+| Titan V, P32: pi+ 10 GeV, 100,000 events, final stage | 6,095 (1,577 before) | 16.4 s (63.4 s) |
+| Titan V, P32: Fe56 56 GeV, 5,000 events, final stage | 9.10 (5.45 before) | 549.5 s (918.2 s) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no

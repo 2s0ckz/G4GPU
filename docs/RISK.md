@@ -17799,3 +17799,81 @@ the same in all four columns, so one column stands for them:
 | a second process replays | both runs exactly |
 | two runs of N against one of 2N | 1,713.790 pGy against 1,713.790 (rel 0.00E+000) |
 | proton depth-dose, 6,000 | 584663 MeV of 600000 (97.4439%); plateau 1.00125; R80 77.693 mm (-0.027); 80-20 width 1.200 mm (+0.031); the 200-slab CSV byte-identical across the four builds |
+
+### V286: what P32 did not land, by name - the interactions on a second stream (built, 1.35x on Fe56, and NOT bit-identical on the pion beam), the persistent drain, the warp-cooperative cascade, a per-bucket slot type
+
+**THE INTERACTIONS ON A SECOND STREAM - BUILT, MEASURED, NOT MERGED.** The lead's item after the
+pools: with the generator keyed, a track whose interaction is pending can simply wait while every
+other track keeps stepping, so the Fe56 beam need not wait 5,098 times for its slowest light-ion
+reaction. Built on branch `perf/async-wip` (b410556, not in perf/loop), opt-in through
+`G4GPU_ASYNC_INTERACTIONS=1`: each iteration's queued entries (the hadronic queue and the
+photo-/lepto-nuclear one) are copied into one of two 16,384-entry rings on the main stream; when
+no drain is in flight and the last one's output has been merged, the ring goes to a non-blocking
+second stream, which bins it, runs the five interaction buckets and both photo-/lepto-nuclear
+drains (so no two kernels ever share a slot) into a side pool of 851,968 tracks, and records an
+event; the next iteration that finds the event done appends the side pool to the live tracks
+(`merge_tracks`) before its counting sort. The end of a window, a ring that would overflow and the
+iteration bound flush everything synchronously. Upload's slot sizing reserves the rings, the side
+pool and its arena (471 slots instead of 628). What it measured, the Titan V alone:
+
+| beam | synchronous (V285) | asynchronous | dose |
+|---|--:|--:|---|
+| proton 1 GeV 200k | 15.84 s | 16.12 s | 391.931 nGy (1.33866), to the digit, 11,550,586 steps both |
+| proton depth-dose gate 6,000 | - | - | the 200-slab CSV byte-identical to main's |
+| Fe56 56 GeV 5k | 549.5 s | **407.4 s (1.35x)** | 3.06391 uGy (53.0322 nGy), to the digit, 62,058,769 steps both |
+| Fe56 56 GeV 1k | 185.3 s | 164.9 s | 565.071 nGy (22.6217), to the digit |
+| **pi+ 10 GeV 100k** | 16.41 s | 16.17 s | **333.4 nGy, rms 2.00918 -> 2.00916 nGy; 12,936,362 -> 12,936,161 track-steps** |
+
+**THE PION BEAM IS NOT BIT-IDENTICAL, so it is not on perf/loop.** 201 fewer track-steps and the
+rms's last digit, with no drop, no repair and no abandonment printed. It is not the slot an
+interaction lands in: the synchronous drain with FTFP at 64 workspaces, or with 100 slots, gives
+12,936,362 steps and 2.00918 to the digit, and five synchronous runs of that beam in this package
+all did. It is something that depends on WHICH ITERATION an interaction is drained in, or on
+interactions of different iterations sharing a launch - the one thing the asynchronous drain
+changes - on a beam with FTFP and Bertini in it (the proton beam, all Binary, is exact). Not found
+in the time this package had; the branch is there for whoever looks next, and the first thing to
+look at is an entry point that reads state its own interaction did not write.
+
+**AND IT WINS LESS THAN IT SHOULD, which is a second finding.** With a drain in flight the main
+stream's first launch of every iteration - the counting sort's memset, count, read-back and
+scatter - took 20.8 ms where it takes 0.2 ms, on Fe56 1k: the main stream waited for the
+interaction stream's kernels although nothing orders them. Not the pageable read-back (the same
+through pinned memory and `cudaStreamSynchronize(0)`), not the interaction stream's width (the
+same at 64 slots). The likely cause is the card's - WDDM's scheduling of two streams, or the
+work distributor not starting a new kernel beside 255-register single-thread blocks - and it is
+recorded, not diagnosed. Until it is, the overlap buys 12-35% on the ion beam and nothing on the
+others.
+
+**THE PERSISTENT DRAIN - REFUSED, BECAUSE THE PROFILE LEAVES IT NOTHING TO WIN.** What it would
+remove is the host's work between kernels: V283 measured 2.2% of the photon beam's wall (10.1 ms
+of 453.6) and 0.07-0.15% of the hadron and ion beams'. The counting sorts it would move onto the
+device, not remove (18% of the photon beam, 0.2% of the others). The interaction kernels' launches
+would stay host-side whatever it did. What it would take, for the record: the stepping kernels
+taking their range from device memory (every one of the 25 kernel units rebuilt), a device-side
+plan kernel for the throttle and the offsets, a fixed grid per species family, and a host
+round trip only every k iterations to see the pool empty - for 2% of one beam.
+
+**THE PHOTON BEAM'S 18% COUNTING SORT** (the lead's question) is over the live range only -
+`count_species` and `scatter_species` take `n_live`, not the pool's 9.7 million slots - so there
+is no empty range to skip: it is 32.4 million track entries histogrammed and scattered over 104
+iterations. Making it cheaper means not re-sorting tracks whose species did not change (a gamma
+appended by a gamma kernel into a per-species output range), which is a change to how the
+stepping kernels append, not to the loop. Named, not done.
+
+**THE WARP-COOPERATIVE CASCADE - REFUSED BY NAME.** The profile does make the Binary cascade the
+dominant cost (96% of the proton beam, 56% of the pion beam) and the light-ion reaction the ion
+beam's (81%), so the brief's condition for trying it holds. What one thread a block (V285) already
+took is the scheduling half of it: each cascade has a warp of its own and the card's 80 SMs. The
+cooperative half - 32 lanes on ONE cascade - means splitting `propagate`'s time step (the
+collision search over every pair of cascade tracks, the field transport of each track) across
+lanes while every random number is drawn in the order the serial cascade draws it. The collision
+search is deterministic and could be split; the rest of the step is not, and keeping one
+generator's sequence across a warp is a rewrite of src/physics/hadronic/bic/* with an
+anti-vacuity campaign of its own (V256's slice took a package). Not attempted; the per-iteration
+latency it would attack on the Fe56 beam is also what the second stream attacks, more cheaply,
+once its two findings above are closed.
+
+**A PER-BUCKET SLOT TYPE - NAMED, NOT DONE.** V285 split off FTFP's workspace, the part only two
+buckets reach. Past that, V283's `offsetof` table puts a Bertini-only slot at about 0.95 MB and a
+Binary-only one at about 1.35 MB against the union's 1.62: 17% more Binary slots for a change to
+every model entry's signature (each takes `InteractionSlot&`) and the seven interaction units.
