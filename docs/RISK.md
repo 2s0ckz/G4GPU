@@ -18009,3 +18009,59 @@ So the largest local arrays a step keeps are the navigator's solid scratch (ever
 the neutron capture's product list (the neutral kernel). None of the frame limits occupancy: the
 driver's occupancy query puts every stepping kernel at 2 blocks an SM by registers (the
 profile's own table prints it).
+
+### V288: register budgets, measured - `__launch_bounds__(128, k)` at 3, 4, 6 and 8 blocks an SM makes every stepping kernel it was tried on slower, so no bound is kept
+
+**THE EXPERIMENT.** The five stepping templates in `host/transport_run_impl.cuh` took a per-family
+macro, `G4GPU_STEP_MINB_<GAMMA|LEPTON|HADRON|NEUTRAL|STRANGE>`, expanding to
+`__launch_bounds__(128, k)` when set and to nothing otherwise (the patch is
+`out\exp\launch_bounds.patch` in the P33 worktree; it was not committed, see below). The
+gamma and lepton units (the photon beam's 80%), and the proton and neutral units (the
+proton beam's two largest hadron stepping kernels), were compiled at each k through
+build_engine_unit.bat into their own directories, archived over the baseline objects and linked
+into their own exampleB1. ptxas's register budget is `65,536 / (128 k)` rounded down to 8.
+The kernel row is the entry; the spills that move are the callees' (V287), so they are shown:
+
+| kernel | k | regs | warps/SM | frame | `step_to_boundary` spills st/ld | the step's own spills st/ld |
+|---|--:|--:|--:|--:|--:|--:|
+| run_step_gamma | - | 255 | 8 | 3,952 | 648 / 1,184 | (inlined: 564 / 2,140 on the entry) |
+| | 3 | 168 | 12 | 4,128 | 992 / 5,224 | 756 / 2,384 |
+| | 4 | 128 | 16 | 4,208 | 2,376 / 7,020 | 856 / 2,496 |
+| | 6 | 80 | 24 | 4,304 | 7,262 / 11,940 | 916 / 2,556 |
+| | 8 | 64 | 32 | 4,384 | 10,648 / 14,336 | 1,132 / 2,860 |
+| run_step_lepton<e-> | - | 255 | 8 | 5,024 | 644 / 1,176 | `step_lepton` 324 / 888 |
+| | 3 | 168 | 12 | 5,200 | 988 / 5,216 | 516 / 1,220 |
+| | 4 | 128 | 16 | 5,280 | 2,360 / 7,012 | 952 / 1,532 |
+| | 6 | 80 | 24 | 5,376 | 7,210 / 11,908 | 1,936 / 2,268 |
+| | 8 | 64 | 32 | 5,456 | 10,592 / 14,300 | 2,432 / 2,696 |
+| run_step_hadron<kProton> | - | 255 | 8 | 4,944 | - | 346 / 992 (entry) |
+| | 3 | 168 | 12 | 5,120 | - | 1,162 / 1,832 |
+| | 4 | 128 | 16 | 5,216 | - | 1,458 / 2,228 |
+| run_step_neutral<kNeutron> | - | 255 | 8 | 8,064 | - | `step_neutral` 150 / 236 |
+| | 3 | 168 | 12 | 8,240 | - | 586 / 924 |
+| | 4 | 128 | 16 | 8,320 | - | 1,098 / 1,996 |
+
+**THE BEAMS** (the Titan V alone; the kernel times from `G4GPU_LOOP_PROFILE=1`, one run; the
+beam times best of three with the profile off):
+
+| build | 2M photons: time, best of 3 | `step e-` ms | `step gamma` ms | proton 1 GeV 200k, best of 3 | `step proton` ms | `step neutron` ms |
+|---|--:|--:|--:|--:|--:|--:|
+| no bound (baseline) | 519.5 ms | 227.6 | 100.6 | 15,427 ms | 236.4 | 30.1 |
+| k = 3 (EM) / (proton, neutral) | 547.2 | 250.0 | 104.4 | 15,588 | 237.7 | 31.0 |
+| k = 4 | 561.5 | 254.7 | 116.5 | 15,483 | 230.5 | 32.4 |
+| k = 6 | 580.0 | 256.2 | 128.1 | - | - | - |
+| k = 8 | 601.1 | 262.9 | 143.7 | - | - | - |
+
+Every dose of every run in the table is the baseline's to the digit (85.2055 nGy, rms 173.586
+pGy; 391.931 nGy, rms 1.33866 nGy): a register budget changes allocation, not arithmetic.
+
+**THE VERDICT.** On the photon beam each step up in warps an SM costs time, monotonically: the
+spills the budget forces - above all into the navigator, whose reloads go from 1.2 KB to 5.2 KB
+at the first step - cost more than the extra warps hide. The proton kernel at k = 4 is 2.5%
+faster in the profile and the beam 0.4% (inside its 15.43-15.88 s spread), and the neutron
+kernel is slower at both; the hadron stepping kernels are 6% of their beam (V287), so nothing
+there could be seen in a rate either way. No bound is kept: the macro would change no code at
+its default and would cost every unit's rebuild, so it stays a patch beside this entry. The
+lepton unit at a bound is also the heaviest ptxas of the tree (5.6 GB each, four at once took the
+machine from 41.5 to 17.7 GB free; P33's first attempt ran eight and the lead stopped four of
+them - those four were rebuilt, four at a time, and are the k = 3, 4, 6, 8 lepton rows above).
