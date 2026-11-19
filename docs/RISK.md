@@ -17545,3 +17545,257 @@ Geant4's 1.58944 over its whole 200,000. Nothing to chase.
 **Refused or not done, by name.** The rho0/omega step itself (V280). The three- and many-body
 DynamicalMass branches (unreached). The photo-/lepto-nuclear drain is not on the NOROW tape
 (V278's two one-eta differences); its etas are tracks like every other's.
+
+### V283: P32's profile - the host's launches and read-backs are 2.2% of the photon beam and under 0.1% of the others, the hadron and ion beams are the interaction kernels (96% of the 1 GeV proton beam is `run_interaction<kBinary>`), and none of the four beams has a second batch to refill
+
+**THE INSTRUMENT.** Nsight Systems 2021.5.2 ran the program and could not read its trace: every
+CUDA 12.9 driver call came back "Unknown driver API function index: 673" and the report held no
+kernels. Nsight Compute 2022.1.0 attached and refused with ERR_NVGPUCTRPERM (the performance
+counters need an administrator's driver setting, which is not this package's to change), so
+there is no memory-throughput number in this entry. What was used instead is the loop's own
+profile, `G4GPU_LOOP_PROFILE=1` (`LoopProfile` in host/transport_run_engine.cuh): a CUDA event
+pair around every launch class, read back once per iteration; counts of host-visible launches,
+synchronising read-backs and memsets per iteration; iterations binned by live tracks against the
+pool; and `cudaFuncGetAttributes` / `cudaOccupancyMaxActiveBlocksPerMultiprocessor` for the
+kernels (registers, frame, blocks per SM). `G4GPU_LOOP_PROFILE_CSV` writes the per-iteration
+curve. The profile's own synchronisation is one per iteration; the rates below are from runs
+with it off.
+
+**FIRST, THE HEADER SPLIT IT NEEDED.** Every change to the loop rebuilt all 27 engine units
+(85 minutes at one target) because the loop lived in host/transport_run_impl.cuh, which every
+kernel unit reads. The engine's host bodies and the loop's utility kernels are
+host/transport_run_engine.cuh now, included at the end of transport_run_impl.cuh unless the
+unit defines `G4GPU_ENGINE_KERNELS_ONLY` (the 25 kernel units do). Measured: with the engine
+header touched, `tools/freshness.ps1` reports `transport_run` alone stale and it compiles in 19 s.
+A project that includes transport_run_impl.cuh for its own hook gets the whole class as before;
+the extern-template block `tools/gen_hook_units.ps1` parses is untouched.
+
+**THE BASELINE, main e2d5e89 built in this worktree, the Titan V alone (sm_70 + compute_70).**
+The eleven dose gates printed ba73's numbers to the last digit (table at the end of V285). The
+four beams, `examples/B1/exampleB1.exe`, `G4GPU_HADRONIC_STAGE=final` on the three hadron/ion
+beams, default live-track count, default (automatic) batch of 2,429,472 events:
+
+| beam | events | dose (rms) | time | events/s | track-steps/s | "GB left" | iterations |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| B1 6 MeV gamma (`-n 2000000`), best of 3 | 2,000,000 | 85.2055 nGy (173.586 pGy) | 516.4 ms | 3.873e6 | 5.045e7 | no raise | 104-105 |
+| proton 1000 MeV | 200,000 | 391.931 nGy (1.33866 nGy) | 106.8 s | 1,872 | 108,117 | 1.01 of 12.00 | 845 |
+| pi+ 10 GeV | 100,000 | 333.4 nGy (2.00918 nGy) | 63.4 s | 1,577 | 203,979 | 1.01 of 12.00 | 504 |
+| Fe56 56 GeV (Fe56_56000.mac at 5,000) | 5,000 | 3.06391 uGy (53.0322 nGy) | 918.2 s | 5.445 | 67,586 | 1.01 of 12.00 | 8,433 |
+
+The proton row is V282's 391.931 to the digit. The split binary (profile off) gave every dose
+above to the digit; its rates are the table's (the main binary's beams ran beside a compile, the
+split's did not; Fe56 is the main binary's one run, its profiled run took 919.1 s). b1_gpu_sched,
+the gate's other photon driver, is its own loop (no hadron, no raise) and is not timed here.
+
+**WHERE THE TIME GOES, one table per beam** (ms of GPU time inside the timed launches; the
+"between" column is wall time not inside any timed launch - host work, launch latency, the
+read-backs):
+
+| | photon 2M | proton 1 GeV | pi+ 10 GeV | Fe56 56 GeV |
+|---|--:|--:|--:|--:|
+| iterations | 104 | 845 | 504 | 8,433 |
+| kernel launches / iteration (max) | 6.4 (8) | 8.6 (70) | 11.2 (63) | 14.9 (26) |
+| synchronising read-backs / iteration (max) | 2.09 (3) | 3.07 (4) | 3.13 (4) | 3.60 (4) |
+| wall in the loop | 453.6 ms | 107,094 ms | 63,807 ms | 919,049 ms |
+| between launches (host + latency) | 10.1 ms (2.2%) | 72.6 ms (0.07%) | 49.0 ms (0.08%) | 1,395 ms (0.15%) |
+| count/scatter species | 80.5 ms (18.1%) | 172 ms (0.2%) | 111 ms (0.2%) | 2,014 ms (0.2%) |
+| all stepping kernels | 360.0 ms (81.2%) | 1,053 ms (1.0%) | 1,141 ms (1.8%) | 23,067 ms (2.5%) |
+| queue read-back + binning | 1.2 ms | 419 ms (0.4%) | 406 ms (0.6%) | 1,885 ms (0.2%) |
+| `run_interaction<kFtfp>` | - | - | 12,340 ms (19.4%) | - |
+| `run_interaction<kBertini>` | - | - | 9,617 ms (15.1%) | 1,667 ms (0.2%) |
+| `run_interaction<kBinary>` | - | **103,164 ms (96.4%)** | **35,926 ms (56.3%)** | 139,144 ms (15.2%) |
+| `run_interaction<kLightIon>` | - | 27 ms | 554 ms (0.9%) | **745,431 ms (81.2%)** |
+| `run_interaction<kAtRest>` | - | 2,129 ms (2.0%) | 3,575 ms (5.6%) | 4,227 ms (0.5%) |
+| photo-/lepto-nuclear drains | 1.9 ms | 58 ms | 89 ms | 219 ms |
+| iterations with < 1% of the pool live | 82 (78.8%), 44.6 ms wall | 813 (96.2%), 5,183 ms | 469 (93.1%), 3,085 ms | 8,433 (100%), 919,049 ms |
+| iterations with 1-10% live | 9, 46.8 ms | 32, **101,911 ms** | 35, **60,723 ms** | 0 |
+| iterations with 10-50% live | 13, **362.3 ms** | 0 | 0 | 0 |
+
+The kernels, as the driver reports them for the Titan V: every stepping kernel and every
+interaction kernel is at 255 registers; a stepping kernel's block of 128 runs 2 blocks (8 warps)
+an SM, an interaction kernel's block of 32 runs 8 blocks (8 warps) an SM. Frames: 3,952 to 8,064
+B for the stepping kernels, 12,944 (Bertini) to 21,376 B (AtRest) for the interaction kernels.
+The stack raise does not cost occupancy - the driver reserves the frame for every thread the card
+can hold, whatever is launched, so it costs MEMORY: 28,672 B x 163,840 threads, which with the
+automatic batch's 4.60 GB of track buffers leaves the 1.01 GB the hadron beams print.
+
+**THE VERDICTS.**
+
+* **Photon 2M: the stepping kernels (81%) and the counting sort (18%), on the card; the host is
+  2% and the tail is 10%.** 78.8% of the iterations step fewer than 1% of the pool, and they
+  cost 44.6 ms of 453.6. The counting sort runs over the live range only (`count_species` takes
+  `n_live`, not the pool), so its 18% is sorting 32.4 million entries, not scanning empty slots;
+  shrinking it means not re-sorting tracks that did not change species, which is a stepping-kernel
+  change, not a loop one.
+* **Proton 1 GeV: `run_interaction<kBinary>`, 96.4%, and it is WIDTH, not tail.** 98,310 Binary
+  cascades run in 862 chunk launches of at most 128 (the slot count), each chunk 4 blocks of 32
+  on 4 of the 80 SMs. 102 of the 107 seconds are 32 early iterations whose queue held up to 7,243
+  interactions; the 813 tail iterations are 5 s.
+* **pi+ 10 GeV: the interaction kernels, 97% between them** (Binary 56%, FTFP 19%, Bertini 15%),
+  the same width limit.
+* **Fe56 56 GeV: `run_interaction<kLightIon>` (81%) and `<kBinary>` (15%), and it is LATENCY.**
+  5,098 of the 8,433 iterations drain an interaction, a handful each (61,032 in all), and every
+  live track waits for the slowest: 175 ms of interaction per such iteration. All 8,433
+  iterations have under 1% of the pool live - the automatic batch holds 2.4 million events and the
+  run has 5,000.
+
+**WHAT THIS DECIDES.** What a persistent drain removes - the host's launches and synchronising
+read-backs between kernels - is 2.2% of the photon beam's wall and under 0.1% of every hadron
+beam's; the counting sorts and the queue binning (18% of the photon beam, under 1% of the
+others) it would move onto the device, not remove. So it has at most that to win and is not
+worth its risk (V286 says what it would take). Every B1 beam at the
+default batch is ONE batch - 2,429,472 events against 2,000,000 photons or 5,000 ions - so the
+batch refill has nothing to refill on any of the four beams; it is built (V284) for the runs that
+are several batches, and measured there. The cost of the three hadron and ion beams is inside
+the interaction kernels: their width (how many run at once, and how they are laid out on the
+SMs) on the proton and pion beams, their latency on the ion beam. So the order is: the refill
+(small, V284), then the interaction drain's width - its launch shape and its slot pool (V285) -
+and the warp-cooperative cascade only as far as V286 can take it with the generator's order
+kept. The slot pool's members, measured with `offsetof` on `had::InteractionSlot<double>`
+(1,617,672 B): Bertini's seven buffers 143,968 B; the Binary cascade's shared arrays 536,976 B and
+the ion arm's own 112,640 B; PreCompound and the de-excitation 536,576 B; the four final states
+and the mass table 212,504 B; the two model final states 23,808 B; the cascade's scratch 51,200 B
+- and, beside the slot, FTFP's workspace, 671,280 B for every slot.
+
+### V284: the batch refill - a score window separate from the events in flight, every dose to the digit, 1.36x on 2M photons in batches of 262,144, and nothing to gain where the drain is the interaction kernels
+
+**WHAT CHANGED.** A batch was two things: the events seeded together, and the columns of the
+per-event score array (`score[slot * batch + event]`). So a run of more events than one batch
+drained each batch to its last track before the next could start, because the next batch needed
+the columns the survivors' events still held. `BeamOn` now scores a WINDOW - up to 256 MB of
+per-event state (a score per scorer, the carried-away double, the primary), at most an eighth of
+the free memory, never fewer events than the batch, allocated for the run and freed at its end -
+and keeps `batch_` events in flight: the window's first batch is seeded at the first iteration as
+before, and every later iteration seeds the window's next primaries into the room the pool has
+freed, back up to `batch_` live tracks, until the last is in. The tail is drained once per window.
+
+**WHY NO NUMBER MOVES.** `seed_from_primaries` takes the window index to start from (`first`), so
+a late-seeded primary gets `seed ^ (key_base_for(stream_pos, window base) + window index)` -
+`key_base_for(stream_pos, run index)`, the key the batch gave it - and its own score column.
+Every random number a track and its descendants draw is keyed on that key and on the track's own
+step count, never on the iteration it was seeded in or what it shares a launch with (`child_rng_key`). The per-event scores are read back and summed over events in ascending order,
+as the batches were. So the refill moves time and nothing else, and the measurements say so:
+
+| run | refill | dose (rms) | time | iterations |
+|---|---|--:|--:|--:|
+| exampleB1 -n 2000000, G4GPU_BATCH=262144 | off (8 batches) | 85.2055 nGy (173.586 pGy) | 802.2 ms | 104 a batch |
+| the same | on (one window, 114 refills, 1,737,856 events refilled) | **85.2055 nGy (173.586 pGy)** | **588.5 ms** | 205 |
+| the same, the refill's key offset perturbed by one | on | 85.3415 nGy (173.758 pGy) | 620.0 ms | - |
+| the automatic batch (2,429,472: one batch, no refill) | - | 85.2055 nGy (173.586 pGy) | 516.4 ms | 104 |
+| proton 1 GeV 200k, G4GPU_BATCH=25000 | off (8 batches) | 391.931 nGy (1.33866 nGy) | 319.4 s | - |
+| the same | on (1,953 refills) | **391.931 nGy (1.33866 nGy)** | 339.4 s | 4,827 |
+| the proton depth-dose gate (`proton_depth.exe 6000`, batch 5,000 set by the caller) | on (6 refills, 1,000 events) | the 200-slab curve byte-identical to main's | - | - |
+
+The perturbation is the anti-vacuity: the comparison can see a refilled primary that drew the
+wrong stream. It was restored before the commit, and the restored source is the gated one.
+
+**WHAT IT IS WORTH, honestly.** On the photon beam in batches of 262,144 it is 1.36x, most of the
+way back to one batch's 516 ms. On the proton beam it is nothing - 6% slower: that beam's time is
+the interaction drain (V283), and a batch of 25,000 throttles the drain's width (a queue of 3,107
+entries a launch against 203,480) whichever way the primaries arrive. And on the four beams at
+the default batch it never runs: every one is a single batch. Its use is the run that is several
+batches - a long run, or a pool made small to leave the card to something else.
+
+**THE ITERATION BOUND IS PER TRACK.** With a refill a window's iterations are not one generation:
+an event seeded at iteration 900 has had 900 fewer than the first. The drain stops at
+`kMaxIterations` (20,000) past the iteration the YOUNGEST event was seeded in (`last_seed`; a
+repair pass resets it too), so every track still alive then has had at least 20,000 iterations,
+which is the guarantee the batch's bound gave its own tracks, and what it abandons is counted as
+before. A window seeded whole has `last_seed` 0 and the old bound exactly. The per-event scoring,
+the carried-away ledger, the repair of an event that lost a track (zeroed and re-seeded from the
+window's own primaries, `ids < n_batch` now meaning the window) and the batch retry (it halves the
+events in flight; the window stays) are the batch's, indexed by the window. `G4GPU_REFILL=0` seeds
+each window whole, as batches, for this comparison.
+
+### V285: the interaction drain's width - one thread a block, as many slots as the card holds, FTFP's workspaces a count of their own - the proton beam 6.7x, the pion beam 3.9x, the Fe56 beam 1.7x, every dose to the digit
+
+**WHAT V283 FOUND.** 96.4% of the 1 GeV proton beam was `run_interaction<kBinary>`: 98,310
+cascades in 862 chunk launches of at most 128 (the slot count), each chunk 4 blocks of 32 threads
+on 4 of the Titan V's 80 SMs, the chunks of an iteration one after another. A cascade is the most
+divergent code in the port, so a warp of 32 of them runs them nearly in series.
+
+**THE EXPERIMENT FIRST** (G4GPU_INTERACTION_BLOCK, G4GPU_INTERACTION_SLOTS, G4GPU_BATCH; the same
+binary, proton 1 GeV 200,000 events, final stage):
+
+| block | slots | batch | time | dose |
+|--:|--:|---|--:|--:|
+| 32 | 128 | auto (2,429,472) | 106.8 s | 391.931 nGy, rms 1.33866 nGy |
+| 2 | 128 | auto | 29.9 s | the same digits |
+| **1** | 128 | auto | **26.8 s** | the same digits |
+| 1 | 384 | auto | 17.9 s | the same digits |
+| 32 | 128 | 200,000 | 128.4 s | the same digits |
+
+The launch shape alone is 4x: one thread a block gives each cascade a warp of its own, spreads a
+chunk over every SM, and leaves 32 resident warps an SM to cover each one's local-memory latency.
+More slots are the rest. A smaller batch is slower, not faster: the queue's bound is the pool's
+(`pool / 48 + 1024`), so a pool of 200,000 events drains narrower chunks.
+
+**WHAT CHANGED.**
+
+1. **The block is one thread** (`kIth = 1`; `G4GPU_INTERACTION_BLOCK` overrides). Thread `i` of a
+   chunk still takes slot `i` and queue entry `base + i`; only which SM runs it moved.
+2. **The slot count is sized to the card** when the caller has not set it: Upload builds the
+   128-slot pool, reads a slot's bytes off it (the type is opaque to the engine, V233), and
+   rebuilds at `128 + (free - raise - 512 MB) / slot`, capped at 2,048 - where `raise` is what
+   `RaiseStackForInteractions` will ask, read off the five kernels the same way (28,672 B x
+   163,840 resident threads less the 16,384 B already reserved = 1.88 GB on the Titan V). So the
+   pool never takes the stack raise's memory (V258's refusal stays the backstop), and the 512 MB
+   margin covers the photo-/lepto-nuclear queue and the driver. `SetInteractionSlots` and
+   `G4GPU_INTERACTION_SLOTS` are honoured as given. The run prints the count and the arithmetic.
+3. **FTFP's workspaces are a count of their own** (`had::ftf_slot_request`, default 128,
+   `G4GPU_FTF_SLOTS`; `InteractionPoolOwner::n_ftf_slots`). FTFP's 671,280 B workspace sat beside
+   EVERY slot, and only two buckets can reach it - kFtfp, and kAtRest for a stopped antinucleon's
+   Fritiof arm; the Binary cascade, the light-ion reaction and Bertini never do. So a slot for the
+   bucket that is 96% of the proton beam cost 2,288,952 B where it needs 1,617,672: per GB, 1.41
+   times the Binary slots. The two FTFP buckets are chunked at FTFP's count and cannot index past
+   it. This is the per-model split the slot's own layout permits without touching a model's
+   signature; the rest of the union is shared by every arm's de-excitation tail (PreCompound and
+   P3's handler, 536,576 B) and final states (212,504 B), and V283's `offsetof` table says what a
+   per-bucket slot type would save past this - Bertini's slot could be 0.95 MB, Binary's 1.35 MB,
+   against 1.62 - which is 17% more Binary slots for a change to every model entry's signature and
+   seven interaction units. Not taken; named.
+
+**THE BEAMS, after (the Titan V alone, profile off, default batch and live count):**
+
+| beam | before (V283) | after | x | dose | slots | "GB left" after the raise |
+|---|--:|--:|--:|---|--:|--:|
+| B1 6 MeV gamma 2M, best of 3 | 516.4 ms, 3.873e6 ev/s | 521.9 ms, 3.833e6 ev/s | 0.99 | 85.2055 nGy (173.586 pGy), to the digit | 628 | no raise |
+| proton 1000 MeV 200k | 106.8 s, 1,872 ev/s, 108,117 steps/s | **15.84 s, 12,624 ev/s, 729,072 steps/s** | **6.7** | 391.931 nGy (1.33866 nGy), to the digit | 628 | 0.26 of 12.00 |
+| pi+ 10 GeV 100k | 63.4 s, 1,577 ev/s, 203,979 steps/s | **16.41 s, 6,095 ev/s, 788,457 steps/s** | **3.9** | 333.4 nGy (2.00918 nGy), to the digit | 628 | 0.26 of 12.00 |
+| Fe56 56 GeV 5k | 918.2 s, 5.445 ev/s, 67,586 steps/s | **549.5 s, 9.099 ev/s, 112,931 steps/s** | **1.67** | 3.06391 uGy (53.0322 nGy), to the digit | 628 | 0.26 of 12.00 |
+
+The photon beam's 1% is inside its run-to-run spread (516-519 ms before, 522-527 after) and is
+the one cost the slots put on a beam that never interacts: 628 slots (1.05 GB) built and uploaded
+at Upload, and its photo-nuclear drain launches 20 blocks where it launched 4. The proton
+depth-dose gate (batch 5,000, so 7.90 GB free) gets the 2,048 cap and its 200-slab curve is
+byte-identical to main's. Nothing paged: 0.26 GB left on every hadron beam, the guard silent.
+
+**THE FTFP WIDTH IS LOAD-BEARING, AND THE COMPARISON SEES IT.** With the two FTFP buckets chunked
+at the slot count (628) instead of FTFP's (128) - the cap removed - the pi+ beam's threads 128 and
+up found no FTFP workspace (`ftfe::Status::kNoWorkspaceSlot`), their interactions were refused and
+disposed of locally, and the dose read 2.6862 uGy against 333.4 nGy. Restored before the commit;
+the committed source is the one the table above ran.
+
+**Fe56 IS LATENCY, AND THIS DOES NOT FIX THAT.** Its 5,098 interaction-bearing iterations each
+drain a handful of light-ion reactions; the width now runs them side by side, so an iteration
+costs its SLOWEST reaction instead of the warp's serial sum - 1.67x - and every live track still
+waits for it. What would take the rest is in V286.
+
+**THE ELEVEN DOSE GATES**, build_all.bat's gate section command for command (out\lead\logs\ba73.log
+holds main's digits), on the Titan V, at main (this worktree's build of e2d5e89), after the header
+split (V283), after the refill (V284) and after the drain's width (V285) - every printed number
+the same in all four columns, so one column stands for them:
+
+| gate | printed |
+|---|---|
+| b1_gpu_sched 2,000,000 | dose = 427.699 pGy, ratio 1.0007 to Geant4's 427.385 +/- 0.870 |
+| example B1 -n 2000000 | 426.028 pGy +/- 0.867928; difference -1.35734 pGy = 1.10452 sigma |
+| batch against macro (gunstate.mac) | 426.028 pGy vs 426.263 pGy (0.02 sigma) |
+| mesh: B1 vs B1mesh 500,000 | 427.3055 / 427.3033 +/- 1.7400 pGy, 6,508,913 / 6,508,701 steps |
+| every physics switch, 200,000 | all on 427.3899 +/- 2.7526, 2,605,456 steps; the seven switches 425.6943, 108.9339, 427.6061, 385.6767, 432.0186, 428.3688, 430.3298 |
+| the step hook, 20,000 | 43,353 steps tapped; sum edep 9092.74676606292 hook = scorer (rel 0); sum edep^2 38808.4355937585 |
+| the pool size, 8.0 / 4.0 / 2.5 | 427.3899 / 427.3899 / 427.3899 |
+| two runs in one process | 842.260 +/- 17.251 then 871.530 +/- 17.635 pGy, 1.19 sigma apart |
+| a second process replays | both runs exactly |
+| two runs of N against one of 2N | 1,713.790 pGy against 1,713.790 (rel 0.00E+000) |
+| proton depth-dose, 6,000 | 584663 MeV of 600000 (97.4439%); plateau 1.00125; R80 77.693 mm (-0.027); 80-20 width 1.200 mm (+0.031); the 200-slab CSV byte-identical across the four builds |
