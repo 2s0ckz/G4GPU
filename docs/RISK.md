@@ -17877,3 +17877,135 @@ once its two findings above are closed.
 buckets reach. Past that, V283's `offsetof` table puts a Bertini-only slot at about 0.95 MB and a
 Binary-only one at about 1.35 MB against the union's 1.62: 17% more Binary slots for a change to
 every model entry's signature (each takes `InteractionSlot&`) and the seven interaction units.
+
+### V287: P33's baseline - every stepping kernel is at ptxas's 255-register cap and 8 warps an SM, the navigator spills at that cap with nothing else live, and what a frame holds is mostly the navigator's
+
+**THE TREE AND THE BUILD.** Branch perf/occupancy, cut from integ/p32 (5ab40b9, docs/RISK.md tail
+V286). The 25 kernel units' objects were perf/loop's (P32's worktree), whose sources differ from
+integ/p32 in comments only (V283-V286's renumbering, 42 lines and no code); their dependency
+files were re-pointed at this worktree and `tools/freshness.ps1` then called them fresh, and the
+engine unit (`transport_run`, whose printed strings did change) was compiled here through
+build_engine.bat. The Titan V alone (`CUDA_VISIBLE_DEVICES=1`) under `out\gpu.lock`,
+`G4GPU_ARCH=-gencode arch=compute_70,code=[sm_70,compute_70]`, CUDA 12.9.86.
+
+**THE ELEVEN DOSE GATES**, build_all.bat's gate section command for command: every printed number
+is ba73's (V285's table), and the proton depth-dose CSV is byte-identical to main's
+`out\port_depth.csv` (md5 ba22d777a151c1d717ba48d0b62f23d1).
+
+| gate | printed |
+|---|---|
+| b1_gpu_sched 2,000,000 | dose = 427.699 pGy, ratio 1.0007 to Geant4's 427.385 +/- 0.870 |
+| example B1 -n 2000000 | 426.028 pGy +/- 0.867928; difference -1.35734 pGy = 1.10452 sigma |
+| batch against macro (gunstate.mac) | 426.028 pGy vs 426.263 pGy (0.02 sigma) |
+| mesh: B1 vs B1mesh 500,000 | 427.3055 / 427.3033 +/- 1.7400 pGy, 6,508,913 / 6,508,701 steps |
+| every physics switch, 200,000 | all on 427.3899 +/- 2.7526, 2,605,456 steps; the seven switches 425.6943, 108.9339, 427.6061, 385.6767, 432.0186, 428.3688, 430.3298 |
+| the step hook, 20,000 | 43,353 steps tapped; sum edep 9092.74676606292 hook = scorer (rel 0); sum edep^2 38808.4355937585 |
+| the pool size, 8.0 / 4.0 / 2.5 | 427.3899 / 427.3899 / 427.3899 |
+| two runs in one process | 842.260 +/- 17.251 then 871.530 +/- 17.635 pGy, 1.19 sigma apart |
+| a second process replays | both runs exactly |
+| two runs of N against one of 2N | 1,713.790 pGy against 1,713.790 (rel 0.00E+000) |
+| proton depth-dose, 6,000 | 584663 MeV of 600000 (97.4439%); plateau 1.00125; R80 77.693 mm (-0.027); 80-20 width 1.200 mm (+0.031) |
+
+**THE FOUR BEAMS** (`examples/B1/exampleB1.exe`; the three hadron and ion beams at
+`G4GPU_HADRONIC_STAGE=final`; default batch and live count; profile off; "0.26 of 12.00 GB left"
+after the stack raise on every hadron and ion run, the host process at most 0.67 GB):
+
+| beam | events | dose (rms) | time | events/s | track-steps/s | iterations |
+|---|--:|--:|--:|--:|--:|--:|
+| B1 6 MeV gamma (`-n 2000000`), best of 3 (515-528 ms over 16 runs of this binary) | 2,000,000 | 85.2055 nGy (173.586 pGy) | 519.5 ms | 3.850e6 | 5.014e7 | 105 |
+| proton 1000 MeV, best of 3 | 200,000 | 391.931 nGy (1.33866 nGy) | 15.43 s | 12,964 | 748,719 | 845 |
+| pi+ 10 GeV, best of 3 | 100,000 | 333.4 nGy (2.00918 nGy) | 16.03 s | 6,239 | 807,086 | 504 |
+| Fe56 56 GeV (5,000) | 5,000 | 3.06391 uGy (53.0322 nGy) | 549.2 s | 9.104 | 113,000 | 8,433 |
+
+V285's after-column to the digit in every dose; the rates are V285's within 3%.
+
+**WHERE THE TIME GOES** (`G4GPU_LOOP_PROFILE=1`, one run each; ms of GPU time):
+
+| | photon 2M | proton 1 GeV | pi+ 10 GeV | Fe56 56 GeV |
+|---|--:|--:|--:|--:|
+| GPU time in the timed launches | 444.4 | 15,894.8 | 15,970.1 | 548,750.4 |
+| count/scatter species | 80.3 (18.1%) | 165.6 (1.0%) | 105.7 (0.7%) | 1,886.5 (0.3%) |
+| `run_step_gamma` | 100.6 (22.6%) | 31.1 | 44.6 | 925.5 |
+| `run_step_lepton<e->` | 227.6 (51.2%) | 145.0 | 267.8 | 1,893.9 |
+| `run_step_lepton<e+>` | 28.0 (6.3%) | 34.2 | 45.9 | 1,572.5 |
+| every other stepping kernel | 4.4 | 810.6 (proton 236.4, GenericIon 221.0, alpha 150.4) | 676.9 (pi+ 86.2, proton 106.9, He3 99.7) | 16,583.9 (GenericIon 3,438.5, proton 2,814.5) |
+| **all stepping** | **360.6 (81.1%)** | 1,020.9 (6.4%) | 1,035.2 (6.5%) | 20,975.8 (3.8%) |
+| the interaction kernels | - | 14,382.4 (90.5%; kBinary 13,610.8) | 14,413.8 (90.3%; kBinary 8,189.4, kFtfp 3,552.8) | 521,754.1 (95.1%; kLightIon 470,008.9) |
+
+So the stepping kernels are the photon beam (81%) and 4-7% of the others, whose time is the
+interaction drain's (P34's). On the hadron beams a stepping launch is short (150-1,400 us a
+span, often a few hundred tracks), so what occupancy could change there is small whatever it is.
+
+**THE KERNEL TABLE** (ptxas -v at sm_70 from each unit's build log; an SM holds 64 warps and 64K
+registers; at 255 registers a warp takes 8,192 of them, so 8 warps an SM whatever the block -
+2 blocks of 128 for a stepping kernel, 8 blocks of 1 for an interaction kernel (V285), 8 of 32
+for the two drains):
+
+| kernel | unit | regs | spill st / ld (entry) | frame B | block | blocks / SM | warps / SM |
+|---|---|--:|--:|--:|--:|--:|--:|
+| `run_step_gamma` | gamma | 255 | 564 / 2140 | 3,952 | 128 | 2 | 8 |
+| `run_step_lepton<e->` | lepton | 255 | 80 / 44 | 5,024 | 128 | 2 | 8 |
+| `run_step_lepton<e+>` | lepton | 255 | 80 / 44 | 5,040 | 128 | 2 | 8 |
+| `run_step_hadron<proton>` | proton | 255 | 346 / 992 | 4,944 | 128 | 2 | 8 |
+| `run_step_hadron<anti_proton>` | antiproton | 255 | 368 / 1136 | 4,608 | 128 | 2 | 8 |
+| `run_step_hadron<alpha>` | alpha | 255 | 330 / 716 | 4,848 | 128 | 2 | 8 |
+| `run_step_hadron<He3>` | he3 | 255 | 318 / 752 | 4,848 | 128 | 2 | 8 |
+| `run_step_hadron<deuteron>` | deuteron | 255 | 362 / 768 | 5,136 | 128 | 2 | 8 |
+| `run_step_hadron<triton>` | triton | 255 | 362 / 768 | 5,136 | 128 | 2 | 8 |
+| `run_step_hadron<GenericIon>` | generic_ion | 255 | 384 / 1112 | 4,864 | 128 | 2 | 8 |
+| `run_step_hadron<mu->` | muon_minus | 255 | 56 / 44 | 5,632 | 128 | 2 | 8 |
+| `run_step_hadron<mu+>` | muon_plus | 255 | 56 / 44 | 5,632 | 128 | 2 | 8 |
+| `run_step_hadron<pi+>` | pion_plus | 255 | 60 / 44 | 5,616 | 128 | 2 | 8 |
+| `run_step_hadron<pi->` | pion_minus | 255 | 56 / 44 | 5,616 | 128 | 2 | 8 |
+| `run_step_hadron<kaon+>` | kaon_plus | 255 | 60 / 44 | 5,616 | 128 | 2 | 8 |
+| `run_step_hadron<kaon->` | kaon_minus | 255 | 56 / 44 | 5,616 | 128 | 2 | 8 |
+| `run_step_neutral<neutron>` | neutral | 255 | 48 / 44 | 8,064 | 128 | 2 | 8 |
+| `run_step_neutral<pi0>` | neutral | 255 | 36 / 44 | 8,064 | 128 | 2 | 8 |
+| `run_step_strange<charged>` | strange_charged | 255 | 60 / 80 | 5,424 | 128 | 2 | 8 |
+| `run_step_strange<neutral>` | strange_neutral | 255 | 64 / 80 | 5,376 | 128 | 2 | 8 |
+| `run_interaction<kFtfp>` | int_ftfp | 255 | 552 / 1092 | 19,248 | 1 | 8 | 8 |
+| `run_interaction<kBertini>` | int_bertini | 255 | 548 / 1092 | 12,944 | 1 | 8 | 8 |
+| `run_interaction<kBinary>` | int_binary | 255 | 552 / 1092 | 15,952 | 1 | 8 | 8 |
+| `run_interaction<kLightIon>` | int_lightion | 255 | 552 / 1092 | 20,688 | 1 | 8 | 8 |
+| `run_interaction<kAtRest>` | int_atrest | 255 | 500 / 1076 | 21,376 | 1 | 8 | 8 |
+| `run_emextra_drain<kPhotoNuclear>` | int_photonuclear | 255 | 580 / 1076 | 11,824 | 32 | 8 | 8 |
+| `run_emextra_drain<kLeptoNuclear>` | int_leptonuclear | 255 | 572 / 1068 | 4,048 | 32 | 8 | 8 |
+
+20 stepping kernels and 7 interaction and drain kernels: the brief's "27 stepping kernels" is
+the 27 together.
+
+**THE SPILLS ARE IN THE CALLEES, AND THE NAVIGATOR'S ARE THE FLOOR.** A stepping kernel is an
+entry and a call tree ptxas keeps as separate ABI functions - `step_lepton`, `step_hadron`,
+`step_neutral`, `geom::step_to_boundary`, `geom::resolve_after_step`, the solid routines, the
+Wentzel and Coulomb models, `sample_fluctuation` - each given the entry's register budget and
+reported on its own line. At 255 registers `geom::step_to_boundary` spills 644-648 B and reloads
+1,176-1,184 B in every unit; `step_lepton` 324-328 / 888-900, `step_hadron` 124-172 / 432-752,
+`step_neutral` 66-150 / 176-236 (`step_gamma` is inlined, so its spills are the entry's
+564 / 2,140). The navigator spills at the cap with none of the physics live, so no kernel that
+calls it - every stepping kernel - fits in fewer than 255 registers without spilling more.
+
+**WHAT A FRAME HOLDS** (each unit's PTX, `nvcc -ptx`: every function's `__local_depot`, the
+locals before ptxas adds its spills; ptxas puts the non-recursive call tree's depots on the
+entry's frame and reports the recursive solid routines on their own):
+
+* **Every kernel: the navigator.** `step_to_boundary` 1,472 B, `dist_in` 1,264,
+  `resolve_after_step` 1,024, `inside_local` 512, `generic_dist` 1,264-1,440, `boolean_dist`
+  544-576 - the box and trd plane buffers (`pl[24]`), the polyhedra's 64-double plane list, the
+  `Solid` copies of a polycone section, the 40-entry BVH stacks. About 2.7 KB on the deepest
+  chain (`step_to_boundary` over `dist_in`).
+* **gamma (3,952 B):** the kernel's own 552 B - the TrackState, the StepReport, the emitter, the
+  DeviceStep and the Philox state, all address-taken by the calls - and the navigator's.
+  `step_gamma` keeps nothing past its per-element accumulators.
+* **lepton (5,024 / 5,040 B):** the kernel's 1,080 B (gamma's, plus the MscStep, the
+  WentzelMscState and the WentzelElementXs - 2 x 16 doubles), `step_lepton`'s 720, the navigator.
+* **the hadron family (4,608-5,632 B):** the proton kernel's 2,688 B (the step inlined: the
+  elastic and inelastic per-element cross-section tables, the decay products),
+  `elastic_apply`'s 1,168 B closure, `sample_decay`'s 424, the navigator.
+* **neutral (8,064 B):** `neutron_capture_apply`'s 4,496 B (the capture's gamma cascade and its
+  product list) over the kernel's 1,432 and `step_neutral`'s 1,632.
+* **strange (5,376-5,424 B):** `step_hadron`'s 1,648 B and the hadron family's tables.
+
+So the largest local arrays a step keeps are the navigator's solid scratch (every kernel) and
+the neutron capture's product list (the neutral kernel). None of the frame limits occupancy: the
+driver's occupancy query puts every stepping kernel at 2 blocks an SM by registers (the
+profile's own table prints it).
