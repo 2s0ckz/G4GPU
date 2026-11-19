@@ -18148,3 +18148,141 @@ depth-dose CSV byte-identical (md5 ba22d777a151c1d717ba48d0b62f23d1). The eleven
 electron bucket's last track not launched each iteration - a list built wrong), the 2M-photon run
 printed 85.1993 nGy, rms 173.578 pGy, and 26,050,104 track-steps against 85.2055, 173.586 and
 26,050,805. Restored before the commit; the committed source is the one the tables ran.
+
+### V289: the monolithic step split into a continuous and a discrete kernel - NOT DONE, and refused by name: its premise is occupancy, and V288 measured that more warps an SM cost these kernels time
+
+**WHAT IT WOULD HAVE TO BE.** The natural cut (AdePT's, Celeritas') is one kernel for the
+continuous part - the navigation, the energy loss along the step, msc, the step limit - and one
+kernel a discrete process, the sort by next process becoming the dispatch. Keeping every random
+number in place means carrying, across the boundary, the track's Philox state (`ctr_[4]`,
+`key_[2]`, `buf_[4]` and the buffer position, 44 B), the emitter's per-step child count and last
+secondary, the StepReport, the pre-step energy, position, direction and volume the hook and the
+queues need, and every discrete process' cross section the continuous part computed (for the
+lepton: `delta_xs`, `brem_xs`, `annih_xs`, `coul_xs`, `enuc_xs`, the material, `d_*` - or they
+are recomputed, which is the same arithmetic in the same order and costs the table loads again),
+plus a per-process index list and a second launch per species per iteration. That is a rewrite of
+`step_lepton`'s 830 lines and the kernel's post-step block, and every one of the 25 units
+rebuilt per attempt (85 minutes).
+
+**WHY IT IS NOT WORTH IT ON THIS CARD, MEASURED.**
+
+1. **The register ceiling is the navigator's, and the continuous kernel keeps it.** ptxas gives
+   a call tree one register budget, and `geom::step_to_boundary` spills 644-648 B at 255
+   registers in every unit with nothing of the physics live (V287). The continuous kernel calls
+   it, so it stays at 255 registers and 8 warps an SM whatever the discrete part does.
+2. **What it buys - more warps an SM for the lighter kernel - is what V288 bought with
+   `__launch_bounds__`, and it cost time.** Forced from 8 to 12, 16, 24 and 32 warps the two EM
+   kernels got monotonically slower (e- 227.6 -> 250.0 -> 254.7 -> 256.2 -> 262.9 ms; gamma
+   100.6 -> 104.4 -> 116.5 -> 128.1 -> 143.7 ms): the spills it adds cost more than the latency
+   the warps hide. A discrete kernel would have fewer registers without forcing, but it is the
+   smaller part of the step: an electron's discrete branch is one delta-ray or bremsstrahlung
+   sample on the steps that end in one, and a photon's one Klein-Nishina, photoelectric or pair
+   sample, against msc, the fluctuation and the tables every step pays.
+3. **Navigation is not where the time is.** Calling `step_to_boundary` a second time per step
+   (the result discarded through a volatile; a measurement build, not committed) costs e- 23.8 ms
+   of 227.6 (10.5%) and gamma 11.2 ms of 100.6 (11.1%) on the 2M-photon gate.
+4. **What did move the stepping kernels is ORDER, not width:** V291's secondary sort key took
+   `run_step_lepton<e->` from 227.6 to 165.5 ms (1.38x) with the same registers and frame - the
+   warps' 32 tracks reading the same rows and taking the same branches. That is the half of the
+   AdePT/Celeritas design that pays here, and it is in.
+
+So the split is named, not merged: on the Titan V the profile says these kernels are bound by
+divergence and memory latency, not by the warps an SM holds, and a split's one lever is the
+latter. Its first measurement, if someone takes it up, is the discrete kernel alone at its own
+register count against the same tracks' share of V291's `run_step_lepton<e->` time.
+
+### V290: scratch out of the frame - NOT DONE: on this card a frame costs memory, not warps, and the large arrays are the navigator's and the neutron capture's, which no step's hot path reads
+
+**WHAT THE FRAMES ARE** (V287): 3,952 to 8,064 B a thread, of which the navigator's solid
+scratch - box and trd plane buffers, the polyhedra's 64-double plane list, polycone section
+copies, BVH stacks; `step_to_boundary` 1,472 B of PTX locals over `dist_in`'s 1,264 on the deepest
+chain - is about 2.7 KB of every kernel's, `neutron_capture_apply`'s product list
+4.5 KB of the neutral kernel's, and each kernel's own address-taken structs (TrackState,
+StepReport, emitter, DeviceStep, Philox) 0.55-2.7 KB.
+
+**WHY MOVING THEM IS NOT A WIN HERE:**
+
+1. **A frame does not limit occupancy.** The driver reserves local memory for every thread the
+   card can hold whatever is launched (V283), and the profile's occupancy query puts every
+   stepping kernel at 2 blocks an SM by REGISTERS (V287's table); a smaller frame changes
+   neither the 8 warps nor the stack raise, which is the interaction kernels' 28,672 B (P34's).
+2. **Local memory is already per-thread interleaved and coalesced** for a warp reading the same
+   offset, which is what the struct locals are; it is cached in L1/L2 like any global load.
+   Moving a struct to the track's pool slot turns one cached local access into an uncached
+   global one and changes nothing about coalescing.
+3. **Shared memory would cost the occupancy it was meant to buy.** 2.7 KB a thread x 128 threads
+   is 346 KB a block against an SM's 96 KB; even the 552 B gamma struct block is 69 KB a block,
+   one block an SM - fewer warps than today's 8.
+4. **The big arrays are off the hot path on B1's beams.** The plane buffers and BVH stacks are
+   touched only for the solid types that use them (B1 is boxes, a cone and a trd), and the
+   capture list only when a neutron is captured. A frame's unused bytes cost nothing but
+   reservation.
+
+What would shrink the reservation is the interaction kernels' frames (13-21 KB), which set the
+stack raise; that is P34's.
+
+### V292: P33 closed - the kernel table after against before is unchanged, the beams' gain is the sort's, and what was refused by name
+
+**THE KERNEL TABLE, AFTER AGAINST BEFORE.** No stepping or interaction unit changed: every row of
+V287's table stands as it was (255 registers, 8 warps an SM, the same frames and spills), because
+the one change kept (V291) is in the engine unit, which holds the loop and the three utility
+kernels and no physics. The only kernels whose code changed are `count_species` and
+`scatter_species` (the engine's own, 128-thread blocks, 12 registers each: they read the
+species, the volume's material and the energy instead of the species alone).
+
+| family | regs before / after | frame B before / after | warps an SM before / after |
+|---|--:|--:|--:|
+| gamma | 255 / 255 | 3,952 / 3,952 | 8 / 8 |
+| lepton (e-, e+) | 255 / 255 | 5,024, 5,040 / the same | 8 / 8 |
+| hadron (13) | 255 / 255 | 4,608-5,632 / the same | 8 / 8 |
+| neutral (2) | 255 / 255 | 8,064 / 8,064 | 8 / 8 |
+| strange (2) | 255 / 255 | 5,376-5,424 / the same | 8 / 8 |
+| interaction (5) and drains (2) | 255 / 255 | 4,048-21,376 / the same | 8 / 8 |
+
+**THE BEAMS** (V287 before, V291 after): photon 2M 519.5 -> 425.4 ms (1.22x), proton 1 GeV 15.43
+-> 14.67 s (1.05x), pi+ 10 GeV 16.03 -> 15.09 s (1.06x), Fe56 56 GeV 549.2 -> 548.4 s (1.00x); every dose and every
+track-step total to the digit; the eleven gates V287's digits.
+
+**WHAT P33 FOUND, IN ONE SENTENCE A DELIVERABLE.**
+
+1. (V287) Every stepping kernel is at 255 registers and 8 warps an SM, and the navigator alone
+   spills at that cap; the stepping kernels are 81% of the photon gate and 4-7% of every hadron
+   and ion beam.
+2. (V288) Forcing 12-32 warps an SM with `__launch_bounds__` is slower at every step on the photon
+   gate (5-16%) and inside the noise on the proton beam: no bound kept.
+3. (V289) The continuous/discrete split - refused by name: its lever is warps an SM, which (2)
+   measured against, the continuous kernel keeps the navigator's 255 registers, and navigation is
+   10-11% of an EM step.
+4. (V290) Scratch out of the frame - refused by name: a frame costs memory, not warps; shared
+   memory would cost the warps it meant to buy; local memory is already coalesced.
+5. (V291) The secondary sort key - kept: 1.37x on `run_step_lepton<e->`, 1.22x on the photon gate,
+   1.05-1.06x on the proton and pion beams, nothing on Fe56.
+
+**REFUSED OR NOT DONE, BY NAME.** The register bounds (V288, measured slower, not kept); the
+kernel split (V289); the scratch move (V290); a sort key on the voxel cell's material (a
+navigation call a track an iteration; B1 has no voxels to measure it on); the interaction kernels'
+occupancy, the drain and the stack raise (P34's, untouched).
+
+**THE MACHINE.** The first launch-bounds sweep compiled eight units at once (four tags of two),
+which took the machine to 3.3 GB free; the lead stopped four of them. Those four (the lepton
+unit at k = 3, 4, 6 and 8) were rebuilt four at a time, which peaks at 17.7 GB free (the lepton
+ptxas is 5.6 GB at a bound), and every later compile of this package ran at most four ptxas.
+
+**THE LAUNCH-BOUNDS PATCH V288 MEASURED** (not in the tree; for whoever measures it on another
+card - the bound is the card's question, not the code's). In `host/transport_run_impl.cuh`, one
+macro a family defaulting to no bound, placed between `__global__ void` and the kernel's name:
+
+    #ifndef G4GPU_STEP_MINB_LEPTON
+    #define G4GPU_STEP_MINB_LEPTON 0
+    #endif
+    #if G4GPU_STEP_MINB_LEPTON > 0
+    #define G4GPU_STEP_BOUNDS_LEPTON __launch_bounds__(128, G4GPU_STEP_MINB_LEPTON)
+    #else
+    #define G4GPU_STEP_BOUNDS_LEPTON
+    #endif
+    template <typename real_t, bool kIsPositron, typename StepHook>
+    __global__ void G4GPU_STEP_BOUNDS_LEPTON run_step_lepton(...)
+
+and the same for GAMMA, HADRON, NEUTRAL and STRANGE; a unit compiled with
+`NVCC_APPEND_FLAGS=-DG4GPU_STEP_MINB_LEPTON=k` through build_engine_unit.bat into a directory of
+its own. A bound needs the stepping launch's block to stay at 128 (`Upload`'s `threads`).
