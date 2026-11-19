@@ -1260,7 +1260,10 @@ struct LoopProfile {
   static constexpr int kIntBase = kQueueBin + 1;
   static constexpr int kNumBuckets = 5;  // kFtfp, kBertini, kBinary, kLightIon, kAtRest
   static constexpr int kEmxBase = kIntBase + kNumBuckets;
-  static constexpr int kNumClasses = kEmxBase + 2;
+  // P37: the species' stepping launches, timed as one span when they run on their own streams
+  // (each species' own class then counts its launches and tracks, and holds no time).
+  static constexpr int kStepStreams = kEmxBase + 2;
+  static constexpr int kNumClasses = kEmxBase + 3;
   // The live-count bins, as a fraction of the pool: < 1%, 1-10%, 10-50%, >= 50%.
   static constexpr int kNumBins = 4;
 
@@ -1329,6 +1332,12 @@ struct LoopProfile {
     ++calls[c];
     items[c] += n_items;
   }
+  /// P37: a launch counted in its class without a span of its own (see kStepStreams).
+  void count_only(int c, long long n_items) {
+    if (!on) { return; }
+    ++calls[c];
+    items[c] += n_items;
+  }
   void launch(int n = 1) { if (on) { launches += n; it_launches += n; } }
   void sync(int n = 1) { if (on) { syncs += n; it_syncs += n; } }
   void memop(int n = 1) { if (on) { memsets += n; it_memsets += n; } }
@@ -1345,7 +1354,7 @@ struct LoopProfile {
         const int c = span_class[s];
         ms[c] += m;
         gpu += m;
-        if (c >= kStepBase && c < kQueueBin) { step_ms += m; }
+        if ((c >= kStepBase && c < kQueueBin) || c == kStepStreams) { step_ms += m; }
         if (c >= kIntBase && c < kEmxBase) { int_ms += m; }
       }
     } else {
@@ -1386,6 +1395,7 @@ struct LoopProfile {
                                                    "interaction kAtRest"};
       return kB[c - kIntBase];
     }
+    if (c == kStepStreams) { return "stepping, species at once"; }
     if (c == kEmxBase) { return "drain kPhotoNuclear"; }
     return "drain kLeptoNuclear";
   }
@@ -2276,18 +2286,86 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         last_wiring = had_wiring;
         last_books = books;
 
+        // ---- P37: THE SPECIES' STEPPING LAUNCHES RUN AT ONCE, each on a stream of its own.
+        //
+        // A stepping launch on the ion beams is a few hundred to a few thousand tracks - 16
+        // blocks of 128 for the Fe56 beam's GenericIon at 5,000 events, one or two for its
+        // muons - and it lasts as long as ONE thread takes to step ONE track: 270 us for an ion,
+        // 430 us for a proton (docs/RISK.md V303's per-phase timers), because nothing else is on
+        // the card to hide that thread's latency. One stream ran the fifteen of an iteration one
+        // after another, 1.39 ms an iteration on the 5k beam for 0.4 ms of the slowest. They
+        // share nothing a launch order could decide: each reads its own index range, appends to
+        // the one pool and adds to the one score through atomics, as the threads of one launch
+        // already do, and every number a step draws is keyed on its track (V284) - so the order
+        // the pool is written in, which V291's sort already changed, reaches no random number.
+        //
+        // AND THIS CARD DOES RUN THEM AT ONCE, which V294 seemed to say it does not. V294's
+        // probe queued a long kernel on one stream and then, later, a short one on another,
+        // which waited for everything queued before it: WDDM submits in order. Launched together
+        // - forked from the legacy stream by an event, each recording its own and the legacy
+        // stream waiting for all of them - ten 200 us kernels take 0.27 ms, not 2.0 (V303's
+        // probe). The legacy stream is where every other launch of the loop is, so the join is
+        // what keeps the drain and the swap after the last step, as the one stream did.
+        //
+        // `G4GPU_STEP_STREAMS=0` launches them on the legacy stream one after another, as before.
+        static const bool step_streams = [] {
+          const char* v = std::getenv("G4GPU_STEP_STREAMS");
+          return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        static cudaStream_t sp_stream[kNumTrackSpecies] = {};
+        static cudaEvent_t sp_done[kNumTrackSpecies] = {};
+        static cudaEvent_t sp_fork = nullptr;
+        int n_launching = 0;
+        for (int sp = 0; sp < kNumTrackSpecies; ++sp) { n_launching += (nsp[sp] > 0) ? 1 : 0; }
+        const bool forked = step_streams && n_launching > 1;
+        if (forked) {
+          if (sp_fork == nullptr) {
+            G4GPU_CUDA_CHECK(cudaEventCreateWithFlags(&sp_fork, cudaEventDisableTiming));
+            for (int k = 0; k < kNumTrackSpecies; ++k) {
+              G4GPU_CUDA_CHECK(cudaStreamCreateWithFlags(&sp_stream[k], cudaStreamNonBlocking));
+              G4GPU_CUDA_CHECK(cudaEventCreateWithFlags(&sp_done[k], cudaEventDisableTiming));
+            }
+          }
+          prof.begin(LoopProfile::kStepStreams);
+          G4GPU_CUDA_CHECK(cudaEventRecord(sp_fork, 0));
+        }
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
           const int n_sp = nsp[sp];
           if (n_sp <= 0) { continue; }
+          cudaStream_t sst = 0;
+          if (forked) {
+            sst = sp_stream[sp];
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(sst, sp_fork, 0));
+          }
           const int* list = idx_[cur] + off.base[sp];
-          const int blocks = (n_sp + threads_ - 1) / threads_;
-          prof.begin(LoopProfile::kStepBase + sp);
+          // P37 STUDY KNOB (V303: no effect): `G4GPU_STEP_BLOCK=n` launches in blocks of n
+          // threads, `=0` spreads each launch over every SM (blocks of the smallest multiple of
+          // 32 that does it, at most `threads_`). Unset, the launch is the one it always was.
+          static const int step_block_env = [] {
+            const char* v = std::getenv("G4GPU_STEP_BLOCK");
+            return (v != nullptr && v[0] != '\0') ? std::atoi(v) : -1;
+          }();
+          static const int n_sm = [] {
+            int dev = 0, n = 0;
+            cudaGetDevice(&dev);
+            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+            return (n > 0) ? n : 1;
+          }();
+          int tpb = threads_;
+          if (step_block_env > 0) {
+            tpb = step_block_env;
+          } else if (step_block_env == 0) {
+            const int per_sm = (n_sp + n_sm - 1) / n_sm;
+            tpb = std::min(threads_, std::max(32, ((per_sm + 31) / 32) * 32));
+          }
+          const int blocks = (n_sp + tpb - 1) / tpb;
+          if (!forked) { prof.begin(LoopProfile::kStepBase + sp); }
 #define G4GPU_LAUNCH_HADRON(TYPE)                                                            \
-  run_step_hadron<real_t, TYPE><<<blocks, threads_>>>(                                       \
+  run_step_hadron<real_t, TYPE><<<blocks, tpb, 0, sst>>>(                                \
       scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,             \
       d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books, hook_)
 #define G4GPU_LAUNCH_NEUTRAL(TYPE)                                                           \
-  run_step_neutral<real_t, TYPE><<<blocks, threads_>>>(                                      \
+  run_step_neutral<real_t, TYPE><<<blocks, tpb, 0, sst>>>(                               \
       scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,             \
       d_voxel_score_, step_n[sp], d_neutron_xs_, had_wiring, d_killed_energy_, d_killed_n_,   \
       traj, d_status_warn_, sec_, books, hook_)
@@ -2295,19 +2373,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // The photon and the two leptons take `had_wiring` since P19, for `photonNuclear`,
             // `electronNuclear` and `positronNuclear`.
             case kSpeciesGamma:
-              run_step_gamma<real_t><<<blocks, threads_>>>(
+              run_step_gamma<real_t><<<blocks, tpb, 0, sst>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesElectron:
-              run_step_lepton<real_t, false><<<blocks, threads_>>>(
+              run_step_lepton<real_t, false><<<blocks, tpb, 0, sst>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesPositron:
-              run_step_lepton<real_t, true><<<blocks, threads_>>>(
+              run_step_lepton<real_t, true><<<blocks, tpb, 0, sst>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
@@ -2332,13 +2410,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // P23a's two GROUP kernels: each steps eight species and reads the species off the
             // track, so the launch names a group and not a ParticleType.
             case kSpeciesStrangeCharged:
-              run_step_strange<real_t, true><<<blocks, threads_>>>(
+              run_step_strange<real_t, true><<<blocks, tpb, 0, sst>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesStrangeNeutral:
-              run_step_strange<real_t, false><<<blocks, threads_>>>(
+              run_step_strange<real_t, false><<<blocks, tpb, 0, sst>>>(
                   scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
@@ -2352,11 +2430,18 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                           "       TransportEngine::BeamOn.\n", sp, n_sp);
               std::exit(3);
           }
-          prof.end(LoopProfile::kStepBase + sp, step_n[sp]);
+          if (forked) {
+            G4GPU_CUDA_CHECK(cudaEventRecord(sp_done[sp], sst));
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(0, sp_done[sp], 0));
+            prof.count_only(LoopProfile::kStepBase + sp, step_n[sp]);
+          } else {
+            prof.end(LoopProfile::kStepBase + sp, step_n[sp]);
+          }
           prof.launch();
 #undef G4GPU_LAUNCH_HADRON
 #undef G4GPU_LAUNCH_NEUTRAL
         }
+        if (forked) { prof.end(LoopProfile::kStepStreams, total_step); }
         G4GPU_CUDA_CHECK(cudaGetLastError());
 
         // ---- P15: drain the interaction queue, in chunks of `n_interaction_slots_`.
