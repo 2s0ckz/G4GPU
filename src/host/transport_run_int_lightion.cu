@@ -10,6 +10,7 @@
 // One at a time they compile, and the figure in this file's first line is what this one costs.
 // docs/RISK.md V189 has the whole table and the reason nothing had ever found this before -
 // every model test in this project is host-only.
+#define G4GPU_ENGINE_KERNELS_ONLY  // a kernel unit: no engine host code here (P32)
 #include "host/transport_run_int_impl.cuh"
 
 namespace g4gpu::host {

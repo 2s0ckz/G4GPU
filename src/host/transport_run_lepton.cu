@@ -8,6 +8,7 @@
 // template switched by a compile-time bool, the pair compiles in 269 s, and it is not the
 // build's long pole. Four instantiations of `run_step_hadron` in one unit is the arrangement
 // ptxas refuses outright, which is why those are thirteen units. docs/RISK.md V65.
+#define G4GPU_ENGINE_KERNELS_ONLY  // a kernel unit: no engine host code here (P32)
 #include "host/transport_run_impl.cuh"
 
 namespace g4gpu::host {

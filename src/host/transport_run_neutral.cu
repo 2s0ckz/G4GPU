@@ -11,6 +11,7 @@
 // physics/hadronic/neutron_wiring.cuh. That chain is now compiled for two kernels rather than
 // alongside sixteen others, and the neutron's is the largest stack frame in the engine at
 // 7472 bytes against the 16384 `Upload` sets. docs/RISK.md V65.
+#define G4GPU_ENGINE_KERNELS_ONLY  // a kernel unit: no engine host code here (P32)
 #include "host/transport_run_impl.cuh"
 
 namespace g4gpu::host {

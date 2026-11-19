@@ -7,6 +7,7 @@
 // P15's five for the reason photonuclear's gives. The three processes share one unit because
 // the two entry points share the gamma chain: P13's lepton probe instantiated both together at
 // 255 registers and a 2,544-byte frame. docs/RISK.md V210 has what this kernel measures.
+#define G4GPU_ENGINE_KERNELS_ONLY  // a kernel unit: no engine host code here (P32)
 #include "host/transport_run_int_impl.cuh"
 
 namespace g4gpu::host {

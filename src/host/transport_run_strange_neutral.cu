@@ -6,6 +6,7 @@
 // other object (docs/RISK.md V65). A unit of its own rather than a third instantiation in
 // transport_run_neutral.cu, whose neutron kernel carries the general process and the capture
 // cascade this one has no use for - docs/RISK.md V240.
+#define G4GPU_ENGINE_KERNELS_ONLY  // a kernel unit: no engine host code here (P32)
 #include "host/transport_run_impl.cuh"
 
 namespace g4gpu::host {
