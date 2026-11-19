@@ -18531,3 +18531,144 @@ would buy are worth about 2% at most, and past 640 nothing, because no more one-
 can be resident. For a change to every model entry's signature (each takes `InteractionSlot&`),
 the pool's layout and seven interaction units (each 6-12 minutes of ptxas at up to 27 GB). Not
 taken; the same arithmetic is V296's.
+
+### V296: the frames and the raise - NOT CUT, and refused by measurement: the 1.88 GB the raise reserves would buy slots and FTFP workspaces, and after V295 neither moves a beam
+
+**WHAT THE BRIEF ASKED.** Cut the five interaction frames (13-21 kB) by V256's method - the arrays
+a model keeps on the stack moved into its slot - so the raise (28,672 B a thread for every one of
+the Titan V's 163,840 resident threads; 1.88 GiB over the stepping kernels' 16,384) falls and the
+memory goes to slots. To bring the raise to the stepping floor every one of the five frames must
+fall to 12,288 B or less: the at-rest frame by 9.2 kB, light-ion by 8.5 kB, FTFP by 7.0 kB,
+Binary by 3.5 kB, Bertini by 0.8 kB - and a 4 kB step of the largest frame is worth 0.67 GB.
+
+**WHAT THE MEMORY WOULD BUY, MEASURED FIRST.** Two things could take it: interaction slots and
+FTFP workspaces.
+
+* Slots: V295 measured that halving them (628 -> 320) costs the proton beam 8% and the pion beam
+  5%, and the card cannot keep more than 640 one-thread interaction blocks resident at 255
+  registers, so slots past 640 add no width at all. 1.88 GB is 1,160 more slots; at most 12 of
+  them can run.
+* FTFP's workspaces (128, 671,280 B each; V285): the narrowest bucket. The same memory split
+  differently, on the pion beam (the only one of the four with FTFP):
+
+| slots | FTFP workspaces | interaction memory | pi+ 10 GeV 100k | dose |
+|--:|--:|--:|--:|---|
+| 628 | 128 (default) | 1,050.8 MB | 10,407-10,512 ms | 333.4 nGy (2.00918) |
+| 560 | 256 | 1,027.8 MB | 10,756.7 ms | the same digits |
+| 520 | 384 | 1,048.1 MB | 10,448.4 ms | the same digits |
+
+Three times FTFP's width moves the beam by nothing measurable: after V295 the FTFP bucket walks
+its entries with a stride and is 1.4 s of the beam's 10.4, and it is no longer bound by how many
+run at once but by how long each one takes.
+
+**SO NO FRAME WAS CUT.** A frame cut is V256's work - an attribution of the frame by moving one
+function's arrays at a time and recompiling a 6-12 minute, up-to-27 GB unit after each move, then
+the seven units and the pool - and on this card what it would free buys no measurable time on
+any of the four beams, and the beams do not page (0.24-0.27 GB left on every hadron beam,
+V293-V295). The frames are recorded as V295 left them: FTFP 19,280, Bertini 13,040, Binary
+15,776, light ion 20,784, at rest 21,472 B, 255 registers each; the raise 28,672 B a thread;
+"0.25 GB of 12.00 GB left". What would change this: a card with more resident threads per
+register file, or a run that is several batches and wants the memory for its track pool - then
+the at-rest and light-ion frames are the two to take first, as V257 said.
+
+### V297: where a reaction's milliseconds go on one thread - device timers per phase in the light-ion reaction and the Binary cascade: the cascade's propagation is 84-86% of both, the light-ion reaction tries 3.8 impact parameters for every one that collides, and nothing cheap is left that keeps the draws in their order
+
+**THE MEASUREMENT** (measurement only, not merged: a `%globaltimer` read around each phase,
+summed per unit with atomics into `__device__` counters and printed after the run, compiled in
+with `-DG4GPU_P34_TIMERS` into the engine, `transport_run_int_lightion` and
+`transport_run_int_binary` of an experiment build over V295's objects; the patch is the
+session's instrument.pl). Every run's dose and step count are V295's to the digit, and its time
+within 1.5% of it (9,085 / 10,657 / 49,458 ms). THREAD time: each reaction runs on one thread, so the sums are the reactions'
+own latencies added up, not wall time.
+
+The light-ion reaction (`G4BinaryLightIonReaction`, P9e), Fe56 56 GeV 5k (19,978 reactions) and
+pi+ 10 GeV 100k (712):
+
+| phase | Fe56: total | mean a call | worst | pi+: total |
+|---|--:|--:|--:|--:|
+| the whole reaction (`blir_apply_yourself`) | 1,187.3 s | **59.4 ms** | **855.9 ms** | 1.53 s |
+| `Interact`'s tries a reaction (impact parameters) | 75,118 | 3.76 | 51 | 385 for 712 |
+| both `G4Fancy3DNucleus::Init`s, per try | 118.1 s (9.9%) | 1.57 ms | 8.6 ms | 0.19 s |
+| the field maps (`make_rk_propagation`), per try | 26.4 s (2.2%) | 0.35 ms | 1.5 ms | 0.05 s |
+| `Propagate`, per try, with the fragment de-excitation inside it | **1,024.0 s (86.2%)** | 13.6 ms | 779.5 ms | 0.75 s |
+| ... of which the fragment's PreCompound + evaporation | 218.8 s (18.4%) | 11.5 ms | 253.1 ms | 0.07 s |
+| the spectators' de-excitation | 11.6 s (1.0%) | 0.95 ms | 24.0 ms | 0.01 s |
+
+The Binary cascade (`G4BinaryCascade::ApplyYourself`), proton 1 GeV 200k (98,135 cascades) and
+Fe56 (38,920):
+
+| phase | proton: total | mean | worst | Fe56: total |
+|---|--:|--:|--:|--:|
+| the whole cascade | 1,763.3 s | **18.0 ms** | 545.9 ms | 362.3 s (9.3 ms a cascade) |
+| `G4Fancy3DNucleus::Init`, per outer pass | 147.0 s (8.3%) | 1.60 ms | 6.8 ms | 30.7 s |
+| the field maps, per outer pass | 67.8 s (3.8%) | 0.74 ms | 1.9 ms | 13.7 s |
+| `Propagate`, per impact parameter (7.3 a cascade) | **1,494.9 s (84.8%)** | 2.10 ms | 317.9 ms | 302.7 s |
+| ... of which the fragment de-excitation | 186.3 s (10.6%) | 2.28 ms | 108.8 ms | 33.4 s |
+
+**WHAT IT SAYS.** The Fe56 beam's drains (V294: 100 of them, the light-ion bucket 27 s of the 49)
+each wait for their slowest reaction, and the slowest are 0.5-0.9 s of one thread inside
+`Propagate`: a 56-nucleon projectile's cascade through the target, the collision search over
+every pair of cascade tracks at every time step (V286's warp-cooperative cascade). A reaction
+also pays 3.76 `Interact` tries on average - Geant4's own loop of up to 150 impact parameters
+until one collides - each with two fresh nuclei and a fresh `Propagate`; that is Geant4's
+algorithm and its draws, and it is ported as it is.
+
+**THE CHEAP WINS, AND WHY NONE IS TAKEN.**
+
+* The field maps: 2.2% of the light-ion reaction and 3.8% of the cascade, rebuilt per try and per
+  outer pass from the nucleus. They draw nothing, but they are built from the nucleus the try
+  has just sampled, and keeping them across tries or interactions makes a slot carry state from
+  one interaction into the next - the property V283, V285 and V295 rest on ("a slot holds
+  nothing between interactions that reaches a number"). For at most 4% of the interaction
+  kernels it is not worth giving up; named.
+* Table lookups hoisted and global loads made local: the phases that matter are `Propagate`'s
+  time step and the de-excitation chain, both P9e's and P3/P6's code paths that every model test
+  holds byte-identical; there is no lookup in them that runs once per reaction and could be
+  hoisted without reordering the work the generator is threaded through. Not attempted.
+* Warp-cooperative work (32 lanes on one reaction): `Propagate`'s collision search is
+  deterministic and could be split across lanes, but the step around it draws, and V286's
+  refusal stands - one generator's sequence across a warp is a rewrite of bic/* with an
+  anti-vacuity campaign of its own. Refused by name.
+
+What would move the Fe56 beam next is the latency of one reaction, not the loop: after V294 the
+loop waits for 100 slowest reactions instead of 5,098.
+
+### V298: P34 closed - the four beams before and after, the gates unchanged throughout, and what was refused by name
+
+The Titan V alone, profile off, the default batch and live count; each number is the run's own
+"time ... events/s" line; every dose, rms and track-step count the same digits in every column.
+
+| beam | V293 (integ/p33) | V294 (the deferred drain) | V295 (the stride) | x | dose (rms) |
+|---|--:|--:|--:|--:|---|
+| B1 gamma 6 MeV 2M | 434.7 ms, 4.60e6 ev/s | 430.0-433.5 ms | 440.3 ms | 1.00 | 85.2055 nGy (173.586 pGy) |
+| proton 1 GeV 200k | 14.63 s, 13,669 ev/s | 12.44-12.49 s | **8.99-9.04 s, 22,135-22,256 ev/s** | **1.62** | 391.931 nGy (1.33866 nGy) |
+| pi+ 10 GeV 100k | 15.39 s, 6,498 ev/s | 14.46-14.57 s | **10.41-10.52 s, 9,513-9,609 ev/s** | **1.47** | 333.4 nGy (2.00918 nGy) |
+| Fe56 56 GeV 5k | 548.5 s, 9.12 ev/s | 49.56-49.68 s | **49.73 s, 100.6 ev/s** | **11.0** | 3.06391 uGy (53.0322 nGy) |
+
+**The eleven gates** at V293's, V294's and V295's builds: every printed number the same (the B1
+photon gate 426.028 pGy, 1.10452 sigma; the depth CSV md5 ba22d777a151c1d717ba48d0b62f23d1) -
+which are ba73's.
+
+**The slots and the raise**: 628 slots of 1,617,672 B + FTFP's 128 workspaces (1,050.8 MB) before
+and after; the raise 28,672 B a thread off `run_interaction<kAtRest>` (21,376 B before, 21,472
+after), 1.88 GiB over the stepping floor; 0.26 GB of 12.00 left before, 0.24-0.25 after (the
+6.7 MB pending ring).
+
+**What changed**: `src/host/transport_run_engine.cuh` (the deferred drain, the drain as a
+function of its queue, the photo-/lepto-nuclear grid no wider than the slots, the launch that
+strides) and `src/host/transport_run_int_impl.cuh` (`run_interaction` walking its bucket in its
+own slots). The units they stale: `transport_run` (the engine) and the seven
+`transport_run_int_*` units, through `transport_run_int_impl.cuh`; a hook project's
+`hook_int_*` units (build_extras) through the same header. Nothing else.
+
+**Refused or not done, by name.** The second stream (V294: this card runs two streams one after
+the other; P32's branch stays as it is, and needs V294's grid fix if it is ever tried on a card
+that overlaps). The per-bucket slot type (V295: slots past the card's 640 resident one-thread
+blocks add no width; halving them costs 5-8%). The frame cuts and the raise (V296: the memory
+would buy slots and FTFP workspaces, and three times FTFP's width moved the pion beam by nothing
+measurable). The field maps kept across tries, lookups hoisted in `Propagate`, and the
+warp-cooperative cascade (V297: the first makes a slot carry state between interactions for at
+most 4%; the others reorder the work the generator is threaded through).
+
+**The GPU tests** (build_all.bat's TESTS_GPU, built with tools/build_tests.ps1 one at a time and run on the
+Titan V on V295's engine, G4GPU_ORACLE at the main tree's ref\oracle): all eleven pass.

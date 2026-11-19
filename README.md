@@ -132,6 +132,10 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P33: proton 1 GeV, 200,000 events, final stage | 13,635 (12,964 before) | 14.7 s (15.4 s) |
 | Titan V, P33: pi+ 10 GeV, 100,000 events, final stage | 6,627 (6,239 before) | 15.1 s (16.0 s) |
 | Titan V, P33: Fe56 56 GeV, 5,000 events, final stage | 9.12 (9.10 before) | 548.4 s (549.2 s) |
+| Titan V, P34 (RISK V293-V298: the interactions wait for a full-width drain, and each interaction launch strides its bucket): example B1 2M 6 MeV gammas, GPU time | 4.55 × 10⁶ | 440 ms (435 before P34) |
+| Titan V, P34: proton 1 GeV, 200,000 events, final stage | 22,135 (13,669 before) | 9.0 s (14.6 s) |
+| Titan V, P34: pi+ 10 GeV, 100,000 events, final stage | 9,513 (6,498 before) | 10.5 s (15.4 s) |
+| Titan V, P34: Fe56 56 GeV, 5,000 events, final stage | 100.6 (9.12 before) | 49.7 s (548.5 s) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no
