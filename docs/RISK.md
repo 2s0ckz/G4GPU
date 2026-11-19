@@ -18286,3 +18286,178 @@ macro a family defaulting to no bound, placed between `__global__ void` and the 
 and the same for GAMMA, HADRON, NEUTRAL and STRANGE; a unit compiled with
 `NVCC_APPEND_FLAGS=-DG4GPU_STEP_MINB_LEPTON=k` through build_engine_unit.bat into a directory of
 its own. A bound needs the stepping launch's block to stay at 128 (`Upload`'s `threads`).
+
+### V293: P34's baseline - integ/p33 measured again: the eleven gates at ba73's digits, the four beams, the interaction kernels at 255 registers and 13-21 kB of frame, and the Fe56 lockstep: 5,098 iterations each waiting 102 ms for a dozen reactions against 4 ms of stepping
+
+**THE TREE.** perf/interactions at integ/p33 (1ac8353 = main e2d5e89 + P32's V283-V286 + P33's
+V287-V292), all 27 engine units built in this worktree with build_engine_unit.bat for the Titan
+V alone (`-gencode arch=compute_70,code=[sm_70,compute_70]`, CUDA 12.9, the interaction units
+one at a time, the rest at most four at a time; 4,983 s of compile), every run on the Titan V
+alone under `out\gpu.lock`, the default batch and live count, profile off unless named.
+
+**THE ELEVEN GATES**, build_all.bat's gate section command for command: every printed number
+equal to P33's final digest and so to ba73 (34 lines compared, none differ) - the B1 photon gate
+426.028 pGy +/- 0.867928, -1.35734 pGy = 1.10452 sigma; b1_gpu_sched 427.699 pGy; the mesh pair
+427.3055 / 427.3033; the switches 427.3899 and the seven; the hook 43,353 steps, rel 0; the pool
+427.3899 x 3; the run sequence 842.260 / 871.530, replayed, 1,713.790 = 1,713.790; the depth gate
+97.4439%, R80 77.693 mm, its CSV md5 ba22d777a151c1d717ba48d0b62f23d1.
+
+**THE FOUR BEAMS** (exampleB1, events/s and track-steps/s as it prints them):
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps | slots | GB left |
+|---|--:|--:|--:|---|--:|--:|--:|
+| B1 gamma 6 MeV 2M | 434.7 ms | 4.6007e6 | 5.99e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 | 628 | no raise |
+| proton 1 GeV 200k | 14,631.9 ms | 13,668.8 | 789,411 | 391.931 nGy (1.33866 nGy) | 11,550,586 | 628 | 0.26 of 12.00 |
+| pi+ 10 GeV 100k | 15,388.7 ms | 6,498.3 | 840,640 | 333.4 nGy (2.00918 nGy) | 12,936,362 | 628 | 0.26 |
+| Fe56 56 GeV 5k | 548,454 ms | 9.117 | 113,152 | 3.06391 uGy (53.0322 nGy) | 62,058,769 | 628 | 0.26 |
+
+**THE INTERACTION KERNELS** (out\transport_run_int_*.log, sm_70; ktable.pl):
+
+| kernel | registers | frame B | spill stores / loads B |
+|---|--:|--:|--:|
+| `run_interaction<kFtfp>` | 255 | 19,248 | 552 / 1,092 |
+| `run_interaction<kBertini>` | 255 | 12,944 | 548 / 1,092 |
+| `run_interaction<kBinary>` | 255 | 15,952 | 552 / 1,092 |
+| `run_interaction<kLightIon>` | 255 | 20,688 | 552 / 1,092 |
+| `run_interaction<kAtRest>` | 255 | **21,376** | 500 / 1,076 |
+| `run_emextra_drain<kPhotoNuclear>` | 255 | 11,824 | 580 / 1,076 |
+| `run_emextra_drain<kLeptoNuclear>` | 255 | 4,048 | 572 / 1,068 |
+
+The raise's arithmetic: the largest frame is kAtRest's 21,376 B; V190's rule rounds it to 24,576
+and adds a page, 28,672 B a thread; the stepping kernels' floor is 16,384; so the raise asks
+(28,672 - 16,384) x 163,840 resident threads = 2.01e9 B = 1.88 GiB, and the slot sizing keeps
+that back (628 slots = 128 + (3.13 GB free - 1.88 - 0.50 margin) / 1,617,672 B). At 255 registers
+a warp holds 8,160 of an SM's 65,536, so an SM keeps 8 one-thread interaction blocks resident and
+the card 640 - 628 slots is already the card's whole residency for these kernels.
+
+**THE PROFILE PER CLASS** (`G4GPU_LOOP_PROFILE=1`, the per-iteration CSV beside it):
+
+| class | proton 1 GeV | pi+ 10 GeV | Fe56 56 GeV |
+|---|--:|--:|--:|
+| iterations | 845 | 504 | 8,433 |
+| GPU in the timed launches | 14,592.5 ms | 15,475.3 ms | 548,152.9 ms |
+| between launches | 72.2 ms | 52.3 ms | 1,495.2 ms |
+| count/scatter species | 172.2 ms (1.2%) | 112.4 ms (0.7%) | 2,331.5 ms (0.4%) |
+| all stepping kernels | 1,036 ms (7.1%) | 1,048 ms (6.8%) | 22,026 ms (4.0%) |
+| queue read-back + binning | 238.5 ms | 220.5 ms | 1,857.0 ms |
+| `run_interaction<kFtfp>` | - | 3,420.2 ms (22.1%), 21,373 | - |
+| `<kBertini>` | - | 1,366.4 ms (8.8%), 12,808 | 1,535.4 ms (0.3%), 649 |
+| `<kBinary>` | **12,471.7 ms (85.5%)**, 98,310 | **8,115.3 ms (52.4%)**, 27,652 | 46,172.7 ms (8.4%), 39,001 |
+| `<kLightIon>` | 13.9 ms, 77 | 276.9 ms, 734 | **470,073.0 ms (85.8%)**, 19,989 |
+| `<kAtRest>` | 744.4 ms (5.1%), 1,290 | 975.9 ms (6.3%), 2,652 | 3,937.2 ms (0.7%), 1,393 |
+| iterations with 1-10% of the pool live | 32, 10,766 ms wall | 35, 13,847 ms | 0 |
+
+**THE Fe56 LOCKSTEP, quantified on this tree** (the CSV's `int_ms` and `step_ms` per iteration):
+5,098 of 8,433 iterations drain an interaction; 61,032 interactions, 12.0 a drain; the drain
+costs 521.7 s, **102.3 ms a draining iteration** (median 81.4, 90th percentile 221.5, the worst
+534.0), against **3.95 ms** of stepping in the same iteration; the iterations with no drain cost
+2.8 s between them. The light-ion bucket's 4,875 spans average 96.4 ms for 4.1 reactions each -
+the slowest of four, every time, while every live track waits.
+
+### V294: the overlap's non-identity found - P19's photo-/lepto-nuclear grid was wider than the slots - and P32's 1.35x was batching, not overlap, because this card runs two streams one after the other; the batching kept, on one stream, every number to the digit: Fe56 11.1x, pi+ 1.06x, proton 1.17x
+
+**THE CAUSE OF THE 201 TRACK-STEPS (V286).** `run_emextra_drain` is launched over
+`ceil(n_slots / 32)` blocks of 32 and thread `i` takes slot `i`. At P19's 128 slots that was
+exact; since V285 sized the pool to the card it is 640 threads over 628 slots (471 with P32's
+side pool: 480 over 471), and a thread past the last slot gets `pool.slot(i) == nullptr`, books
+`kInteractionNoSlot`, and disposes of its photon's photonuclear interaction where it stands.
+Thread `i` walks entries `i, i + 640, ...`, so only an entry at a queue index past the slot count
+can reach one of those threads. No iteration of the four beams queues that many photo- or
+lepto-nuclear interactions (the deepest: 18) - but P32's asynchronous drain copied them into its
+ring BEHIND the iteration's thousands of hadronic entries, and there about one in fifty lands on
+a slotless thread. The run's own refusal ledger says so; V286 read the dose and the step count
+and not the ledger, which B1 prints only when it is non-empty.
+
+**PROVED BY TURNING IT ON AND OFF.** P32's branch re-applied here (b410556's engine hunks, the
+counting sort's pinned read-back left out as V286 found it changed nothing), one binary, the
+grid switchable (`G4GPU_EMX_GRID_CEIL=1` = P32's rounded-up grid; off = rounded down):
+
+| pi+ 10 GeV 100k | runs | refusals "no workspace slot" | track-steps | rms |
+|---|--:|--:|---|---|
+| synchronous, either grid | 3 | 0 | 12,936,362 | 2.00918 |
+| asynchronous, rounded-up grid | 4 | 0, 4, 5, 4 | 12,936,362; 12,936,320; 12,936,304; 12,936,331 | 2.00918 (one dose 333.402 nGy) |
+| asynchronous, rounded-down grid | 26 | 0 in every one | 12,936,362 in every one | 2.00918 |
+| synchronous on THIS tree's base binary, 2 slots (grid 32 over 2) | 1 | **3** (147.7 MeV) | 2,554,779 (pi+ 20k) | 890.909 pGy, dose 66.6117 nGy |
+| synchronous, the fix, 2 slots | 1 | 0 | **2,554,809**, the 628-slot run's | 66.6118 nGy, the 628-slot run's |
+
+The last two rows are the anti-vacuity on the synchronous path the fix ships in: a pool narrower
+than the queue's depth makes the base binary refuse, and the fixed one gives the wide pool's
+digits. The asynchronous runs' per-event doses (a dump of each event's score) agree with the
+synchronous run's to 1e-9 relative in all 100,000 events whenever the ledger is empty. The
+per-iteration CSV could not find this: the asynchronous loop's step counts part from the
+synchronous one's at ITERATION 1, the first iteration that queues anything, by design - that
+iteration's interactions wait - in exact and inexact runs alike.
+
+**THE 20.8 ms STALL, EXPLAINED: THIS CARD'S DRIVER DOES NOT RUN TWO STREAMS AT ONCE.** A probe
+(the session's xstream.cu): a spinning kernel of 100 ms on a non-blocking stream, then, 5 ms
+later, a memset, a 512-thread kernel and a synchronising read-back on the main stream:
+
+| the other stream's 100 ms | main stream | the main stream's 0.2 ms of work took |
+|---|---|--:|
+| 1 kernel, 1 block | legacy stream 0 | 100.2-100.5 ms |
+| 1 kernel, 600 one-thread blocks | legacy | 100.2-100.5 ms |
+| 10 kernels of 10 ms | legacy | 100.2-100.7 ms |
+| 50 kernels of 2 ms | legacy | 82-90 ms |
+| 1 kernel / 10 kernels | its own non-blocking stream | 100.1-100.6 ms |
+| 1 / 10 kernels, `cudaStreamQuery` flush after the launches | legacy | 82-95 ms |
+
+In every arrangement the main stream's work finished when the OTHER stream's queued work did -
+not at the running kernel's end, at the end of everything submitted before it. The Titan V runs
+under WDDM here (V210, V258) and its scheduling serialises the two queues. So V286's "the main
+stream's first launch waits 20.8 ms" is that launch waiting out the interaction stream's whole
+drain, and the second stream overlaps nothing on this machine. What P32's drain did win was
+BATCHING: its ring held several iterations' reactions and drained them in one launch, so one
+slowest reaction was waited for where several were.
+
+**SO THE OVERLAP IS NOT MERGED, AND ITS WIN IS, ON ONE STREAM: THE DEFERRED DRAIN.** An
+iteration's queued interactions are copied into a pending ring (16,384 entries, 6.7 MB) instead
+of drained, and the ring is drained - into that iteration's output pool, before the swap, as the
+drain always did - when it holds a full-width chunk (`n_interaction_slots_` entries), when its
+oldest entry has waited `kDeferIterations` (256) iterations, when it would overflow, when
+nothing else is alive (at the top of the iteration, before the sort, so a window cannot end on
+pending reactions), when the pending reservation would take half the throttle's room, and at a
+window's iteration bound (then what they give back is counted abandoned). Each pending entry
+keeps its 48-slot output reservation in the throttle until it is drained. A deferred track
+simply takes its next step later: its key and step count, and so every number it draws, are its
+own (V284). No second stream, no side pool, no slot given up (628, as before), and the drain the
+host chooses from counts alone - the schedule varies a little from run to run with the
+throttle's choices (845 or 858 iterations on the proton beam) and the numbers do not.
+`G4GPU_DEFER_ITERATIONS=k` sets the bound, 0 drains every iteration as before. The P19 grid is
+rounded down in the same change, so every thread of `run_emextra_drain` has a slot.
+
+What the bound buys, Fe56 1k (184.5 s synchronous; every row 565.071 nGy, rms 22.6217, the
+synchronous digits and step count):
+
+| `G4GPU_DEFER_ITERATIONS` | drains of the ring | iterations | time |
+|--:|--:|--:|--:|
+| P32's second stream (fixed grid) | 2,316 drains | 7,043 | 164.2 s |
+| 64 | 89 | 7,104 | 35.1 s |
+| **256 (the default)** | 31 | 7,246 | **19.3 s** |
+| 1,024 | 22 | 8,818 | 16.0 s |
+
+256 and not 1,024 because the drain's per-track bound is 20,000 iterations (V284) and a deep
+chain of interactions can wait the bound once per generation: 1,024 adds 1,776 iterations to the
+1k run for 3.3 s; on the 5k run it bought nothing (49.5 s against 49.6).
+
+**THE FOUR BEAMS AND THE GATES, AFTER** (two runs each; out\ built through build_engine.bat):
+
+| beam | before (V293) | after | x | dose (rms), track-steps | slots | GB left |
+|---|--:|--:|--:|---|--:|--:|
+| B1 gamma 2M | 434.7 ms, 4.60e6 ev/s | 430.0 / 433.5 ms, 4.65e6 / 4.61e6 | 1.00 | 85.2055 nGy (173.586 pGy), 26,050,805: **to the digit** | 628 | no raise |
+| proton 1 GeV 200k | 14,631.9 ms, 13,669 ev/s | 12,494.7 / 12,441.5 ms, 16,007 / 16,075 ev/s | **1.17** | 391.931 nGy (1.33866), 11,550,586: **to the digit** | 628 | 0.25 |
+| pi+ 10 GeV 100k | 15,388.7 ms, 6,498 ev/s | 14,565.8 / 14,460.1 ms, 6,865 / 6,916 ev/s | **1.06** | 333.4 nGy (2.00918), 12,936,362: **to the digit** | 628 | 0.25 |
+| Fe56 56 GeV 5k | 548,454 ms, 9.117 ev/s | 49,564.8 / 49,682.1 ms, 100.88 / 100.64 ev/s | **11.1** | 3.06391 uGy (53.0322 nGy), 62,058,769: **to the digit** | 628 | 0.24-0.25 |
+
+The eleven gates: every printed number equal to V293's (the digest, 34 lines, none differ; the
+depth CSV's md5 the same). The photon gate drains its one photonuclear reaction as it did - an
+iteration with no hadron live never queues - and its time is inside its run-to-run spread.
+
+Fe56 after, profiled: 8,735 iterations, 100 of them drain (345.8 ms of interaction each, 3.29 ms
+of stepping); light-ion 26.7 s (55%), Binary 6.6 s (14%); the stepping kernels are now 12.2 s of
+48.6 s of GPU. The pion beam after: 31 drains, Binary 7.3 s (51%), FTFP 3.5 s (24%), Bertini
+1.2 s, at rest 0.8 s - the interaction kernels' width, which is V295's.
+
+**REFUSED BY NAME.** The second stream itself, on this machine: it overlaps nothing (the probe
+above), costs 157 slots of side pool and adds a schedule the host does not choose. It stays on
+perf/async-wip; on a card in TCC mode, or under a scheduler that runs two queues at once, it
+would be worth measuring again - with the grid fix, which it needs.

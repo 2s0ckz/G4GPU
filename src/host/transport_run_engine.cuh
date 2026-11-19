@@ -19,6 +19,12 @@
 
 namespace g4gpu::host {
 
+// P34's deferred drain (docs/RISK.md V294; see `drain_interactions` in BeamOn): how many
+// iterations a queued interaction may wait for a full-width drain, and the pending ring's
+// entries (16,384 x 408 B = 6.7 MB, inside Upload's 512 MB margin).
+inline constexpr int kDeferIterations = 256;
+inline constexpr int kPendingCap = 16384;
+
 // ---------------------------------------------------------------- the loop's own kernels
 //
 // The seeding kernel and the two counting sorts moved here from transport_run_impl.cuh with the
@@ -1626,6 +1632,131 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     // P32: off unless G4GPU_LOOP_PROFILE asks; see LoopProfile.
     LoopProfile prof;
     prof.init();
+
+    // ---- P34: THE DEFERRED DRAIN (docs/RISK.md V294).
+    //
+    // An iteration that queues interactions used to drain them before any track took its next
+    // step, so every live track waited for the slowest reaction of every such iteration. On the
+    // Fe56 beam that is the whole run: 5,098 of 8,433 iterations drain about twelve reactions
+    // each, at 102 ms of interaction against 4 ms of stepping (V293). P32 tried to hide it on a
+    // second stream (V286); V294 measured that this card's driver runs the two streams one after
+    // the other - a 0.2 ms launch on the main stream waits for everything already queued on the
+    // other, one kernel or fifty, legacy stream or not - so what P32's 1.35x was made of is the
+    // BATCHING its ring did, not overlap. This is that batching, on one stream and on a schedule
+    // the host decides from counts alone: an iteration's queued interactions are copied into a
+    // pending ring instead of drained, and the ring is drained when it holds a full-width chunk
+    // (`n_interaction_slots_` entries), when its oldest entry has waited `defer` iterations, when
+    // it would overflow, and whenever nothing else is alive. A pending track just takes its next
+    // step later; its key, its step count and therefore every number it draws are its own
+    // (V284), and V294 holds the four beams and the eleven gates to the digit with it on.
+    //
+    // `G4GPU_DEFER_ITERATIONS=k` sets the age bound (0 drains every iteration, as before).
+    // Each pending entry keeps its 48-slot output reservation (`max_secondaries_per_step`) in
+    // the throttle below until it is drained, so the deferral does not spend the room the
+    // stepping kernels' outputs need.
+    int defer = kDeferIterations;
+    if (const char* env = std::getenv("G4GPU_DEFER_ITERATIONS")) {
+      defer = std::max(0, std::atoi(env));
+    }
+    had::PendingInteraction<real_t>* d_pending = nullptr;
+    int pending_n = 0, pending_from = 0, pending_cap = 0;
+    long long deferred_drains = 0, deferred_entries = 0;
+    if (defer > 0 && d_queue_ != nullptr && interaction_pool_.ok) {
+      pending_cap = std::min(kPendingCap, queue_capacity_);
+      G4GPU_CUDA_CHECK(
+          cudaMalloc(&d_pending, sizeof(had::PendingInteraction<real_t>) * pending_cap));
+    }
+    // The last iteration's wiring and books, for a drain at the top of an iteration that has
+    // not built its own yet; they are the run's and do not change between iterations.
+    had::HadronicWiring<real_t> last_wiring{};
+    EmitterBooks last_books{};
+    // One drain of `n` queued entries at `items` into `out`: bin by model (histogram, host
+    // prefix sum, scatter), then each bucket in chunks of the slot count - P15's drain, with
+    // the queue as a parameter so the pending ring can be drained the same way.
+    auto drain_interactions = [&](const had::PendingInteraction<real_t>* items, int n,
+                                  TrackBuffer<real_t> out,
+                                  const had::HadronicWiring<real_t>& wiring,
+                                  const EmitterBooks& bk) {
+      if (n <= 0) { return; }
+      RaiseStackForInteractions();  // once per run; see the note above `any_hadron`'s use
+      constexpr int kNB = static_cast<int>(had::InteractionBucket::kNumInteractionBuckets);
+      prof.begin(LoopProfile::kQueueBin);
+      const int qblocks = (n + threads_ - 1) / threads_;
+      G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
+      count_interactions<real_t><<<qblocks, threads_>>>(items, n, d_qcount_);
+      int nb[kNB] = {};
+      G4GPU_CUDA_CHECK(cudaMemcpy(nb, d_qcount_, sizeof(int) * kNB, cudaMemcpyDeviceToHost));
+      InteractionOffsets qoff{};
+      int acc = 0;
+      for (int b = 0; b < kNB; ++b) { qoff.base[b] = acc; acc += nb[b]; }
+      G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
+      scatter_interactions<real_t><<<qblocks, threads_>>>(items, n, d_qidx_, qoff, d_qcount_);
+      prof.memop(2);
+      prof.launch(2);
+      prof.sync();
+      prof.end(LoopProfile::kQueueBin, n);
+
+      // A BLOCK OF ONE THREAD, since P32 (docs/RISK.md V285), and not the 32 it was. The
+      // 32 was chosen so that a chunk of 40 interactions would use two SMs rather than one;
+      // what it also did was put 32 different cascades in one WARP, and a cascade is the
+      // most divergent code in the port - every thread of the warp at a different
+      // collision, a different nucleus, a different branch - so the warp ran its 32
+      // cascades nearly one after another, on 4 of the card's 80 SMs for a 128-slot chunk.
+      // One thread a block gives each interaction a warp of its own, spreads a chunk over
+      // every SM, and leaves the scheduler 32 resident warps an SM to hide each one's
+      // local-memory latency behind. Measured on the 1 GeV proton beam (V283): 106.8 s at
+      // 32, 29.9 s at 2, 26.8 s at 1, the dose to the digit each time. The idle lanes cost
+      // nothing the divergent warp was not already wasting.
+      //
+      // `G4GPU_INTERACTION_BLOCK=n` overrides it for the experiment. Thread `i` of a chunk
+      // still takes slot `i` and queue entry `base + i` whatever the block, so the block
+      // moves which SM runs an interaction and nothing it computes.
+      int kIth = 1;
+      if (const char* env = std::getenv("G4GPU_INTERACTION_BLOCK")) {
+        const int v = std::atoi(env);
+        if (v > 0 && v <= 1024) { kIth = v; }
+      }
+#define G4GPU_DRAIN(BUCKET)                                                              \
+  do {                                                                                       \
+    const int b_ = static_cast<int>(BUCKET);                                                 \
+    const int pc_ = LoopProfile::kIntBase + (b_ - static_cast<int>(had::InteractionBucket::kFtfp)); \
+    if (nb[b_] > 0) { prof.begin(pc_); }                                                     \
+    /* P32: the two buckets that reach FTFP are chunked at FTFP's own count (V285). */      \
+    const int w_ = (BUCKET == had::InteractionBucket::kFtfp                                  \
+                    || BUCKET == had::InteractionBucket::kAtRest)                            \
+                       ? std::min(n_interaction_slots_, interaction_pool_.n_ftf_slots)       \
+                       : n_interaction_slots_;                                               \
+    for (int base = 0; base < nb[b_]; base += w_) {                                          \
+      const int n_this = (nb[b_] - base < w_) ? (nb[b_] - base) : w_;                        \
+      run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
+          scene_, items, d_qidx_, n_this, qoff.base[b_] + base, out, stride,                 \
+          d_win_score, d_voxel_score_, wiring, interaction_pool_.d_pool, traj,               \
+          d_status_warn_, sec_, bk, hook_);                                                  \
+      ++interaction_chunks_;                                                                 \
+      prof.launch();                                                                         \
+    }                                                                                        \
+    if (nb[b_] > 0) { prof.end(pc_, nb[b_]); }                                               \
+  } while (0)
+      G4GPU_DRAIN(had::InteractionBucket::kFtfp);
+      G4GPU_DRAIN(had::InteractionBucket::kBertini);
+      G4GPU_DRAIN(had::InteractionBucket::kBinary);
+      G4GPU_DRAIN(had::InteractionBucket::kLightIon);
+      G4GPU_DRAIN(had::InteractionBucket::kAtRest);
+#undef G4GPU_DRAIN
+      // `kNone` is not drained and is not silent: the stepper booked `kNoInelasticModel` for
+      // every entry in it before it enqueued, and an entry with no model has no kernel to run.
+      // It is counted here so the report can say how many interactions never reached a launch.
+      interactions_no_model_ += nb[static_cast<int>(had::InteractionBucket::kNone)];
+      G4GPU_CUDA_CHECK(cudaGetLastError());
+    };
+    // The pending ring, drained into `out`, emptied.
+    auto drain_pending = [&](TrackBuffer<real_t> out, const had::HadronicWiring<real_t>& wiring,
+                             const EmitterBooks& bk) {
+      if (pending_n <= 0) { return; }
+      drain_interactions(d_pending, pending_n, out, wiring, bk);
+      ++deferred_drains;
+      pending_n = 0;
+    };
     cudaEvent_t t0, t1;
     G4GPU_CUDA_CHECK(cudaEventCreate(&t0));
     G4GPU_CUDA_CHECK(cudaEventCreate(&t1));
@@ -1668,6 +1799,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       const long long abandoned_before = st.abandoned;
 
       int cur = 0, nxt = 1;
+      pending_n = 0;  // a retried window starts with nothing pending (P34)
       tracks_[cur].reset();
       G4GPU_CUDA_CHECK(cudaMemcpy(d_win_prim, primaries + base,
                                   sizeof(Primary<real_t>) * n_batch, cudaMemcpyHostToDevice));
@@ -1733,6 +1865,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           last_seed = iteration;
           ++refills;
           refilled_events += k;
+        }
+
+        // ---- P34: nothing else alive and interactions still pending (V294): they are drained
+        // into this iteration's pool before it is sorted, so the window cannot end on them. And
+        // when their reservation would take half the room the throttle has, for the same place:
+        // the pool's room goes to stepping, not to holding interactions back.
+        if (pending_n > 0
+            && (n_live == 0
+                || static_cast<long long>(pending_n) * max_secondaries_per_step(kSpeciesProton)
+                       > (static_cast<long long>(tracks_[nxt].view.capacity) - n_live) / 2)) {
+          drain_pending(tracks_[cur].view, last_wiring, last_books);
+          n_live = tracks_[cur].count();
+          prof.sync();
         }
 
         // The dispatch layout for this iteration: which slots hold gammas, which electrons,
@@ -1884,6 +2029,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // remainder passes through untouched and is stepped next time.
         const int cap_out = tracks_[nxt].view.capacity;
         int slots = (cap_out > n_live) ? (cap_out - n_live) : 0;
+        // P34 (V294): a pending interaction keeps the reservation its own step made, until it
+        // is drained into some iteration's output pool.
+        if (pending_n > 0) {
+          const long long held =
+              static_cast<long long>(pending_n) * max_secondaries_per_step(kSpeciesProton);
+          slots = (slots > held) ? static_cast<int>(slots - held) : 0;
+        }
         int step_n[kNumTrackSpecies] = {};
         int total_step = 0;
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
@@ -2109,6 +2261,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         had_wiring.emx_queue.cursor = d_emx_cursor_;
         had_wiring.emx_queue.capacity = emx_queue_capacity_;
         had_wiring.emx_stats = d_emx_stats_;
+        last_wiring = had_wiring;
+        last_books = books;
 
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
           const int n_sp = nsp[sp];
@@ -2207,93 +2361,52 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // device - the counting sort above already reads `idx_n_` back for the same reason.
         if (any_hadron && d_queue_cursor_ != nullptr && interaction_pool_.ok) {
           int n_queued = 0;
-          prof.begin(LoopProfile::kQueueBin);
           G4GPU_CUDA_CHECK(cudaMemcpy(&n_queued, d_queue_cursor_, sizeof(int),
                                       cudaMemcpyDeviceToHost));
           prof.sync();
           if (n_queued > queue_capacity_) { n_queued = queue_capacity_; }
-          if (n_queued == 0) { prof.end(LoopProfile::kQueueBin, 0); }
           if (n_queued > 0) {
-            RaiseStackForInteractions();  // once per run; see the note above `any_hadron`'s use
             interactions_queued_ += n_queued;
             if (n_queued > max_queued_per_launch_) { max_queued_per_launch_ = n_queued; }
-
-            // Bin by model, exactly as the species dispatch bins the track pool: histogram,
-            // host-side prefix sum, scatter. `d_qcount_` is the histogram and then the bump
-            // cursors, one allocation used twice - the same arrangement `idx_n_` has.
-            constexpr int kNB = static_cast<int>(had::InteractionBucket::kNumInteractionBuckets);
-            const int qblocks = (n_queued + threads_ - 1) / threads_;
-            G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
-            count_interactions<real_t><<<qblocks, threads_>>>(d_queue_, n_queued, d_qcount_);
-            int nb[kNB] = {};
-            G4GPU_CUDA_CHECK(cudaMemcpy(nb, d_qcount_, sizeof(int) * kNB,
-                                        cudaMemcpyDeviceToHost));
-            InteractionOffsets qoff{};
-            int acc = 0;
-            for (int b = 0; b < kNB; ++b) { qoff.base[b] = acc; acc += nb[b]; }
-            G4GPU_CUDA_CHECK(cudaMemset(d_qcount_, 0, sizeof(int) * kNB));
-            scatter_interactions<real_t><<<qblocks, threads_>>>(d_queue_, n_queued, d_qidx_,
-                                                                qoff, d_qcount_);
-            prof.memop(2);
-            prof.launch(2);
-            prof.sync();
-            prof.end(LoopProfile::kQueueBin, n_queued);
-
-            // A BLOCK OF ONE THREAD, since P32 (docs/RISK.md V285), and not the 32 it was. The
-            // 32 was chosen so that a chunk of 40 interactions would use two SMs rather than one;
-            // what it also did was put 32 different cascades in one WARP, and a cascade is the
-            // most divergent code in the port - every thread of the warp at a different
-            // collision, a different nucleus, a different branch - so the warp ran its 32
-            // cascades nearly one after another, on 4 of the card's 80 SMs for a 128-slot chunk.
-            // One thread a block gives each interaction a warp of its own, spreads a chunk over
-            // every SM, and leaves the scheduler 32 resident warps an SM to hide each one's
-            // local-memory latency behind. Measured on the 1 GeV proton beam (V283): 106.8 s at
-            // 32, 29.9 s at 2, 26.8 s at 1, the dose to the digit each time. The idle lanes cost
-            // nothing the divergent warp was not already wasting.
-            //
-            // `G4GPU_INTERACTION_BLOCK=n` overrides it for the experiment. Thread `i` of a chunk
-            // still takes slot `i` and queue entry `base + i` whatever the block, so the block
-            // moves which SM runs an interaction and nothing it computes.
-            int kIth = 1;
-            if (const char* env = std::getenv("G4GPU_INTERACTION_BLOCK")) {
-              const int v = std::atoi(env);
-              if (v > 0 && v <= 1024) { kIth = v; }
-            }
-#define G4GPU_DRAIN(BUCKET)                                                                \
-  do {                                                                                       \
-    const int b_ = static_cast<int>(BUCKET);                                                 \
-    const int pc_ = LoopProfile::kIntBase + (b_ - static_cast<int>(had::InteractionBucket::kFtfp)); \
-    if (nb[b_] > 0) { prof.begin(pc_); }                                                     \
-    /* P32: the two buckets that reach FTFP are chunked at FTFP's own count (V285). */      \
-    const int w_ = (BUCKET == had::InteractionBucket::kFtfp                                  \
-                    || BUCKET == had::InteractionBucket::kAtRest)                            \
-                       ? std::min(n_interaction_slots_, interaction_pool_.n_ftf_slots)       \
-                       : n_interaction_slots_;                                               \
-    for (int base = 0; base < nb[b_]; base += w_) {                                          \
-      const int n_this = (nb[b_] - base < w_) ? (nb[b_] - base) : w_;                        \
-      run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
-          scene_, d_queue_, d_qidx_, n_this, qoff.base[b_] + base, tracks_[nxt].view, stride, \
-          d_win_score, d_voxel_score_, had_wiring, interaction_pool_.d_pool, traj,           \
-          d_status_warn_, sec_, books, hook_);                                             \
-      ++interaction_chunks_;                                                                 \
-      prof.launch();                                                                         \
-    }                                                                                        \
-    if (nb[b_] > 0) { prof.end(pc_, nb[b_]); }                                               \
-  } while (0)
-            G4GPU_DRAIN(had::InteractionBucket::kFtfp);
-            G4GPU_DRAIN(had::InteractionBucket::kBertini);
-            G4GPU_DRAIN(had::InteractionBucket::kBinary);
-            G4GPU_DRAIN(had::InteractionBucket::kLightIon);
-            G4GPU_DRAIN(had::InteractionBucket::kAtRest);
-#undef G4GPU_DRAIN
-            // `kNone` is not drained and is not silent: the stepper booked
-            // `kNoInelasticModel` for every entry in it before it enqueued, and an entry with
-            // no model has no kernel to run. It is counted here so the report can say how many
-            // interactions never reached a launch.
-            interactions_no_model_ +=
-                nb[static_cast<int>(had::InteractionBucket::kNone)];
-            G4GPU_CUDA_CHECK(cudaGetLastError());
           }
+          if (d_pending == nullptr) {
+            drain_interactions(d_queue_, n_queued, tracks_[nxt].view, had_wiring, books);
+          } else {
+            // P34 (V294): drain now when the ring and this iteration's entries make a chunk of
+            // the card's width, when the oldest pending entry has waited `defer` iterations, or
+            // when they would not fit the ring; otherwise this iteration's entries wait.
+            const int total = pending_n + n_queued;
+            const bool fits = total <= pending_cap;
+            const bool wide = total >= n_interaction_slots_;
+            const bool aged = pending_n > 0 && iteration - pending_from >= defer;
+            if (wide || aged || !fits) {
+              if (pending_n == 0) {
+                drain_interactions(d_queue_, n_queued, tracks_[nxt].view, had_wiring, books);
+              } else if (fits) {
+                if (n_queued > 0) {
+                  G4GPU_CUDA_CHECK(cudaMemcpyAsync(
+                      d_pending + pending_n, d_queue_,
+                      sizeof(had::PendingInteraction<real_t>) * n_queued,
+                      cudaMemcpyDeviceToDevice));
+                  pending_n += n_queued;
+                }
+                drain_pending(tracks_[nxt].view, had_wiring, books);
+              } else {
+                drain_pending(tracks_[nxt].view, had_wiring, books);
+                drain_interactions(d_queue_, n_queued, tracks_[nxt].view, had_wiring, books);
+              }
+            } else if (n_queued > 0) {
+              if (pending_n == 0) { pending_from = iteration; }
+              G4GPU_CUDA_CHECK(cudaMemcpyAsync(
+                  d_pending + pending_n, d_queue_,
+                  sizeof(had::PendingInteraction<real_t>) * n_queued, cudaMemcpyDeviceToDevice));
+              pending_n += n_queued;
+              deferred_entries += n_queued;
+            }
+          }
+        } else if (pending_n > 0 && iteration - pending_from >= defer) {
+          // No hadron stepped this iteration, so nothing was queued; the ring still ages.
+          drain_pending(tracks_[nxt].view, had_wiring, books);
         }
 
         // ---- P19: drain the photo- and lepto-nuclear queue, ON THE DEVICE.
@@ -2306,8 +2419,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // host-side count it could only get by synchronising. A launch whose species could not
         // have queued anything - no photon, or the process off - is skipped outright.
         if (any_emx && d_emx_queue_ != nullptr && interaction_pool_.ok) {
-          constexpr int kEth = 32;
-          const int eblocks = (n_interaction_slots_ + kEth - 1) / kEth;
+          // NO WIDER THAN THE SLOTS (P34, docs/RISK.md V294). Thread `i` takes slot `i`, so a
+          // thread past the last slot finds none and refuses its entry as
+          // `kInteractionNoSlot`. The grid was the slot count rounded UP to 32 - exact at P19's
+          // 128 slots, and since V285 sized the pool to the card, 640 threads over 628 slots:
+          // twelve threads with no slot, reached by an entry at a queue index past 627. No
+          // iteration of the four beams queues that many photo-/lepto-nuclear interactions,
+          // so the synchronous drain never met it; P32's asynchronous drain put them behind
+          // thousands of hadronic entries in one ring, and THAT is the 201 track-steps it lost
+          // on the pion beam - 4-5 photonuclear refusals a run, on the ledger. Rounded DOWN, the
+          // grid is at most the slot count, and every thread has one.
+          int kEth = 32;
+          if (n_interaction_slots_ < kEth) { kEth = std::max(1, n_interaction_slots_); }
+          const int eblocks = std::max(1, n_interaction_slots_ / kEth);
           if (nsp[kSpeciesGamma] > 0 && had_wiring.photon_nuclear) {
             prof.begin(LoopProfile::kEmxBase);
             run_emextra_drain<real_t, had::InteractionBucket::kPhotoNuclear>
@@ -2341,6 +2465,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         prof.close_iteration(iteration, n_live, tracks_[cur].view.capacity, total_step);
         cur ^= 1;
         nxt ^= 1;
+      }
+      // P34 (V294): a window that ended on the iteration bound with interactions still pending
+      // runs them, so their deposits are scored, and abandons what they give back with the rest.
+      if (pending_n > 0) {
+        const int before = tracks_[cur].count();
+        drain_pending(tracks_[cur].view, last_wiring, last_books);
+        leftover += tracks_[cur].count() - before;
       }
       st.abandoned += leftover;
 
@@ -2491,6 +2622,14 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       }
     }
     prof.release();
+    if (d_pending != nullptr) {
+      if (deferred_drains > 0) {
+        std::printf("deferred drain: %lld interactions waited, drained in %lld launches of the "
+                    "pending ring (at most %d iterations, %d entries; docs/RISK.md V294)\n",
+                    deferred_entries, deferred_drains, defer, pending_cap);
+      }
+      cudaFree(d_pending);
+    }
     // The window's own arrays, when it was wider than the batch; the batch-sized ones Upload
     // made are the engine's and stay.
     if (win_owned) {
