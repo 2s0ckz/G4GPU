@@ -55,13 +55,18 @@ template <typename real_t>
 __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
                                     geom::Geometry<real_t> geometry,
                                     const Primary<real_t>* prim, int n, unsigned int key_base,
-                                    unsigned int seed, const int* only = nullptr) {
+                                    unsigned int seed, const int* only = nullptr,
+                                    int first = 0) {
   const int t = blockIdx.x * blockDim.x + threadIdx.x;
   if (t >= n) { return; }
   // `only` names the events to seed, for a repair pass that transports just the events
   // which lost a track. Without it every event in the batch is seeded, which is the normal
   // case and the one where `only` is null and this costs a predicated load.
-  const int i = (only != nullptr) ? only[t] : t;
+  //
+  // `first` (P32) is where in the window a refill starts: the refill seeds the window's events
+  // `first .. first + n - 1`, each with ITS OWN window index - which is both the key offset and
+  // the score column - so a primary seeded late is the track it would have been seeded early.
+  const int i = (only != nullptr) ? only[t] : first + t;
   const Primary<real_t> p = prim[i];
 
   // No routing. A primary of any species goes into the one pool and says what it is; whether a
@@ -1418,7 +1423,77 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 
     std::vector<double> ev_scores(static_cast<size_t>(n_scorers_), 0.0);
 
-    std::vector<double> h_score(static_cast<size_t>(n_scorers_) * batch_);
+    // ---- P32: THE SCORE WINDOW, AND THE BATCH REFILL IT MAKES POSSIBLE (docs/RISK.md V284).
+    //
+    // Until P32 a batch was both things at once: the events whose primaries were seeded together
+    // AND the columns of the per-event score array. So a run of more events than a batch drained
+    // its first batch to the last track - the batch's time set by its longest shower, the card
+    // stepping a handful of survivors for the tail - before the next batch's primaries could be
+    // seeded, because the next batch needed the score columns the survivors' events still held.
+    //
+    // The two are separate now. The WINDOW is the score array's width: up to `win_cap` events
+    // whose per-event scores and carried-away energy are kept on the device and read back
+    // together. The BATCH is how many events are in flight: the window's first `batch_` events
+    // are seeded at the first iteration, as before, and every later iteration seeds the next ones
+    // into whatever the pool has freed - as many as bring the live count back to `batch_` - until
+    // the window's last primary is in. Only then does the drain run down its tail, once per
+    // window and not once per batch.
+    //
+    // NOTHING ABOUT A TRACK CHANGES. Its key is `seed ^ (key_base_for(stream_pos, window base) +
+    // window index)`, which is `key_base_for(stream_pos, run index)` exactly as the batch's was,
+    // and every random number it and its descendants draw is keyed on that and on its own step
+    // count - never on the iteration it was seeded in or the tracks beside it. Each event's score
+    // is its own column, read back and summed over events in ascending order as before. So the
+    // dose is bit-identical, and V284 holds it to the digit on the gates and on runs of several
+    // batches forced with G4GPU_BATCH.
+    //
+    // A run of no more events than a batch - every gate here, and every B1 beam at the default
+    // batch - seeds all of them at the first iteration and never refills: the schedule is
+    // exactly the one it was. `G4GPU_REFILL=0` turns the refill off for any run (each window is
+    // then seeded whole, in batches as before), so the comparison can be made.
+    //
+    // THE WINDOW'S MEMORY is per event: a score per scorer, the carried-away double and the
+    // primary itself. It is capped at 256 MB and at an eighth of what the card has free, and
+    // never below the batch, so a window costs what the batch did on a run that fits one, and a
+    // ten-million-event run gets windows of a few million rather than an allocation it cannot
+    // hold. Allocated here, for this BeamOn, and freed at its end; the batch-sized arrays Upload
+    // made are used as they were when the window is no wider than the batch.
+    bool refill = true;
+    if (const char* env = std::getenv("G4GPU_REFILL")) {
+      refill = !(env[0] == '0' && env[1] == '\0');
+    }
+    int win_cap = batch_;
+    double* d_win_score = d_score_;
+    double* d_win_carried = d_carried_away_;
+    Primary<real_t>* d_win_prim = d_primaries_;
+    bool win_owned = false;
+    if (refill && n_events > batch_) {
+      const std::size_t per_event = sizeof(double) * static_cast<std::size_t>(n_scorers_)
+                                    + ((d_carried_away_ != nullptr) ? sizeof(double) : 0)
+                                    + sizeof(Primary<real_t>);
+      size_t wf = 0, wt = 0;
+      cudaMemGetInfo(&wf, &wt);
+      const std::size_t budget = std::min<std::size_t>(std::size_t(256) << 20, wf / 8);
+      const long long fit = static_cast<long long>(budget / per_event);
+      const long long want = std::min<long long>(n_events, std::max<long long>(fit, batch_));
+      if (want > batch_) {
+        win_cap = static_cast<int>(want);
+        G4GPU_CUDA_CHECK(cudaMalloc(&d_win_score,
+                                    sizeof(double) * static_cast<std::size_t>(n_scorers_) * win_cap));
+        if (d_carried_away_ != nullptr) {
+          G4GPU_CUDA_CHECK(cudaMalloc(&d_win_carried, sizeof(double) * win_cap));
+        }
+        G4GPU_CUDA_CHECK(cudaMalloc(&d_win_prim, sizeof(Primary<real_t>) * win_cap));
+        win_owned = true;
+      }
+    }
+    // The score array's stride - its column count - is the window's, and every kernel indexes
+    // `score[slot * stride + event]` with it (the kernels' `batch` argument has only ever been
+    // that stride).
+    const int stride = win_cap;
+    long long refills = 0, refilled_events = 0;
+
+    std::vector<double> h_score(static_cast<size_t>(n_scorers_) * stride);
     // P32: off unless G4GPU_LOOP_PROFILE asks; see LoopProfile.
     LoopProfile prof;
     prof.init();
@@ -1446,12 +1521,17 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     int base = 0;
     int try_batch = batch_;
     while (base < n_events) {
-      const int n_batch = std::min(try_batch, n_events - base);
-      G4GPU_CUDA_CHECK(cudaMemset(d_score_, 0, sizeof(double) * n_scorers_ * batch_));
+      // P32: `n_batch` is the WINDOW's event count - the events this pass scores - and
+      // `n_first` how many of them are seeded at its first iteration. Without a window wider
+      // than the batch (one batch, refill off, or no memory for one) the two are equal and this
+      // is the batch loop it was, a retry's halving included.
+      const int n_batch = std::min((win_cap > batch_) ? win_cap : try_batch, n_events - base);
+      const int n_first = std::min(try_batch, n_batch);
+      G4GPU_CUDA_CHECK(cudaMemset(d_win_score, 0, sizeof(double) * n_scorers_ * stride));
       // Zeroed with the scores and for the same reason: it is indexed by the BATCH-local event
       // id, so a batch that reused a slot would add this batch's neutrinos to the last one's.
-      if (d_carried_away_ != nullptr) {
-        G4GPU_CUDA_CHECK(cudaMemset(d_carried_away_, 0, sizeof(double) * batch_));
+      if (d_win_carried != nullptr) {
+        G4GPU_CUDA_CHECK(cudaMemset(d_win_carried, 0, sizeof(double) * stride));
       }
       // This attempt's drops, not a previous attempt's.
       for (int i = 0; i < 2; ++i) { tracks_[i].reset_overflow(); }
@@ -1460,7 +1540,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 
       int cur = 0, nxt = 1;
       tracks_[cur].reset();
-      G4GPU_CUDA_CHECK(cudaMemcpy(d_primaries_, primaries + base,
+      G4GPU_CUDA_CHECK(cudaMemcpy(d_win_prim, primaries + base,
                                   sizeof(Primary<real_t>) * n_batch, cudaMemcpyHostToDevice));
       // No partition to do: the primaries all go into the one pool.
       //
@@ -1469,16 +1549,18 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       // fraction and dropped the rest - and the throttle could not help, because nothing had
       // been stepped yet. With one pool the only question is whether the batch fits, which is
       // one comparison rather than a division nobody could get right in advance.
-      if (n_batch > tracks_[cur].view.capacity) {
+      if (n_first > tracks_[cur].view.capacity) {
         std::printf("\nFATAL: %d primaries do not fit a pool of %d slots. Raise\n"
                     "       SetLiveTracksPerEvent (now %.1f per event) or lower the batch.\n",
-                    n_batch, tracks_[cur].view.capacity, live_per_event_);
+                    n_first, tracks_[cur].view.capacity, live_per_event_);
         std::exit(3);
       }
-      seed_from_primaries<real_t><<<(n_batch + threads_ - 1) / threads_, threads_>>>(
-          tracks_[cur].view, geom_, d_primaries_, n_batch, key_base_for(stream_pos, base),
+      seed_from_primaries<real_t><<<(n_first + threads_ - 1) / threads_, threads_>>>(
+          tracks_[cur].view, geom_, d_win_prim, n_first, key_base_for(stream_pos, base),
           seed);
       G4GPU_CUDA_CHECK(cudaGetLastError());
+      int next = n_first;    // the window's next unseeded event
+      int last_seed = 0;     // the iteration the youngest track's event was seeded in
 
       // Bounded so a non-terminating track shows up as an explicit abandonment rather than a
       // hang - RunAction prints the count. B1's photon beam drains in about 110 iterations, but
@@ -1488,13 +1570,41 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       // so the old bound of 1,000 abandoned every Fe56 before the bone and the row read 3.88 pGy
       // against Geant4's 12.6 uGy (P30, docs/RISK.md V276-V277). 20,000 is twice the deepest
       // drain measured; a beam that needs more is still reported, never hidden.
+      //
+      // P32: THE BOUND IS PER TRACK NOW, NOT PER BATCH. With the refill a window's iterations
+      // are not one generation of tracks: an event seeded at iteration 900 has had 900 fewer
+      // than the window's first. So the drain stops at `kMaxIterations` past the iteration the
+      // YOUNGEST event was seeded in (`last_seed`, which a repair pass also resets) - every track
+      // still alive then has had at least that many iterations, which is the guarantee the
+      // batch's bound gave its own tracks - and what it abandons is counted as before. A window
+      // seeded whole has `last_seed` 0 and the bound it always had.
       constexpr int kMaxIterations = 20000;
       int leftover = 0;
-      for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
+      for (int iteration = 0; iteration - last_seed < kMaxIterations; ++iteration) {
         // How many tracks are alive, of any species. One number, because there is one pool.
         prof.start_iteration();
-        const int n_live = tracks_[cur].count();
+        int n_live = tracks_[cur].count();
         prof.sync();  // TrackBuffer::count is a device-to-host copy of the append cursor
+
+        // ---- P32: the refill. The window's next primaries go into the room the pool has
+        // freed, as many as bring the live count back to the batch - never more than the first
+        // iteration seeded, so the throttle below has at least the room it had then. They are
+        // appended after the live tracks (`count` is the append cursor, and nothing else is
+        // appended between here and the counting sort), so the live count afterwards is
+        // `n_live + k` without another read-back.
+        if (next < n_batch && n_live < try_batch) {
+          const int k = std::min(n_batch - next, try_batch - n_live);
+          seed_from_primaries<real_t><<<(k + threads_ - 1) / threads_, threads_>>>(
+              tracks_[cur].view, geom_, d_win_prim, k, key_base_for(stream_pos, base), seed,
+              nullptr, next);
+          G4GPU_CUDA_CHECK(cudaGetLastError());
+          prof.launch();
+          next += k;
+          n_live += k;
+          last_seed = iteration;
+          ++refills;
+          refilled_events += k;
+        }
 
         // The dispatch layout for this iteration: which slots hold gammas, which electrons,
         // and so on. Rebuilt every time because the pool is written in append order, which is
@@ -1570,7 +1680,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           // makes the repair a redo rather than a double count.
           for (int e : ids) {
             for (int sc = 0; sc < n_scorers_; ++sc) {
-              G4GPU_CUDA_CHECK(cudaMemset(d_score_ + static_cast<size_t>(sc) * batch_ + e, 0,
+              G4GPU_CUDA_CHECK(cudaMemset(d_win_score + static_cast<size_t>(sc) * stride + e, 0,
                                           sizeof(double)));
             }
             // The carried-away ledger is per event exactly as the score is, so a repaired
@@ -1578,8 +1688,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // double-count every neutrino of every repaired event - an error that shows up
             // only as an energy balance that does not close, which is the last place anyone
             // looks.
-            if (d_carried_away_ != nullptr) {
-              G4GPU_CUDA_CHECK(cudaMemset(d_carried_away_ + e, 0, sizeof(double)));
+            if (d_win_carried != nullptr) {
+              G4GPU_CUDA_CHECK(cudaMemset(d_win_carried + e, 0, sizeof(double)));
             }
           }
           st.events_repaired += static_cast<long long>(ids.size());
@@ -1594,12 +1704,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
 
           tracks_[cur].reset();
           seed_from_primaries<real_t><<<(n_repair + threads_ - 1) / threads_, threads_>>>(
-              tracks_[cur].view, geom_, d_primaries_, n_repair,
+              tracks_[cur].view, geom_, d_win_prim, n_repair,
               key_base_for(stream_pos, base), seed, d_dropped_);
+          last_seed = iteration;  // the repaired events start their tracks afresh
           G4GPU_CUDA_CHECK(cudaGetLastError());
           continue;  // drain again, this time carrying only the repaired events
         }
-        if (iteration == kMaxIterations - 1) { leftover = n_live; }
+        if (iteration - last_seed == kMaxIterations - 1) { leftover = n_live; }
 
         for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
           st.peak_live[sp] = std::max(st.peak_live[sp], nsp[sp]);
@@ -1733,7 +1844,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // portably, and because each line names the specialisation it launches - which is what
         // makes a missing species a compile error in the switch rather than a track that is
         // counted and never stepped.
-        EmitterBooks books{d_carried_away_, d_carried_n_, d_refused_, d_refused_e_};
+        EmitterBooks books{d_win_carried, d_carried_n_, d_refused_, d_refused_e_};
         // P23a's study knob: `G4GPU_STRANGE_TRACKS=0` refuses the sixteen strange species at
         // emission as the port did before they had kernels - see `EmitterBooks::refuse_strange`.
         if (const char* env = std::getenv("G4GPU_STRANGE_TRACKS")) {
@@ -1859,11 +1970,11 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           prof.begin(LoopProfile::kStepBase + sp);
 #define G4GPU_LAUNCH_HADRON(TYPE)                                                            \
   run_step_hadron<real_t, TYPE><<<blocks, threads_>>>(                                       \
-      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
+      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,             \
       d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books, hook_)
 #define G4GPU_LAUNCH_NEUTRAL(TYPE)                                                           \
   run_step_neutral<real_t, TYPE><<<blocks, threads_>>>(                                      \
-      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,             \
+      scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,             \
       d_voxel_score_, step_n[sp], d_neutron_xs_, had_wiring, d_killed_energy_, d_killed_n_,   \
       traj, d_status_warn_, sec_, books, hook_)
           switch (sp) {
@@ -1871,19 +1982,19 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // `electronNuclear` and `positronNuclear`.
             case kSpeciesGamma:
               run_step_gamma<real_t><<<blocks, threads_>>>(
-                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesElectron:
               run_step_lepton<real_t, false><<<blocks, threads_>>>(
-                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesPositron:
               run_step_lepton<real_t, true><<<blocks, threads_>>>(
-                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
@@ -1908,13 +2019,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // track, so the launch names a group and not a ParticleType.
             case kSpeciesStrangeCharged:
               run_step_strange<real_t, true><<<blocks, threads_>>>(
-                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
             case kSpeciesStrangeNeutral:
               run_step_strange<real_t, false><<<blocks, threads_>>>(
-                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, batch_, d_score_,
+                  scene_, tracks_[cur].view, list, tracks_[nxt].view, n_sp, stride, d_win_score,
                   d_voxel_score_, step_n[sp], had_wiring, traj, d_status_warn_, sec_, books,
                   hook_);
               break;
@@ -2002,8 +2113,8 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       const int n_this = (nb[b_] - base < n_interaction_slots_) ? (nb[b_] - base)            \
                                                                 : n_interaction_slots_;      \
       run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
-          scene_, d_queue_, d_qidx_, n_this, qoff.base[b_] + base, tracks_[nxt].view, batch_, \
-          d_score_, d_voxel_score_, had_wiring, interaction_pool_.d_pool, traj,           \
+          scene_, d_queue_, d_qidx_, n_this, qoff.base[b_] + base, tracks_[nxt].view, stride, \
+          d_win_score, d_voxel_score_, had_wiring, interaction_pool_.d_pool, traj,           \
           d_status_warn_, sec_, books, hook_);                                             \
       ++interaction_chunks_;                                                                 \
       prof.launch();                                                                         \
@@ -2042,7 +2153,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             prof.begin(LoopProfile::kEmxBase);
             run_emextra_drain<real_t, had::InteractionBucket::kPhotoNuclear>
                 <<<eblocks, kEth>>>(scene_, d_emx_queue_, d_emx_cursor_, emx_queue_capacity_,
-                                    tracks_[nxt].view, batch_, d_score_, d_voxel_score_,
+                                    tracks_[nxt].view, stride, d_win_score, d_voxel_score_,
                                     had_wiring, interaction_pool_.d_pool, traj, d_status_warn_, sec_,
                                     books, hook_);
             ++emx_drain_launches_;
@@ -2058,7 +2169,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             prof.begin(LoopProfile::kEmxBase + 1);
             run_emextra_drain<real_t, had::InteractionBucket::kLeptoNuclear>
                 <<<eblocks, kEth>>>(scene_, d_emx_queue_, d_emx_cursor_, emx_queue_capacity_,
-                                    tracks_[nxt].view, batch_, d_score_, d_voxel_score_,
+                                    tracks_[nxt].view, stride, d_win_score, d_voxel_score_,
                                     had_wiring, interaction_pool_.d_pool, traj, d_status_warn_, sec_,
                                     books, hook_);
             ++emx_drain_launches_;
@@ -2102,17 +2213,17 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         st.overflow += dropped;
       }
 
-      G4GPU_CUDA_CHECK(cudaMemcpy(h_score.data(), d_score_,
-                                  sizeof(double) * n_scorers_ * batch_,
+      G4GPU_CUDA_CHECK(cudaMemcpy(h_score.data(), d_win_score,
+                                  sizeof(double) * n_scorers_ * stride,
                                   cudaMemcpyDeviceToHost));
       // The carried-away ledger, brought back with the scores and appended to the run-length
       // vector. Accumulated on the host per event rather than reduced on the device because the
       // per-event number is the one that means anything - see RunStats::carried_away - and the
       // array is already being copied for the batch.
-      if (d_carried_away_ != nullptr) {
+      if (d_win_carried != nullptr) {
         if (st.carried_away.empty()) { st.carried_away.assign(n_events, 0.0); }
         std::vector<double> h_nu(static_cast<size_t>(n_batch));
-        G4GPU_CUDA_CHECK(cudaMemcpy(h_nu.data(), d_carried_away_, sizeof(double) * n_batch,
+        G4GPU_CUDA_CHECK(cudaMemcpy(h_nu.data(), d_win_carried, sizeof(double) * n_batch,
                                     cudaMemcpyDeviceToHost));
         for (int e = 0; e < n_batch; ++e) {
           st.carried_away[base + e] = h_nu[e];
@@ -2125,7 +2236,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       // 0.09-sigma agreement with Geant4 is measured on.
       for (int e = 0; e < n_batch; ++e) {
         for (int sc = 0; sc < n_scorers_; ++sc) {
-          const double v = h_score[static_cast<size_t>(sc) * batch_ + e];
+          const double v = h_score[static_cast<size_t>(sc) * stride + e];
           score_sum[sc] += v;
           score_sum_sq[sc] += v * v;
           ev_scores[sc] = v;
@@ -2221,6 +2332,18 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
       }
     }
     prof.release();
+    // The window's own arrays, when it was wider than the batch; the batch-sized ones Upload
+    // made are the engine's and stay.
+    if (win_owned) {
+      cudaFree(d_win_score);
+      if (d_win_carried != d_carried_away_) { cudaFree(d_win_carried); }
+      cudaFree(d_win_prim);
+    }
+    if (refills > 0) {
+      std::printf("refill: %lld events seeded into freed pool slots in %lld refills (windows of "
+                  "%d events, %d in flight; docs/RISK.md V284)\n",
+                  refilled_events, refills, win_cap, batch_);
+    }
     // st.overflow is accumulated per attempt above, and is only ever non-zero when a caller
     // asked for best-effort transport with AllowDroppedTracks. Reading the counters here
     // instead would report the last attempt's, which is zero by construction.
