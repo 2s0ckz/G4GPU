@@ -18672,3 +18672,281 @@ most 4%; the others reorder the work the generator is threaded through).
 
 **The GPU tests** (build_all.bat's TESTS_GPU, built with tools/build_tests.ps1 one at a time and run on the
 Titan V on V295's engine, G4GPU_ORACLE at the main tree's ref\oracle): all eleven pass.
+
+### V299: P35's baseline - integ/p34 measured again, and the ion count question: the Fe56 beam is 16% faster at 20,000 events and 27% at 50,000, because its STEPPING is spread thin at 5,000; its reactions are not, and they are two thirds of the GPU time at any count
+
+**THE TREE.** perf/cascade_warp at integ/p34 (14b441f), its out\ copied from P34's worktree (the
+same sources but for two comments and one printf, which the engine unit was rebuilt for; the
+seven interaction units are byte for byte P34's sm_70 objects), every run on the Titan V alone
+under `out\gpu.lock`, profile off unless named, the default live count.
+
+**THE ELEVEN GATES**: every printed number equal to P33's final digest and so to ba73's (34 lines,
+none differ; the depth CSV's md5 ba22d777a151c1d717ba48d0b62f23d1).
+
+**THE FOUR BEAMS** (exampleB1's own lines; "0.24-0.25 GB of 12.00 GB left" on every hadron run,
+the host process at most 0.67 GB):
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| B1 gamma 6 MeV 2M | 431.1 ms | 4.639e6 | 6.04e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+| proton 1 GeV 200k | 8,931.4 / 8,965.8 ms | 22,393 / 22,307 | 1.29e6 | 391.931 nGy (1.33866 nGy) | 11,550,586 |
+| pi+ 10 GeV 100k | 10,473.6 / 10,491.2 ms | 9,548 / 9,532 | 1.24e6 | 333.4 nGy (2.00918 nGy) | 12,936,362 |
+| Fe56 56 GeV 5k | 49,462.8 ms | 101.1 | 1.25e6 | 3.06391 uGy (53.0322 nGy) | 62,058,769 |
+
+V295's to the digit, and its times within 1%.
+
+**THE ION COUNT QUESTION.** ref/b1ion/Fe56_56000.mac's beam at three counts (the count is all
+that changes; every Fe56 primary of the shorter run is the longer run's first, the keyed
+generator), and the deferred drain's bound at 64 and 1024 against the default 256:
+
+| events | defer 256 (default) | defer 64 | defer 1024 | dose (rms), track-steps (every column) |
+|--:|--:|--:|--:|---|
+| 5,000 | 49.46 s, **101.1 ev/s** | 60.89 s, 82.1 ev/s | 49.36 s, 101.3 ev/s | 3.06391 uGy (53.0322 nGy), 62,058,769 |
+| 20,000 | 170.98 s, **117.0 ev/s** | 174.14 s, 114.9 ev/s | 170.68 s, 117.2 ev/s | 12.3689 uGy (106.6 nGy), 248,093,226 |
+| 50,000 | 389.46 s, **128.4 ev/s** | - | - | 31.0701 uGy (168.945 nGy), 622,407,701 |
+
+The rate rises with the count - 1.16x at 20,000 and 1.27x at 50,000 - so the 5,000-event row
+IS partly parallelism-limited, and the sweep's longer rows see more of it. Where it comes from,
+profiled (`G4GPU_LOOP_PROFILE`, 5k and 20k):
+
+| GPU time | 5,000 events | 20,000 events | per event, 5k -> 20k |
+|---|--:|--:|--:|
+| every iteration under 1% of the pool live | 8,735 of 8,735 | 10,030 of 10,050 | |
+| the stepping kernels, the species sort, the read-backs | 13.7 s (28.1%) | 25.1 s (14.8%) | 2.74 -> 1.26 ms |
+| `run_interaction<kBertini>`, `<kAtRest>`, the photo-/lepto-nuclear drains | 1.5 s (3.1%) | 6.8 s (4.0%) | 0.30 -> 0.34 ms |
+| `run_interaction<kLightIon>` | 27.0 s (55.5%), 100 spans | 113.6 s (66.9%), 383 spans | 5.40 -> 5.68 ms |
+| `run_interaction<kBinary>` | 6.5 s (13.3%) | 24.3 s (14.3%) | 1.29 -> 1.21 ms |
+| all of it | 48.7 s | 169.9 s | 9.73 -> 8.49 ms |
+
+The stepping's cost per event halves from 5,000 to 20,000 events - the same iterations carry four
+times the tracks - and that is the whole gain. The reactions cost the same per event at any count:
+each drain span waits for its slowest reaction (270 ms at 5k, 297 ms at 20k a span, ~200
+reactions each) and there are as many spans per reaction either way. So the answer: **the Fe56 5k
+beam is parallelism-limited in its stepping, which is a third of it; the light-ion bucket is two
+thirds at 20,000 events and is bound by one reaction's latency, which is this package's lever.**
+The 20,000-event rate is 117.0 events/s. The drain's bound is not a lever: 1024 is the default's
+time at both counts (49.36 against 49.46 s, 170.68 against 170.98 s), 64 is 23% slower at 5k and
+2% at 20k, all to the digit.
+
+**THE PER-PHASE TIMERS, THIS TREE** - V297's binary (P34's `instrument.pl` build) on the proton and
+Fe56 beams: a Binary cascade 17.98 ms of thread time on average (worst 563 ms; `Propagate` 2.10
+ms per impact parameter, 84.8%), a light-ion reaction 59.43 ms (worst 840 ms; 3.76 tries; 86.2%
+`Propagate`), V297's numbers to the percent. V300 breaks `Propagate` down.
+
+### V300: the draw map - every draw of a Binary cascade and a light-ion reaction by phase, and the deterministic phases' share: the field transport is 35% of a cascade and 46% of a reaction, the pair search 9% and 5%, the collision list's scans under 1%, and 95-99% of the draws are the nucleus's
+
+**THE MEASUREMENT** (measurement only, not merged: the session's `instrument_p35.pl` on a copy of
+integ/p34's src, `-DG4GPU_P35_TIMERS` in `transport_run_int_binary`, `_lightion` and the engine).
+Each phase's `clock64` span on the cascade's thread, summed with atomics, and every `uniform()`
+the cascade makes counted against the phase that made it (a counting wrapper around the slot's
+`Philox` in `run_arm_binary` and `run_arm_light_ion`, the phase in a per-thread word each timed
+region sets and restores). Every run's dose and step count are V299's to the digit. The
+instrumented frames are larger (light ion 27,040 B) so the raise took 32,768 B a thread and the
+pool fell to 213 slots: the spans below are SHARES of the cascade's own time, which the slot
+count does not move; the absolute latencies are V297's and V301's.
+
+**THE BINARY CASCADE** (proton 1 GeV 200k: 98,135 cascades, 7.3 impact parameters each):
+
+| phase | share of the cascade | draws a cascade | what it is |
+|---|--:|--:|---|
+| `G4Fancy3DNucleus::Init` (V297) | 8.3% | **1,517** (95%) | positions by rejection, Fermi momenta, `ReduceSum` |
+| impact point (`GetSpherePoint`) | 0.5% | 18.7 | two uniforms an attempt |
+| field maps (`thePropagator->Init`) | 3.8% | 0 | |
+| `Propagate`, all of it | 81.3% | | |
+| ... `G4RKPropagation::Transport` of the secondaries, every time step | **35.3%** | 0 | per secondary, independent |
+| ... `FindCollisions` | 14.8% | 0.62 | |
+| ...... `G4Scatterer::GetTimeToInteraction`, 189 pairs a cascade | **8.0%** | 0 | per target, independent |
+| ...... `G4MesonAbsorption::GetTimeToAbsorption`, the same pairs | 1.3% | 0 | per target, independent |
+| ...... `G4BCDecay::GetCollisions` (the residual lifetime) | (in 3.2% with the absorption loop) | 0.62 | one uniform a short-lived secondary |
+| ... the collisions' final states (`G4Scatterer::GetFinalState` and the rest) | 10.0% | 14.9 | channel, angles, masses |
+| ... the collision list's scans (`GetNextCollision`, `size()`, `RemoveTracksCollisions`) | 0.6% | 0 | 9.4 entries a scan |
+| ... `BuildTargetList`, `Absorb`, `Capture` | 2.7% | 0 | |
+| ... the fragment's PreCompound + evaporation (`DeExcite`) | 12.1% | 13.8 | P6, on its own state |
+| ... the final `G4DecayKineticTracks`, `DecayVoidNucleus`, the rest | 0.1% | 1.76 | |
+| **all of it** | 100% | **1,567** | |
+
+**THE LIGHT-ION REACTION** (Fe56 56 GeV 5k: 19,978 reactions, 3.76 tries each; the projectile
+O16's or the lighter nucleus's nucleons are the secondaries, the heavier nucleus the targets):
+
+| phase | share | draws a reaction |
+|---|--:|--:|
+| both `G4Fancy3DNucleus::Init`s, per try | 13.1% | **9,957** (99%) |
+| impact parameter | 0.0% | 7.5 |
+| field maps | 1.5% | 0 |
+| `Propagate` | 83.8% | |
+| ... field transport of the secondaries | **45.6%** | 0 |
+| ... `FindCollisions` | 8.2% | 1.2 |
+| ...... `GetTimeToInteraction`, 1,435 pairs a reaction | **4.3%** | 0 |
+| ...... `GetTimeToAbsorption` | 0.4% | 0 |
+| ... the collisions' final states | 4.1% | 50.3 |
+| ... the collision list's scans (60 entries a scan) | 0.7% | 0 |
+| ... `Absorb`, `Capture`, `BuildTargetList` | 1.7% | 0 |
+| ... the fragment's de-excitation | 20.4% | 54.7 |
+| the spectators' de-excitation | 1.1% | 6.7 |
+| **all of it** | 100% | **10,040** |
+
+**WHAT THE LANES MAY SHARE, AND WHERE LANE 0 MUST ACT ALONE.** This is the design V301 builds.
+
+* **The field transport** of one time step: `Transport` takes each secondary independently -
+  sphere times, free or Runge-Kutta transport through the field, the surface corrections - and
+  draws nothing. The one thing the tracks share is `theMomentumTranfer`, which each
+  `FieldTransport` ADDS to; so each lane hands back its tracks' transfers from zero and lane 0
+  sums them in pool order. Shareable: 35% / 46%.
+* **The pair search** of one secondary over the target list: every pair's
+  `GetTimeToInteraction` and `GetTimeToAbsorption` is independent arithmetic and draws nothing.
+  The collisions they find must be ADDED in the serial loops' order (absorptions then
+  scatterings, each in target order) because `GetNextCollision` breaks ties by list order; the
+  cross-section buffers the pion pairs read are built lazily (`BufferCrossSection`) and the
+  `ScatterRefusal` the serial loop hands every pair is sticky (two of its flags are read back) -
+  so lane 0 builds the buffers in the serial order first, and runs the serial loop itself when
+  any pair reports a flag. Shareable: 9% / 5%.
+* **`G4BCDecay::GetCollisions`** draws one uniform per short-lived secondary, BETWEEN the
+  secondaries' pair searches: lane 0, in place, the pairs around it.
+* **The collision list's scans**: deterministic and shareable, but 0.6-0.7% - a scan is 9 to 60
+  entries; shared only above 64 entries, where a long ion cascade's list goes.
+* **Lane 0 alone**: the nucleus (95-99% of the draws, interleaved with its rejection tests at
+  every step), the impact parameter, every collision's final state, the de-excitation of the
+  fragment and the spectators (PreCompound and the handler, other models' code on their own
+  state), the decays, and every list edit. 37-46% of a cascade stays serial by its nature.
+
+So the bound on a cascade's speed-up from its warp is Amdahl's with 45% (Binary) and 51% (light
+ion) of the time shareable - 1.8x and 2.0x at infinitely many lanes - and less in practice,
+because a proton cascade has two to five secondaries in flight, so its transport has that many
+lanes' worth of work, not 32.
+
+### V301: the cascade on a warp, lane 0 drawing - EXACT where it ran (20,088 Binary cascades on a warp are the pre-P35 thread cascades to the bit and the draw, 1.41x shorter each), and NOT MERGED: the Binary unit's ptxas needs 42-43 GB of this machine's 64 and was killed for memory twice, and the light-ion unit's frame grew 20,784 -> 27,024 B, which takes the raise to 32,768 B a thread and the pool from 628 slots to 213
+
+**WHAT WAS BUILT** (perf/cascade_warp, the WIP commit after this entry's; nothing of it is in the
+four beams' binary). `physics/hadronic/bic/cascade_crew.cuh`: a cascade's warp is a CREW - lane
+0 runs every line of the cascade exactly as a one-thread block runs it, with the slot's
+generator; lanes 1-31 wait at a `__syncwarp` in `crew_serve_loop` and, when lane 0 writes a call
+into the block's `__shared__` `CascadeCrew` and meets them, take their stride of one of V300's
+shareable loops and meet it again. The generator reaches the cascade behind a `CrewRng` (the
+same `Philox`, plus the crew's address; `crew_of(rng)` is null on a host test or a one-thread
+launch, which then runs the serial loop line for line). Shared, each consumed by lane 0 in the
+serial order:
+
+* the field transport of a time step (`transport_secondaries`): every secondary on its own lane,
+  each lane's transfer handed back per track from zero and summed by lane 0 in pool order (the
+  proof that this is `FieldTransport`'s own `+=` to the bit is in `transport_track`'s note: +0
+  added to a sum that never becomes -0);
+* the pair search of one secondary (`crew_find_pairs`): lane 0 builds `FindAndFillCluster`'s
+  arrays and calls `ensure_meson_buffer` in the serial order, the lanes compute every target's
+  absorption and scattering time, lane 0 adds the absorptions then the scatterings in target
+  order; any pair whose sticky `ScatterRefusal` flags were set sends lane 0 back to the serial
+  loop for that secondary; `G4BCDecay`'s one draw stays on lane 0 before it;
+* the collision list's `GetNextCollision` (min-time, first-index reduction), `size()` and
+  `RemoveTracksCollisions` above 64 entries.
+
+The kernel (`run_interaction<kBinary>` and `<kLightIon>`) launches one-warp blocks
+(`G4GPU_CASCADE_WARP=0` the one-thread transcription; `=binary`/`=ion` one model alone).
+
+**THE CAMPAIGN** (tests/test_bic_warp.cu; test_blir_warp.cu is the same for `kLightIon`, never
+compiled - see below): 20,088 Binary cascades through `had::run_one_model<kBinary>` on a slot of
+the transport's own pool - p and n at 20 MeV to 1.5 GeV, pi+- to 1.3 GeV, on H1, C12, O16,
+Ca40, Fe56 and Pb208 - each record a hash of the final state field by field, the draw count and
+the outcome; 512 slots, the Titan V alone.
+
+| run | cascades that differ | draws a cascade | lane 0's latency, mean (worst) | campaign wall |
+|---|--:|--:|--:|--:|
+| integ/p34's thread cascade, recorded as the tape | - | 2,526.1 | 51.8 ms* (1,295 ms) | 3,940 ms |
+| **the warp, against the tape** | **0 of 20,088** | 2,526.1 | **40.4 ms (1,664 ms)** | 3,362 ms |
+| the new tree's crewless (one-thread) branch, against the tape | 13,883 of 20,088 | 2,526.1 | 56.9 ms (1,433 ms) | 3,991 ms |
+
+(*`clock64` at the nominal clock on that build; the other two are `%globaltimer`.) So the crew is
+exact where it ran: every final state and every draw count of 20,088 cascades on a warp is the
+thread cascade's AS IT WAS before P35, and lane 0's cascade is 1.41x shorter than the thread's at
+the same 512-block width (the campaign's wall 1.19x, because a campaign is bounded by its
+slowest cascades and their tails share the same serial de-excitation).
+
+Two things the first run found, both mended in the source: the crew hung - lane 0 handed it a
+pointer to `apply_collision`'s local `old_secondary`, and a lane reads its OWN frame at another
+lane's local address (the ids are copied into the crew since; the header names the rule); and
+the new tree's crewless branch is NOT the old transcription to the bit (row 3) although its
+source is - the same formulas compiled into a different function round differently (a product
+fused into an add in one context and not in another), which is also why the pair and transport
+arithmetic now has one compiled body for both paths (`pair_scatter_time`,
+`pair_absorption_time`, `transport_track`).
+
+**WHY IT IS NOT MERGED - THE COMPILE, MEASURED** (the session's `peak.ps1`, the largest ptxas
+working set; the machine has 64 GB and the user's rule is that nothing pages):
+
+| unit | build | ptxas peak | outcome |
+|---|---|--:|---|
+| `transport_run_int_binary`, integ/p34 | - | 27 GB (the lead's figure) | 14 min |
+| tests/test_bic_warp (thread + warp kernels, two instantiations) | | 34.3 GB | 1,595 s |
+| tests/test_bic_warp, one instantiation (crewless `CrewRng` for the thread) | | 37.1 GB | 1,919 s, 0.9 GB free |
+| `transport_run_int_binary`, the crew, two call sites of the entry | w1 | 41.4 GB | stopped by me at 0.5 GB free |
+| ... one call site of the entry | w2 | 41.9 GB | **killed for memory** (2.4 GB free) |
+| ... + the shared work out of line (`crew_share`, the pair and track bodies `__noinline__`) | w3 | 43.1 GB | **killed for memory** (1.5 GB free) |
+| `transport_run_int_lightion`, + `crew_call`/`crew_serve_loop` out of line | w4 | 38.6 GB | compiled, 957 s, 6.3 GB free |
+
+**The Binary unit with the crew does not compile on this machine.** Per the lead's rule it was not
+retried beside other work and is not retried again until the kernel is smaller; what makes it
+42 GB is not found - neither a second call site of the entry nor the shared bodies' inlining
+moved it, so the cost is in the crew's presence in the kernel (the warp-synchronous calls in a
+255-register, 15-27 kB-frame kernel are the remaining suspect). And the one unit that did
+compile is not usable as it stands:
+
+| `run_interaction<kLightIon>` | integ/p34 | the crew (w4) |
+|---|--:|--:|
+| registers | 255 | 255 |
+| frame (cumulative stack) | 20,784 B | **27,024 B** |
+| spill stores / loads | 556 / 1,136 B | 592 / 1,164 B |
+| shared memory | 0 | 1,072 B (the crew) |
+| object | 8,644,037 B | 9,279,521 B |
+
+27,024 B rounds the raise to 32,768 B a thread (V190), 2.50 GB where it kept 1.88, and the pool
+falls from 628 slots to 213 - a third of the width V295 measured as worth 8% per halving. And
+the slot grew 53,248 B (`BicScratch`'s crew arrays, 1,617,672 -> 1,670,920) - which every
+interaction unit and the pool builder must agree on, so a build that rebuilds only the two crewed
+units is not a run at all: the w4 experiment (light-ion crew + engine, the other units P34's) put
+3.06391 uGy at 2.545 (warp) and 2.563 (one thread) with 61,032 interactions down to ~41,500, the
+slot stride of the old objects against the new. It is recorded only as what a partial build does.
+
+**WHAT WOULD MAKE IT MERGEABLE**, by name: (1) the crew's arrays out of the slot's layout - over
+the Bertini workspace a Binary interaction never touches, behind a size assert - so only the two
+crewed units change; (2) the frame back under 24,576 B (no lane-local copy of the propagator,
+the shared bodies inline again on the crew's own path); (3) the Binary unit under ~30 GB of
+ptxas, which needs the cause found first - one experiment is ~17 minutes at the machine's limit.
+None of the four beams or the eleven gates was run on a crewed binary.
+
+### V302: P35 stopped - the rule change inside an interaction (the user, 2026-11-19 10:40), the light-ion reaction and the pool not done, and what is refused or left by name
+
+**THE RULE CHANGE, BY NAME.** Relayed by the lead at 10:40: inside a hadronic interaction the
+bit-identity rule is relaxed. A cascade or reaction may consume its draws in another order - the
+draw-bearing phases (V300: the nucleus's 1,517 and 9,957 draws, the collisions' final states, the
+de-excitation) may be spread across the lanes, each lane on its own deterministic stream derived
+from the slot's key and the lane index. What replaces bit-identity: (1) determinism - the same
+binary reproduces itself to the digit (the replay, two-runs and N+N-vs-2N gates exact), lane
+assignment and reductions never timing-dependent; (2) the one-thread path stays in the tree as
+the transcription, selectable at run time (`G4GPU_CASCADE_WARP=0`), with every exact oracle test
+(test_bic_apply, the light-ion test) passing on it unchanged; (3) the warp path validated
+STATISTICALLY against the thread path and the Geant4 oracle - multiplicities, kinetic-energy and
+angular spectra, final-state size, energy and baryon balance, at least 20,000 cascades a point,
+no row past 5 sigma, the worst named, one anti-vacuity perturbation caught; (4) the four beams
+and the eleven gates within their own statistics against the previous binary, every formula
+byte for byte; outside an interaction nothing changes.
+
+Under it, V301's crewless-branch difference (13,883 of 20,088 cascades rounding differently in a
+different compiled context) is no longer a defect by itself, and the lane-0 crew's exactness
+(V301's 0 of 20,088) stands as the check of the lane distribution the rule asked for first.
+
+**NOT DONE, BY NAME.**
+* V301's crew in the beams: blocked by the Binary unit's compile (42-43 GB, killed twice), the
+  light-ion frame (27,024 B -> 213 slots) and the slot layout change. No beam or gate was run on
+  a crewed binary; no number of P35 is in the four beams.
+* The light-ion reaction on a warp (the brief's V302) and its campaign (tests/test_blir_warp.cu,
+  written, never compiled: one more ~38 GB unit).
+* The pool and the raise re-derived for a warp a cascade (the brief's V303): nothing to re-derive
+  until V301 compiles; V301's table says what its one compiled unit would have cost (213 slots).
+* The draw-bearing phases across lanes under the new rule: the next deliverable. By V300 the one
+  phase it opens that is large is the nucleus (8% of a Binary cascade, 13% of a light-ion
+  reaction; its Fermi momenta are per nucleon and could take a lane each), and the collisions'
+  final states (4-10%); the de-excitation (12-20%) is a Markov chain and stays on one lane under
+  any rule.
+* README's performance rows: unchanged, because no P35 binary ran a beam.
+
+**THE ION COUNT ANSWER** (V299) stands on its own: Fe56 is parallelism-limited in its stepping
+(a third of its GPU time at 5,000 events, 15% at 20,000), the rate 101 -> 117 -> 128 events/s at
+5k/20k/50k; the deferred drain's bound moves nothing (64 is slower, 1024 the same).
