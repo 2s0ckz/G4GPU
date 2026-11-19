@@ -18065,3 +18065,86 @@ its default and would cost every unit's rebuild, so it stays a patch beside this
 lepton unit at a bound is also the heaviest ptxas of the tree (5.6 GB each, four at once took the
 machine from 41.5 to 17.7 GB free; P33's first attempt ran eight and the lead stopped four of
 them - those four were rebuilt, four at a time, and are the k = 3, 4, 6, 8 lepton rows above).
+
+### V291: the live list sorted within a species - the material, then the energy's binary octave - and the 2M-photon gate runs 1.22x faster, the proton and pion beams 1.05x and 1.06x, every dose to the digit
+
+**WHAT CHANGED** (`host/transport_run_engine.cuh`, the engine unit alone). `count_species` and
+`scatter_species` histogram and scatter over (species, material, energy) buckets instead of
+species: 8 materials - the track's volume's own (a voxel grid's cells are not looked up; that
+would be a navigation call a track an iteration for a sort key), an index past 7 sharing the
+last - by 32 energy bins, `ilogb(ekin) + 10` clamped, binary octaves from 1 keV to 2 TeV (an
+integer instruction, not a logarithm). 256 buckets a species, laid out species-major, so each
+species' buckets are still one contiguous range and the launches are exactly what they were. The
+host reads the 5,120 bucket counts back where it read the 20 species counts (the same
+synchronising copy), turns them into each bucket's starting cursor and uploads those (20 KB an
+iteration); the scatter bumps the bucket's cursor. `idx_n_` is 20 KB a side instead of 80 B.
+`transport_run.cuh` is untouched, so `tools/freshness.ps1` names the engine unit alone stale: no
+kernel unit, example object or project rebuilds.
+
+**WHY NO NUMBER CAN MOVE.** The order of the dispatch list decides which thread steps which
+track and which tracks the throttle defers. Neither reaches a random number - each track draws
+from `Philox(rng_key, step, stream)` (V284) - and the pool gate's three sizes already defer
+different tracks to the same digits. Within a bucket the order is still the atomics'.
+
+**WHICH KEY, MEASURED** (`G4GPU_SORT_KEYS`, one engine; the 2M-photon gate, best of three):
+
+| key | time | events/s | dose |
+|---|--:|--:|---|
+| none (`0`: the species-only sort, through the new code) | 512.2 ms | 3.90 x 10^6 | 85.2055 nGy, rms 173.586 pGy |
+| energy alone (`3`) | 454.9 ms | 4.40 x 10^6 | the same digits |
+| material alone (`2`) | 443.4 ms | 4.51 x 10^6 | the same digits |
+| **material, then energy (`1`, the default)** | **425.4 ms** | **4.70 x 10^6** | the same digits |
+| material, then half-octave energy (a build of its own, not kept) | 433.3 ms | 4.62 x 10^6 (against key 1's 433.4 in the same session) | the same digits |
+
+Key 0 against the pre-P33 binary (512-518 ms against 517-528): the 20 KB each way an iteration
+costs nothing that shows.
+
+**WHERE IT COMES FROM** (`G4GPU_LOOP_PROFILE=1`, one run each, ms of GPU time):
+
+| class | photon 2M, before | after | x | proton 1 GeV, before | after | pi+ 10 GeV, before | after |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| count/scatter species | 80.3 | 71.6 | 1.12 | 165.6 | 178.3 | 105.7 | 109.8 |
+| `run_step_gamma` | 100.6 | 89.7 | 1.12 | 31.1 | 29.4 | 44.6 | 48.3 |
+| `run_step_lepton<e->` | 227.6 | **166.1** | **1.37** | 145.0 | 124.6 | 267.8 | **124.0** |
+| `run_step_lepton<e+>` | 28.0 | 22.9 | 1.22 | 34.2 | 30.6 | 45.9 | 37.2 |
+| `run_step_hadron<proton>` | - | - | | 236.4 | **122.3** | 106.9 | 81.0 |
+| `run_step_hadron<pi+>` | - | - | | 34.3 | 29.9 | 86.2 | 55.1 |
+| all stepping | 360.6 | 283.8 | 1.27 | 1,020.9 | 860.5 | 1,035.2 | 808.0 |
+| `run_interaction<kBinary>` | - | - | | 13,610.8 | 12,612.9 | 8,189.4 | 8,285.1 |
+| GPU time in the timed launches | 444.4 | 359.4 | 1.24 | 15,894.8 | 14,741.3 | 15,970.1 | 15,681.0 |
+
+The electron kernel gains most: a warp's 32 tracks now share a material and an octave, so they
+read the same rows of the range, dE/dx, msc and brems tables and mostly take the same branch of
+the step limit. The proton kernel halves on its own beam for the same reason. The counting sort
+itself is no dearer (cheaper on the photon beam: fewer collisions on 20 counters when 5,120
+buckets share the atomics). On the proton beam `run_interaction<kBinary>` also came down 7%:
+the queue is filled in the order the sorted warps reach their interactions, so a drain chunk's
+cascades share a material and an energy band more often; on the pion beam it did not move
+(8,189 against 8,285, one run each), so that part is named, not claimed.
+
+**THE FOUR BEAMS** (the committed source, built through build_engine.bat - `transport_run`
+alone stale; profile off; photon, proton and pion best of three, Fe56 one run; "0.26 of 12.00 GB
+left" on every hadron and ion run, the host at most 0.67 GB; the same track-step totals as V287):
+
+| beam | before (V287) | after | x | dose |
+|---|--:|--:|--:|---|
+| B1 6 MeV gamma 2M | 519.5 ms, 3.850e6 ev/s, 5.014e7 steps/s | **425.4 ms, 4.701e6 ev/s, 6.123e7 steps/s** | **1.22** | 85.2055 nGy (173.586 pGy), to the digit |
+| proton 1000 MeV 200k | 15.43 s, 12,964 ev/s, 748,719 steps/s | **14.67 s, 13,635 ev/s, 787,431 steps/s** | **1.05** | 391.931 nGy (1.33866 nGy), to the digit |
+| pi+ 10 GeV 100k | 16.03 s, 6,239 ev/s, 807,086 steps/s | **15.09 s, 6,627 ev/s, 857,287 steps/s** | **1.06** | 333.4 nGy (2.00918 nGy), to the digit |
+| Fe56 56 GeV 5k | 549.2 s, 9.104 ev/s, 113,000 steps/s | 548.4 s, 9.117 ev/s, 113,154 steps/s | 1.00 | 3.06391 uGy (53.0322 nGy), to the digit |
+
+The Fe56 beam is the light-ion reaction's latency (V283, 86% of it) and the sort has nothing to
+give it.
+
+**THE ELEVEN DOSE GATES AND THE GPU TESTS**, the committed source, build_all.bat's gate section
+command for command, run twice - after the first build, and again after the engine was
+recompiled through build_engine.bat from the restored source (below) and the drivers relinked
+(the 2M-photon gate then 428.9 ms best of three): every printed number V287's (ba73's), the
+digest of the eleven compared line for line with V287's with no differences, and the proton
+depth-dose CSV byte-identical (md5 ba22d777a151c1d717ba48d0b62f23d1). The eleven GPU tests of
+`TESTS_GPU`, built and run as build_all.bat does: 11 passed, 0 failed.
+
+**THE ANTI-VACUITY.** With each species' range computed from the buckets one short (the last
+electron bucket's last track not launched each iteration - a list built wrong), the 2M-photon run
+printed 85.1993 nGy, rms 173.578 pGy, and 26,050,104 track-steps against 85.2055, 173.586 and
+26,050,805. Restored before the commit; the committed source is the one the tables ran.

@@ -148,11 +148,53 @@ __global__ void seed_from_primaries(TrackBuffer<real_t> pool,
 /// sort pays four bytes a slot for any number of species: histogram here, prefix sum on the
 /// host (it already reads the counts back to size the launches), scatter below.
 ///
-/// The scatter's offsets travel as a by-value argument rather than a third device buffer, which
-/// is why SpeciesOffsets exists: sixteen ints is 64 bytes against a 4 KB kernel parameter
-/// space, and a buffer would need its own allocation, upload and lifetime.
+/// P33 (docs/RISK.md V291): A SECONDARY KEY WITHIN A SPECIES - the material the track's volume
+/// is made of, then its kinetic energy's binary exponent - so a warp's 32 tracks read
+/// neighbouring rows of the same tables and are more likely to take the same branches. The
+/// histogram is over (species, material, energy bin) buckets, `kSortKeys` a species, laid out
+/// species-major, so each species' buckets are still one contiguous range of the list and the
+/// launches are exactly what they were. The host reads the bucket counts back (it read the
+/// species counts back before), turns them into the scatter's starting cursors and uploads
+/// those; the scatter then bumps a bucket's cursor instead of a species'.
+///
+/// `G4GPU_SORT_KEYS` chooses the key, for the measurement: 1 (the default) material then
+/// energy, 0 none - every track's sub-key is 0 and the sort is the species-only one it was -
+/// 2 material alone, 3 energy alone. On the 2M-photon gate, best of three (V291): 0 513 ms,
+/// 3 455 ms, 2 443 ms, 1 429-433 ms; half-octave energy bins under the material bought nothing
+/// over the octave. The extra 20 KB read back and uploaded an iteration is inside the noise of
+/// key 0 against the species-only sort it replaced (513-518 ms against 517-527).
+///
+/// Like the order within a bucket, which is still the atomics', none of this can move a number:
+/// a track's random stream is keyed on its own key and step. The material is the volume's own
+/// (a voxel grid's cells are not looked up: that would be a navigation call per track per
+/// iteration for a sort key); a material index past `kSortMaterials - 1` shares the last.
+constexpr int kSortMaterials = 8;
+constexpr int kSortEnergyBins = 32;
+constexpr int kSortKeys = kSortMaterials * kSortEnergyBins;
+
+/// The bucket within a species: 0 when the keyed sort is off. The energy bin is
+/// `ilogb(ekin) + 10` clamped to [0, 31] - a binary decade from 1 keV (2^-10 MeV) to 2 TeV,
+/// one integer instruction rather than a logarithm.
 template <typename real_t>
-__global__ void count_species(TrackBuffer<real_t> pool, int n, int* counts, int* unknown) {
+__device__ __forceinline__ int sort_subkey(const TrackBuffer<real_t>& pool,
+                                           const geom::Volume<real_t>* volumes, int i,
+                                           int keyed) {
+  if (keyed == 0) { return 0; }
+  const int v = pool.volume[i];
+  int m = (v >= 0) ? volumes[v].material : kSortMaterials - 1;
+  m = (m < 0 || m >= kSortMaterials) ? kSortMaterials - 1 : m;
+  if (keyed == 2) { return m * kSortEnergyBins; }
+  const real_t e = pool.ekin[i];
+  int eb = (e > real_t(0)) ? ilogb(e) + 10 : 0;
+  eb = eb < 0 ? 0 : (eb >= kSortEnergyBins ? kSortEnergyBins - 1 : eb);
+  if (keyed == 3) { return eb; }
+  return m * kSortEnergyBins + eb;
+}
+
+template <typename real_t>
+__global__ void count_species(TrackBuffer<real_t> pool, int n,
+                              const geom::Volume<real_t>* volumes, int keyed, int* counts,
+                              int* unknown) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   const int sp = species_index(static_cast<ParticleType>(pool.species[i]));
@@ -163,7 +205,7 @@ __global__ void count_species(TrackBuffer<real_t> pool, int n, int* counts, int*
     atomicAdd(unknown, 1);
     return;
   }
-  atomicAdd(&counts[sp], 1);
+  atomicAdd(&counts[sp * kSortKeys + sort_subkey(pool, volumes, i, keyed)], 1);
 }
 
 /// Start of each species' contiguous range in the one index list.
@@ -171,20 +213,21 @@ struct SpeciesOffsets {
   int base[kNumTrackSpecies];
 };
 
-/// Writes each track's pool slot into its own species' range.
+/// Writes each track's pool slot into its own bucket's range.
 ///
-/// `cursors` is the same allocation the histogram used, zeroed again - it is a per-species
-/// bump counter now rather than a count. Reusing it is not a saving worth making on its own;
-/// what it avoids is a second `kNumTrackSpecies`-sized buffer whose only distinguishing
-/// feature would be which of the two passes wrote it.
+/// `cursors` is the same allocation the histogram used, overwritten by the host with each
+/// bucket's starting position - a bump counter now rather than a count. Reusing it is not a
+/// saving worth making on its own; what it avoids is a second buffer of the same size whose
+/// only distinguishing feature would be which of the two passes wrote it.
 template <typename real_t>
-__global__ void scatter_species(TrackBuffer<real_t> pool, int n, int* list,
-                                SpeciesOffsets off, int* cursors) {
+__global__ void scatter_species(TrackBuffer<real_t> pool, int n,
+                                const geom::Volume<real_t>* volumes, int keyed, int* list,
+                                int* cursors) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) { return; }
   const int sp = species_index(static_cast<ParticleType>(pool.species[i]));
   if (sp < 0) { return; }  // already counted by count_species
-  list[off.base[sp] + atomicAdd(&cursors[sp], 1)] = i;
+  list[atomicAdd(&cursors[sp * kSortKeys + sort_subkey(pool, volumes, i, keyed)], 1)] = i;
 }
 
 // ---------------------------------------------------------------- P15: binning the queue
@@ -775,7 +818,8 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
         // it, so N species cost N times the pool to describe pool-many tracks. Four bytes a
         // slot here, 1.7% on top of a 236-byte track, independent of how many species exist.
         G4GPU_CUDA_CHECK(cudaMalloc(&idx_[i], sizeof(int) * pool_));
-        G4GPU_CUDA_CHECK(cudaMalloc(&idx_n_[i], sizeof(int) * kNumTrackSpecies));
+        // P33: a count per (species, material, energy) bucket - see count_species (V291).
+        G4GPU_CUDA_CHECK(cudaMalloc(&idx_n_[i], sizeof(int) * kNumTrackSpecies * kSortKeys));
       }
       std::printf("track pool: %lld live slots per side (%.1f per event), %.2f GB total\n",
                   pool_, live_per_event_, double(arena_half_ * 2) / 1073741824.0);
@@ -1702,25 +1746,44 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         SpeciesOffsets off{};
         if (n_live > 0) {
           const int blocks = (n_live + threads_ - 1) / threads_;
+          // P33 (V291): the buckets are (species, material, energy); `G4GPU_SORT_KEYS=0` puts
+          // every track of a species in its first bucket, which is the species-only sort.
+          static const int sort_keyed = [] {
+            const char* v = std::getenv("G4GPU_SORT_KEYS");
+            return (v != nullptr && v[0] != '\0') ? std::atoi(v) : 1;
+          }();
+          constexpr int kBuckets = kNumTrackSpecies * kSortKeys;
+          static thread_local std::vector<int> bucket(kBuckets);
           prof.begin(LoopProfile::kSort);
-          G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kNumTrackSpecies));
-          count_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live, idx_n_[cur],
-                                                      d_unknown_);
+          G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kBuckets));
+          count_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
+                                                      scene_.geometry.volumes, sort_keyed,
+                                                      idx_n_[cur], d_unknown_);
           G4GPU_CUDA_CHECK(cudaGetLastError());
-          G4GPU_CUDA_CHECK(cudaMemcpy(nsp, idx_n_[cur], sizeof(int) * kNumTrackSpecies,
+          G4GPU_CUDA_CHECK(cudaMemcpy(bucket.data(), idx_n_[cur], sizeof(int) * kBuckets,
                                       cudaMemcpyDeviceToHost));
           prof.memop(2);
           prof.launch(2);
           prof.sync();
+          // Each bucket's count becomes its starting cursor, in species-major order, so a
+          // species' buckets stay one contiguous range starting at `off.base[sp]`.
           int at = 0;
           for (int sp = 0; sp < kNumTrackSpecies; ++sp) {
             off.base[sp] = at;
-            at += nsp[sp];
+            for (int k = 0; k < kSortKeys; ++k) {
+              const int c = bucket[sp * kSortKeys + k];
+              bucket[sp * kSortKeys + k] = at;
+              at += c;
+            }
+            nsp[sp] = at - off.base[sp];
           }
-          // Zeroed again and reused as the scatter cursors; see scatter_species.
-          G4GPU_CUDA_CHECK(cudaMemset(idx_n_[cur], 0, sizeof(int) * kNumTrackSpecies));
-          scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live, idx_[cur],
-                                                        off, idx_n_[cur]);
+          // Overwritten with the cursors and reused by the scatter; see scatter_species.
+          G4GPU_CUDA_CHECK(cudaMemcpy(idx_n_[cur], bucket.data(), sizeof(int) * kBuckets,
+                                      cudaMemcpyHostToDevice));
+          prof.memop();
+          scatter_species<real_t><<<blocks, threads_>>>(tracks_[cur].view, n_live,
+                                                        scene_.geometry.volumes, sort_keyed,
+                                                        idx_[cur], idx_n_[cur]);
           G4GPU_CUDA_CHECK(cudaGetLastError());
           prof.end(LoopProfile::kSort, n_live);
         }
