@@ -2427,7 +2427,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         // probe queued a long kernel on one stream and then, later, a short one on another,
         // which waited for everything queued before it: WDDM submits in order. Launched together
         // - forked from the legacy stream by an event, each recording its own and the legacy
-        // stream waiting for all of them - ten 200 us kernels take 0.27 ms, not 2.0 (V303's
+        // stream waiting for all of them - ten 200 us kernels take 0.27 ms, not 2.0 (V304's
         // probe). The legacy stream is where every other launch of the loop is, so the join is
         // what keeps the drain and the swap after the last step, as the one stream did.
         //

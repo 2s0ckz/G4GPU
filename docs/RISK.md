@@ -18950,3 +18950,194 @@ different compiled context) is no longer a defect by itself, and the lane-0 crew
 **THE ION COUNT ANSWER** (V299) stands on its own: Fe56 is parallelism-limited in its stepping
 (a third of its GPU time at 5,000 events, 15% at 20,000), the rate 101 -> 117 -> 128 events/s at
 5k/20k/50k; the deferred drain's bound moves nothing (64 is slower, 1024 the same).
+
+### V303: P37's measurement - where the Fe56 beam's "forty times a photon's step" is: an ion step costs 270 us of one thread's time and a proton step 430 us, no phase of either is a tenth of it, and the forty is the card's emptiness and the light-ion drain, not the ion's physics
+
+**THE TREE.** perf/ion_step, cut from integ/p35 (918092f = integ/p34's sources plus V299-V302).
+The 25 kernel units' objects are P34's (perf/interactions, 4639038, sm_70 + compute_70, CUDA
+12.9), whose sources differ from integ/p35 in comments and one printf of the engine; their
+dependency files re-pointed at this worktree, `tools/freshness.ps1` then names `transport_run`
+alone stale, and it was compiled here. Every run on the Titan V alone (`CUDA_VISIBLE_DEVICES=1`)
+under `out\gpu.lock` taken per run, "0.24-0.25 GB of 12.00 GB left" on every hadron and ion run,
+the host process at most 0.67 GB. The eleven dose gates on this build: ba73's digest, 34 lines,
+no difference (proton depth CSV md5 ba22d777a151c1d717ba48d0b62f23d1). The four beams: V299's
+digits and times within 1% (Fe56 5k 49.71 s, 100.6 ev/s, 3.06391 uGy (53.0322 nGy),
+62,058,769 track-steps; proton 8.97 s; pi+ 10.21 s; photon 424.7 ms best of 3).
+
+**(i) GEANT4'S OWN Fe56 RATE.** ref/B1build's exampleB1 (QBBC as it ships) on
+ref/b1ion/Fe56_56000.mac at `/run/beamOn 2000`, `G4FORCE_RUN_MANAGER_TYPE=Serial`: User 49.625 s,
+Real 49.876 s - **40.3 events a core-second** (1.23838 uGy, rms 33.5391 nGy). The lead's
+measurement on ten workers (`out\lead\cpu_rates.md`: 500 events, User 16.234 s, Real 2.289 s)
+gives 31 a core-second and 218 events/s on the 10-core box; the ten-worker figure carries the MT
+overhead and is the one the sweep cites. Against it the port's 5k rate was 3.2 cores at 100.6
+ev/s and is 4.0 cores at 123.2 (V304); at 20k 3.8 and 4.2 cores.
+
+**(ii) THE LOOP, PROFILED** (`G4GPU_LOOP_PROFILE=1`, `_CSV`; ms of GPU time):
+
+| | 5,000 events | 20,000 events |
+|---|--:|--:|
+| iterations (all under 1% of the pool live) | 8,735 | 10,050 |
+| mean live tracks an iteration (max) | 7,105 (46,844) | 24,686 (154,817) |
+| kernel launches / synchronising read-backs an iteration | 9.0 / 3.01 | 11.0 / 3.04 |
+| wall in the loop | 50,357 | 171,849 |
+| `run_interaction<kLightIon>` | 26,851 (55.2%), 100 spans of 269 ms | 113,398 (66.8%), 383 of 296 ms |
+| `run_interaction<kBinary>` | 6,479 (13.3%) | 24,317 (14.3%) |
+| `kBertini`, `kAtRest`, the two emextra drains | 1,506 (3.1%) | 6,812 (4.0%) |
+| **all stepping, 16 species launched one after another** | **12,157 (25.0%), 1.39 ms an iteration** | **23,050 (13.6%), 2.29 ms** |
+| of which `run_step_hadron<kGenericIon>` | 3,286, 8,733 spans of 376 us | 4,341, 10,046 of 432 us |
+| the counting sort (its read-back's wait included) | 1,647, 189 us an iteration | 2,122, 211 us |
+| between launches (host, launch latency) | 1,703 | 2,102 |
+
+A species launch costs about the same whatever it holds: the e- launch 170 us for 4,556 tracks,
+the mu- launch 192 us for 1.6, the GenericIon launch 376 us for 2,000, the triton's 331 us for 23.
+The deferral (c): 100 drains at 5k, 384 at 20k; the drain's bound re-measured once the stepping
+was cheaper (V304): 128 44.91 s, 256 41.68, 512 41.12, 1,024 41.57 at 5k, all to the digit - 256
+stays. The iteration count is the chain of a primary's ~1,745 steps, its fragments' and the
+waits; the 2,893 iterations with under 100 tracks live (the tail) cost 2.2 s at 5k.
+
+**(iii) THE PER-PHASE TIMERS** (measurement only, never committed: `out\p37\instrument.pl` on a
+copy of src, clock64 per phase summed with atomics, the GenericIon and proton units and the engine
+compiled with `-DG4GPU_P37_TIMERS`; thread time, us a step, mean over every step):
+
+| phase | GenericIon, Fe56 5k beam (17.47 M steps) | proton, proton 1 GeV beam (4.15 M steps) |
+|---|--:|--:|
+| the kernel: load, voxel cell, Philox, emitter and the track's mass | 19.8 | 18.9 |
+| def + `material_at` | 4.9 | 3.4 |
+| `range_for` | 5.1 | 9.2 |
+| `step_to_boundary` | 12.6 | 17.5 |
+| `compute_safety` | 7.1 | 13.6 |
+| the delta ray: rate + draw / emission | 5.7 / 31.3 | 5.7 / 31.2 |
+| decay and Coulomb lengths | 0.0 | 19.9 |
+| the elastic cross section (ionElastic / hadElastic) | **45.2** | **45.0** |
+| the inelastic length (ionInelastic / protonInelastic) | **28.8** | 18.5 |
+| msc: limit / geometric path / true path / scattering | 11.8 / 14.8 / 0.4 / 35.7 | 21.8 / 18.9 / 20.3 / 29.4 |
+| the loss: mean, corrections, fluctuations (of which fluctuations) | 24.8 (17.3) | 32.1 (18.4) |
+| nuclear stopping + edep; move + `resolve_after_step` | 2.6; 3.8 | 2.4; 14.0 |
+| Coulomb and elastic apply | 1.7 | 50.8 |
+| advance, score, hook, append | 4.5 | 10.9 |
+| **the whole thread** | **272.7** (worst 604) | **429.2** (worst 1,121) |
+
+Thread time is the latency of one thread through the step: 397,000 cycles at 1.455 GHz for an
+ion, every phase thousands of cycles, none a fifth of the total. An ion step does NOT cost more
+than a proton's; its two interaction lengths are 74 us of 273, the proton's elastic and Coulomb
+pair as much. What makes the Fe56 beam slow per step is that nothing hides that latency: a launch
+is as long as its slowest thread, and the card holds 2,000 ions on 16 of its 80 SMs.
+
+**(iv) THE KERNEL**: `run_step_hadron<kGenericIon>` 255 registers, 4,864 B frame, 384 / 1,112 B
+spill at the entry, compiled at -O3 (no `.o1` marker), 2 blocks of 128 an SM (8 warps) - V287's
+row unchanged. Launched over 2,000 live ions on average at 5k (16 blocks, 10% of the 160 the card
+holds), 6,947 at 20k (55 blocks). The block shape is not the lever: 32, 64, spread over every SM,
+128 and 256 threads a block run 49.58, 49.54, 49.61, 49.71 and 49.87 s, all to the digit.
+
+**(v) THE STEP BUDGET**, per event at 5k (items stepped): e- 7,959 (64.1%), GenericIon 3,494
+(28.2% - the Fe56 primary 1,745 of them, its fragments 1,749), gamma 403, proton 294, neutron 138,
+alpha 34, deuteron 23, pi+ 17, pi- 17, e+ 11.5, He3 10.5, triton 6.5, mu+- 2.1, pi0 1.7.
+
+**WHERE THE FORTY IS.** The beam's 49.7 s for 62.06 M track-steps is 0.80 us a step against
+the 2M-photon gate's 0.0163 - 49x. Of it:
+
+| | s at 5k | share | what it is | whose |
+|---|--:|--:|---|---|
+| the light-ion, Binary, Bertini and at-rest drains | 34.6 | 71% | one slowest reaction a span (V297) | P36 |
+| the stepping | 12.2 | 25% | sixteen launches an iteration one after another, each one thread's step latency (270-430 us) on a card holding a few thousand tracks: (b) and (d), not (a) | P37, V304 |
+| the sort, the read-backs, the launches | 3.4 | 7% | three 62 us synchronising copies and the launches' latency an iteration | P37, V304 |
+
+The stepping alone is 0.196 us a step, 12x a photon's; the GenericIon kernel's 0.188 is 3.4x the
+e- kernel's 0.037 on the same iterations. The candidates as the brief named them: (a) the ion's
+per-step physics - measured, not the forty; (b) the small live count - the stepping's whole cost;
+(c) the deferral - re-measured, not a lever; (d) the per-iteration launches and read-backs - 7%;
+(e) occupancy and spills - the block shape moves nothing.
+
+### V304: the two fixes that keep every digit - the species' stepping launches run at once on their own streams, and the loop's read-backs land in mapped memory with the sort's prefix sum on the card: Fe56 5k 49.7 -> 40.6 s, 20k 171.0 -> 153.7 s
+
+**ONE: THE STEPPING LAUNCHES AT ONCE** (13fbc61, `host/transport_run_engine.cuh` alone). Each
+species launch goes on a non-blocking stream of its own, forked from the legacy stream by an
+event and joined back by one event a stream, so every other launch of the loop (the drains, the
+swap, the sort) still sees all of them finished. V294 measured that a short launch on one stream
+waited for everything QUEUED BEFORE IT on another; launched together, this card runs them at once
+(`out\p37\xconc.cu`, best of five, four blocks of 32 a kernel spinning on %globaltimer):
+
+| kernels | one stream | K streams, event fork/join |
+|--:|--:|--:|
+| 2 x 200 us | 0.427 ms | 0.233 ms |
+| 5 x 200 us | 1.046 ms | 0.245 ms |
+| 10 x 200 us | 2.055 ms | 0.271 ms |
+| 10 x 50 us | 0.554 ms | 0.121 ms |
+
+Nothing a step does depends on which launch runs first: each reads its own index range, appends
+to the one pool and adds to the one score through the atomics the threads of one launch already
+use, and every draw is keyed on the track (V284). `G4GPU_STEP_STREAMS=0` is the old schedule. On
+the Fe56 5k beam the stepping went from 12,157 ms (1.39 ms an iteration) to 3,955 ms (453 us: one
+ion step's latency). The per-thread ion step rose from 273 to 320 us with the species sharing SMs.
+
+**TWO: THE READ-BACKS** (341796a, the same file). A probe (`out\p37\xsync.cu`): a launch and a
+four-byte `cudaMemcpy` 62.4 us, the same through a pinned `cudaMemcpyAsync` 62-70 us, a launch and
+a synchronisation 24-26 us, a launch writing mapped host memory polled by the host 25 us. So the
+three integers an iteration reads - the pool's append cursor, the counting sort's counts, the
+interaction queue's cursor - are written into mapped pinned memory by a one-thread kernel, and
+the sort's exclusive sum over its 5,120 buckets runs on the card in one block (integer sums: the
+cursors are the host's to the bit), which writes each species' base and count - 40 integers -
+into the same mapped memory, where the 5,120 counts went down and 5,120 cursors came back. The
+sort's span 168 -> 109 us an iteration, the time between launches 1.82 -> 1.16 s at 5k.
+`G4GPU_SORT_DEVICE=0` is the host's sum. A one-launch sort (count, sum and scatter in one block
+up to 16,384 or 65,536 live tracks) ran 40.55 and 40.48 s against 40.44 without it and is not
+kept. The anti-vacuity: the electron count read one short, the 2M-photon gate printed 85.1992 nGy
+and 26,050,047 track-steps against 85.2055 and 26,050,805; restored and rebuilt.
+
+**THE BEAMS** (exampleB1's own lines; one run each but the photon's best of three):
+
+| beam | before (integ/p35) | after ONE | after ONE + TWO | x | dose (rms), track-steps, every column |
+|---|--:|--:|--:|--:|---|
+| Fe56 56 GeV 5k | 49.71 s, 100.6 ev/s | 41.68 s, 120.0 | **40.59 s, 123.2 ev/s** | **1.22** | 3.06391 uGy (53.0322 nGy), 62,058,769 |
+| Fe56 56 GeV 20k | 170.98 s, 117.0 ev/s (V299; 171.9 profiled here) | 155.05 s, 129.0 | **153.72 s, 130.1 ev/s** | **1.11** | 12.3689 uGy (106.6 nGy), 248,093,226 |
+| proton 1 GeV 200k | 8.97 s, 22,309 ev/s | 8.53 s | **8.51 s, 23,515** | 1.05 | 391.931 nGy (1.33866 nGy), 11,550,586 |
+| pi+ 10 GeV 100k | 10.21 s, 9,798 ev/s | 9.92 s | **9.76 s, 10,246** | 1.05 | 333.4 nGy (2.00918 nGy), 12,936,362 |
+| B1 gamma 6 MeV 2M | 424.7 ms | 418.7 ms | **404.8 ms, 4.94e6 ev/s** | 1.05 | 85.2055 nGy (173.586 pGy), 26,050,805 |
+
+The 20k profile after both: 154,231 ms in the loop, the stepping 6,926 ms (689 us an iteration,
+against 2.29 ms), the sort 127 us an iteration, the light-ion drain 74.4% of the GPU time.
+
+**THE ELEVEN GATES** after each fix (`out\p37\gates.bat`, build_all.bat's gate section command for
+command, g4dose and proton_depth relinked against each engine): ba73's digest, 34 lines, no
+difference, the depth CSV's md5 ba22d777a151c1d717ba48d0b62f23d1. **THE ELEVEN GPU TESTS** of
+`TESTS_GPU` on the final tree (test_ion_primary rebuilt, the one that reads the engine header):
+11 passed, 0 failed.
+
+**THE UNITS.** Both fixes are `host/transport_run_engine.cuh` only, which only the engine unit
+reads (`G4GPU_ENGINE_KERNELS_ONLY`): `tools/freshness.ps1` names `transport_run` alone stale, 40 s
+to compile; of the tests, test_ion_primary. No stepping or interaction unit, no extra.
+
+### V305: what this package did not do, by name - nothing found would move a digit for a measured gain worth it, and what is left is named with its size
+
+* **The ion's interaction lengths cached per (nuclide, material, energy bin).** ionElastic's and
+  ionInelastic's cross sections are evaluated at the track's own continuous energy; a cache can
+  return the identical double only at the identical energy, which a continuous slowing-down never
+  repeats. A tabulated and interpolated length is a different number - not bit-identical by its
+  nature. Its potential is bounded: the two are 74 of the ion thread's 273 us, and since V304 an
+  iteration's stepping is as long as its slowest species' step, which is a proton's (430 us) in
+  the 39% of iterations that hold one. At most ~1 s of the 40.6 at 5k. Left for the lead.
+* **The duplicate nuclide lookups in the GenericIon kernel.** The kernel computes the track's mass
+  through `ion_particle_def` (the AME and ENSDFSTATE searches) for the emitter and the clocks, and
+  `step_hadron` does the same search again for `stepped_ion` - 10 us of the ion's 273 (the kernel's
+  "voxel/rng/emitter/mass" phase is 15.6 us for an ion, 5.2 for a proton). Identical doubles if
+  done once; but the shape needs `run_step_hadron` (in transport_run_impl.cuh, which every unit
+  reads: 85 minutes, all stale) or `step_hadron`'s signature (stepper.cuh, the same), and the gain
+  is under a tenth of a second where a proton shares the iteration. Named, not done.
+* **Several steps a launch for the ion tail.** 2,893 iterations at 5k hold under 100 tracks and
+  each costs a step's latency plus ~250 us of sort, read-backs and launches; letting the GenericIon
+  kernel take k steps of a track in one launch keeps every number (each step is keyed on its own
+  count) but changes the throttle's slot reservation, the deferral's iteration ages and the window
+  bound, and is a kernel change every unit recompiles for. Potential ~1 s at 5k. Not done.
+* **The two empty emextra drains** launched every iteration a photon or lepton is live (15-19 us
+  each, 0.25 s at 5k): P19's drains, P36's to own.
+* **The light-ion and Binary drains**, 71% of the 5k beam and 90% of the 20k after V304: P36's.
+
+Nothing in this package changes a step limit, a sum's order or a formula, so nothing was found
+that needed refusing for moving a digit.
+
+### V306: P37 closed - the docs
+
+README's throughput table carries the five P37 rows and Geant4's Fe56 core rate; the plan's
+performance-phase row carries part 4. The branch: 13fbc61 (the streams), 341796a (the read-backs),
+and this entry's commit. Measurement artefacts, uncommitted, in the worktree's `out\p37`: the
+timer instrumenter and header, the two probes, the profiles' CSVs and every run's log.
