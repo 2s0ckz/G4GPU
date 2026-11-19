@@ -45,11 +45,30 @@ struct InteractionPool;
 /// sizes the run reports, and - opaque, in the forms the builder needs to free them - what it
 /// allocated. A default-constructed owner is "no pool", and `free_interaction_pool` of it is a
 /// no-op, which is what `Free` on an engine that never uploaded relies on.
+/// P32: how many of the slots ALSO get an FTFP workspace, set by the caller before
+/// `build_interaction_pool` and read by it; 0 (the default) gives every slot one, as before.
+///
+/// WHY THE TWO COUNTS DIFFER (docs/RISK.md V285). FTFP's workspace is a pool of its own beside the
+/// slots - 671,280 B a slot against the slot's 1,617,672 - and only two buckets reach it: kFtfp,
+/// and kAtRest for a stopped antinucleon's Fritiof arm. The Binary cascade, the light-ion
+/// reaction and Bertini never touch it. So a pool sized for the Binary bucket's width paid 41% on
+/// top of every slot for a workspace those launches cannot use; with the count separate, the
+/// engine sizes the slots to the card and keeps FTFP's at what it was, and chunks the two FTFP
+/// buckets at FTFP's count. An inline function and not an argument because the builder's
+/// signature is the one every hook project's generated `hook_pool.cu` instantiates.
+inline int& ftf_slot_request() {
+  static int n = 0;
+  return n;
+}
+
 template <typename real_t>
 struct InteractionPoolOwner {
   /// ONE device copy of the view, which every interaction and drain launch is handed.
   const InteractionPool<real_t>* d_pool = nullptr;
   int n_slots = 0;
+  /// P32: how many slots have an FTFP workspace (`ftf_slot_request`, capped at `n_slots`). The
+  /// kFtfp and kAtRest launches are chunked at this width and never index past it.
+  int n_ftf_slots = 0;
   std::size_t slot_bytes = 0;           ///< `sizeof(InteractionSlot<real_t>)`
   std::size_t ftf_workspace_bytes = 0;  ///< `ftf::entry::kWorkspaceBytes`
   std::size_t slots_bytes = 0;          ///< `n_slots * slot_bytes`

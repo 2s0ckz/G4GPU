@@ -977,6 +977,17 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
       // one constructed host image per slot (never a memset: V104), the FATAL on an FTFP pool
       // that could not be built, and the bytes the line below prints are the builder's now,
       // unchanged.
+      //
+      // P32: FTFP's workspaces are a count of their own (`had::ftf_slot_request`, V285): 128,
+      // what every slot carried before, or `G4GPU_FTF_SLOTS`, and never more than the slots.
+      {
+        int ftf_slots = 128;
+        if (const char* env = std::getenv("G4GPU_FTF_SLOTS")) {
+          const int v = std::atoi(env);
+          if (v > 0) { ftf_slots = v; }
+        }
+        had::ftf_slot_request() = ftf_slots;
+      }
       interaction_pool_ = had::build_interaction_pool<real_t>(
           n_interaction_slots_, level_storage_.view(), /*verbose=*/false);
       if (!interaction_pool_.ok) {
@@ -984,12 +995,86 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                     "host/interaction_pool_build.cuh.\n", n_interaction_slots_);
         std::exit(1);
       }
+      // ---- P32: AS MANY SLOTS AS THE CARD HOLDS, NOT 128 (docs/RISK.md V285).
+      //
+      // The slot count is the drain's WIDTH: a chunk is `n_interaction_slots_` interactions run
+      // at once, and the chunks of one iteration run one after the other. V283 measured what 128
+      // costs: 96.4% of the 1 GeV proton beam's GPU time is `run_interaction<kBinary>`, 862
+      // chunk launches, each one 128 cascades on a handful of SMs of the 80 - and 384 slots ran
+      // the same beam 1.5 times faster again than the launch-shape change alone. The constraint
+      // the 128 was chosen against is the device stack (the comment above): the raise reserves
+      // the interaction kernels' frame for every thread the card can hold, after the pool is
+      // built, and a pool that took that memory would have the raise refused by name (V258).
+      //
+      // So the default is sized here, against what is free NOW minus what the raise WILL ask -
+      // read off the five kernels exactly as `RaiseStackForInteractions` reads it - minus a
+      // margin for what Upload still allocates (the photo-/lepto-nuclear queue, the voxel
+      // scores) and for the driver. The 128-slot pool just built tells us a slot's bytes (the
+      // type is opaque here, V233), and when the card holds materially more the pool is rebuilt
+      // at that count; capped at 2,048, past which the card cannot keep more single-thread
+      // blocks resident (80 SMs x 32 blocks = 2,560 on the Titan V) and the queue's busiest
+      // iteration on any beam measured (7,247 on the proton beam) would not fill the chunk
+      // anyway. A caller's `SetInteractionSlots` and `G4GPU_INTERACTION_SLOTS` are honoured as
+      // given, as before. A slot holds nothing between interactions that reaches a number, so
+      // the count moves time and memory and not doses - V283/V285 hold that to the digit.
+      const bool slots_by_caller =
+          interaction_slots_request_ > 0 || std::getenv("G4GPU_INTERACTION_SLOTS") != nullptr;
+      if (!slots_by_caller) {
+        // A slot's bytes and nothing for FTFP: its workspaces stay at the count set below.
+        const std::size_t per_slot = interaction_pool_.slot_bytes;
+        cudaFuncAttributes ka[5] = {};
+        cudaFuncGetAttributes(&ka[0],
+                              run_interaction<real_t, had::InteractionBucket::kFtfp, StepHook>);
+        cudaFuncGetAttributes(&ka[1],
+                              run_interaction<real_t, had::InteractionBucket::kBertini, StepHook>);
+        cudaFuncGetAttributes(&ka[2],
+                              run_interaction<real_t, had::InteractionBucket::kBinary, StepHook>);
+        cudaFuncGetAttributes(&ka[3],
+                              run_interaction<real_t, had::InteractionBucket::kLightIon, StepHook>);
+        cudaFuncGetAttributes(&ka[4],
+                              run_interaction<real_t, had::InteractionBucket::kAtRest, StepHook>);
+        std::size_t need = 0;
+        for (const cudaFuncAttributes& a : ka) { need = std::max(need, a.localSizeBytes); }
+        std::size_t want = ((need + 4095u) / 4096u) * 4096u + 4096u;
+        want = std::max(want, stepping_stack_bytes());
+        std::size_t have = 0;
+        cudaDeviceGetLimit(&have, cudaLimitStackSize);
+        const host::SelectedDevice& dev = host::select_device();
+        const std::size_t threads = static_cast<std::size_t>(dev.prop.multiProcessorCount) *
+                                    static_cast<std::size_t>(dev.prop.maxThreadsPerMultiProcessor);
+        const std::size_t raise = (want > have) ? (want - have) * threads : 0;
+        constexpr std::size_t kMargin = std::size_t(512) << 20;
+        constexpr int kMaxAutoSlots = 2048;
+        size_t pf = 0, pt = 0;
+        cudaMemGetInfo(&pf, &pt);
+        const std::size_t reserve = raise + kMargin;
+        const long long extra =
+            (pf > reserve && per_slot > 0) ? static_cast<long long>((pf - reserve) / per_slot) : 0;
+        const int target = static_cast<int>(
+            std::min<long long>(kMaxAutoSlots, n_interaction_slots_ + extra));
+        if (target >= n_interaction_slots_ + n_interaction_slots_ / 4) {
+          had::free_interaction_pool<real_t>(interaction_pool_);
+          n_interaction_slots_ = target;
+          interaction_pool_ = had::build_interaction_pool<real_t>(
+              n_interaction_slots_, level_storage_.view(), /*verbose=*/false);
+          if (!interaction_pool_.ok) {
+            std::printf("\nFATAL: the interaction pool (%d slots) could not be built; see "
+                        "host/interaction_pool_build.cuh.\n", n_interaction_slots_);
+            std::exit(1);
+          }
+        }
+        std::printf("interaction slots: %d, sized to the card - %.2f GB free before the pool, "
+                    "%.2f GB kept for the stack raise (%zu B a thread x %zu threads) and %.2f GB "
+                    "of margin (docs/RISK.md V285)\n",
+                    n_interaction_slots_, double(pf) / 1073741824.0, double(raise) / 1073741824.0,
+                    want, threads, double(kMargin) / 1073741824.0);
+      }
       interaction_bytes_ += interaction_pool_.bytes;
 
-      std::printf("interaction pool: %d slots of %zu B + FTFP's %zu B = %.1f MB; queue %d "
-                  "entries of %zu B = %.1f MB\n",
+      std::printf("interaction pool: %d slots of %zu B + FTFP's %zu B on %d of them = %.1f MB; "
+                  "queue %d entries of %zu B = %.1f MB\n",
                   n_interaction_slots_, interaction_pool_.slot_bytes,
-                  interaction_pool_.ftf_workspace_bytes,
+                  interaction_pool_.ftf_workspace_bytes, interaction_pool_.n_ftf_slots,
                   double(interaction_pool_.slots_bytes + interaction_pool_.ftf_bytes) / 1048576.0,
                   queue_capacity_, sizeof(had::PendingInteraction<real_t>),
                   double(q_bytes) / 1048576.0);
@@ -2091,15 +2176,22 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             prof.sync();
             prof.end(LoopProfile::kQueueBin, n_queued);
 
-            // A block of 32 and not `threads_`: an interaction kernel is 255 registers with a
-            // large frame, so a 256-thread block would not be resident anyway, and a small one
-            // lets a chunk of 40 interactions use two SMs instead of one.
+            // A BLOCK OF ONE THREAD, since P32 (docs/RISK.md V285), and not the 32 it was. The
+            // 32 was chosen so that a chunk of 40 interactions would use two SMs rather than one;
+            // what it also did was put 32 different cascades in one WARP, and a cascade is the
+            // most divergent code in the port - every thread of the warp at a different
+            // collision, a different nucleus, a different branch - so the warp ran its 32
+            // cascades nearly one after another, on 4 of the card's 80 SMs for a 128-slot chunk.
+            // One thread a block gives each interaction a warp of its own, spreads a chunk over
+            // every SM, and leaves the scheduler 32 resident warps an SM to hide each one's
+            // local-memory latency behind. Measured on the 1 GeV proton beam (V283): 106.8 s at
+            // 32, 29.9 s at 2, 26.8 s at 1, the dose to the digit each time. The idle lanes cost
+            // nothing the divergent warp was not already wasting.
             //
-            // P32: `G4GPU_INTERACTION_BLOCK=n` overrides the 32 for the profile's experiment
-            // (docs/RISK.md V283). Thread `i` of a chunk still takes slot `i` and queue entry
-            // `base + i` whatever the block, so the block moves which SM runs an interaction and
-            // nothing it computes.
-            int kIth = 32;
+            // `G4GPU_INTERACTION_BLOCK=n` overrides it for the experiment. Thread `i` of a chunk
+            // still takes slot `i` and queue entry `base + i` whatever the block, so the block
+            // moves which SM runs an interaction and nothing it computes.
+            int kIth = 1;
             if (const char* env = std::getenv("G4GPU_INTERACTION_BLOCK")) {
               const int v = std::atoi(env);
               if (v > 0 && v <= 1024) { kIth = v; }
@@ -2109,9 +2201,13 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     const int b_ = static_cast<int>(BUCKET);                                                 \
     const int pc_ = LoopProfile::kIntBase + (b_ - static_cast<int>(had::InteractionBucket::kFtfp)); \
     if (nb[b_] > 0) { prof.begin(pc_); }                                                     \
-    for (int base = 0; base < nb[b_]; base += n_interaction_slots_) {                        \
-      const int n_this = (nb[b_] - base < n_interaction_slots_) ? (nb[b_] - base)            \
-                                                                : n_interaction_slots_;      \
+    /* P32: the two buckets that reach FTFP are chunked at FTFP's own count (V285). */      \
+    const int w_ = (BUCKET == had::InteractionBucket::kFtfp                                  \
+                    || BUCKET == had::InteractionBucket::kAtRest)                            \
+                       ? std::min(n_interaction_slots_, interaction_pool_.n_ftf_slots)       \
+                       : n_interaction_slots_;                                               \
+    for (int base = 0; base < nb[b_]; base += w_) {                                          \
+      const int n_this = (nb[b_] - base < w_) ? (nb[b_] - base) : w_;                        \
       run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
           scene_, d_queue_, d_qidx_, n_this, qoff.base[b_] + base, tracks_[nxt].view, stride, \
           d_win_score, d_voxel_score_, had_wiring, interaction_pool_.d_pool, traj,           \
@@ -2295,23 +2391,23 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           {"run_interaction<kFtfp>",
            reinterpret_cast<const void*>(
                run_interaction<real_t, had::InteractionBucket::kFtfp, StepHook>),
-           32},
+           1},
           {"run_interaction<kBertini>",
            reinterpret_cast<const void*>(
                run_interaction<real_t, had::InteractionBucket::kBertini, StepHook>),
-           32},
+           1},
           {"run_interaction<kBinary>",
            reinterpret_cast<const void*>(
                run_interaction<real_t, had::InteractionBucket::kBinary, StepHook>),
-           32},
+           1},
           {"run_interaction<kLightIon>",
            reinterpret_cast<const void*>(
                run_interaction<real_t, had::InteractionBucket::kLightIon, StepHook>),
-           32},
+           1},
           {"run_interaction<kAtRest>",
            reinterpret_cast<const void*>(
                run_interaction<real_t, had::InteractionBucket::kAtRest, StepHook>),
-           32},
+           1},
       };
       const host::SelectedDevice& dev = host::select_device();
       std::printf("  %-30s %6s %10s %6s %14s  (%d SMs, %d threads an SM; %d interaction "
@@ -2328,7 +2424,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
           continue;
         }
         std::printf("  %-30s %6d %10zu %6d %8d (%3d)\n", r.name, a.numRegs, a.localSizeBytes,
-                    r.block, per_sm, per_sm * r.block / 32);
+                    r.block, per_sm, per_sm * ((r.block + 31) / 32));
       }
     }
     prof.release();

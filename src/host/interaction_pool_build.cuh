@@ -123,6 +123,11 @@ InteractionPoolOwner<real_t> build_interaction_pool(int n_slots,
   own.n_slots = n_slots;
   own.slot_bytes = sizeof(InteractionSlot<real_t>);
   own.ftf_workspace_bytes = ftfe::kWorkspaceBytes;
+  // P32: FTFP's workspaces, as many as the caller asked for and never more than the slots
+  // (docs/RISK.md V285; `ftf_slot_request` says why the two counts differ).
+  const int n_ftf = (ftf_slot_request() > 0 && ftf_slot_request() < n_slots) ? ftf_slot_request()
+                                                                              : n_slots;
+  own.n_ftf_slots = n_ftf;
 
   // The slots. ONE CONSTRUCTED HOST IMAGE, uploaded into every slot, and not a memset:
   // docs/RISK.md V104 is a member that only a constructor sets and that decides physics when it
@@ -136,7 +141,7 @@ InteractionPoolOwner<real_t> build_interaction_pool(int n_slots,
     cudaMemGetInfo(&pf, &pt);
     host::PagingRequest r;
     r.what = "the interaction pool";
-    r.asked = own.slots_bytes + ftfe::kWorkspaceBytes * static_cast<std::size_t>(n_slots);
+    r.asked = own.slots_bytes + ftfe::kWorkspaceBytes * static_cast<std::size_t>(n_ftf);
     r.free_bytes = pf;
     r.total_bytes = pt;
     r.card = host::select_device().prop.name;
@@ -175,15 +180,16 @@ InteractionPoolOwner<real_t> build_interaction_pool(int n_slots,
     delete[] ch;
   }
 
-  // FTFP's pool, through its own contract. Same slot count, same thread index - and
+  // FTFP's pool, through its own contract. The same thread index - and, since P32, the first
+  // `n_ftf` slots only (the engine chunks the two buckets that reach FTFP at that width) - and
   // `entry::Workspace` rather than `entry::HadronWorkspace` because a GenericIon above
   // 3 GeV per nucleon goes to FTFP and the hadron-only type refuses an ion by capacity.
   auto* ftf = new ftfe::Owner<ftfe::Workspace>(
-      ftfe::build<ftfe::Workspace>(n_slots, /*enable_bc_particles=*/true, /*verbose=*/false));
+      ftfe::build<ftfe::Workspace>(n_ftf, /*enable_bc_particles=*/true, /*verbose=*/false));
   if (!ftf->view.ok()) {
     std::printf("\nFATAL: FTFP's workspace pool (%d slots) could not be built. The "
                 "inelastic\n       process cannot run without it; see "
-                "ftf/ftf_entry.cuh.\n", n_slots);
+                "ftf/ftf_entry.cuh.\n", n_ftf);
     std::exit(1);
   }
   own.ftf_owner = ftf;
