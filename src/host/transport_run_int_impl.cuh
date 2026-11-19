@@ -57,20 +57,21 @@ namespace g4gpu::host {
 /// deliberately did not call it - see `step_hadron`'s `queued` parameter - because a stepping
 /// action reads `GetNumberOfSecondariesInCurrentStep()` and that count does not exist until the
 /// model has run.
+///
+/// ONE ENTRY, IN SLOT `i` (P34). The body below was the kernel's until docs/RISK.md V295; the
+/// kernel now walks its bucket's entries with a stride of its own width and calls this for
+/// each, in the same slot every time - see `run_interaction` under it.
 template <typename real_t, had::InteractionBucket kBucket, typename StepHook>
-__global__ void run_interaction(Scene<real_t> scene, const had::PendingInteraction<real_t>* items,
-                                const int* idx, int n, int base, TrackBuffer<real_t> out,
-                                int batch, double* score, double* voxel_score,
-                                had::HadronicWiring<real_t> had,
-                                const had::InteractionPool<real_t>* pool_ptr,
-                                vis::TrajectoryBuffer traj, int* status_warn, SecondaryArena sec,
-                                EmitterBooks books, StepHook hook) {
+__device__ __forceinline__ void run_interaction_entry(
+    const Scene<real_t>& scene, const had::PendingInteraction<real_t>& q_in, int i,
+    TrackBuffer<real_t>& out, int batch, double* score, double* voxel_score,
+    const had::HadronicWiring<real_t>& had, const had::InteractionPool<real_t>* pool_ptr,
+    vis::TrajectoryBuffer traj, int* status_warn, const SecondaryArena& sec,
+    const EmitterBooks& books, StepHook& hook) {
   // The view, read through the one device copy the builder wrote: a pointer and not a value, so
   // that no launching translation unit needs its definition (docs/RISK.md V233).
   const had::InteractionPool<real_t>& pool = *pool_ptr;
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= n) { return; }
-  const had::PendingInteraction<real_t> q = items[idx[base + i]];
+  const had::PendingInteraction<real_t> q = q_in;
   TrackState<real_t> p = q.track;
 
   // The voxel cell the step STARTED in, recomputed rather than carried: it is three integer
@@ -366,6 +367,42 @@ __global__ void run_interaction(Scene<real_t> scene, const had::PendingInteracti
     atomicAdd(status_warn, 1);
   }
   if (requeue) { out.append(p); }
+}
+
+/// The kernel: this bucket's `n` entries from `base`, each thread walking them with a stride of
+/// the launch's width and running each in ITS OWN slot `i`, one after another.
+///
+/// WHY A STRIDE AND NOT A CHUNK (P34, docs/RISK.md V295). Until V295 the host launched a bucket
+/// in chunks of the slot count, one entry a thread, chunk after chunk, so every chunk waited
+/// for its slowest cascade before the next could start: the 1 GeV proton beam's busiest
+/// iteration queued 7,265 Binary cascades and paid twelve slowest-of-628s for them. Launched
+/// once, at most the slot count wide, a thread that finishes a short cascade starts its next
+/// entry at once, and the iteration pays the slowest thread's SUM instead of the sum of every
+/// chunk's slowest. A launch of exactly `n` threads (the old chunk) walks one entry each, which
+/// is the old kernel to the instruction; `G4GPU_INTERACTION_CHUNKED=1` launches that way.
+///
+/// NOTHING AN ENTRY COMPUTES DEPENDS ON WHICH SLOT OR WHICH LAUNCH IT RAN IN: a slot holds
+/// nothing between interactions that reaches a number (V283, V285 - the synchronous drain at
+/// 64 FTFP workspaces, 100 slots and 628 gives the same digits), its generator is keyed on the
+/// track's `(rng_key, step)`, and what it appends goes into the pool in whatever order the
+/// atomics give, as every kernel's does. The width is at most the slot count, and at most
+/// FTFP's workspace count for the two buckets that reach FTFP, so `pool.slot(i)` and FTFP's
+/// workspace `i` exist for every thread.
+template <typename real_t, had::InteractionBucket kBucket, typename StepHook>
+__global__ void run_interaction(Scene<real_t> scene, const had::PendingInteraction<real_t>* items,
+                                const int* idx, int n, int base, TrackBuffer<real_t> out,
+                                int batch, double* score, double* voxel_score,
+                                had::HadronicWiring<real_t> had,
+                                const had::InteractionPool<real_t>* pool_ptr,
+                                vis::TrajectoryBuffer traj, int* status_warn, SecondaryArena sec,
+                                EmitterBooks books, StepHook hook) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int width = gridDim.x * blockDim.x;
+  for (int e = i; e < n; e += width) {
+    run_interaction_entry<real_t, kBucket, StepHook>(scene, items[idx[base + e]], i, out, batch,
+                                                     score, voxel_score, had, pool_ptr, traj,
+                                                     status_warn, sec, books, hook);
+  }
 }
 
 /// Every queued photo- or lepto-nuclear interaction of ONE bucket, drained by a fixed grid that

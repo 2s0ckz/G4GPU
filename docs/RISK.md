@@ -18461,3 +18461,73 @@ of stepping); light-ion 26.7 s (55%), Binary 6.6 s (14%); the stepping kernels a
 above), costs 157 slots of side pool and adds a schedule the host does not choose. It stays on
 perf/async-wip; on a card in TCC mode, or under a scheduler that runs two queues at once, it
 would be worth measuring again - with the grid fix, which it needs.
+
+### V295: the drain's width without memory - each interaction launch strides its bucket in its own slots instead of waiting chunk by chunk, the proton beam 1.38x and pi+ 1.39x again, every dose to the digit; the per-bucket slot type is refused by measurement, because slots are no longer what the width is made of
+
+**WHAT THE PROFILE SAID AFTER V294.** The proton beam's 12.4 s were 85% `run_interaction<kBinary>`
+and the pion beam's 14.5 s 76% interaction kernels, almost all in the 32-35 iterations that
+queue thousands: the busiest queued 7,265 Binary cascades and the drain ran them as twelve
+chunks of 628, each waiting for its slowest cascade before the next could start. And the card
+cannot hold more of them at once anyway: at 255 registers a one-thread block's warp takes 8,160
+of an SM's 65,536 registers, so an SM keeps 8 and the Titan V 640 (V293) - 628 slots is already
+the card's whole residency for these kernels.
+
+**THE CHANGE.** `run_interaction`'s body became `run_interaction_entry` (`__forceinline__`, one
+entry in slot `i`, every line as it was), and the kernel walks its bucket's `n` entries with a
+stride of its own width, each thread in its own slot, one entry after another. The host launches
+each bucket ONCE, `min(n, w)` threads wide, where `w` is the slot count (FTFP's workspace count
+for the two buckets that reach FTFP, V285), instead of `ceil(n / w)` chunks. A thread that
+finishes a short cascade starts its next entry at once, so an iteration pays the slowest
+thread's sum where it paid the sum of every chunk's slowest. A launch exactly `n` wide walks one
+entry a thread, which is the old kernel; `G4GPU_INTERACTION_CHUNKED=1` launches that way, for
+the comparison below. Nothing an entry computes depends on its slot or its launch (V283, V285:
+64, 100 and 628 slots give the same digits), its generator is keyed on `(rng_key, step)`, and
+its outputs go into the pool in whatever order the atomics give, as every kernel's do.
+
+The frames (ptxas, sm_70; before -> after): FTFP 19,248 -> 19,280, Bertini 12,944 -> 13,040, Binary 15,952 -> 15,776, light ion 20,688 -> 20,784, at rest 21,376 -> 21,472 B, all at 255 registers; the raise is
+unchanged (28,672 B a thread: 21,472 still rounds to 24,576). The five interaction units, the two
+photo-/lepto-nuclear units (they include the header, nothing in them changed) and the engine
+unit rebuilt.
+
+**THE BEAMS** (the Titan V alone, profile off; before = V294's two runs; after = three runs):
+
+| beam | V293 | V294 | V295 (stride) | V295 binary, chunked | dose (rms), track-steps |
+|---|--:|--:|--:|--:|---|
+| proton 1 GeV 200k | 14,631.9 ms | 12,494.7 / 12,441.5 ms | **9,035.6 / 9,043.8 / 8,986.3 ms, 22,135-22,256 ev/s** | 12,432.8 ms | 391.931 nGy (1.33866), 11,550,586: **to the digit** |
+| pi+ 10 GeV 100k | 15,388.7 ms | 14,565.8 / 14,460.1 ms | **10,512.0 / 10,427.8 / 10,407.2 ms, 9,513-9,609 ev/s** | 14,390.2 ms | 333.4 nGy (2.00918), 12,936,362: **to the digit** |
+| Fe56 56 GeV 5k | 548,454 ms | 49,564.8 / 49,682.1 ms | 49,725.4 ms | - | 3.06391 uGy (53.0322), 62,058,769: **to the digit** |
+| B1 gamma 2M | 434.7 ms | 430.0 / 433.5 ms | 440.3 ms | - | 85.2055 nGy (173.586 pGy): **to the digit** |
+
+x V294: proton 1.38, pion 1.39; x V293: proton **1.62**, pion **1.47**, Fe56 11.0. The profile
+after (proton / pion): Binary 7,205 ms (82%) / 5,835 ms (57%), FTFP - / 1,379 ms (was 3,463),
+Bertini - / 1,077 ms, at rest 354 / 512 ms; the stepping kernels 954 / 979 ms. The pion's FTFP
+bucket gained most (2.5x): its 128 workspaces made it the narrowest bucket, so it had the most
+chunks to wait on. Fe56's interactions come a hundred at a time (V294) and gain nothing.
+
+**THE ELEVEN GATES**: every printed number equal to V293's (the digest, 34 lines; the depth CSV's
+md5 ba22d777a151c1d717ba48d0b62f23d1).
+
+**ANTI-VACUITY.** The deferred drain's comparison (V294) was checked by perturbing it: the
+pending ring drained one entry short (`pending_n - 1`), the proton beam reads 391.912 nGy, rms
+1.33855, 11,550,260 track-steps against 391.931 / 1.33866 / 11,550,586 - the comparison sees one
+lost interaction in a run of 99,677. Restored before either commit. The stride's own control is
+the chunked row above: the same binary launched the old way gives the old times and the same
+digits, so what moved is the schedule.
+
+**THE PER-BUCKET SLOT TYPE (the brief's item 3) - REFUSED BY MEASUREMENT.** Its premise was V285's:
+the width is the slot count, so 17% more Binary slots (a 1.35 MB Binary-only slot against the
+union's 1.62) would be 17% more width. Under the stride the slot count is no longer the width's
+bound - the launch is - and the card's residency (640) is. Measured on this binary, the slot
+count halved and cut by a quarter:
+
+| `G4GPU_INTERACTION_SLOTS` | proton 1 GeV 200k | pi+ 10 GeV 100k |
+|--:|--:|--:|
+| 320 | 9,807.7 ms | 11,066.0 ms |
+| 470 | 9,511.3 ms | 10,950.6 ms |
+| 628 (sized to the card) | 8,986-9,044 ms | 10,407-10,512 ms |
+
+Halving the slots costs 8% (proton) and 5% (pion); the 20% more Binary slots a per-bucket type
+would buy are worth about 2% at most, and past 640 nothing, because no more one-thread blocks
+can be resident. For a change to every model entry's signature (each takes `InteractionSlot&`),
+the pool's layout and seven interaction units (each 6-12 minutes of ptxas at up to 27 GB). Not
+taken; the same arithmetic is V296's.

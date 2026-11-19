@@ -1716,6 +1716,12 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         const int v = std::atoi(env);
         if (v > 0 && v <= 1024) { kIth = v; }
       }
+      // `G4GPU_INTERACTION_CHUNKED=1`: the chunk-at-a-time schedule V295 replaced, for the
+      // comparison.
+      static const bool chunked = [] {
+        const char* v = std::getenv("G4GPU_INTERACTION_CHUNKED");
+        return v != nullptr && v[0] == '1';
+      }();
 #define G4GPU_DRAIN(BUCKET)                                                              \
   do {                                                                                       \
     const int b_ = static_cast<int>(BUCKET);                                                 \
@@ -1726,9 +1732,15 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
                     || BUCKET == had::InteractionBucket::kAtRest)                            \
                        ? std::min(n_interaction_slots_, interaction_pool_.n_ftf_slots)       \
                        : n_interaction_slots_;                                               \
-    for (int base = 0; base < nb[b_]; base += w_) {                                          \
-      const int n_this = (nb[b_] - base < w_) ? (nb[b_] - base) : w_;                        \
-      run_interaction<real_t, BUCKET><<<(n_this + kIth - 1) / kIth, kIth>>>(                 \
+    /* P34 (V295): one launch, at most w_ threads, each walking the bucket with a stride;   \
+       chunked (the old schedule) on request. */                                             \
+    const int chunk_ = chunked ? w_ : nb[b_];                                                \
+    for (int base = 0; base < nb[b_]; base += chunk_) {                                      \
+      const int n_this = (nb[b_] - base < chunk_) ? (nb[b_] - base) : chunk_;                \
+      const int width_ = (n_this < w_) ? n_this : w_;                                        \
+      const int th_ = (kIth < width_) ? kIth : width_;                                       \
+      const int blocks_ = chunked ? (n_this + kIth - 1) / kIth : width_ / th_;               \
+      run_interaction<real_t, BUCKET><<<blocks_, chunked ? kIth : th_>>>(                    \
           scene_, items, d_qidx_, n_this, qoff.base[b_] + base, out, stride,                 \
           d_win_score, d_voxel_score_, wiring, interaction_pool_.d_pool, traj,               \
           d_status_warn_, sec_, bk, hook_);                                                  \
