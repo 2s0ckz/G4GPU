@@ -147,6 +147,8 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P36: pi+ 10 GeV, 100,000 events, final stage | 10,390 (9,824 before) | 9.6 s (10.2 s) |
 | Titan V, P36: Fe56 56 GeV, 5,000 events, final stage | 165.5 (100.6 before) | 30.2 s (49.7 s) |
 | Titan V, P36: Fe56 56 GeV, 20,000 events, final stage | 295.6 (116.9 before) | 67.7 s (171.1 s) |
+| Titan V, P40 (RISK V313-V317: the flat Bertini and FTF designs refused by measurement - a Bertini drain is as long as its slowest cascade, an FTF interaction has two strings and 70% of its time in the de-excitation; the flat pools only in the final hadronic stage): example B1 2M 6 MeV gammas, GPU time | 4.90 × 10⁶ | 408 ms (433 before P40: the pools no longer built in stage 1)
+| Titan V, P40: proton 10 GeV, 50,000 events, final stage (new row) | 8,085 | 6.18 s |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no

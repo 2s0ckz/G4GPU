@@ -19679,3 +19679,248 @@ build_hook_engine.bat would need the two flat units for its hook type).
 TESTS_GPU line gains `test_bic_flat test_blir_flat`. transport_run_engine.cuh changed in four
 replaced lines (the batch budget, the two buckets' `G4GPU_DRAIN`, the ring's `wide` test) plus
 additions; the restack onto integ/p37 touches the `wide` line in the deferred-drain block.
+
+### V313: P40's measurements before any design - on the pion beam the Bertini and FTFP buckets are 7% and 11% of the GPU time and the flat Binary cascade 67%; a Bertini drain is as long as its slowest cascade and an FTF interaction has two strings and two splits, and 70% of FTF's time is the residual's de-excitation - both flat designs are refused by the measurement
+
+**THE TREE.** perf/flat_bertini_ftf at integ/p36 (648d8c6), its out\ the lead's integ/p36 objects
+(copied from D:\g4gpu\out at 13:48, the `.d` files' paths rewritten), exampleB1 the lead's
+binary. Every run on the Titan V alone under `out\gpu.lock`, the default live count, "0.24-0.27
+GB of 12.00 GB left" on every hadron run, the host at most 0.75 GB. The instrumented build was
+compiled from a COPY of src (out\exp\src, `instrument.pl`; never committed): per model call, on
+the call's own thread, `clock64` spans and generator draws by phase and the counters below,
+printed one row a call from `run_arm_bertini` / `run_arm_ftfp`; its doses were the baseline's to
+the digit (pi+ 333.391 nGy, proton 10 GeV 214.088 nGy). Its two units' ptxas peaked at 12.8 GB
+(Bertini, 442 s) and 14.9 GB (FTFP, 1,002 s), one at a time.
+
+**THE BASELINE** (exampleB1's own lines; three runs each unless one):
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| B1 gamma 6 MeV 2M | 433.0 / 437.0 / 440.8 ms | 4.62e6 | 6.02e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+| proton 1 GeV 200k | 7,142 / 7,207 / 7,229 ms | 28,002 | 1.62e6 | 391.933 nGy (1.33865 nGy) | 11,550,631 |
+| pi+ 10 GeV 100k | 8,737 / 8,745 / 8,768 ms | 11,445 | 1.48e6 | 333.391 nGy (2.00911 nGy) | 12,936,409 |
+| proton 10 GeV 50k (new: examples/B1's gun, 10,000 MeV) | 6,173 / 6,206 / 6,246 ms | 8,100 | 1.16e6 | 214.088 nGy (1.97054 nGy) | 7,151,649 |
+| Fe56 56 GeV 5k | 24,436 ms | 204.6 | 2.54e6 | 3.06372 uGy (53.0331 nGy) | 62,057,540 |
+
+The lead's integ/p36 digits (13:55), every one.
+
+**WHERE THE PION BEAM'S DRAIN IS** (`G4GPU_LOOP_PROFILE=1`; spans, ms, entries):
+
+| bucket | flat path on (integ/p36) | `G4GPU_CASCADE_FLAT=0` | proton 10 GeV, flat on |
+|---|---|---|---|
+| kBinary | 11, **5,719.9 ms (67.2%)**, 27,651 | 30, 5,885.2 (60.8%), 27,652 | 9, 3,689.1 (61.6%), 22,010 |
+| kFtfp | 8, **964.9 (11.3%)**, 21,373 | 25, 1,358.1 (14.0%) | 6, 956.3 (16.0%), 18,770 |
+| kBertini | 8, **606.5 (7.1%)**, 12,808 | 27, 1,074.7 (11.1%) | 6, 211.0 (3.5%), 3,755 |
+| kLightIon | 8, 298.9 (3.5%), 734 | 29, 263.8 | 6, 479.0 (8.0%), 1,170 |
+| kAtRest | 9, 258.3 (3.0%), 2,652 | 24, 517.0 | 7, 165.4 (2.8%), 1,665 |
+| the run | 8,510 ms of GPU time in 8,771 ms | 9,674 in 9,913 | 5,994 in 6,230 |
+
+The brief's premise - "what remains of the pion drain is Bertini + FTFP" - was V283/V290's
+(Binary 56%, FTFP 19%, Bertini 15% before P34-P36). It is not integ/p36's: P34's deferred ring
+made the drains few and wide, and P36's flat Binary cascade on the pion beam is 5.9 -> 5.7 s,
+because the pion beam's Binary drains (11 of them, 2,514 cascades each) wait on their set-up and
+tail rounds (1,431 rounds, 4.0 ms a round; P39's and the de-excitation's). Bertini and FTFP
+together are 1.57 s of 8.51: made free, the beam would be 8.75 -> ~7.2 s, 1.22x at most.
+
+**THE TAPES** (pi+ 10 GeV 100k and proton 10 GeV 50k, every Bertini and FTF call; n, mean, p50 /
+p90 / p99 / p99.9, max; ms at the Titan V's 1,455 MHz):
+
+| Bertini | pi+ 10 GeV (12,808 calls) | proton 10 GeV (3,754) |
+|---|---|---|
+| projectiles | pi+ 71%, pi- 15%, p 4%, n 4%, kaons, hyperons | p 31%, n 25%, pi+ 23%, pi- 16% |
+| targets | O16 74%, H 12%, C12 8%, Ca40 2%, P31 1.5% | O16 71%, H 12%, C12 10% |
+| kinetic energy | 5,970 MeV mean; 5,258 / 9,987 / 9,999 | 2,280 MeV; 2,030 / 3,768 / 5,197 |
+| `G4CascadeInterface` tries | 1.84; 1 / 4 / 7 / 10; 17 | 1.35; 1 / 2 / 5 / 7; 8 |
+| `G4IntraNucleiCascader` tries | 2.81; 2 / 6 / 13 / 21; 42 | 2.39; 2 / 5 / 11 / 16; 22 |
+| **fates a call** (every try: the cascade's step, one particle's) | **40.5; 26 / 88 / 244 / 515; 1,164** | 32.8; 21 / 74 / 198 / 395; 768 |
+| fates in the longest try | 35.2; 19 / 82 / 226 / 502; 707 | 28.9; 16 / 68 / 183 / 393; 756 |
+| collisions a call | 4.53; max 34 | 4.11; max 28 |
+| **particles in flight a fate** (the LIFO stack) | **3.89**; high-water 4.65; 5 / 8 / 11 / 13; 17 | 3.06; high-water max 12 |
+| out: particles; nuclei | 7.91, max 36; 1.93, max 10 | 6.13, max 25; 1.80, max 12 |
+| **thread time a call** | **10.9 ms; 8.0 / 24.3 / 45.8 / 69.1; 81.4** | 6.7 ms; 5.2 / 13.5 / 30.2 / 44.9; 59.2 |
+| phases: the cascade (fates) / the nucleus model / PreCompound de-excitation / boost and on-shell | 62.9% / 2.9% / **30.3%** / 0.7% | 63.6% / 2.3% / 30.6% / 0.6% |
+| draws a call (cascade 94%, de-excitation 4%) | 644; 474 / 1,362 / 2,830 / 5,988; 9,615 | 451; max 8,518 |
+| calls past K fates: K = 64 / 128 / 256 / 512 | 18.8% / 3.9% / 0.96% / 0.12% of calls; 41% / 11% / 3.1% / 0.45% of the time | 13.3% / 2.4% / 0.59% / 0.03% |
+
+| FTF | pi+ 10 GeV (21,372 calls) | proton 10 GeV (18,769) |
+|---|---|---|
+| projectiles; targets | pi+ 98%; O16 75%, H 14%, C12 7% | p 96%, n 4%; O16 74%, H 15%, C12 8% |
+| `Scatter` attempts | 1.00, max 2 | 1.00, max 2 |
+| participants (`G4FTFParticipants` interactions) | 1.50; 1 / 3 / 4 / 6; 7 | 1.78; max 9 |
+| **strings; excited strings** | **2.65, max 12; 2.06; 2 / 3 / 5 / 6; 8** | 4.17, max 22; 2.17, max 9 |
+| `FragmentStrings` attempts | 1.00, max 2 | 1.00, max 4 |
+| **hadron splits a call (`SplitUp`); the most on one string** | **1.89; 2 / 4 / 6 / 9; 11; 1.35, max 9** | 1.57, max 12; 1.16, max 9 |
+| hadrons out of the strings; the most from one string | 5.86, max 20; 2.78, max 8 | 6.88, max 26; 2.51, max 7 |
+| tracks after `G4DecayKineticTracks` | 7.33, max 23 | 8.06, max 30 |
+| **thread time a call** | **3.32 ms; 2.65 / 5.87 / 20.4 / 38.6; 57.2** | 3.67 ms; max 56.3 |
+| phases: ModelInit (the nucleus, the collisions) / GetStrings / FragmentStrings / decays / `Propagate` / **the residual's PreCompound de-excitation** | 16.2% / 6.3% / 6.3% / 2.0% / 0.4% / **67.6%** | 14.4 / 5.8 / 5.3 / 1.3 / 0.4 / **71.7%** |
+| draws (ModelInit 84%, GetStrings 10%, strings 2%, de-excitation 3%) | 1,690; max 5,040 | 1,660; max 6,547 |
+
+**THE TRUE STATE AGAINST THE WORKSPACES** (`sizeof`, host-compiled, out\exp\sizes.cu):
+
+* Bertini: what a cascade carries between fates is the `NucleiModel` (600 B), the stack (max 17
+  x 104 B = 1.8 kB measured), the cascade's output (max 36 particles and 10 nuclei of a
+  14,120-B `CollisionOutput`), the excitons and recoil (80 B), the loops' counters and the
+  generator: about 8 kB used of the slot's 86,544-B `BertiniWorkspace` (whose 512-particle stack
+  is 53 kB, its never-read trailing list 12 kB, the big-bang arrays 13 kB) plus four
+  `CollisionOutput`s (56 kB). But every fate calls `nm_generate_particle_fate(..., BertiniWorkspace&
+  ws, ...)` and every collision `ep_collide(..., ws, ...)`, whole: a record that calls the thread
+  path's functions unchanged must hold a whole `BertiniWorkspace`, ~102 kB a lane (2,048 lanes =
+  210 MB), or borrow one per stage from a slot (667 at a time).
+* FTF: per interaction 1.5 participants, 2.65 strings (184 B each), ~6 hadrons (72 B) and ~7
+  tracks (80 B) - a few kB - against the 671,280-B `entry::Workspace`, which is sized for a
+  250-nucleon target, a 64-nucleon projectile, 1,024 interactions, 512 strings and 832 tracks
+  (ion beams). A hadron-on-B1 record (A <= 64, 64 strings, 128 tracks) would be ~40-60 kB.
+
+**WHAT THE NUMBERS SAY ABOUT A DRAIN.**
+
+* **The Bertini drain is as long as its slowest cascade, not as its work.** 12,808 calls x 10.9
+  ms = 139.6 s of thread time over 667 slots is 0.21 s if the drain were throughput-bound; it is
+  0.61 s in 8 drains of ~1,600 calls, 76 ms each - the tape's slowest call is 81 ms. On the
+  thread path's schedule (`G4GPU_CASCADE_FLAT=0`, no flat pool, the ring's narrower width) the
+  same calls are 27 drains of ~474 at 40 ms each, the p99 call's time (45.8 ms): the bucket's time
+  is the NUMBER OF DRAINS times the slowest call in one, which is what a straggler-bound drain
+  looks like.
+* **The FTFP drain is throughput-bound at FTF's 128 workspaces** (`G4GPU_FTF_SLOTS`, V285):
+  21,372 x 3.32 ms / 128 = 0.55 s, measured 0.96 s in 8 drains of 2,672 calls (21 a workspace,
+  120 ms a drain); the longest call is 57 ms. Wider is measurably faster, on integ/p36's binary
+  (one run each, `G4GPU_LOOP_PROFILE`): 128 workspaces 964.9 ms, the beam 8,737-8,768 ms; 256:
+  817.8 ms, 8,605 ms, 0.16 GB left; 384: 758.0 ms, 8,559 ms, **0.08 GB left**; 640: the stack
+  raise refuses to start (1.875 GB asked, 1.795 free). V296's "tripling FTFP's moves nothing"
+  was integ/p34's chunked schedule; on integ/p36's deferred ring it is 0.2 s (2%), bought with
+  the card's last 0.16 GB.
+
+**THE TWO DESIGNS, AND WHY THE MEASUREMENT REFUSES BOTH.**
+
+*Bertini (the brief's design: lane = cascade, step = one fate, the de-excitation on a tail slot,
+hand-back past K).* The cascade is depth-first: `generateCascade` pops the LAST particle, draws its
+fate from the one generator and pushes what it made, so a cascade has exactly ONE item a step
+(3.9 particles wait on the stack, none of them movable before the one on top) - the width can
+only be many cascades, as for the Binary cascade. That is not what limits this drain. A lockstep
+drain of ~1,600 cascades lasts as many rounds as its longest cascade has fates - the drain's
+maximum of ~1,600 draws from this distribution is ~600 (p99.94) - and a round costs at least its
+launches and read-back (V309: 0.09 ms a round of claim + reap + read-back on the proton beam)
+plus the slowest stepping lane's fate (62.9% of 10.9 ms over 40.5 fates = 0.17 ms of one thread):
+600 x 0.26 ms = ~156 ms a drain against the thread path's 76. With K = 128 the drain is 128
+rounds (~33 ms) and hands back 3.9% (~62 calls a drain), which then run on the thread path in
+the same drain and take their own slowest - the 81 ms cascades are exactly those - so the drain
+is ~33 + ~80 ms. Every K is at or above today's 76 ms: the flat method buys throughput, and the
+Bertini bucket has throughput to spare (0.21 s of work in 0.61 s). REFUSED BY MEASUREMENT; not
+built. What would shorten it is the number of Bertini drains (8) or their overlap with the
+Binary cascade's 5.7 s on the same card - the thread-path drain's schedule, outside this
+package (below).
+
+*FTF (the brief's design: lane = interaction, the width one lane per string across many
+interactions, the residual to the tail).* There are 2.06 excited strings an interaction (p99 5,
+max 8) and 1.9 hadron splits in all (one string's most 9): the string stage's work is 12.6% of an
+interaction (GetStrings 6.3%, FragmentStrings 6.3%) and its parallelism two strings - and those
+two cannot be split across lanes in the thread path's draw order, because `FragmentStrings`
+fragments them one after another from the one generator inside a 100-attempt loop. 84% of an
+FTF interaction is the two stages it shares with the other models: the residual's PreCompound
+de-excitation (67.6%) and ModelInit's `G4Fancy3DNucleus` (16.2%, 84% of the draws) - V312's (1),
+the de-excitation as its own wide queue, and P39's nucleus factory. A flat FTF record would put
+the de-excitation on the 667 tail slots instead of 128 workspaces - a width gain the workspace
+count already gives (above) without a record, a unit, or a campaign. REFUSED BY MEASUREMENT as a
+string design; not built.
+
+**WHAT IS LEFT, BY NAME, FOR THE LEAD.**
+
+* **The FTF workspaces' count**: 256 = -0.15 s and 384 = -0.21 s on the pion beam (above), each
+  out of the 0.24 GB the stack raise leaves; or a hadron-projectile workspace (`HadronWorkspace`,
+  458,112 B - the kFtfp bucket also carries ion projectiles above FTF's threshold, which need the
+  ion one) for more slots in the same memory. A sizing decision about the whole card, not a
+  flat design: named, not done.
+* **The Bertini drains' count and overlap**: 8 drains of a slowest-cascade 76 ms; the kFtfp and
+  kBertini drains run one after another and after/before the 5.7 s flat Binary drain on one
+  stream. Overlapping them (P37's V304: same-submission streams do run concurrently) needs the
+  thread-path drain's slot ranges kept apart from the flat tail's - the thread-path drain this
+  brief forbids touching. Up to ~1.6 s of the pion beam's 8.5 s.
+* **The de-excitation**: 30% of a Bertini call, 68-72% of an FTF call, and (V309) 34% of the flat
+  Binary drain - one PreCompound, three models. V312's (1).
+
+### V314: the Bertini cascade flat - NOT BUILT, refused by V313's measurement
+
+No `bertini/flat/`, no `transport_run_int_bertini_flat.cu`, no `test_bertini_flat`. The kBertini
+bucket stays on the thread path, as on integ/p36. The reason is V313's: the pion beam's Bertini
+drains are bound by their slowest cascade (76 ms a drain, the tape's slowest call 81 ms) with
+throughput to spare (0.21 s of thread time at 667 wide in 0.61 s), and a lockstep of one fate a
+round is at least as long as the slowest cascade's fates (~600 rounds a drain) or, with a
+hand-back, as K rounds plus the handed-back cascades' own slowest. The record would have been
+~102 kB a lane (a whole `BertiniWorkspace`, because the fate and collision functions take it
+whole), 2,048 lanes = 210 MB.
+
+### V315: the FTF string model flat - NOT BUILT, refused by V313's measurement
+
+No `ftf/flat/`, no `transport_run_int_ftfp_flat.cu`, no `test_ftf_flat`. An FTF interaction on
+the pion and proton-10 GeV beams has 2.06-2.17 excited strings and 1.6-1.9 hadron splits in all;
+the string stage is 11-13% of its thread time and the residual's PreCompound de-excitation 68-72%
+(V313). There is no string width to flatten; the FTFP drain's lever is its workspace count (V313:
+-0.21 s at 384, at the card's last 0.08 GB), and the de-excitation queue (V312).
+
+### V316: the flat pools only in the final hadronic stage - the 2M-photon gate 433-441 -> 408-416 ms (1.06x), every hadron beam to its digit and its time
+
+**WHAT CHANGED** (transport_run_engine.cuh, one delimited block in P36's pool block of `Upload`,
+and its `if`): P36's two pools (623.7 + 163.5 MB, V311) are built only when the run's hadronic
+stage is `kFinal` (`had_stage_`, or `G4GPU_HADRONIC_STAGE` as the stage's own two readers decide
+it); `G4GPU_CASCADE_FLAT_STAGE1=1` builds them in stage 1 as well. Every gate runs in `kStage1`,
+and V309 measured that no gate's digits reach a Binary cascade or a light-ion reaction; a kBinary
+or kLightIon entry of a stage-1 run drains on the thread path, the exact transcription. The
+brief's "lazy" in the literal sense - built at the first interaction of its kind - is not
+possible without the track buffers being resizable (V311): the pools come out of the batch's
+budget at `Upload`, and after the stack raise 0.24 GB is left, less than either pool. The stage
+is the earliest point that knows the run cannot use them. No Bertini or FTF pool exists
+(V314/V315), so this branch adds no memory.
+
+**THE PHOTON BEAM** (2M, three runs each, the same binary):
+
+| | track buffers | live slots | time | dose |
+|---|--:|--:|---|---|
+| integ/p36's exampleB1 | 3.80 GB | 8,042,112 | 437.0 / 440.8 / 433.0 ms | 85.2055 nGy (173.586 pGy), 26,050,805 steps |
+| this branch, `G4GPU_CASCADE_FLAT_STAGE1=1` (the pools built) | 3.80 GB | 8,042,112 | 437.2 / 453.6 / 437.6 ms | the same digits |
+| **this branch** | **4.60 GB** | **9,717,888** | **412.4 / 416.2 / 408.2 ms** | the same digits |
+
+Best of three 433.0 -> 408.2 ms (1.06x; the lead's 431.07 -> 408.2); throttled steps 13.09M ->
+6.45M, iterations 107 -> 103, the batch 2.01M -> 2.43M events - integ/p35's track buffers with
+P37's stepping.
+
+**THE HADRON BEAMS** (final stage: the pools are built as before; this branch's exampleB1):
+
+| beam | integ/p36 (V313) | this branch | dose (rms) | steps |
+|---|---|---|---|--:|
+| proton 1 GeV 200k | 7,142-7,229 ms | 7,122 / 7,130 / 7,139 ms, 28,080 ev/s | 391.933 nGy (1.33865) | 11,550,631 |
+| pi+ 10 GeV 100k | 8,737-8,768 | 8,695 / 8,772 / 8,836, 11,501 ev/s | 333.391 nGy (2.00911) | 12,936,409 |
+| proton 10 GeV 50k | 6,173-6,246 | 6,184 / 6,199 / 6,205, 8,085 ev/s | 214.088 nGy (1.97054) | 7,151,649 |
+| Fe56 56 GeV 5k | 24,436 | 24,355, 205.3 ev/s | 3.06372 uGy (53.0331) | 62,057,540 |
+| Fe56 5k, `G4GPU_CASCADE_FLAT=0` | - | 40,396 ms | 3.06391 uGy (53.0322) | 62,058,769 (V306's) |
+| pi+ 100k, `G4GPU_CASCADE_FLAT=0` | 9,922 (V313) | 9,742 | 333.4 nGy (2.00918) | 12,936,362 (V299's) |
+
+Every digit integ/p36's; with the switch off, V299's and V306's.
+
+### V317: P40 closed - the gates, and what was refused by name
+
+**THE ELEVEN GATES** (build_all.bat's gate section command for command, `out\p40\gates.bat`; the
+drivers b1_gpu_sched, g4dose and proton_depth rebuilt against this engine): with the flat path at
+its default and with `G4GPU_CASCADE_FLAT=0`, every printed number equal to P36's gate run
+(perf/cascade_flat out\gates\f1, itself ba73's digest) - the B1 dose, the macro run, the mesh,
+the physics switches, the step hook (PASSED, 0 failures), the three pool sizes, the two-run
+sequence and its replay; B1 against Geant4 at 1.1045 sigma; the proton depth-dose CSV md5
+ba22d777a151c1d717ba48d0b62f23d1, ba73's. The lines that differ are the allocation report (no
+flat pools in stage 1: 4.60 GB of track buffers, 628 slots) and the throttle's count. In stage 1
+the two settings now run the same code: the switch only decides the pools, which stage 1 no
+longer builds.
+
+**THE UNITS.** No new unit: transport_run.obj alone recompiled (ptxas 0.25 GB, 42 s). The
+instrumented Bertini and FTFP units of V313 (12.8 GB, 14.9 GB) were measurement and are not in
+the tree. No GPU test was added (no flat model was built); the thread-path units, every exact
+oracle test and build_all's TESTS lines are untouched.
+
+**REFUSED BY NAME, WITH THE MEASUREMENT:** the flat Bertini cascade (V314: the drain is
+straggler-bound, 0.21 s of work in 0.61 s, one item a step); the flat FTF string model (V315: two
+strings and two splits an interaction, 84% of its time in the de-excitation and the nucleus);
+the pools built at first use (V316: the track buffers would have to be resizable).
+
+**FOR THE LEAD.** One block in transport_run_engine.cuh (P36's pool block in `Upload`, marked
+"P40"), which P39 does not own; no edit to flat_drain*.cuh, build_*.bat or the TESTS lines. The
+pion beam's next levers, measured here: the FTF workspace count (2%), the Bertini and FTFP drains
+overlapped with the Binary drain (up to 1.6 s of 8.5, the thread-path drain's schedule), and the
+shared de-excitation (V312's (1)).

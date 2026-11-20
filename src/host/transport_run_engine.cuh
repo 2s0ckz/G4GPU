@@ -807,7 +807,24 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // thread path (its interaction units are its own), and so does a run that asks for it.
     if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
                   std::is_same<real_t, double>::value) {
-      if (flat_requested_() && !flat_pool_().ok()) {
+      // ---- P40 (docs/RISK.md V316): the flat pools only for a run in the FINAL hadronic stage.
+      // The 2M-photon gate - and every gate - runs in `kStage1`, where no gate's digits see a
+      // Binary cascade or a light-ion reaction (V309), and paid 0.79 GB of track buffers for
+      // pools it never drained (V311: 9.72M -> 8.04M live slots, 431 -> 465 ms on integ/p36's
+      // P36 alone). A kBinary or kLightIon entry of a stage-1 run runs on the thread path, the
+      // exact transcription, so this moves no stage-1 digit and only the photon beam's clock.
+      // `G4GPU_CASCADE_FLAT_STAGE1=1` builds them in stage 1 as well, for the comparison.
+      const bool p40_flat_stage = [&] {
+        had::HadronicStage st = had_stage_;
+        if (const char* env = std::getenv("G4GPU_HADRONIC_STAGE")) {
+          if (env[0] == 'f') { st = had::HadronicStage::kFinal; }
+          else if (env[0] == 's') { st = had::HadronicStage::kStage1; }
+        }
+        const char* s1 = std::getenv("G4GPU_CASCADE_FLAT_STAGE1");
+        return st == had::HadronicStage::kFinal || (s1 != nullptr && s1[0] == '1');
+      }();
+      // ---- end P40
+      if (flat_requested_() && p40_flat_stage && !flat_pool_().ok()) {
         int lanes = kFlatDefaultLanes;
         int k = kFlatDefaultK;
         if (const char* v = std::getenv("G4GPU_CASCADE_FLAT_LANES")) { lanes = std::atoi(v); }
