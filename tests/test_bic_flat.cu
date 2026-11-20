@@ -161,7 +161,9 @@ __device__ bf::FlatEnv env_of(const Args& a) {
   e.channels = a.pool->bic_channels;
   e.n_channels = a.pool->n_bic_channels;
   e.buffers = a.buffers;
-  e.k_steps = 1 << 30;   // no stragglers in the campaign: every call is the flat path's own
+  // A bound far past V307's longest cascade (149 steps), so no real call is a straggler, and a
+  // perturbed one that never ends (a secondary that never moves never leaves) is handed back.
+  e.k_steps = 4096;
   e.perturb = a.perturb;
   return e;
 }
@@ -218,11 +220,23 @@ __global__ void k_pre(Args a) {
   bf::stage_pre(c, env_of(a), scr);
   if (!c.stepping) { return; }
   int n_sec = 0;
-  for (int i = 0; i < c.st.lists.n_pool; ++i) { n_sec += (c.prestate[i] >= 0) ? 1 : 0; }
+  int last = -1;
+  for (int i = 0; i < c.st.lists.n_pool; ++i) {
+    if (c.prestate[i] >= 0) {
+      ++n_sec;
+      last = i;
+    }
+  }
+  // Perturbation 3, the ion campaign's anti-vacuity: an off-by-one in this enumeration - the
+  // step's last secondary gets no move item (it stands still for the step, its transfer zero).
+  if (a.perturb == 3 && last >= 0) {
+    c.transfer[last] = deex::Vec3d{0.0, 0.0, 0.0};
+    --n_sec;
+  }
   const int at = atomicAdd(&a.ctr[1], n_sec);
   int k = at;
   for (int i = 0; i < c.st.lists.n_pool; ++i) {
-    if (c.prestate[i] >= 0) { a.items[k++] = (lane << 9) | i; }
+    if (c.prestate[i] >= 0 && !(a.perturb == 3 && i == last)) { a.items[k++] = (lane << 9) | i; }
   }
 }
 __global__ void k_move(Args a) {
@@ -280,7 +294,7 @@ __global__ void k_reap(Args a) {
   Core& c = core(a.rec[lane]);
   if (c.stage == bf::kStThread) {
     Out& o = a.out[a.job_of[lane]];
-    o.handed = 1;
+    o.handed = 1 + c.hand_off;  // 1 + `bf::HandOff`, so the report can say why
     o.status = -2;
     c.stage = bf::kStFree;
   } else if (c.stage == bf::kStDone) {
@@ -733,7 +747,8 @@ std::vector<std::vector<std::string>> read_csv(const std::string& path) {
 
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  std::printf("== the flat Binary cascade against the thread path and Geant4 (P36) ==\n");
+  std::printf(kIon ? "== the flat light-ion reaction against the thread path and Geant4 (P36) ==\n"
+                   : "== the flat Binary cascade against the thread path and Geant4 (P36) ==\n");
   int per_point = 20000;
   if (argc > 1 && std::atoi(argv[1]) > 0) { per_point = std::atoi(argv[1]); }
   const std::string pe = host::g4photon_evaporation_dir();
@@ -813,15 +828,24 @@ int main(int argc, char** argv) {
   // come out far under 1 - a comparison that could not have seen anything.)
   const int host_threads = 8;
   std::vector<int> all(n), handed;
+  int why[bf::kNumHandOff] = {};
   for (int i = 0; i < n; ++i) {
     all[i] = i;
-    if (flat[i].handed) { handed.push_back(i); }
+    if (flat[i].handed) {
+      handed.push_back(i);
+      const int r = flat[i].handed - 1;
+      if (r >= 0 && r < bf::kNumHandOff) { ++why[r]; }
+    }
   }
   std::vector<Out> paired(n);
   run_thread(jobs, all, host_lt, host_fp, paired, host_threads);
   for (int i : handed) { flat[i] = paired[i]; }
   std::printf("  %zu of %d calls handed back by the flat path (answered by the thread path)\n",
               handed.size(), n);
+  std::printf("    by reason: straggler %d, capacity %d, refused %d, hydrogen %d, "
+              "PreCompound or fusion %d, re-entry %d\n",
+              why[bf::kHandStraggler], why[bf::kHandCapacity], why[bf::kHandRefused],
+              why[bf::kHandHydrogen], why[bf::kHandPrecompound], why[bf::kHandReentry]);
   int same = 0;
   for (int i = 0; i < n; ++i) { same += (flat[i].hash == paired[i].hash) ? 1 : 0; }
   std::printf("  %d of %d flat final states are the host thread path's on the same key, to the "
@@ -932,7 +956,7 @@ int main(int argc, char** argv) {
   Worst wo, wot;
   oracle(flat, wo);
   oracle(thread, wot);
-  std::printf("  flat against Geant4 (bic_apply.csv): %d rows, the worst %+.2f sigma (%s)\n",
+  std::printf(kIon ? "  flat against Geant4 (bic_blirapply.csv): %d rows, the worst %+.2f sigma (%s)\n" : "  flat against Geant4 (bic_apply.csv): %d rows, the worst %+.2f sigma (%s)\n",
               wo.rows, wo.z, wo.row.c_str());
   wo.print("Geant4");
   std::printf("  (the thread path against Geant4, the same rows: the worst %+.2f sigma (%s))\n",
@@ -946,7 +970,10 @@ int main(int argc, char** argv) {
   {
     float msp = 0.f;
     int rp = 0;
-    std::vector<Out> pert = run_flat(jobs, pown, lown.view, lanes, 2, msp, rp);
+    // The ion arm moves few pions, and `Capture` skipped is not caught on it either (V310: 3.85
+    // and 3.16 sigma), so its perturbation is 3, the move items' off-by-one (`k_pre`); the
+    // nucleon arm's is the absorption dropped (2).
+    std::vector<Out> pert = run_flat(jobs, pown, lown.view, lanes, kIon ? 3 : 2, msp, rp);
     for (int i = 0; i < n; ++i) {
       if (pert[i].handed) { pert[i] = paired[i]; }
     }
@@ -962,10 +989,10 @@ int main(int argc, char** argv) {
       }
       compare(pts[p].name, a, b, wp);
     }
-    std::printf("  ANTI-VACUITY (G4MesonAbsorption dropped from FindCollisions): the worst row %+.2f sigma (%s)\n", wp.z,
+    std::printf(kIon ? "  ANTI-VACUITY (the step's last secondary not moved): the worst row %+.2f sigma (%s)\n" : "  ANTI-VACUITY (G4MesonAbsorption dropped from FindCollisions): the worst row %+.2f sigma (%s)\n", wp.z,
                 wp.row.c_str());
     wp.print("perturbed");
-    check(std::fabs(wp.z) > 5.0, "the campaign catches a flat path whose FindCollisions drops the absorption");
+    check(std::fabs(wp.z) > 5.0, "the campaign catches the perturbed flat path");
   }
 
   had::free_interaction_pool(pown);

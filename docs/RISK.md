@@ -19417,3 +19417,265 @@ between the secondaries' searches and the sticky `ScatterRefusal` handled (V300)
 first. The sort of the drain by target A (V307: 80% of every drain is A = 16). The nucleus in
 shared memory (V307: no two cascades share one). A device-side cooperative loop instead of host
 launches (measured first, V309). The de-excitation flattened (pitfall 8).
+
+### V309: the Binary cascade flat - it reproduces itself to the bit at every width and batching, the thread path is untouched to the digit, the campaign holds it within 5 sigma of the thread path and catches one dropped call at 19 sigma; the proton beam gains 1.14x and the pion beam 1.06x, because the set-up and the de-excitation - the two stages a lockstep cannot widen - are now most of the drain
+
+**WHAT WAS BUILT** (V308's design; where a measurement changed it, it says so below):
+
+* `src/physics/hadronic/bic/flat/cascade_flat.cuh` - the record (`FlatCascade<N, P, C>`) and
+  the stages. Four bodies are re-composed rather than called, their lists on the calling
+  thread's frame (`FlatScratch`): `flat_capture` (`capture_secondaries`),
+  `flat_schedule_absorption` + `flat_find_collisions` (`schedule_absorption`, `find_collisions`),
+  `flat_after_transport` (`do_time_step` after its transport). `flat_tail_direct` runs the two
+  arms `apply_yourself` answers before its loops - A == 1 is `apply_yourself_h1` itself, the
+  PreCompound arm `apply_yourself`'s six lines around `preco::deexcite`.
+* `src/host/flat_drain_kernels.cuh` - the kernels and the round for either model (a `Policy`
+  per unit); `src/host/flat_drain.cuh` - the engine's view, no model type in it (V233);
+  `src/host/transport_run_int_binary_flat.cu` - the unit (build_engine.bat's glob finds it).
+* `src/host/transport_run_engine.cuh` - additions, and four lines replaced: the flat pools built
+  before the batch, whose budget becomes 55% of the free memory less the pools (the track
+  buffers give up the bytes; the slots are sized from the same free memory as before); the
+  kBinary and kLightIon buckets' dispatch (the flat drain, then its hand-backs on
+  `run_interaction<k...>` from the hand-back list, same drain, same slots); the deferred ring's
+  "full width" (`wide = total >= n_interaction_slots_` becomes the flat width when a pool is
+  on); two report lines. None of it is in P37's stepping, read-back or sort blocks.
+* `tests/test_bic_flat.cu` (and `test_blir_flat.cu`, V310) on build_all.bat's TESTS_GPU line.
+
+**THE PROTON BEAM, BUILD BY BUILD** (200,000 events; one run each unless two; the flat kernels
+timed with `G4GPU_FLAT_PROFILE=1`, events around each kernel of a round; every flat run 391.933
+nGy (rms 1.33865) and 11,550,631 track-steps):
+
+| build | time | events/s | x thread | the flat kernels | what it showed |
+|---|--:|--:|--:|---|---|
+| thread path (`G4GPU_CASCADE_FLAT=0`) | 8,996.6 ms | 22,231 | 1.00 | - | V307's digits, 391.931 nGy, 11,550,586 |
+| every stage every round, 64-thread blocks | 17,252 | 11,593 | 0.52 | 12.07 s: tail 63%, set-up 22% | a round waits for its slowest lane in EVERY stage, so a 1-8 ms nucleus or de-excitation sits in each of 1,641 rounds |
+| set-up and tail gated: run when lanes/16 (set-up) or a slot's worth (tail) wait, or nothing steps | 12,210 | 16,380 | 0.74 | 7.21 s: set-up 42%, move 15%, post 14%, tail 19% | |
+| + the deferred ring 8,192 wide | 8,047 | 24,854 | 1.12 | 4.33 s | the drains were 1,780 cascades: 56 full warps on 80 SMs |
+| + blocks sized for ~1,024 warps ("the spread") | **7,402** | **27,018** | **1.22** | 3.62 s: set-up 30%, tail 34%, move 14%, post 13% | |
+| + A == 1 and the PreCompound arm on the tail instead of handed back | 7,892 | 25,344 | 1.14 | 4.22 s: tail 44% | 16,538 cheap calls now queue for the 666 tail slots |
+| + the tail on its own stream (P37's V303) | 7,823 / 8,021 | 25,567 / 24,935 | 1.13 | | a round still waits for its tail before its claim and reap |
+| the final build (the beam table below) | 7,877 / 7,948 | 25,390 / 25,164 | 1.14 | | |
+
+On the stream build, without a rebuild: the tail's minimum batch 666: 7,803 ms; 100: 8,715;
+the tail back in the round: 7,971 (with 666: 7,709); the set-up in one-lane blocks: 8,994.
+The ring's width: 2,048: 10,236 ms; 4,096: 8,875; 8,192: 8,047; 16,384: 8,256 (the ring holds
+16,384). The fifth row (7.40 s) is the best measured; the hand-back of A == 1 and PreCompound
+calls to the thread path was its only difference from the final build, and it is kept off in
+the final build because it ties 17% of the bucket to the thread path's 666 one-thread blocks at
+the drain's end; the 0.5 s between the two is inside this card's run-to-run spread on this
+beam (8.92-9.03 s for the thread path, V307) - named, not chased.
+
+**WHERE A DRAIN'S TIME IS** (the best build, 1,538 rounds over 15 drains): set-up 1.08 s (30%),
+tail 1.24 s (34%), move 0.49 s, post 0.49 s, pre 0.12 s, finish 0.06 s, claim + reap +
+read-back 0.14 s. The thread path spent ~6 s on the same bucket (V295/V299): at V300's shares
+the step - the field transport and the collisions with their pair searches, two thirds of a
+cascade, the part this design was for - went from ~4 s to ~1.2 s (3.3x); the set-up (the
+nucleus: 95% of the draws, rejection sampling, up to 200 impact points) is at ~1x, and the
+de-excitation tail runs on the thread path's 666 slots and is bounded by them, as V307's
+pitfall-8 arithmetic said before any code. Those two are the next package's (V312).
+
+**THE BEAMS** - V309's and V310's build (both models flat), against the thread path of the same
+binary and V307's baseline:
+
+| beam | V307 (integ/p35) | flat (this build) | x | dose (rms), flat | dose, thread path | flat vs thread |
+|---|--:|--:|--:|---|---|--:|
+| B1 gamma 6 MeV 2M | 430.7 ms | 464.7 ms | 0.93 | 85.2055 nGy (173.586 pGy) | the same | 0 (no Binary call reaches its dose) |
+| proton 1 GeV 200k | 9,025 / 8,922 ms | 7,877 / 7,948 ms | 1.14 | 391.933 nGy (1.33865) | 391.931 (1.33866) | +0.0015 sigma |
+| pi+ 10 GeV 100k | 10,179 / 10,551 ms | 9,625 / 9,718 ms | 1.06 | 333.391 nGy (2.00911) | 333.4 (2.00918) | -0.004 sigma |
+| Fe56 56 GeV 5k | 49,679 ms | **30,206 ms** | **1.64** | 3.06372 uGy (53.0331 nGy) | 3.06391 (53.0322) | -0.004 sigma |
+| Fe56 56 GeV 20k | 171,103 ms | **67,671 ms** | **2.53** | 12.3684 uGy (106.602 nGy) | 12.3689 (106.6) | -0.005 sigma |
+
+Track-steps: proton 11,550,631 (thread 11,550,586), pi+ 12,936,409 (12,936,362), Fe56 5k
+62,057,540 (62,058,769), Fe56 20k 248,088,528 (248,093,226) - a cascade's products differ in the
+last bits, so the shower after it does, which is what V302's rule admits. Every dose moved by
+less than a hundredth of its own sigma. THE THREAD PATH (`G4GPU_CASCADE_FLAT=0`, the same
+binary): pi+ 333.4 nGy (2.00918), 12,936,362 steps, 10,350 ms; Fe56 5k 3.06391 uGy (53.0322),
+62,058,769 steps, 49,578 ms - V307's digits, so the thread path is the transcription it was.
+"0.24-0.27 GB of 12.00 GB left" on every run, the host at most 0.75 GB.
+
+THE PHOTON GATE IS 8% SLOWER, and that is the pools' memory: the track buffers went from 4.60 to
+3.80 GB (the two pools, 0.79 GB, before the 55%), so the live pool fell from 9.72M to 8.04M
+slots and the throttle defers more (107 iterations against 103); the dose is to the digit. Named
+for V311: the pools are built whenever the engine's own hook runs, photons or not.
+
+**THE ELEVEN GATES** on this build: every printed number equal to P33's final digest and so to
+ba73's (34 lines, none differ; the depth CSV md5 ba22d777a151c1d717ba48d0b62f23d1). No gate
+reaches a Binary cascade or a light-ion reaction it can see in its digits.
+
+**DETERMINISM.** The proton beam's dose and step count were the same digits in all nine flat
+runs - two units' builds, four ring widths, six knob settings, the tail on and off its own stream
+- so which lane, which round and which tail slot a cascade got moved nothing; the replay and
+two-runs gates above are exact; the campaign's flat runs are bit-identical twice and at two
+widths (below).
+
+**THE CAMPAIGN** (tests/test_bic_flat.cu; 32 points - p, n at 100/400/800/1400 MeV and pi+-
+at 200/800 MeV on C12 and O16, and four points each on Al27 and Fe56 - 20,000 calls a point,
+640,000 calls; the flat path on 8,192 lanes, the thread path `bic::apply_yourself` on the host):
+
+| check | result |
+|---|---|
+| the flat campaign run twice | 0 of 640,000 final states differ |
+| at 4,103 lanes against 8,192 | 0 of 640,000 differ |
+| handed back to the thread path | 0 (the campaign sets no straggler bound; no list overflowed, nothing refused) |
+| flat against the thread path ON THE SAME KEYS | 1 of 640,000 to the bit - the host's compiler and the device's round differently, so a pair parts at its first rounding (V301); which is why the statistics below are against INDEPENDENT keys: on shared keys the two samples share their draws and the z-scores came out under 1 (the first run of this test, -0.83 sigma at worst over 2,466 rows - a comparison that could not have seen anything; and `Capture` skipped "passed" it at 1.96) |
+| flat against thread, independent keys: 3,127 rows (11 species' mean multiplicities; 12-bin kinetic-energy and 10-bin cos(theta) spectra for p, n, pi+, pi-, pi0; the final-state size in 12 bins; the energy balance in 9 bins and the baryon balance in 5) | worst **-4.11 sigma** (camp_n800_Fe56, pi0 kinetic energy bin 6); the next -3.60, +3.58 - the expected extreme of 3,127 normal rows |
+| flat against Geant4 (ref/oracle/bic_apply.csv, 20,000 events a case; mean multiplicity and mean kinetic energy per species and per (Z, A), isomer rows summed, the oracle's killed events only): 2,423 rows | worst **+4.60 sigma** (camp_p1400_C12, the multiplicity of (Z, A) = (1, 2)); the thread path on the same rows -3.49 sigma (camp_p400_O16, N15's kinetic energy) |
+| ANTI-VACUITY: `G4MesonAbsorption` dropped from the flat path's `FindCollisions` (one lost call in the re-composed glue) | caught at **-18.86 sigma** (camp_pip200_Fe56, the proton multiplicity), and at 15.8-16.6 sigma in four more rows. `Capture` skipped is NOT caught (3.4 sigma at 2,000 calls a point) - it moves few nucleons on light targets - so it is not the perturbation |
+
+So the flat Binary cascade is the thread path's distribution and Geant4's, row for row, inside
+5 sigma at 20,000 calls a point; a single missing call in the glue is 19 sigma away. The test
+is on build_all.bat's TESTS_GPU line (4.3 minutes on the Titan V, 2.8 to build).
+
+**THE UNITS** (ptxas, sm_70, CUDA 12.9; each compiled alone under `out\ptxas.lock`):
+
+| unit | ptxas peak | compile | kernels (registers, frame) |
+|---|--:|--:|---|
+| transport_run_int_binary_flat | 5.9 GB | 272 s | tail 255 / 18,288 B; post 250 / 10,624; move 212 / 720; setup 158 / 16,656; claim 144 / 792; pre 74 / 6,656; finish 70 / 6,656 |
+| transport_run_int_lightion_flat | 6.9 GB | 298 s | tail 255 / 18,624; post 250 / 15,232; move 212 / 720; setup 138 / 21,328; claim 152 / 792; pre 74 / 11,264; finish 70 / 11,264 |
+| transport_run (the engine) | - | - | the dispatch only |
+| tests/test_bic_flat, test_blir_flat | - | 160-180 s each | |
+
+Every frame is under `run_interaction<kAtRest>`'s 21,472 B, so the raise stays 28,672 B a
+thread. The seven monolithic interaction units were not recompiled (their sources are untouched).
+
+### V310: the light-ion reaction flat - the same stages with `Interact`'s two nuclei and 150 tries in front and `SortResult`, the corrector and the spectators' de-excitation behind; the Fe56 beam 1.64x at 5,000 events and 2.53x at 20,000, every dose inside a hundredth of its sigma, and the nucleus set-up NOT flattened per nucleon
+
+**WHAT WAS BUILT.** `bic/flat/ion_flat.cuh`: the record (`FlatIon`: the nucleon arm's record
+plus the projectile nucleus, `Interact`'s one-track-per-projectile-nucleon secondaries and the
+frame), `stage_ion_model` (`blir_apply_yourself` above `Interact`: the anti/hyper test,
+`SetLighterAsProjectile`, the fusion threshold - the fusion arm is handed to the thread path:
+one PreCompound call, nothing to flatten), `stage_ion_nucleus` (`Interact`'s tries: both
+`G4Fancy3DNucleus::Init`s, the impact parameter, the projectile nucleons as tracks, the field
+maps, `Propagate`'s prologue; a try that finds no collision is the next try in the same call),
+and `ion_pack` (`blir_cascade_arm` after `Interact`, line for line, with `run_arm_light_ion`'s
+mapping: a refusal hands the record back, Geant4's "primary alive" answers are final states).
+`flat_outer_test` takes `Interact`'s loop for `kModelIon` (a NULL and an empty product list
+both try again, at most 150). Everything between - the step, the finish, the tail to the
+product list - is the nucleon arm's stages unchanged. The unit:
+`src/host/transport_run_int_lightion_flat.cu` (`IonPolicy`: N = 64 a nucleus, P = 256, C = 512,
+K = 160 - V307's 149 steps at most; 2,048 lanes of 82,164 B = 163.5 MB).
+
+**THE FE56 BEAM** (both models flat; the Binary cascade's numbers are V309's):
+
+| events | V307 | flat | x | dose (rms) flat | thread path | flat light-ion: entries, finished, handed back | rounds |
+|--:|--:|--:|--:|---|---|---|--:|
+| 5,000 | 49,679 ms, 100.6 ev/s | **30,206 ms, 165.5 ev/s** | **1.64** | 3.06372 uGy (53.0331 nGy), -0.004 sigma | 3.06391 (53.0322), 49,578 ms | 19,991, 19,698, 293 (292 fusion, 1 capacity, 0 straggler) | 4,684 |
+| 20,000 | 171,103 ms, 116.9 ev/s | **67,671 ms, 295.6 ev/s** | **2.53** | 12.3684 uGy (106.602 nGy), -0.005 sigma | 12.3689 (106.6) (V307) | | |
+
+The 20,000-event row gains more because its drains are four times as wide: the flat light-ion
+pool has 2,048 lanes and the 5,000-event beam's drains hold ~200 reactions (V299), so at 5k most
+lanes idle; at 20k they fill. The light-ion reaction's time step moves 16 secondaries (V307), so
+its move kernel has 16 items a lane where the nucleon arm's has 2.6 - the per-item split pays
+here more than anywhere.
+
+**THE NUCLEUS SET-UP NOT FLATTENED PER NUCLEON** (the brief's optional item). V300: both
+`Init`s are 13% of a reaction's thread time and 99% of its draws. Flattening them per nucleon
+reorders those draws (the rejection loop places nucleon i against the i-1 already placed, so a
+lane per nucleon is a different algorithm's draw order, which the relaxed rule would admit) -
+but it is 13% of a reaction against the tail's 20% (V300) that the flat path also leaves on one
+lane, and the reaction is now bounded by its set-up and tail together (as the nucleon arm is,
+V309). Not done; the set-up and the de-excitation together are the next package's (V312).
+
+**THE CAMPAIGN** (tests/test_blir_flat.cu = test_bic_flat.cu with `G4GPU_TEST_BLIR_FLAT`: six of
+ref/oracle/bic_blirapply.csv's cases - d 1 GeV/n on O16, alpha 200 MeV/n on C12, alpha 1 GeV/n
+on O16, C12 200 MeV/n on O16, C12 1 GeV/n on C12, Fe56 1 GeV/n on Al27 - 20,000 reactions each,
+the thread path `blir_apply_yourself` on the host):
+
+| check | result |
+|---|---|
+| the flat campaign run twice | 0 of 120,000 final states differ |
+| at 4,103 lanes against 8,192 | 0 of 120,000 differ |
+| handed back to the thread path (answered by `blir_apply_yourself`) | 1,078 of 120,000 (no straggler bound in the campaign: these are the flat lists' capacities, the 256-track pool against Fe56 + Al27's cascades; the thread path's lists are the ion envelope) |
+| flat against thread, independent keys: 606 rows (species multiplicities, 12-bin kinetic-energy and 10-bin angular spectra for p, n, pi+-0, the final-state size, the energy- and baryon-balance distributions) | worst **-2.66 sigma** (ic_a1000_O16, cos(theta) of pi+, bin 9) |
+| flat against Geant4 (bic_blirapply.csv, 20,000 events a case): 585 rows (mean multiplicity and mean kinetic energy per species and per (Z, A)) | worst **+3.65 sigma** (ic_C12200_O16, the mean kinetic energy of C12 fragments); the thread path on the same rows -3.32 sigma |
+| ANTI-VACUITY | `G4MesonAbsorption` dropped (the nucleon arm's perturbation) reaches only 3.85 sigma here - ion cascades make few pions - and `Capture` skipped 3.16; so the ion campaign's perturbation is an off-by-one in the move items' enumeration (the step's last secondary gets no item: it stands still for the step): caught at **23.3 sigma** (ic_d1000_O16, the energy balance), 16.3 and 12.5 in the deuteron and alpha multiplicities. The campaign's straggler bound is 4,096 steps (no real reaction comes near: 149, V307) so that a perturbed reaction that never ends is handed back |
+
+### V311: the pools and the raise after P36 - 0.79 GB of flat pools taken from the track buffers, the interaction slots 628 -> 667, the raise unchanged at 28,672 B, "0.24-0.27 GB left" as before, and the slots now the de-excitation's width
+
+**THE NUMBERS** (the run's own lines, every hadron beam of V309/V310):
+
+| | before (V307) | after |
+|---|--:|--:|
+| flat Binary pool | - | 16,384 lanes x 39,332 B (a record 39,312 B + its entry) = **623.7 MB** with the item and hand-back lists |
+| flat light-ion pool | - | 2,048 lanes x 82,164 B = **163.5 MB** |
+| the batch's track buffers | 4.60 GB, 9,717,888 slots a side, 2.43M events | **3.80 GB**, 8,042,112 slots, 2,010,528 events (55% of the 7.55 GB free plus the pools, less the pools) |
+| free before the interaction pool | 3.13 GB | 3.19 GB |
+| interaction slots | 628 (1,050.8 MB with FTFP's 128) | **667** (1,111.0 MB) |
+| the raise | 28,672 B a thread off `run_interaction<kAtRest>`'s 21,472 B, 1.88 GB | **unchanged**: the flat kernels' largest frame is 21,328 B (the light-ion set-up) |
+| left after the raise | 0.24-0.25 GB | 0.24-0.27 GB |
+
+The slot count ROSE because the batch's budget is now 55% of (free + pools) less the pools:
+the track buffers give up the pools' 0.79 GB and a little more than their 55% share, and the
+slots, sized from what is left (V285), gain 39. That is the right direction: the slots are now
+the de-excitation tail's width as well as the thread path's.
+
+**WHAT THE THREAD PATH'S SLOTS COST AND WHETHER 628 ARE STILL NEEDED.** They are needed MORE,
+not less. The flat drain hands back only 0.01-0.1% of its Binary calls (17 of 98,311 on the
+proton beam) and 1.5% of its light-ion reactions (the fusion arm), so as the thread path's
+width they could be a few dozen; but the flat tail borrows them - PreCompound's 536 kB, the
+products, the final-state buffers - and V309 measured the tail at a third of the Binary drain,
+bounded by exactly this count. Fewer slots would slow every hadron beam; more would need the
+memory the raise (1.88 GB) and the track buffers hold. A tail slot that is not a whole
+`InteractionSlot` (PreCompound's workspace, the products, a 128-wide final state: ~0.7 MB
+against 1.6 MB) would double the tail's width in the same memory: the next package's (V312).
+
+**THE PHOTON BEAM PAYS** for the pools with its live pool (8.04M slots against 9.72M): 464.7 ms
+against 430.7 (V309). The pools are built whenever the engine's own hook runs, because a run
+cannot know at `Upload` whether it will reach a Binary cascade; building them lazily at the first
+kBinary drain would need the track buffers to be resizable. Named, not done.
+
+**THE ACCOUNTING** (pitfall 9): the pools are counted where they are allocated (the paging
+guard's `refuse_if_paging` on each, before the batch's budget is read) and printed on their own
+lines; the throttle's per-entry output reservation and P34's pending ring are unchanged, because
+the flat drain emits exactly the secondaries the thread path would, into the same buffer, in the
+same drain.
+
+### V312: P36 closed - what it bought, what it did not, and what was refused by name
+
+**BOUGHT** (V309-V311, the Titan V alone, every dose inside 0.01 sigma of the thread path of the
+same binary, the eleven gates to the digit, the thread path to V307's digits): Fe56 56 GeV
+2.53x at 20,000 events (171.1 -> 67.7 s) and 1.64x at 5,000 (49.7 -> 30.2 s); proton 1 GeV
+1.14x (9.0 -> 7.9 s); pi+ 10 GeV 1.06x (10.4 -> 9.7 s); the 2M-photon gate 0.93x (the pools'
+memory, V311). A cascade's step - the field transport one item per secondary and the collisions
+- is ~3.3x faster than on a thread; its set-up (the nucleus) is not faster and its
+de-excitation tail runs at the thread path's slot count.
+
+**NOT BOUGHT, AND WHY - THE MECHANISM.** The lockstep pays, in every round, the slowest lane of
+every stage it launches. The step stages are short and uniform enough for that to be cheap; the
+set-up (a `G4Fancy3DNucleus` by rejection, up to 200 impact points) and the tail (PreCompound
+and the evaporation chain, 1-100 ms) are neither. Gating them (run only when a batch waits) and
+sizing the blocks to ~1,024 warps took the proton drain from 12.1 s of flat kernels to 3.6 s,
+but set-up + tail stayed two thirds of it. The brief's estimate (~0.5-1.5 s for the hadron
+phase) assumed the step was the whole cascade; V300 had measured the set-up at 12% and the
+de-excitation at 12% of a cascade's thread time, and those two are ~1x here while everything
+else is ~3x - Amdahl again, in the other direction from P35's.
+
+**THE NEXT PACKAGE'S, BY NAME:** (1) the de-excitation as its own wide queue - tail slots that
+are not whole `InteractionSlot`s (~0.7 MB against 1.6 MB: double the width in the same memory),
+or PreCompound/evaporation flattened (a Markov chain per fragment, so per FRAGMENT, not per
+step); (2) the nucleus set-up per nucleon (99% of the light-ion reaction's draws, a different
+draw order under the relaxed rule); (3) the pools built lazily so the photon beam does not pay
+for them; (4) a hook project's engine on the flat path (its units are its own:
+build_hook_engine.bat would need the two flat units for its hook type).
+
+**REFUSED BY NAME, WITH THE MEASUREMENT:**
+
+* SoA across lanes (V308): every per-cascade stage calls the thread path's functions on a
+  cascade's own record; V307's bytes say a round is ~0.2 ms of bandwidth at full width, so the
+  layout was never the bound.
+* The nucleus in shared memory and the sort of the drain by target (V307): no two cascades share
+  a nucleus (each samples its own); A = 16 is 80% of every beam's mix.
+* The per-pair search as its own phase (V308): 9% of a cascade, inside `post` at the drain's
+  width; it needs `G4BCDecay`'s draw kept between secondaries and the sticky `ScatterRefusal`.
+* A device-side cooperative loop (pitfall 4): the launches and the read-back are 0.14 s of the
+  proton drain's 3.6 s (claim + reap + read-back), not worth a persistent kernel.
+* Re-composing `run_interaction_entry`'s head and tail as shared functions: copied into
+  `flat_tail` instead, so transport_run_int_impl.cuh - and the seven interaction units - did not
+  change (the duplication is named in the code).
+* K above 64 / 160: V307's histograms; the hand-backs are 17 (proton), 25 (pi+), 7 (Fe56's
+  Binary calls) and 0 stragglers of the light-ion reactions.
+
+**FOR THE LEAD.** The new units are found by build_engine.bat's glob - no edit there; build_all's
+TESTS_GPU line gains `test_bic_flat test_blir_flat`. transport_run_engine.cuh changed in four
+replaced lines (the batch budget, the two buckets' `G4GPU_DRAIN`, the ring's `wide` test) plus
+additions; the restack onto integ/p37 touches the `wide` line in the deferred-drain block.

@@ -142,6 +142,11 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P37: Fe56 56 GeV, 5,000 events, final stage | 123.2 (100.6 before) | 40.6 s (49.7 s) |
 | Titan V, P37: Fe56 56 GeV, 20,000 events, final stage | 130.1 (116.3 before) | 153.7 s (171.9 s) |
 | Geant4 11.1.1, QBBC as it ships, one core (P37 V303): Fe56 56 GeV, 2,000 events serial; 500 events on 10 workers (out\lead\cpu_rates.md) | 40.3 a core-second; 31 a core-second | User 49.6 s; User 16.2 s |
+| Titan V, P36 (RISK V307-V312: the Binary cascade and the light-ion reaction as data - stages over 16,384 and 2,048 lanes, the field transport one item per secondary; doses within 0.01 sigma of the thread path, the relaxed rule of V302): example B1 2M 6 MeV gammas, GPU time | 4.30 × 10⁶ | 465 ms (431 before P36: the pools' memory) |
+| Titan V, P36: proton 1 GeV, 200,000 events, final stage | 25,390 (22,161 before) | 7.9 s (9.0 s) |
+| Titan V, P36: pi+ 10 GeV, 100,000 events, final stage | 10,390 (9,824 before) | 9.6 s (10.2 s) |
+| Titan V, P36: Fe56 56 GeV, 5,000 events, final stage | 165.5 (100.6 before) | 30.2 s (49.7 s) |
+| Titan V, P36: Fe56 56 GeV, 20,000 events, final stage | 295.6 (116.9 before) | 67.7 s (171.1 s) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no
