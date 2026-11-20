@@ -19251,3 +19251,169 @@ an outer-loop turn as well as a time step.
   them, the slots the thread path owns and does not use while the flat drain runs). If the rest
   shrinks 10x, the de-excitation is ~55% of what is left for the Binary cascade and ~70% for the
   light-ion reaction - the brief's pitfall 8, named here before any code: the next package's.
+
+### V308: P36's design - the cascade as a resumable record: stages cut at `Propagate`'s time steps, the field transport one item per secondary, the tail on the thread path's idle slots, every draw in the thread path's order, and the bic/ sources untouched
+
+**THE DECISION EVERYTHING ELSE FOLLOWS FROM.** V300's draw map: the field transport of a time
+step and the pair search draw nothing; every draw of a cascade is in a per-cascade phase (the
+nucleus, the impact point, a collision's final state, `G4BCDecay`'s lifetime, the final decays,
+the de-excitation). So each cascade keeps ITS OWN generator - the `Philox` `run_interaction_entry`
+makes from the queue entry's track (`rng_key`, `step`, `kInteractionRngPurpose`), carried in the
+record between stages - and runs its per-cascade stages in the thread path's order. A flat cascade
+then consumes its generator draw for draw as the thread cascade does. The relaxed rule of V302 is
+needed only for what V301 measured: the same arithmetic compiled into a different function rounds
+differently (an FMA in one context and not in the other), after which two cascades part. Nothing
+about the physics is reordered - a stronger statement than the rule asks for, and it means a
+campaign row past 5 sigma is a defect, never a draw order.
+
+**THE BIC/ SOURCES ARE NOT EDITED.** `propagate`, `do_time_step`, `step_particles_out`,
+`apply_yourself`, `blir_*` are the thread path byte for byte: the seven interaction units, every
+exact oracle test (test_bic_apply, test_bic_imr, test_bic_1h1, test_bic_void, test_bic_nucleus)
+and P35's V301 tape are untouched by construction, not by re-measurement. The flat path is
+re-composed in `src/physics/hadronic/bic/flat/cascade_flat.cuh`: glue - the loops' control flow
+and the list bookkeeping between two cuts - around the same callees with the same arguments. Four
+short bodies are copied rather than called, because their lists live in the slot's 51,200-byte
+`BicScratch`: `capture_secondaries`, `schedule_absorption`, `find_collisions` around it, and
+`DoTimeStep` after its transport. The copies keep those lists on the calling thread's frame
+(`FlatScratch<N, P>`, sized by the record's pool, `P` <= 256, so the thread path's 256-entry caps
+never bind), and call the thread path's formulas (`capture_decision`, `time_to_absorption`,
+`find_and_fill_cluster`, `schedule_decay`, `schedule_scattering`, `correct_barions_on_boundary`).
+
+**THE STAGES** (lane = cascade; every kernel a uniform loop over the lanes or the items):
+
+| kernel | stage | what it runs | per | draws | thread path's lines |
+|---|---|---|---|---|---|
+| claim | - | `run_inelastic`'s integral rejection and `SampleZandA`, a free lane takes the next entry | entry | 1-2 | interaction_apply.cuh `run_inelastic` 2-3 |
+| setup | `kStModel` | `ApplyYourself` above the loops: species, `theBCminP`, A == 1 | cascade | 0 | binary_cascade.cuh |
+| setup | `kStNucleus` | an outer-loop turn: `G4Fancy3DNucleus::Init`, the field maps, then the inner loop's impact points and `Propagate`'s prologue to the first `Entries()` | cascade | the nucleus (95%), the impact | `apply_yourself`, `propagate` |
+| pre | `kStStep`, `kStStepOut` | the top of a collision-loop / `StepParticlesOut` iteration: Absorb, Capture, the next collision, the time step; one move item per secondary | cascade | 0 | `propagate`, `step_particles_out` |
+| move | - | `G4RKPropagation::Transport` of ONE secondary, its transfer from zero | (cascade, secondary): 2.6 / 16 a step (V307) | 0 | `transport_secondaries` |
+| post | `kStStep`, `kStStepOut` | the rest of `DoTimeStep`; `ApplyCollision` and `FindCollisions` for what it made; step-out's absorb / capture / reset | cascade | final states, `G4BCDecay` | `do_time_step`, `apply_collision` |
+| finish | `kStFinishA/B` | `Propagate` between and after its two loops: the void test, `GetExcitationEnergy`, `CorrectFinalPandE`, `FindFragments` | cascade | 0 | `propagate` |
+| tail | `kStTail` | on a tail slot: `DeExcite` (or the A == 1 / void branches), `G4DecayKineticTracks`, the products, the outer-loop test, the packing; then `copy_final_state`, `CheckResult` (a rejection sends the record back to `kStModel` with its generator where it is), K0 mixing, `FillResult`, the emission | cascade | de-excitation, decays, K0 | `propagate`'s end, `run_arm_binary`, `run_inelastic` 6-8, `run_interaction_entry` |
+| reap | - | hand-backs to the thread path's list, finished lanes freed, the counts the host reads | lane | 0 | - |
+
+A ROUND is the eight kernels once (plus two `cudaMemsetAsync` and one 76-byte read-back for the
+loop's end): every stage a cascade is in advances by one. A lane that finishes takes the next
+entry at the next round's claim, so the drain does not wait for its slowest cascade to refill.
+
+**THE ONE SUM THE SPLIT TOUCHES.** Each move item returns its track's momentum transfer from zero
+and `post` sums them in pool order from zero - one `+=` a track (V301's proof) - so the cascade's
+`theMomentumTransfer` is the thread path's to the bit.
+
+**THE RECORD** (`bic::flat::FlatCascade<N, P, C>`, AoS, one per lane, every pointer inside it
+into itself; Binary: N = 64, P = 128, C = 256):
+
+| field | bytes | what |
+|---|--:|---|
+| stage, entry, steps, hand-off, tail work, model, try count | 28 | the state machine and the straggler clock |
+| `Philox<double>` | 44 | the cascade's generator, between stages |
+| projectile, target, `ApplyYourself`'s loop counters, outcome, products | ~60 | |
+| `BicCascadeState` | 232 | `Propagate`'s members |
+| `Nucleus3D` | 96 | the target's `G4Fancy3DNucleus` view |
+| `RkPropagation` | 720 | the field maps' parameters (`thePropagator`) |
+| `CollisionList`, loop guard, excitation, `CascadeFragment`, the step's mode / next / dt | ~170 | |
+| nucleons [64] | 5,120 | `G4Nucleon`s (A <= 48 measured) |
+| field tables 2 x [256] | 4,096 | `G4NuclearFieldMap`'s two tables (`kMaxFieldTable`) |
+| track pool [128] | 17,408 | targets + secondaries + finals (max 89 measured) |
+| collision list [256] | 8,192 | `G4CollisionManager` (max 95 measured) |
+| pre-step state [128] | 128 | `DoTimeStep`'s outside/inside sets, as a tag a track |
+| transfer [128] | 3,072 | each move item's momentum transfer |
+| **total** | **~39.3 kB** | + a 20-byte entry record (queue index, `CheckResult`'s attempts, the rejection, Z and A) |
+
+**WHY AoS AND NOT SoA ACROSS LANES.** The per-cascade stages call the thread path's functions,
+which take a `BicCascadeState&`, a `CascadeTrack*` pool and a `CollisionList` - a record of one
+cascade. SoA across lanes would mean rewriting every one of them for strided fields, which is the
+rewrite of bic/* the rule forbids (formulas byte for byte). V307's arithmetic says it is also not
+needed: a move item reads one contiguous 136-byte track (five 32-byte sectors, the full sectors it
+uses) and the cascade's 720-byte propagator, which the cascade's other items hit in L1/L2; a round
+of 16,384 cascades is ~0.2 ms of bandwidth. Refused by measurement, and re-opened if V309's
+profile shows the move kernel bandwidth-bound.
+
+**THE SCRATCH** is not in the record: `FlatScratch` (the step's, Capture's, step-out's and the
+cluster's lists, 6.6 kB) and `Nucleus3DScratch` (64 nucleons' momenta, Fermi momenta and sort
+sums plus `G4RandFlat`'s 600-double block, 9.4 kB) live on the calling thread's frame, inside the
+raise V293 already reserves (28,672 B a thread); the tail uses the slot's own `BicScratch`.
+
+**THE CROSS-SECTION BUFFERS.** `CascadeBuffers` (32,464 B) is a lazily built cache of ten pure
+tables (`BufferCrossSection`, four NN pairs and six meson-baryon pairs); the thread path builds
+them per slot on first use. The flat pool builds all ten ONCE, on the device, with the same
+functions (`ensure_meson_buffer`, `ensure_nn_buffer`), and every lane reads the one copy: a
+lookup then only finds, and a pair it would have to build finds no free entry and refuses by
+capacity - which hands the cascade back rather than writing a table other lanes read.
+
+**THE GENERATOR STREAMS.** One per cascade, the thread path's own: `Philox(rng_key, step,
+kInteractionRngPurpose)` of the queue entry's track, made in `claim`, consumed in the stages in
+the thread path's order, kept in the record between them. Which lane an entry gets, which round
+it reaches a stage in and which tail slot it uses move time and nothing else: a stage reads only
+its own record and the read-only tables.
+
+**THE HAND-BACKS, EVERY ONE A FUNCTION OF THE CASCADE ALONE.** A cascade is handed to the thread
+path - its queue index appended to a list the drain then runs `run_interaction<kBinary>` over,
+from its key, in the same drain - when (1) its own clock passes K: time steps plus outer-loop
+turns, K = 64 for the Binary cascade (V307: 0.011% of the proton beam's calls, 0.25% of its
+thread time); (2) a flat list would overflow (the thread path's lists are the ion envelope);
+(3) anything refuses (the thread path books its own refusal by name); (4) A == 1
+(`Propagate1H1`, not cut into stages) or a nucleon under `theBCminP` (PreCompound alone - no
+cascade to flatten); (5) `CheckResult` refuses 100 times. The thread path RERUNS the entry from
+its key rather than continuing the record: the result is then exactly the thread path's result
+for that entry, whatever the flat path did with it before, and since the hand-back test reads only
+the cascade's own state, the set of entries the thread path answers is the same however the run
+was batched or deferred - which is what the replay, two-runs and N+N-vs-2N gates need. The flat
+path never writes a score, a book or a secondary before its tail's emission, so a handed-back
+entry has left no trace.
+
+**THE DE-EXCITATION QUEUE = THE TAIL SLOTS.** The tail needs PreCompound's 536 kB workspace, the
+products, a `BicScratch` and the three 856-wide final-state buffers - exactly an
+`InteractionSlot`. The thread path's 628 slots are idle while the flat drain runs (the drain's
+buckets run one after another on one stream), so the tail BORROWS them: each round, the first 628
+records in `kStTail` (by an atomic counter; which ones moves time only) run their tail on slot
+0..627; the rest wait a round, their clock stopped. No memory is added for the de-excitation, and
+`run_interaction<kBinary>` uses the same slots for the hand-backs after the flat drain ends. The
+tail's throughput is therefore the thread path's slot count per round - pitfall 8, named: if the
+rest gets 10x faster, the de-excitation is about half of what is left, and flattening it is the
+next package's.
+
+**THE POOL AND ITS ACCOUNTING** (pitfalls 7 and 9). A second pool beside the interaction pool:
+`host::FlatPool` (`src/host/flat_drain.cuh`: no model type in the engine's view, V233), built in
+`Upload` BEFORE the batch is sized, through `refuse_if_paging` like every other allocation
+(V258), and printed ("flat Binary cascade: n lanes of b B"). The batch's budget becomes 55% of
+the free memory minus the flat pool, so the TRACK BUFFERS give up the flat pool's bytes and the
+interaction slots keep their count (V285's sizing is unchanged and still sees the same free
+memory). Default 16,384 lanes x ~39.3 kB = 0.64 GB: the track buffers 4.60 -> ~3.96 GB, which
+still holds the 2M-photon gate in one batch (2.08M events at 4.0 slots an event). The throttle's
+pending reservation (48 output slots an entry) and P34's ring are unchanged: the flat path emits
+exactly the secondaries the thread path would, into the same buffer, from the same drain. The
+ring's "full width" becomes `G4GPU_CASCADE_FLAT_WIDE` (default the slot count, as today) - one
+of the knobs V309 measures (pitfall 4). The raise does not move: the flat kernels' frames
+(<= ~20 kB: the set-up's 9.4 kB nucleus scratch and 6.6 kB lists) are under the 28,672 B the
+monolithic kernels already reserve, and those still run (FTFP, Bertini, at-rest, the
+hand-backs).
+
+**SELECTION.** The flat path is the default for the kBinary bucket of the engine's own hook
+(`StepTap<double>`); `G4GPU_CASCADE_FLAT=0` runs every interaction on the thread path, untouched.
+A hook project keeps the thread path (its interaction units are its own, build_hook_engine.bat):
+named, not changed.
+
+**THE UNITS.** One new unit, `src/host/transport_run_int_binary_flat.cu` - the eight kernels, the
+pool's build and the drain loop - found by build_engine.bat's glob (`transport_run_int_*.cu`, run
+one at a time like the other interaction units), so build_engine.bat needs no edit. Expected
+ptxas: the monolithic Binary kernel is 27 GB because the whole model is one inlined tree under
+one entry; here it is eight entries, the largest the tail (PreCompound + the emission, the shape
+of `run_interaction<kBertini>`'s 9 GB) and the post (the im_r final states). The rule is 30 GB
+and 30 minutes; a unit past either is split (the tail first, into its own unit). The light-ion
+reaction (V310) is a second unit of the same shape, the stage functions shared. The engine unit
+(`transport_run.cu`) changes for the dispatch; the seven interaction units do not.
+
+**THE PER-ROUND ARITHMETIC** (V307): ~0.2 ms of bandwidth at full width; ~1-2 ms of latency and
+divergence; ~10 kernel launches (~10 us each) and one read-back a round. The proton beam's ~1.0
+million cascade-rounds are ~64 full-width rounds, but its drains are 1,780 cascades on average,
+so the launches - not the width - bound a small drain: ~100 us a round x (7.4 steps + ~4
+set-up/finish/tail rounds + the tail queue) a drain. Measured in V309, with the ring's width.
+
+**NOT IN THIS DESIGN, BY NAME.** The per-pair SEARCH phase (9% of a cascade, V300): it stays
+inside `post`, per cascade, at the drain's width; splitting it needs `G4BCDecay`'s draw kept
+between the secondaries' searches and the sticky `ScatterRefusal` handled (V300) - measured
+first. The sort of the drain by target A (V307: 80% of every drain is A = 16). The nucleus in
+shared memory (V307: no two cascades share one). A device-side cooperative loop instead of host
+launches (measured first, V309). The de-excitation flattened (pitfall 8).
