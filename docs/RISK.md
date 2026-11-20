@@ -19141,3 +19141,113 @@ README's throughput table carries the five P37 rows and Geant4's Fe56 core rate;
 performance-phase row carries part 4. The branch: 13fbc61 (the streams), 341796a (the read-backs),
 and this entry's commit. Measurement artefacts, uncommitted, in the worktree's `out\p37`: the
 timer instrumenter and header, the two probes, the profiles' CSVs and every run's log.
+### V307: P36's measurements before the design - a Binary cascade is 7.4 time steps with 2.6 secondaries in flight, a light-ion reaction 21 with 16; K = 64 leaves 0.011% of the proton beam's cascades to the thread path and K = 160 none of Fe56's reactions; the per-cascade state fits 40 kB; and every cascade samples its own nucleus, so no two lanes share one
+
+**THE TREE.** perf/cascade_flat at integ/p35 (918092f = integ/p34's code + P35's V299-V302),
+its out\ P35's objects (integ/p34's sm_70 build, V299). Every run on the Titan V alone under
+`out\gpu.lock`, the default live count; the instrumented build was compiled into out\exp\d1 from
+a COPY of src (the worktree's sources were never edited, so no unit went stale).
+
+**THE BASELINE** (exampleB1's own lines; "0.24-0.25 GB of 12.00 GB left" on every hadron run,
+the host process at most 0.67 GB). The eleven gates: every printed number equal to P33's final
+digest and so to ba73's (34 lines, none differ; the depth CSV md5
+ba22d777a151c1d717ba48d0b62f23d1).
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| B1 gamma 6 MeV 2M | 430.7 ms | 4.643e6 | 6.05e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+| proton 1 GeV 200k | 9,025.1 / 8,921.8 ms | 22,161 / 22,417 | 1.28e6 | 391.931 nGy (1.33866 nGy) | 11,550,586 |
+| pi+ 10 GeV 100k | 10,178.7 / 10,550.8 ms | 9,824 / 9,478 | 1.25e6 | 333.4 nGy (2.00918 nGy) | 12,936,362 |
+| Fe56 56 GeV 5k | 49,679.4 ms | 100.6 | 1.25e6 | 3.06391 uGy (53.0322 nGy) | 62,058,769 |
+| Fe56 56 GeV 20k | 171,103 ms | 116.9 | 1.45e6 | 12.3689 uGy (106.6 nGy) | 248,093,226 |
+
+V293's and V299's digits, every one.
+
+**THE INSTRUMENT** (measurement only, never committed: the session's `instrument_d1.pl` and
+`p36_d1.cuh`, `-DG4GPU_P36_D1` in `transport_run_int_binary`, `_lightion` and the engine). Per
+model call, on the cascade's own thread: the time steps (`DoTimeStep` calls, the collision loop's
+and `StepParticlesOut`'s together), the `Propagate` calls, the applies, the target A and the
+projectile A, the collision list's and the track pool's high-water marks, and the call's
+`clock64` span; per time step the secondaries in flight (`kt_outside` + `kt_inside`); per
+`FindCollisions` the targets. Every run's dose and step count are the baseline's to the digit
+(proton 391.931 nGy, pi+ 333.4 nGy, Fe56 3.06391 uGy; the ptxas peak of the instrumented Binary
+unit 30.2 GB).
+
+**THE TABLES** (n, mean, p50 / p90 / p99 / p99.9, max):
+
+| quantity | proton 1 GeV: Binary (98,135) | pi+ 10 GeV: Binary (27,533) | Fe56: Binary (38,920) | Fe56: light ion (19,978) |
+|---|---|---|---|---|
+| time steps a call, every try | 7.44; 6 / 15 / 24 / 36; 1,023* | 7.02; 6 / 14 / 24 / 38; 1,023* | 6.89; 6 / 14 / 23 / 34; 100 | **21.2; 14 / 50 / 96 / 120; 149** |
+| collision-loop iterations a productive `Propagate` | 4.99; 4 / 11 / 19 / 30; 50 | 4.82; 4 / 10 / 18 / 26; 43 | 4.62; 3 / 10 / 18 / 28; 49 | 15.4; 8 / 42 / 85 / 106; 132 |
+| secondaries in flight a time step | **2.59**; 2 / 5 / 8 / 12; 18 | 1.64; 1 / 3 / 7 / 9; 14 | 2.36; 2 / 5 / 8 / 11; 17 | **15.9**; 14 / 35 / 52 / 64; 83 |
+| `Propagate` calls a call (impact points and nuclei) | 6.89; 4 / 16 / 37 / 77; 1,023* | 7.04; 3 / 16 / 47 / 260; 1,023* | 7.26; 4 / 17 / 39 / 103; 1,023* | 3.76 tries; 3 / 8 / 17 / 29; 51 |
+| applies a time step | 0.609 | 0.377 | 0.632 | 0.747 |
+| target A (the drain's mix) | 15.2; 16 / 16 / 40 / 40; 48 | 16.3; 16 / 16 / 40 / 42; 44 | 16.3; 16 / 16 / 40 / 44; 48 | 11.3; 16 / 16 / 40 / 40; 44 (projectile A 30.0, max 56) |
+| targets a pair search | 15.8 | 16.0 | 16.2 | 33.2 (max 56) |
+| track pool high-water a call | 22.0; 24 / 34 / 53 / 70; **89** | 18.8; 22 / 31 / 51 / 68; 87 | 20.8; 22 / 32 / 54 / 66; 89 | 66.3; 61 / 126 / 197 / 228; **259** |
+| collision list high-water a call | 3.9; max **95** | 3.4; max 79 | 3.4; max 79 | 25; max **303** |
+| thread time a call (clock64) | 16.4 ms; worst 502 ms | 16.2 ms; worst 446 ms | 8.5 ms; worst 427 ms | 54.5 ms; worst 768 ms+ |
+
+(*1,023 is the histogram's last bin: one cascade in 98,135 of the proton beam runs
+`StepParticlesOut`'s reset loop past it, and a handful turn the outer loop a hundred times.)
+
+**THE STRAGGLERS** - calls with more than K time steps, and their share of the thread time:
+
+| K | proton: Binary | pi+: Binary | Fe56: Binary | Fe56: light ion |
+|--:|---|---|---|---|
+| 32 | 171 (0.174%), 1.10% | 46 (0.167%), 1.63% | 45 (0.116%), 1.13% | 3,766 (18.9%), 56.1% |
+| 48 | 18 (0.018%), 0.30% | 20 (0.073%), 1.20% | 7 (0.018%), 0.58% | 2,112 (10.6%), 39.2% |
+| **64** | **11 (0.011%), 0.25%** | 20 (0.073%), 1.20% | 5 (0.013%), 0.49% | 1,247 (6.2%), 26.8% |
+| 96 | 6, 0.13% | 18, 1.04% | 3, 0.30% | 197 (0.99%), 5.7% |
+| 128 | 1, 0.01% | 13, 0.58% | 0 | 11 (0.055%), 0.36% |
+| **160** | 1 | 13 | 0 | **0** |
+
+and the worst cascade at or under K: proton 316 ms at K = 64 against 502 ms for the worst of all -
+the slowest cascades are NOT the ones with the most time steps. They are the ones that turn
+`ApplyYourself`'s outer loop (a new `G4Fancy3DNucleus` each turn, 1.6 ms) or its inner loop (200
+impact points) many times: a pion near threshold that misses. So the straggler clock must count
+an outer-loop turn as well as a time step.
+
+**WHAT FIXES THE DESIGN.**
+
+* **K.** 64 for the Binary cascade (0.011-0.073% of the calls to the thread path, at most 1.2%
+  of the thread time), counted in time steps AND outer-loop turns; 160 for the light-ion reaction
+  (no reaction of 19,978 above it; its time steps are three times the Binary cascade's).
+* **The lists.** The Binary cascade's per-cascade lists fit 128 tracks (max 89) and 256
+  collisions (max 95) and 64 nucleons (max A 48); the light-ion reaction's 256 tracks (max 259:
+  the one call past it goes to the thread path), 512 collisions (max 303) and 64 nucleons a
+  nucleus (max 56). A call that would outgrow a flat list is handed to the thread path, whose
+  lists are the ion envelope (1,024 / 8,192 / 256), so a flat capacity is a performance choice and
+  never a physics one.
+* **The width.** Inside one cascade there are 2.6 (Binary) and 16 (light ion) secondaries to
+  transport per time step and 16 / 33 targets per pair search: P35's lesson, measured again - a
+  cascade's own parallelism is a few lanes. The width has to come from MANY cascades: the proton
+  beam's drains hold 1,780 Binary cascades on average and 7,246 at most (P34's deferred ring), the
+  Fe56 beam's ~200 reactions (V299). The flat pool's width is therefore set by memory, not by the
+  drain: at ~40 kB a cascade (below), 16,384 lanes are 0.66 GB.
+* **The nucleus in shared memory: NOT USEFUL, by construction.** Every cascade samples its own
+  `G4Fancy3DNucleus` (V300: 95% of a Binary cascade's draws are the nucleon positions and Fermi
+  momenta), so two lanes never hold the same target nucleons, even at the same A; the brief's
+  "a warp's 32 cascades share one nucleus" holds for A, not for the nucleus. Sorting the drain by
+  A would equalise loop trip counts, but A = 16 (oxygen) is 80% of every beam's mix already
+  (p50 = p90 = 16), so the sort's benefit is bounded by the 20% of lanes whose A differs, and it
+  is refused until a measurement shows divergence on A (V309).
+* **The bytes a time step touches**, from the record's layout (V308): one TRANSPORT item reads
+  and writes its `CascadeTrack` (2 x 136 B), copies the cascade's `RkPropagation` (720 B, an L1/L2
+  line for every item of the same cascade) and writes its transfer (24 B), plus the field tables'
+  few entries per Runge-Kutta substep - about 1.1 kB an item. A round of 16,384 proton-beam
+  cascades is ~42,000 items = 46 MB, 0.07 ms at the card's 653 GB/s; the per-cascade stages read
+  the record's live part (the pool's first 25 tracks, 3.4 kB, and the list) - another ~60 MB. So a
+  round is ~0.2 ms of bandwidth at full width: the bound is latency and divergence, not bytes,
+  and the layout need not change before the kernels do.
+* **The expected per-round time**: a round costs the slowest lane's stage. V300's per-phase times
+  (thread time on a one-lane warp: a time step's transport 0.33 ms, an apply 0.30 ms) and P32's
+  measured 8x per 32-lane warp (V285) give ~1-2 ms a round for a full-width proton drain; the
+  proton beam's 98,135 cascades at 7.4 steps + ~3 set-up / finish / tail rounds are ~1.0 million
+  cascade-rounds, 64 rounds of 16,384 - about 0.1-0.2 s of rounds where the thread path's
+  Binary bucket costs ~6 s today.
+* **The de-excitation after the rest is fast**: V300 measured it at 12.1% of a Binary cascade
+  and 20.4% of a light-ion reaction; it stays on the thread path's code on a tail slot (628 of
+  them, the slots the thread path owns and does not use while the flat drain runs). If the rest
+  shrinks 10x, the de-excitation is ~55% of what is left for the Binary cascade and ~70% for the
+  light-ion reaction - the brief's pitfall 8, named here before any code: the next package's.
