@@ -16,8 +16,54 @@
 #include <chrono>
 
 #include "host/transport_run_impl.cuh"
+#include "host/flat_drain.cuh"
 
 namespace g4gpu::host {
+
+// P36's defaults (docs/RISK.md V307-V308): the flat pool's width, the straggler bound K in a
+// cascade's own time steps, the hand-back list (a drain is at most the pending ring or one
+// iteration's queue, both under it), and the deferred ring's full width when the pool is on.
+inline constexpr int kFlatDefaultLanes = 16384;
+inline constexpr int kFlatDefaultK = 64;
+inline constexpr int kFlatStragCap = 1 << 18;
+inline constexpr int kFlatDefaultWide = 8192;
+// V310: the light-ion reaction's pool - V307: ~200 reactions a drain on the Fe56 beam, 21 time
+// steps and 16 secondaries in flight each, at most 149 steps, so K = 160 hands none back.
+inline constexpr int kFlatIonDefaultLanes = 2048;
+inline constexpr int kFlatIonDefaultK = 160;
+
+// P36 (docs/RISK.md V308-V311): the flat Binary cascade's pool and its run totals. Process
+// statics rather than members, so that the engine class - and with it transport_run.cuh, which
+// all twenty-seven units include - is not touched; a process runs one engine at a time.
+inline FlatPool& flat_pool_() {
+  static FlatPool p;
+  return p;
+}
+inline FlatPool& flat_ion_pool_() {
+  static FlatPool p;
+  return p;
+}
+inline FlatStats& flat_ion_stats_() {
+  static FlatStats s;
+  return s;
+}
+inline FlatStats& flat_stats_() {
+  static FlatStats s;
+  return s;
+}
+/// `G4GPU_CASCADE_FLAT=0` selects the one-thread path for every Binary cascade.
+/// `G4GPU_CASCADE_FLAT_WIDE=n`: the deferred ring's "full width" when the flat pool is on.
+inline int flat_wide_cap_() {
+  static const int v = [] {
+    const char* e = std::getenv("G4GPU_CASCADE_FLAT_WIDE");
+    return (e != nullptr) ? std::atoi(e) : kFlatDefaultWide;
+  }();
+  return v;
+}
+inline bool flat_requested_() {
+  const char* v = std::getenv("G4GPU_CASCADE_FLAT");
+  return !(v != nullptr && v[0] == '0');
+}
 
 // P34's deferred drain (docs/RISK.md V294; see `drain_interactions` in BeamOn): how many
 // iterations a queued interaction may wait for a full-width drain, and the pending ring's
@@ -755,6 +801,62 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // track_arena_half_bytes() in core/track_buffer.cuh turns that into bytes by dry-running
     // the same allocator the carve then walks. One function, so the number that picks the
     // batch and the number that is consumed cannot disagree.
+    // ---- P36: the flat Binary cascade's pool (docs/RISK.md V308, V311), BEFORE the batch, so
+    // the track buffers are sized from what it leaves. `G4GPU_CASCADE_FLAT_LANES=n` sets its
+    // width; `G4GPU_CASCADE_FLAT_K` the straggler bound. A hook project's engine keeps the
+    // thread path (its interaction units are its own), and so does a run that asks for it.
+    if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
+                  std::is_same<real_t, double>::value) {
+      if (flat_requested_() && !flat_pool_().ok()) {
+        int lanes = kFlatDefaultLanes;
+        int k = kFlatDefaultK;
+        if (const char* v = std::getenv("G4GPU_CASCADE_FLAT_LANES")) { lanes = std::atoi(v); }
+        if (const char* v = std::getenv("G4GPU_CASCADE_FLAT_K")) { k = std::atoi(v); }
+        if (lanes > 0) {
+          const std::size_t want = flat_binary_lane_bytes() * static_cast<std::size_t>(lanes);
+          size_t ff = 0, ft = 0;
+          cudaMemGetInfo(&ff, &ft);
+          host::PagingRequest r;
+          r.what = "the flat Binary cascade's pool";
+          r.asked = want;
+          r.free_bytes = ff;
+          r.total_bytes = ft;
+          r.card = host::select_device().prop.name;
+          host::refuse_if_paging(r);
+          flat_pool_() = flat_binary_pool_build(lanes, k, kFlatStragCap);
+          {
+            int il = kFlatIonDefaultLanes;
+            int ik = kFlatIonDefaultK;
+            if (const char* v = std::getenv("G4GPU_CASCADE_FLAT_ION_LANES")) { il = std::atoi(v); }
+            if (const char* v = std::getenv("G4GPU_CASCADE_FLAT_ION_K")) { ik = std::atoi(v); }
+            if (il > 0) {
+              size_t f2 = 0, t2 = 0;
+              cudaMemGetInfo(&f2, &t2);
+              host::PagingRequest r2;
+              r2.what = "the flat light-ion reaction's pool";
+              r2.asked = flat_ion_lane_bytes() * static_cast<std::size_t>(il);
+              r2.free_bytes = f2;
+              r2.total_bytes = t2;
+              r2.card = host::select_device().prop.name;
+              host::refuse_if_paging(r2);
+              flat_ion_pool_() = flat_ion_pool_build(il, ik, kFlatStragCap);
+              if (flat_ion_pool_().ok()) {
+                std::printf("flat light-ion reaction: %d lanes of %zu B, %.1f MB, K = %d "
+                            "(docs/RISK.md V310)\n",
+                            il, flat_ion_lane_bytes(), double(flat_ion_pool_().bytes) / 1048576.0,
+                            ik);
+              }
+            }
+          }
+          if (flat_pool_().ok()) {
+            std::printf("flat Binary cascade: %d lanes of %zu B (a record %zu B), %.1f MB, K = %d "
+                        "time steps (docs/RISK.md V308)\n",
+                        lanes, flat_binary_lane_bytes(), flat_pool_().record_bytes,
+                        double(flat_pool_().bytes) / 1048576.0, k);
+          }
+        }
+      }
+    }
     {
       size_t free_b = 0, total_b = 0;
       const cudaError_t mem_err = cudaMemGetInfo(&free_b, &total_b);
@@ -766,7 +868,12 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
           std::printf("batch: could not read device memory, defaulting to %d events\n", batch_);
         } else {
           // See SetMemoryFraction for why this is a share of free memory rather than all of it.
-          const size_t budget = static_cast<size_t>(static_cast<double>(free_b) * mem_fraction_);
+          // P36 (docs/RISK.md V308): the flat pool's bytes come out of the track buffers' share,
+          // so the interaction slots below are sized from the same free memory as before.
+          const size_t flat_b = flat_pool_().bytes + flat_ion_pool_().bytes;
+          const double share = static_cast<double>(free_b + flat_b) * mem_fraction_;
+          const size_t budget =
+              (share > static_cast<double>(flat_b)) ? static_cast<size_t>(share) - flat_b : 0;
           long long lo = 1024, hi = 4194304;
           while (lo < hi) {
             const long long mid = lo + (hi - lo + 1) / 2;
@@ -1856,8 +1963,60 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
   } while (0)
       G4GPU_DRAIN(had::InteractionBucket::kFtfp);
       G4GPU_DRAIN(had::InteractionBucket::kBertini);
-      G4GPU_DRAIN(had::InteractionBucket::kBinary);
-      G4GPU_DRAIN(had::InteractionBucket::kLightIon);
+      if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
+                    std::is_same<real_t, double>::value) {
+        constexpr int bb_ = static_cast<int>(had::InteractionBucket::kBinary);
+        if (flat_pool_().ok() && nb[bb_] > 0) {
+          // P36: the flat path (docs/RISK.md V309). What it hands back runs on the thread path
+          // in the same drain, from `strag`, before anything else steps.
+          prof.begin(LoopProfile::kIntBase + (bb_ - static_cast<int>(had::InteractionBucket::kFtfp)));
+          const int ns_ = flat_binary_drain(
+              flat_pool_(), scene_, items, d_qidx_, nb[bb_], qoff.base[bb_], out, stride,
+              d_win_score, d_voxel_score_, wiring, interaction_pool_.d_pool,
+              n_interaction_slots_, traj, d_status_warn_, sec_, bk, hook_, flat_stats_());
+          if (ns_ > 0) {
+            const int w_ = (ns_ < n_interaction_slots_) ? ns_ : n_interaction_slots_;
+            run_interaction<real_t, had::InteractionBucket::kBinary><<<w_, 1>>>(
+                scene_, items, flat_pool_().strag, ns_, 0, out, stride, d_win_score,
+                d_voxel_score_, wiring, interaction_pool_.d_pool, traj, d_status_warn_, sec_,
+                bk, hook_);
+            ++interaction_chunks_;
+          }
+          prof.end(LoopProfile::kIntBase + (bb_ - static_cast<int>(had::InteractionBucket::kFtfp)),
+                   nb[bb_]);
+        } else {
+          G4GPU_DRAIN(had::InteractionBucket::kBinary);
+        }
+      } else {
+        G4GPU_DRAIN(had::InteractionBucket::kBinary);
+      }
+      if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
+                    std::is_same<real_t, double>::value) {
+        constexpr int bl_ = static_cast<int>(had::InteractionBucket::kLightIon);
+        if (flat_ion_pool_().ok() && nb[bl_] > 0) {
+          // P36 (docs/RISK.md V310): the light-ion reaction's flat path; its hand-backs run on
+          // the thread path in the same drain.
+          prof.begin(LoopProfile::kIntBase + (bl_ - static_cast<int>(had::InteractionBucket::kFtfp)));
+          const int ns_ = flat_ion_drain(
+              flat_ion_pool_(), scene_, items, d_qidx_, nb[bl_], qoff.base[bl_], out, stride,
+              d_win_score, d_voxel_score_, wiring, interaction_pool_.d_pool,
+              n_interaction_slots_, traj, d_status_warn_, sec_, bk, hook_, flat_ion_stats_());
+          if (ns_ > 0) {
+            const int w_ = (ns_ < n_interaction_slots_) ? ns_ : n_interaction_slots_;
+            run_interaction<real_t, had::InteractionBucket::kLightIon><<<w_, 1>>>(
+                scene_, items, flat_ion_pool_().strag, ns_, 0, out, stride, d_win_score,
+                d_voxel_score_, wiring, interaction_pool_.d_pool, traj, d_status_warn_, sec_,
+                bk, hook_);
+            ++interaction_chunks_;
+          }
+          prof.end(LoopProfile::kIntBase + (bl_ - static_cast<int>(had::InteractionBucket::kFtfp)),
+                   nb[bl_]);
+        } else {
+          G4GPU_DRAIN(had::InteractionBucket::kLightIon);
+        }
+      } else {
+        G4GPU_DRAIN(had::InteractionBucket::kLightIon);
+      }
       G4GPU_DRAIN(had::InteractionBucket::kAtRest);
 #undef G4GPU_DRAIN
       // `kNone` is not drained and is not silent: the stepper booked `kNoInelasticModel` for
@@ -2597,7 +2756,12 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
             // when they would not fit the ring; otherwise this iteration's entries wait.
             const int total = pending_n + n_queued;
             const bool fits = total <= pending_cap;
-            const bool wide = total >= n_interaction_slots_;
+            // P36: a full-width drain is the flat pool's width when it runs the Binary bucket.
+            const int width_ = flat_pool_().ok()
+                                   ? std::max(n_interaction_slots_,
+                                              std::min(flat_pool_().lanes, flat_wide_cap_()))
+                                   : n_interaction_slots_;
+            const bool wide = total >= width_;
             const bool aged = pending_n > 0 && iteration - pending_from >= defer;
             if (wide || aged || !fits) {
               if (pending_n == 0) {
@@ -3037,6 +3201,26 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     // that it is a measured capacity rather than an implicit one: a run that does not say how
     // many interactions it produced and how many launches it took to run them has not made the
     // capacity visible, it has only made it invisible in a different place.
+    if (flat_stats_().entries > 0) {
+      const FlatStats& fs = flat_stats_();
+      std::printf("flat Binary cascade: %lld entries, %lld finished on %d lanes in %lld rounds "
+                  "(%lld launches); handed to the thread path: %lld straggler, %lld capacity, "
+                  "%lld refused, %lld hydrogen, %lld PreCompound, %lld re-entry; %lld tail waits "
+                  "(docs/RISK.md V309)\n",
+                  fs.entries, fs.finished, flat_pool_().lanes, fs.rounds, fs.launches,
+                  fs.handed[1], fs.handed[2], fs.handed[3], fs.handed[4], fs.handed[5],
+                  fs.handed[6], fs.tail_waits);
+    }
+    if (flat_ion_stats_().entries > 0) {
+      const FlatStats& fs = flat_ion_stats_();
+      std::printf("flat light-ion reaction: %lld entries, %lld finished on %d lanes in %lld rounds "
+                  "(%lld launches); handed to the thread path: %lld straggler, %lld capacity, "
+                  "%lld refused, %lld fusion, %lld re-entry; %lld tail waits "
+                  "(docs/RISK.md V310)\n",
+                  fs.entries, fs.finished, flat_ion_pool_().lanes, fs.rounds, fs.launches,
+                  fs.handed[1], fs.handed[2], fs.handed[3], fs.handed[5], fs.handed[6],
+                  fs.tail_waits);
+    }
     st.interactions = interactions_queued_;
     st.interaction_chunks = interaction_chunks_;
     st.max_queued_per_launch = max_queued_per_launch_;
