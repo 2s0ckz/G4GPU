@@ -78,6 +78,10 @@ enum HandOff : int {
   kHandHydrogen,       ///< A == 1: `Propagate1H1`, which is not cut into stages
   kHandPrecompound,    ///< a nucleon under `theBCminP`: PreCompound alone, no cascade
   kHandReentry,        ///< `CheckResult` refused 100 times
+  /// P41: a tail-pool lane whose compact de-excitation workspace bound found no slot-sized one
+  /// free within its bound (`TailFallback::spin_bound`) - the one tail case still rerun from
+  /// its key, reported by name (docs/RISK.md V326).
+  kHandTailScratch,
   kNumHandOff
 };
 
@@ -1004,18 +1008,74 @@ __host__ __device__ inline void flat_run_solo(FlatCascade<N, P, C>& c, const Fla
 }
 
 // =============================================================================================
-// kStTail, on a tail slot: what `Propagate` does after `FindFragments`, and the packing
-// `ApplyYourself` ends in. `store` is the slot's: its products, its PreCompound workspace and its
-// scratch. Returns true when the model call has its final state in `result`.
+// kStTail: what `Propagate` does after `FindFragments`, and the packing `ApplyYourself` ends in.
+// Returns true when the model call has its final state in `result`.
+//
+// P41 (docs/RISK.md V326): the buffers are the caller's, so that one body serves the two places
+// a tail runs - a thread-path slot (`ws` the slot's `CascadeWorkspace`, `decay_list` its
+// `BicScratch::decay_list` at `kCascadeMaxScratch`), and an entry of the wide tail pool
+// (deexcitation/flat/tail_pool.cuh: compact product lists and decay list, no `BicScratch`).
+// `ws.scratch` is read only by `DecayVoidNucleus` (an all-neutron remnant); a tail without one
+// hands the cascade back, and the drain never sends that case to a pool entry (`tail_needs_slot`).
+// The lines are the thread path's in the thread path's order: what changed is where the decay
+// list lives. Its capacity, and the product lists', are the slot's own, so no refusal arises
+// that the slot tail would not make. The ONE compact buffer is the de-excitation workspace
+// `pws`, and when it binds the call is CONTINUED, never rerun from the key: the generator is put
+// back where it was before the call - nothing else the call wrote is read again - and the same
+// call runs on a slot-sized workspace borrowed from `fb`. P39 measured why (the lead, 2026-11-20):
+// a rerun from the key is a different cascade, and the subset rerun is selected by the failure,
+// which biases the sample. `fb` null is the slot tail: the thread path's behaviour, unchanged.
 // =============================================================================================
+/// P41: did PreCompound or the handler run out of a buffer - the only refusals a compact
+/// de-excitation workspace can add to the slot's (the rest are functions of the fragment).
+__host__ __device__ inline bool tail_capacity_refused(const preco::PrecoStatus& s) {
+  return s.ref.capacity || s.deex.refused_capacity;
+}
+
+/// P41: the slot-sized de-excitation workspaces (536,576 B each: the slot's 4,096 / 1,024 / 512 /
+/// 1,024 / 1,024) a pool lane borrows when its compact one binds. A flag a workspace; a lane that
+/// finds none free retries at most `spin_bound` times and is then handed back by name
+/// (`kHandTailScratch`) - a bound, so that no lane can wait forever (P39's 2 h 44 min hang).
+struct TailFallback {
+  const preco::PrecoWorkspace* big = nullptr;
+  int* busy = nullptr;
+  int n = 0;
+  int spin_bound = 1 << 20;
+  __host__ __device__ int acquire() const {
+#ifdef __CUDA_ARCH__
+    atomicAdd(&busy[n], 1);   // busy[n] counts the continuations, for the run's report
+#else
+    ++busy[n];
+#endif
+    for (int s = 0; s < spin_bound; ++s) {
+      for (int k = 0; k < n; ++k) {
+#ifdef __CUDA_ARCH__
+        if (atomicCAS(&busy[k], 0, 1) == 0) { __threadfence(); return k; }
+#else
+        if (busy[k] == 0) { busy[k] = 1; return k; }
+#endif
+      }
+    }
+    return -1;
+  }
+  __host__ __device__ void release(int k) const {
+#ifdef __CUDA_ARCH__
+    __threadfence();
+    atomicExch(&busy[k], 0);
+#else
+    busy[k] = 0;
+#endif
+  }
+};
+
 template <int N, int P, int C>
-__host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicStorage& store,
+__host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const CascadeWorkspace& ws,
+                                           DecayTrack* decay_list, int decay_capacity,
                                            const data::LevelTable& lt,
                                            const deex::FermiPool& fpool,
-                                           const preco::PrecoWorkspace& pws) {
+                                           const preco::PrecoWorkspace& pws,
+                                           const TailFallback* fb = nullptr) {
   BicCascadeState& st = c.st;
-  BicScratch& scr = *store.cascade.scratch;
-  const CascadeWorkspace& ws = store.cascade;
   CascadeRefusal ref;
   if (c.tail_work == kTailVoid) {
     VoidReport vrep;
@@ -1035,8 +1095,24 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicSto
     const CascadeFragment& frag = c.frag;
     if (frag.a > 1) {
       bool overflow = false;
+      const Philox<double> rng_before = c.rng;
       n_preco = bic_deexcite_fragment(frag, ws.preco_products, ws.preco_capacity, lt, fpool,
                                       pws, c.rng, status, overflow);
+      // P41: the compact workspace bound - the same call again, from the same generator
+      // position, on a slot-sized workspace (the continuation; see above).
+      if (fb != nullptr && tail_capacity_refused(status)) {
+        const int k = fb->acquire();
+        if (k < 0) {
+          flat_hand_off(c, kHandTailScratch);
+          return false;
+        }
+        c.rng = rng_before;
+        overflow = false;
+        status = preco::PrecoStatus{};
+        n_preco = bic_deexcite_fragment(frag, ws.preco_products, ws.preco_capacity, lt, fpool,
+                                        fb->big[k], c.rng, status, overflow);
+        fb->release(k);
+      }
       if (overflow) {
         flat_hand_off(c, kHandCapacity);
         return false;
@@ -1066,15 +1142,19 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicSto
       ws.preco_products[0].parent_resonance_id = t.parent_resonance_id;
       n_preco = 1;
     } else {
-      n_preco = decay_void_nucleus(st, ws.preco_products, ws.preco_capacity, bic_model_id(), scr,
-                                   c.rng, ref);
+      if (ws.scratch == nullptr) {
+        flat_hand_off(c, kHandCapacity);
+        return false;
+      }
+      n_preco = decay_void_nucleus(st, ws.preco_products, ws.preco_capacity, bic_model_id(),
+                                   *ws.scratch, c.rng, ref);
       if (ref.any()) {
         flat_hand_off(c, ref.capacity ? kHandCapacity : kHandRefused);
         return false;
       }
     }
     // `G4DecayKineticTracks decay(&theFinalState)`, as `propagate` ends.
-    DecayTrack* dl = scr.decay_list;
+    DecayTrack* dl = decay_list;
     int n = 0;
     for (int seq = 0; seq < st.n_final_pushed; ++seq) {
       int i = -1;
@@ -1086,7 +1166,7 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicSto
       }
       if (i < 0) { continue; }
       const CascadeTrack& t = st.lists.pool[i];
-      if (n >= kCascadeMaxScratch) {
+      if (n >= decay_capacity) {
         flat_hand_off(c, kHandCapacity);
         return false;
       }
@@ -1103,7 +1183,7 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicSto
     }
     KineticDecayRefusal kref;
     int m = n;
-    decay_kinetic_tracks(dl, m, kCascadeMaxScratch, c.rng, kref);
+    decay_kinetic_tracks(dl, m, decay_capacity, c.rng, kref);
     if (kref.any()) {
       flat_hand_off(c, kHandRefused);
       return false;
@@ -1165,6 +1245,14 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const BicSto
 /// arm is `apply_yourself`'s six lines around `preco::deexcite`, the packing included. Returns
 /// false when the record was handed back (a refusal the thread path books).
 template <int N, int P, int C>
+__host__ __device__ inline bool flat_tail_precompound(FlatCascade<N, P, C>& c,
+                                                      const data::LevelTable& lt,
+                                                      const deex::FermiPool& fpool,
+                                                      const preco::PrecoWorkspace& pws,
+                                                      BicFinalState& result,
+                                                      const TailFallback* fb = nullptr);
+
+template <int N, int P, int C>
 __host__ __device__ inline bool flat_tail_direct(FlatCascade<N, P, C>& c, BicStorage& store,
                                                  const data::LevelTable& lt,
                                                  const deex::FermiPool& fpool,
@@ -1185,6 +1273,21 @@ __host__ __device__ inline bool flat_tail_direct(FlatCascade<N, P, C>& c, BicSto
     }
     return true;
   }
+  return flat_tail_precompound(c, lt, fpool, pws, result);
+}
+
+/// The PreCompound arm alone (`kTailPrecompound`): `apply_yourself`'s six lines around
+/// `preco::deexcite`, the packing included, into `result`. P41: its own function because it needs
+/// no `BicStorage` - only the de-excitation workspace - so the wide tail pool runs it on an entry
+/// (docs/RISK.md V326); `flat_tail_direct` calls it for the slot's tail. `result` is cleared by
+/// the caller.
+template <int N, int P, int C>
+__host__ __device__ inline bool flat_tail_precompound(FlatCascade<N, P, C>& c,
+                                                      const data::LevelTable& lt,
+                                                      const deex::FermiPool& fpool,
+                                                      const preco::PrecoWorkspace& pws,
+                                                      BicFinalState& result,
+                                                      const TailFallback* fb) {
   preco::Excitons ex;
   bool preco_refused = false;
   const deex::Fragment frag = preco::apply_yourself_initial_fragment(
@@ -1193,10 +1296,24 @@ __host__ __device__ inline bool flat_tail_direct(FlatCascade<N, P, C>& c, BicSto
     flat_hand_off(c, kHandRefused);
     return false;
   }
-  const preco::PrecoStatus status = preco::deexcite(frag, ex, lt, fpool, pws, c.rng);
+  const Philox<double> rng_before = c.rng;
+  preco::PrecoStatus status = preco::deexcite(frag, ex, lt, fpool, pws, c.rng);
+  const preco::PrecoWorkspace* used = &pws;
+  int borrowed = -1;
+  if (fb != nullptr && tail_capacity_refused(status)) {
+    // P41: continued from the same generator position on a slot-sized workspace.
+    borrowed = fb->acquire();
+    if (borrowed < 0) {
+      flat_hand_off(c, kHandTailScratch);
+      return false;
+    }
+    c.rng = rng_before;
+    used = &fb->big[borrowed];
+    status = preco::deexcite(frag, ex, lt, fpool, *used, c.rng);
+  }
   result.status = physics::hadronic::HadFinalStateStatus::kStopAndKill;
   for (int i = 0; i < status.n_products; ++i) {
-    const deex::DeexProduct& p = pws.products[i];
+    const deex::DeexProduct& p = used->products[i];
     physics::hadronic::HadSecondary<double> s;
     s.pdg = p.pdg;
     s.z = p.z;
@@ -1209,10 +1326,12 @@ __host__ __device__ inline bool flat_tail_direct(FlatCascade<N, P, C>& c, BicSto
                   : ((p.pdg == deex::kPdgElectron) ? u::electron_mass_c2<double>() : 0.0);
     capture::set_four_momentum(s, p.momentum, pdg_mass);
     if (!result.add_secondary(s)) {
+      if (borrowed >= 0) { fb->release(borrowed); }
       flat_hand_off(c, kHandCapacity);
       return false;
     }
   }
+  if (borrowed >= 0) { fb->release(borrowed); }
   return true;
 }
 

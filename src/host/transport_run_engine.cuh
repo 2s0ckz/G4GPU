@@ -65,6 +65,79 @@ inline bool flat_requested_() {
   return !(v != nullptr && v[0] == '0');
 }
 
+// ---- P41 (docs/RISK.md V328): the thread-path drains BESIDE the flat ones. Once the flat tails
+// left the interaction slots (V326), the slots are the thread-path drains' alone, so the kFtfp
+// and kAtRest drains (FTF's workspaces), the kBertini drain and the flat drains' own slot users
+// (the hand-backs and the A == 1 / void-nucleus tails) get DISJOINT slot ranges - each a device
+// view of the one pool with its `slots` moved (`flat_pool_range`) - and the first two run on
+// streams of their own while the flat Binary and light-ion drains run on the main stream. P37
+// measured that this card runs kernels of separate streams together (V303-V304); V294's
+// non-identity was a range shared by two streams, which the ranges here exclude by
+// construction.
+//
+// OFF BY DEFAULT, BY MEASUREMENT (V328): on the pion beam the three thread-path drains' 1.9 s ran
+// beside the flat Binary drain and the flat drain grew by 1.8 s - its per-round reap and
+// read-back 0.14 -> 1.59 s, its small kernels queued behind the 255-register, one-thread-a-block
+// FTF and Bertini kernels holding the SMs - so the beam moved 8.45 -> 8.43 s (pion) and 5.70 ->
+// 5.70 s (proton 10 GeV), inside the run-to-run spread. `G4GPU_DRAIN_STREAMS=1` turns it on;
+// `G4GPU_DRAIN_FLAT_SLOTS=n` sets the flat drains' range (default 128).
+struct P41DrainLanes {
+  bool built = false;
+  bool ok = false;
+  const had::InteractionPool<double>* flat = nullptr;
+  int n_flat = 0;
+  const had::InteractionPool<double>* ftf = nullptr;
+  int n_ftf = 0;
+  const had::InteractionPool<double>* bert = nullptr;
+  int n_bert = 0;
+  cudaStream_t s_ftf = nullptr, s_bert = nullptr;
+  cudaEvent_t fork = nullptr, done_ftf = nullptr, done_bert = nullptr;
+};
+inline P41DrainLanes& p41_drain_lanes_() {
+  static P41DrainLanes l;
+  return l;
+}
+inline bool p41_drain_streams_() {
+  static const bool v = [] {
+    const char* e = std::getenv("G4GPU_DRAIN_STREAMS");
+    return e != nullptr && e[0] == '1';
+  }();
+  return v;
+}
+/// The ranges, built once a run from the pool's view: [0, n_flat) the flat drains', the next
+/// `n_ftf_slots` FTF's (its workspaces are indexed by the same thread index from 0), the rest
+/// Bertini's. Refused - the drains then run one after the other - when Bertini's range would
+/// be under 64 slots.
+inline P41DrainLanes& p41_drain_lanes_build_(const had::InteractionPool<double>* d_pool,
+                                            int n_slots, int n_ftf_slots) {
+  P41DrainLanes& l = p41_drain_lanes_();
+  if (l.built) { return l; }
+  l.built = true;
+  int nf = 128;
+  if (const char* e = std::getenv("G4GPU_DRAIN_FLAT_SLOTS")) { nf = std::max(1, std::atoi(e)); }
+  const int nftf = std::min(n_ftf_slots, n_slots);
+  const int nb = n_slots - nf - nftf;
+  if (d_pool == nullptr || nb < 64) { return l; }
+  l.flat = flat_pool_range(d_pool, 0, nf, false);
+  l.ftf = flat_pool_range(d_pool, nf, nftf, true);
+  l.bert = flat_pool_range(d_pool, nf + nftf, nb, false);
+  if (l.flat == nullptr || l.ftf == nullptr || l.bert == nullptr) { return l; }
+  l.n_flat = nf;
+  l.n_ftf = nftf;
+  l.n_bert = nb;
+  G4GPU_CUDA_CHECK(cudaStreamCreateWithFlags(&l.s_ftf, cudaStreamNonBlocking));
+  G4GPU_CUDA_CHECK(cudaStreamCreateWithFlags(&l.s_bert, cudaStreamNonBlocking));
+  G4GPU_CUDA_CHECK(cudaEventCreateWithFlags(&l.fork, cudaEventDisableTiming));
+  G4GPU_CUDA_CHECK(cudaEventCreateWithFlags(&l.done_ftf, cudaEventDisableTiming));
+  G4GPU_CUDA_CHECK(cudaEventCreateWithFlags(&l.done_bert, cudaEventDisableTiming));
+  l.ok = true;
+  std::printf("thread-path drains beside the flat ones: slots [0, %d) the flat drains', [%d, %d) "
+              "kFtfp and kAtRest's, [%d, %d) kBertini's (docs/RISK.md V328)\n",
+              nf, nf, nf + nftf, nf + nftf, n_slots);
+  return l;
+}
+// ---- end P41
+
 // P34's deferred drain (docs/RISK.md V294; see `drain_interactions` in BeamOn): how many
 // iterations a queued interaction may wait for a full-width drain, and the pending ring's
 // entries (16,384 x 408 B = 6.7 MB, inside Upload's 512 MB margin).
@@ -1978,6 +2051,96 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
     }                                                                                        \
     if (nb[b_] > 0) { prof.end(pc_, nb[b_]); }                                               \
   } while (0)
+      // ---- P41 (docs/RISK.md V328): the thread-path drains BESIDE the flat drains. kFtfp then
+      // kAtRest (FTF's workspaces) on one stream, kBertini on another, each on its own range of
+      // slots (`p41_drain_lanes_build_`), while the flat Binary and light-ion drains - and the
+      // hand-backs and slot tails they run on the flat range - go on the main stream as before.
+      // Every drain reads the binned queue and writes the track buffer by atomics, as the
+      // buckets of one launch always did; no two of them share a slot or a workspace. The main
+      // stream waits for both before anything steps.
+      bool p41_conc = false;
+      if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
+                    std::is_same<real_t, double>::value) {
+        if (!chunked && p41_drain_streams_() && flat_pool_().ok() &&
+            flat_pool_().tail_width > 0) {
+          P41DrainLanes& L = p41_drain_lanes_build_(interaction_pool_.d_pool,
+                                                    n_interaction_slots_,
+                                                    interaction_pool_.n_ftf_slots);
+          p41_conc = L.ok;
+          if (p41_conc) {
+#define P41_DRAIN_ON(BUCKET, STRM, VIEW, W)                                                    \
+  do {                                                                                         \
+    const int b_ = static_cast<int>(BUCKET);                                                   \
+    if (nb[b_] > 0) {                                                                          \
+      const int width_ = (nb[b_] < (W)) ? nb[b_] : (W);                                        \
+      const int th_ = (kIth < width_) ? kIth : width_;                                         \
+      run_interaction<real_t, BUCKET><<<width_ / th_, th_, 0, STRM>>>(                         \
+          scene_, items, d_qidx_, nb[b_], qoff.base[b_], out, stride, d_win_score,             \
+          d_voxel_score_, wiring, VIEW, traj, d_status_warn_, sec_, bk, hook_);                \
+      ++interaction_chunks_;                                                                   \
+      prof.launch();                                                                           \
+      prof.count_only(LoopProfile::kIntBase + (b_ - static_cast<int>(had::InteractionBucket::kFtfp)), \
+                      nb[b_]);                                                                 \
+    }                                                                                          \
+  } while (0)
+            G4GPU_CUDA_CHECK(cudaEventRecord(L.fork, 0));
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(L.s_ftf, L.fork, 0));
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(L.s_bert, L.fork, 0));
+            P41_DRAIN_ON(had::InteractionBucket::kFtfp, L.s_ftf, L.ftf, L.n_ftf);
+            P41_DRAIN_ON(had::InteractionBucket::kAtRest, L.s_ftf, L.ftf, L.n_ftf);
+            P41_DRAIN_ON(had::InteractionBucket::kBertini, L.s_bert, L.bert, L.n_bert);
+#undef P41_DRAIN_ON
+            G4GPU_CUDA_CHECK(cudaEventRecord(L.done_ftf, L.s_ftf));
+            G4GPU_CUDA_CHECK(cudaEventRecord(L.done_bert, L.s_bert));
+            constexpr int bb_ = static_cast<int>(had::InteractionBucket::kBinary);
+            if (nb[bb_] > 0) {
+              prof.begin(LoopProfile::kIntBase + (bb_ - static_cast<int>(had::InteractionBucket::kFtfp)));
+              const int ns_ = flat_binary_drain(
+                  flat_pool_(), scene_, items, d_qidx_, nb[bb_], qoff.base[bb_], out, stride,
+                  d_win_score, d_voxel_score_, wiring, L.flat, L.n_flat, traj, d_status_warn_,
+                  sec_, bk, hook_, flat_stats_());
+              if (ns_ > 0) {
+                const int w_ = (ns_ < L.n_flat) ? ns_ : L.n_flat;
+                run_interaction<real_t, had::InteractionBucket::kBinary><<<w_, 1>>>(
+                    scene_, items, flat_pool_().strag, ns_, 0, out, stride, d_win_score,
+                    d_voxel_score_, wiring, L.flat, traj, d_status_warn_, sec_, bk, hook_);
+                ++interaction_chunks_;
+              }
+              prof.end(LoopProfile::kIntBase + (bb_ - static_cast<int>(had::InteractionBucket::kFtfp)),
+                       nb[bb_]);
+            }
+            constexpr int bl_ = static_cast<int>(had::InteractionBucket::kLightIon);
+            if (nb[bl_] > 0) {
+              prof.begin(LoopProfile::kIntBase + (bl_ - static_cast<int>(had::InteractionBucket::kFtfp)));
+              if (flat_ion_pool_().ok()) {
+                const int ns_ = flat_ion_drain(
+                    flat_ion_pool_(), scene_, items, d_qidx_, nb[bl_], qoff.base[bl_], out,
+                    stride, d_win_score, d_voxel_score_, wiring, L.flat, L.n_flat, traj,
+                    d_status_warn_, sec_, bk, hook_, flat_ion_stats_());
+                if (ns_ > 0) {
+                  const int w_ = (ns_ < L.n_flat) ? ns_ : L.n_flat;
+                  run_interaction<real_t, had::InteractionBucket::kLightIon><<<w_, 1>>>(
+                      scene_, items, flat_ion_pool_().strag, ns_, 0, out, stride, d_win_score,
+                      d_voxel_score_, wiring, L.flat, traj, d_status_warn_, sec_, bk, hook_);
+                  ++interaction_chunks_;
+                }
+              } else {
+                const int w_ = (nb[bl_] < L.n_flat) ? nb[bl_] : L.n_flat;
+                run_interaction<real_t, had::InteractionBucket::kLightIon><<<w_, 1>>>(
+                    scene_, items, d_qidx_, nb[bl_], qoff.base[bl_], out, stride, d_win_score,
+                    d_voxel_score_, wiring, L.flat, traj, d_status_warn_, sec_, bk, hook_);
+                ++interaction_chunks_;
+              }
+              prof.end(LoopProfile::kIntBase + (bl_ - static_cast<int>(had::InteractionBucket::kFtfp)),
+                       nb[bl_]);
+            }
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(0, L.done_ftf, 0));
+            G4GPU_CUDA_CHECK(cudaStreamWaitEvent(0, L.done_bert, 0));
+          }
+        }
+      }
+      if (!p41_conc) {
+      // ---- end P41 (and its closing brace after kAtRest's drain below)
       G4GPU_DRAIN(had::InteractionBucket::kFtfp);
       G4GPU_DRAIN(had::InteractionBucket::kBertini);
       if constexpr (std::is_same<StepHook, StepTap<double>>::value &&
@@ -2035,6 +2198,7 @@ RunStats TransportEngine<real_t, StepHook>::BeamOn(int n_events, const Primary<r
         G4GPU_DRAIN(had::InteractionBucket::kLightIon);
       }
       G4GPU_DRAIN(had::InteractionBucket::kAtRest);
+      }  // P41: !p41_conc
 #undef G4GPU_DRAIN
       // `kNone` is not drained and is not silent: the stepper booked `kNoInelasticModel` for
       // every entry in it before it enqueued, and an entry with no model has no kernel to run.

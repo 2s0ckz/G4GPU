@@ -50,6 +50,29 @@ struct IonPolicy {
     had::copy_final_state<double>(s.blir_fs, s.fs);
     return true;
   }
+
+  // ---- P41 (docs/RISK.md V325, V327): the tail pool. The light-ion arm's products (85 at most,
+  // V680/V325) and `SortResult`'s two lists at 256; the final state 168 = the model's own
+  // `BlirFinalState`, so `copy_final_state` never counts an overflow the slot would not.
+  using TailCaps = deex::flat::IonTailCaps;
+  using Tail = deex::flat::TailEntry<TailCaps, bic::BlirFinalState>;
+  static constexpr int kTailWidth = 1024;
+  static constexpr int kTailEmitWidth = 128;
+  static constexpr int kTailPoolMin = kTailWidth;
+  static constexpr int kTailPoolBlock = 1;
+  __device__ static int tail_bin(const bic::flat::FlatCascade<kN, kP, kC>& c) {
+    return deex::flat::tail_cost_bin(c);
+  }
+  /// `blir_cascade_arm` after `Interact` into the entry's `BlirFinalState`; a compact handler
+  /// workspace that binds is continued on a slot-sized one (`fb`).
+  __device__ static bool pack_entry(Rec& r, Tail& t, const had::InteractionPool<double>& pool,
+                                    const data::LevelTable& lt,
+                                    const preco::PrecoWorkspace& pws,
+                                    const bic::flat::TailFallback* fb) {
+    bic::BlirStorage store = deex::flat::tail_blir_view(t);
+    return bic::flat::ion_pack(r, store, lt, pool.fermi, pws, t.model_fs, fb,
+                               t.cascaders_save) == bic::flat::kIonFinalState;
+  }
 };
 
 }  // namespace

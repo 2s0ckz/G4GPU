@@ -23,10 +23,13 @@
 // another lane: which lane, which round or which tail slot an entry got moves time, not numbers.
 #pragma once
 
+#include <vector>
+
 #include "host/flat_drain.cuh"
 #include "host/transport_run_int_impl.cuh"
 #include "physics/hadronic/bic/flat/ion_flat.cuh"
 #include "physics/hadronic/npool/nucleus_factory_launch.cuh"
+#include "physics/hadronic/deexcitation/flat/tail_pool.cuh"
 
 namespace g4gpu::host::flatk {
 
@@ -45,7 +48,7 @@ enum FlatCounter : int {
   kFcTailWait,
   kFcSetupN,        ///< lanes in `kStModel` / `kStNucleus`, listed in `setup_list`
   kFcStepN,         ///< lanes in a step or finish stage
-  kFcTailN,         ///< lanes in `kStTail`, listed in `tail_list`
+  kFcTailN,         ///< lanes in `kStTail` that need a slot, listed in `tail_list`
   // P39's set-up counters (summed over the drain; printed with `G4GPU_FLAT_PROFILE=1`):
   kFcSetupNuc,      ///< set-ups that reached the nucleus (an outer-loop turn, a light-ion call)
   kFcSetupRetry,    ///< ... of a record that had had a nucleus set-up before
@@ -54,8 +57,13 @@ enum FlatCounter : int {
   kFcSoloN,         ///< stragglers waiting for `flat_solo`, listed in `solo_list`
   kFcSolo,          ///< stragglers finished on their own lane, over the drain
   kFcHand0,         ///< + `bf::HandOff`
-  kFcNum = kFcHand0 + 8
+  /// P41: lanes in `kStTail` waiting for a pool entry, by cost bin (`tail_bins`).
+  kFcBin0 = kFcHand0 + 8,
+  kFcNum = kFcBin0 + 16
 };
+
+/// P41: how many cost bins the pool's waiting tails are sorted into (`Pol::tail_bin`).
+constexpr int kTailBins = 16;
 
 /// Per-entry transport state the model record does not carry.
 struct FlatEntry {
@@ -77,6 +85,10 @@ struct FlatArgs {
   int* tail_list;
   int* solo_list;         ///< P39: stragglers waiting for `flat_solo`
   int solo;               ///< P39: stragglers run solo (the factory is on), not handed back
+  /// P41: the pool's waiting tails, `kTailBins` lists of `bin_stride` lanes; null when the run
+  /// has no tail pool (every tail then takes a slot, as before).
+  int* tail_bins;
+  int bin_stride;
   int lanes;
   int item_capacity;
   int k_steps;
@@ -321,79 +333,25 @@ __global__ void flat_finish(FlatArgs<Pol> a, const had::InteractionPool<double>*
   }
 }
 
-// ---- tail: on a tail slot, the end of the model call and `run_interaction_entry`'s tail.
+// ---- the emission: `run_interaction_entry` around the model call (transport_run_int_impl.cuh),
+// from a final state `fs` of any capacity and its definition masses, through `filled`.
 //
 // From the model's packing on, this is interaction_apply.cuh's and transport_run_int_impl.cuh's
-// code with the slot the tail claimed: `copy_final_state`, `run_inelastic`'s `CheckResult`
-// re-entry loop (a rejection sends the record back to `kStModel` with its generator where it
-// is, which is the loop's next `ApplyYourself`), the K0 mixing, `fill_result_into` and the
-// emission. Written out here rather than shared, so that transport_run_int_impl.cuh - and with
+// code: `fill_result_into` (templated on the source capacity, so the pool's compact final state
+// and the slot's 856-wide one go through the same lines), the emission, the score, the hook and
+// the requeue. Written out here rather than shared, so that transport_run_int_impl.cuh - and with
 // it the seven interaction units - stays as it is (docs/RISK.md V308 names the duplication).
-template <class Pol>
-__global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<double> out,
-                          int batch, double* score, double* voxel_score,
-                          had::HadronicWiring<double> had,
-                          const had::InteractionPool<double>* pool_ptr, int n_tail_slots,
-                          vis::TrajectoryBuffer traj, int* status_warn, SecondaryArena sec,
-                          EmitterBooks books, StepTap<double> hook, int n_list) {
+// P41 (V326) made it one function for the slot's tail and the pool's emission kernel.
+template <int kCap>
+__device__ __noinline__ void flat_emit(
+    const had::PendingInteraction<double>& q, const had::InteractionOutcome& outc,
+    physics::hadronic::HadFinalState<double, kCap>& fs, const double* pdg_mass,
+    physics::hadronic::HadronicStepResult<double, had::kInteractionSecondaryCap>& filled,
+    const Scene<double>& scene, TrackBuffer<double> out, int batch, double* score,
+    double* voxel_score, const had::HadronicWiring<double>& had,
+    const had::InteractionPool<double>& pool, int* status_warn, SecondaryArena sec,
+    EmitterBooks books, StepTap<double> hook) {
   using real_t = double;
-  const int k_ = blockIdx.x * blockDim.x + threadIdx.x;
-  if (k_ >= n_list || k_ >= n_tail_slots) { return; }
-  const int lane = a.tail_list[k_];
-  typename Pol::Rec& r = a.rec[lane];
-  bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(r);
-  if (c.stage != bf::kStTail) { return; }
-  const int slot_index = k_;
-  const had::InteractionPool<real_t>& pool = *pool_ptr;
-  had::InteractionSlot<real_t>* slot = pool.slot(slot_index);
-  FlatEntry& en = a.ent[lane];
-  const had::PendingInteraction<real_t>& q = a.q[en.qi];
-
-  had::InteractionOutcome outc;
-  if (en.rejected) {
-    outc.rejected_by_integral_xs = true;
-  } else {
-    const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(*slot);
-    bic::BicStorage store = had::bic_storage_of<real_t>(*slot, pool, pws);
-    if (c.tail_work == bf::kTailHydrogen || c.tail_work == bf::kTailPrecompound) {
-      if (!bf::flat_tail_direct(c, store, had.level_data, pool.fermi, pws, slot->bic_fs)) {
-        return;
-      }
-      had::copy_final_state<real_t>(slot->bic_fs, slot->fs);
-    } else if (!bf::stage_tail(c, store, had.level_data, pool.fermi, pws) ||
-               !Pol::pack(r, *slot, pool, had.level_data, pws)) {
-      return;  // back to the flat stages, or handed to the thread path
-    }
-    // `run_inelastic`'s step 6, from `slot->fs` (the model's `copy_final_state` is `pack`'s).
-    for (int i = 0; i < slot->fs.n_secondaries; ++i) {
-      slot->pdg_mass[i] = had::definition_mass_of<real_t>(slot->fs.secondaries[i]);
-    }
-    const fhp::HadProjectile<real_t> proj = flat_projectile(q);
-    const fhp::FatalEnergyCheckLevels<real_t> levels{};
-    const real_t target_mass = static_cast<real_t>(deex::nuclear_mass(en.target_a, en.target_z));
-    real_t delta_e = real_t(0);
-    const fhp::CheckResultVerdict v = fhp::check_result<real_t, had::kInteractionSecondaryCap>(
-        proj, target_mass, slot->fs, levels, slot->pdg_mass, &delta_e);
-    if (v != fhp::CheckResultVerdict::kAccept) {
-      if (++en.attempts >= 100) { return bf::flat_hand_off(c, bf::kHandReentry); }
-      c.stage = bf::kStModel;
-      return;
-    }
-    for (int i = 0; i < slot->fs.n_secondaries; ++i) {
-      const int pc = slot->fs.secondaries[i].pdg;
-      if (pc == 311 || pc == -311) {
-        slot->fs.secondaries[i].pdg = (c.rng.uniform() > real_t(0.5)) ? 310 : 130;
-      }
-    }
-    outc.model = Pol::kModel;
-    outc.target_z = en.target_z;
-    outc.target_a = en.target_a;
-    outc.attempts = en.attempts;
-    outc.n_secondaries = slot->fs.n_secondaries;
-    outc.ran = true;
-  }
-
-  // ---- `run_interaction_entry` around the model call (transport_run_int_impl.cuh).
   TrackState<real_t> p = q.track;
   int vcell = -1;
   if (q.score_slot >= 0 && q.volume_pre >= 0 && voxel_score != nullptr) {
@@ -426,22 +384,21 @@ __global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<doub
   if (outc.rejected_by_integral_xs) {
     alive = (p.ekin > em::kHadronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld);
   } else if (outc.ran) {
-    had::fill_result_into<real_t, had::kInteractionSecondaryCap, had::kInteractionSecondaryCap>(
-        slot->fs, p.dir, p.global_time, p.weight,
-        /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), slot->pdg_mass,
-        slot->filled);
-    edep += slot->filled.local_energy_deposit;
-    srep.non_ionizing += slot->filled.non_ionizing_energy_deposit;
+    had::fill_result_into<real_t, kCap, had::kInteractionSecondaryCap>(
+        fs, p.dir, p.global_time, p.weight,
+        /*has_at_rest_processes=*/had::has_at_rest_arm(q.species), pdg_mass, filled);
+    edep += filled.local_energy_deposit;
+    srep.non_ionizing += filled.non_ionizing_energy_deposit;
     em.pos = p.pos;
     em.volume = p.volume;
     em.event = p.event;
-    had::emit_interaction_result<real_t>(slot->filled, em, had.books);
+    had::emit_interaction_result<real_t>(filled, em, had.books);
     if (pool.ftfp_tape_max > 0) {
-      had::norow_tape_rows<real_t>(pdg_code(q.species), outc.ftf_ran, slot->filled);
+      had::norow_tape_rows<real_t>(pdg_code(q.species), outc.ftf_ran, filled);
     }
-    if (slot->filled.status == fhp::TrackStatusChange::kAlive) {
-      p.ekin = slot->filled.energy;
-      p.dir = slot->filled.momentum_direction;
+    if (filled.status == fhp::TrackStatusChange::kAlive) {
+      p.ekin = filled.energy;
+      p.dir = filled.momentum_direction;
       alive = (p.ekin > em::kHadronTrackingCut<real_t>() && p.volume != geom::kOutsideWorld);
     } else {
       p.ekin = real_t(0);
@@ -459,7 +416,6 @@ __global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<doub
       atomicAdd(&voxel_score[vcell], static_cast<double>(edep));
     }
   }
-  (void)traj;
   DeviceStep<real_t> ds{};
   ds.species = q.species;
   p.species = q.species;
@@ -493,10 +449,244 @@ __global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<doub
     atomicAdd(status_warn, 1);
   }
   if (requeue) { out.append(p); }
+}
+
+/// `run_inelastic`'s step 6 and its `CheckResult` re-entry, and the K0 mixing, on a final state
+/// `fs` with `pdg_mass` beside it (interaction_apply.cuh's lines, as the slot's tail ran them).
+/// Returns false when `CheckResult` refused: the record is back at `kStModel` with its generator
+/// where it is - the loop's next `ApplyYourself` - or, after 100, handed back.
+template <class Pol, int kCap>
+__device__ inline bool flat_check_and_mix(bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c,
+                                          FlatEntry& en,
+                                          const had::PendingInteraction<double>& q,
+                                          physics::hadronic::HadFinalState<double, kCap>& fs,
+                                          double* pdg_mass) {
+  using real_t = double;
+  for (int i = 0; i < fs.n_secondaries; ++i) {
+    pdg_mass[i] = had::definition_mass_of<real_t>(fs.secondaries[i]);
+  }
+  const fhp::HadProjectile<real_t> proj = flat_projectile(q);
+  const fhp::FatalEnergyCheckLevels<real_t> levels{};
+  const real_t target_mass = static_cast<real_t>(deex::nuclear_mass(en.target_a, en.target_z));
+  real_t delta_e = real_t(0);
+  const fhp::CheckResultVerdict v =
+      fhp::check_result<real_t, kCap>(proj, target_mass, fs, levels, pdg_mass, &delta_e);
+  if (v != fhp::CheckResultVerdict::kAccept) {
+    if (++en.attempts >= 100) {
+      bf::flat_hand_off(c, bf::kHandReentry);
+    } else {
+      c.stage = bf::kStModel;
+    }
+    return false;
+  }
+  for (int i = 0; i < fs.n_secondaries; ++i) {
+    const int pc = fs.secondaries[i].pdg;
+    if (pc == 311 || pc == -311) {
+      fs.secondaries[i].pdg = (c.rng.uniform() > real_t(0.5)) ? 310 : 130;
+    }
+  }
+  return true;
+}
+
+/// The outcome `run_interaction_entry` reports for a model call that ran.
+template <class Pol>
+__device__ inline had::InteractionOutcome flat_outcome(const FlatEntry& en, int n_secondaries) {
+  had::InteractionOutcome outc;
+  outc.model = Pol::kModel;
+  outc.target_z = en.target_z;
+  outc.target_a = en.target_a;
+  outc.attempts = en.attempts;
+  outc.n_secondaries = n_secondaries;
+  outc.ran = true;
+  return outc;
+}
+
+// ---- tail on a SLOT: the end of the model call and `run_interaction_entry`'s tail, on the
+// thread path's own slot `k_` (P36). Since P41 only the two tails that need a slot's cascade
+// arrays come here - A == 1 and `DecayVoidNucleus` (`deex::flat::tail_needs_slot`) - or every
+// tail when the run has no tail pool (`G4GPU_FLAT_TAIL_WIDTH=0`).
+template <class Pol>
+__global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<double> out,
+                          int batch, double* score, double* voxel_score,
+                          had::HadronicWiring<double> had,
+                          const had::InteractionPool<double>* pool_ptr, int n_tail_slots,
+                          vis::TrajectoryBuffer traj, int* status_warn, SecondaryArena sec,
+                          EmitterBooks books, StepTap<double> hook, int n_list) {
+  using real_t = double;
+  const int k_ = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k_ >= n_list || k_ >= n_tail_slots) { return; }
+  const int lane = a.tail_list[k_];
+  typename Pol::Rec& r = a.rec[lane];
+  bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(r);
+  if (c.stage != bf::kStTail) { return; }
+  const int slot_index = k_;
+  const had::InteractionPool<real_t>& pool = *pool_ptr;
+  had::InteractionSlot<real_t>* slot = pool.slot(slot_index);
+  FlatEntry& en = a.ent[lane];
+  const had::PendingInteraction<real_t>& q = a.q[en.qi];
+
+  had::InteractionOutcome outc;
+  if (en.rejected) {
+    outc.rejected_by_integral_xs = true;
+  } else {
+    const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(*slot);
+    bic::BicStorage store = had::bic_storage_of<real_t>(*slot, pool, pws);
+    if (c.tail_work == bf::kTailHydrogen || c.tail_work == bf::kTailPrecompound) {
+      if (!bf::flat_tail_direct(c, store, had.level_data, pool.fermi, pws, slot->bic_fs)) {
+        return;
+      }
+      had::copy_final_state<real_t>(slot->bic_fs, slot->fs);
+    } else if (!bf::stage_tail(c, store.cascade, store.cascade.scratch->decay_list,
+                               bic::kCascadeMaxScratch, had.level_data, pool.fermi, pws) ||
+               !Pol::pack(r, *slot, pool, had.level_data, pws)) {
+      return;  // back to the flat stages, or handed to the thread path
+    }
+    if (!flat_check_and_mix<Pol, had::kInteractionSecondaryCap>(c, en, q, slot->fs,
+                                                                 slot->pdg_mass)) {
+      return;
+    }
+    outc = flat_outcome<Pol>(en, slot->fs.n_secondaries);
+  }
+  (void)traj;
+  flat_emit<had::kInteractionSecondaryCap>(q, outc, slot->fs, slot->pdg_mass, slot->filled,
+                                           scene, out, batch, score, voxel_score, had, pool,
+                                           status_warn, sec, books, hook);
   // The tail runs beside the other stages on its own stream (`drain`): every write of this
   // lane's record and emission is made visible before the stage that frees the lane.
   __threadfence();
   c.stage = bf::kStDone;
+}
+
+// =============================================================================================
+// P41: THE TAIL POOL (docs/RISK.md V325-V327). One lane per waiting tail on an entry of the
+// pool (deexcitation/flat/tail_pool.cuh) instead of a slot: GATHER puts the waiting lanes in
+// cost order, TAIL runs `stage_tail` (the residual's PreCompound and handler, the decays, the
+// products), the packing, `CheckResult` and the K0 mixing into the entry, and EMIT - a narrow
+// kernel with one 856-wide `filled` buffer a thread - hands the final state to the track buffer.
+// A lane's numbers depend on its record alone: which entry, which launch and which emission
+// thread it got move time, not results.
+// =============================================================================================
+
+/// The pool as the kernels see it.
+template <class Pol>
+struct TailArgs {
+  typename Pol::Tail* entries = nullptr;
+  int* order = nullptr;   ///< the launch's lanes, in cost order (GATHER's output)
+  physics::hadronic::HadronicStepResult<double, had::kInteractionSecondaryCap>* filled = nullptr;
+  int width = 0;          ///< entries
+  int emit_width = 0;     ///< `filled` buffers = EMIT's threads
+  bf::TailFallback fb;    ///< the slot-sized workspaces a binding compact one continues on
+};
+
+/// Where each cost bin's lanes go in the launch: bins in `bin[]` order, `off[i]` the first
+/// position of `bin[i]`'s lanes, `off[kTailBins]` the launch's size.
+struct TailOrder {
+  int bin[kTailBins];
+  int off[kTailBins + 1];
+};
+
+// ---- gather: the waiting lanes, bin by bin, into `order`.
+template <class Pol>
+__global__ void flat_tail_gather(FlatArgs<Pol> a, TailArgs<Pol> t, TailOrder o) {
+  const int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= o.off[kTailBins]) { return; }
+  int i = 0;
+  while (i + 1 < kTailBins && k >= o.off[i + 1]) { ++i; }
+  t.order[k] = a.tail_bins[o.bin[i] * a.bin_stride + (k - o.off[i])];
+}
+
+// ---- tail on a POOL ENTRY: lane `order[k]` on entry `k`.
+template <class Pol>
+__global__ void flat_tail_pool(FlatArgs<Pol> a, TailArgs<Pol> t, had::HadronicWiring<double> had,
+                               const had::InteractionPool<double>* pool_ptr, int n_run) {
+  const int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= n_run) { return; }
+  typename Pol::Tail& e = t.entries[k];
+  const int lane = t.order[k];
+  e.lane = lane;
+  e.ready = deex::flat::kTailNotReady;
+  typename Pol::Rec& r = a.rec[lane];
+  bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(r);
+  if (c.stage != bf::kStTail) { return; }
+  FlatEntry& en = a.ent[lane];
+  if (en.rejected) {
+    e.ready = deex::flat::kTailRejected;
+    return;
+  }
+  const had::InteractionPool<double>& pool = *pool_ptr;
+  const preco::PrecoWorkspace pws = deex::flat::tail_deex_workspace(e);
+  bool packed = false;
+  if constexpr (Pol::kModel == had::InelasticModel::kBinary) {
+    if (c.tail_work == bf::kTailPrecompound) {
+      e.model_fs.clear();
+      if (!bf::flat_tail_precompound(c, had.level_data, pool.fermi, pws, e.model_fs, &t.fb)) {
+        return;
+      }
+      packed = true;
+    }
+  }
+  if (!packed) {
+    const bic::CascadeWorkspace ws = deex::flat::tail_cascade_view(e);
+    if (!bf::stage_tail(c, ws, deex::flat::tail_decay_list(e), Pol::Tail::caps::kDecay,
+                        had.level_data, pool.fermi, pws, &t.fb) ||
+        !Pol::pack_entry(r, e, pool, had.level_data, pws, &t.fb)) {
+      return;  // back to the flat stages, or handed to the thread path
+    }
+  }
+  // The area's last tenant: the final state, copied as `run_arm_binary` / `run_arm_light_ion`
+  // copy theirs, then `run_inelastic`'s step 6.
+  auto& fa = deex::flat::tail_fs(e);
+  had::copy_final_state<double>(e.model_fs, fa.fs);
+  const had::PendingInteraction<double>& q = a.q[en.qi];
+  if (!flat_check_and_mix<Pol, Pol::Tail::caps::kFs>(c, en, q, fa.fs, fa.pdg_mass)) { return; }
+  e.ready = deex::flat::kTailFinalState;
+}
+
+// ---- emit: the pool's finished entries into the track buffer, `emit_width` threads striding.
+template <class Pol>
+__global__ void flat_tail_emit(FlatArgs<Pol> a, TailArgs<Pol> t, Scene<double> scene,
+                               TrackBuffer<double> out, int batch, double* score,
+                               double* voxel_score, had::HadronicWiring<double> had,
+                               const had::InteractionPool<double>* pool_ptr, int* status_warn,
+                               SecondaryArena sec, EmitterBooks books, StepTap<double> hook,
+                               int n_run) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= t.emit_width) { return; }
+  const int stride = gridDim.x * blockDim.x;
+  for (int k = tid; k < n_run; k += stride) {
+    typename Pol::Tail& e = t.entries[k];
+    if (e.ready == deex::flat::kTailNotReady) { continue; }
+    const int lane = e.lane;
+    bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(a.rec[lane]);
+    const FlatEntry& en = a.ent[lane];
+    auto& fa = deex::flat::tail_fs(e);
+    had::InteractionOutcome outc;
+    if (e.ready == deex::flat::kTailRejected) {
+      outc.rejected_by_integral_xs = true;
+    } else {
+      outc = flat_outcome<Pol>(en, fa.fs.n_secondaries);
+    }
+    flat_emit<Pol::Tail::caps::kFs>(a.q[en.qi], outc, fa.fs, fa.pdg_mass, t.filled[tid], scene,
+                                    out, batch, score, voxel_score, had, *pool_ptr, status_warn,
+                                    sec, books, hook);
+    e.ready = deex::flat::kTailNotReady;
+    __threadfence();
+    c.stage = bf::kStDone;
+  }
+}
+
+/// The emission buffers are written field by field by `fill_result_into`; built once, as every
+/// device object of the port is, from a constructed value (docs/RISK.md V104).
+template <class Pol>
+__global__ void flat_tail_init(TailArgs<Pol> t) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < t.emit_width) {
+    new (&t.filled[i]) physics::hadronic::HadronicStepResult<double, had::kInteractionSecondaryCap>();
+  }
+  if (i < t.width) {
+    t.entries[i].lane = -1;
+    t.entries[i].ready = deex::flat::kTailNotReady;
+  }
 }
 
 // ---- reap: hand-offs back to the queue, finished lanes freed, the host's counts.
@@ -520,7 +710,14 @@ __global__ void flat_reap(FlatArgs<Pol> a) {
   } else if (c.stage == bf::kStModel || c.stage == bf::kStNucleus) {
     a.setup_list[atomicAdd(&a.ctr[kFcSetupN], 1)] = lane;
   } else if (c.stage == bf::kStTail) {
-    a.tail_list[atomicAdd(&a.ctr[kFcTailN], 1)] = lane;
+    // P41: a tail that needs no slot waits for a pool entry, in its cost bin; the rest (and
+    // every tail of a run without a pool) for a slot, as P36's did.
+    if (a.tail_bins != nullptr && (a.ent[lane].rejected || !deex::flat::tail_needs_slot(c))) {
+      const int b = a.ent[lane].rejected ? 0 : Pol::tail_bin(c);
+      a.tail_bins[b * a.bin_stride + atomicAdd(&a.ctr[kFcBin0 + b], 1)] = lane;
+    } else {
+      a.tail_list[atomicAdd(&a.ctr[kFcTailN], 1)] = lane;
+    }
   } else if (c.stage != bf::kStFree) {
     atomicAdd(&a.ctr[kFcStepN], 1);
   }
@@ -569,6 +766,13 @@ inline void pool_free(FlatPool& p) {
   cudaFree(p.strag);
   cudaFree(p.factory_req);
   cudaFree(p.factory_count);
+  cudaFree(p.tail_entries);
+  cudaFree(p.tail_bins);
+  cudaFree(p.tail_order);
+  cudaFree(p.tail_filled);
+  cudaFree(p.tail_big);
+  cudaFree(p.tail_big_ws);
+  cudaFree(p.tail_big_busy);
   p = FlatPool{};
 }
 template <class Pol>
@@ -611,6 +815,74 @@ FlatPool pool_build(int lanes, int k_steps, int strag_capacity) {
   flat_init_records<Pol><<<(lanes + 127) / 128, 128>>>(static_cast<typename Pol::Rec*>(p.records),
                                                        lanes);
   cudaDeviceSynchronize();
+  // ---- P41: the tail pool (docs/RISK.md V326). `G4GPU_FLAT_TAIL_WIDTH` entries (default the
+  // policy's), `G4GPU_FLAT_TAIL_EMIT` emission buffers; it is refused - and the slots keep every
+  // tail - if the card could not hold it with 1 GB to spare, since the pool is built before the
+  // batch is sized and must not be what makes the run page.
+  {
+    static const int w_env = [] {
+      const char* v = std::getenv("G4GPU_FLAT_TAIL_WIDTH");
+      return v ? std::max(0, std::atoi(v)) : -1;
+    }();
+    static const int e_env = [] {
+      const char* v = std::getenv("G4GPU_FLAT_TAIL_EMIT");
+      return v ? std::max(1, std::atoi(v)) : -1;
+    }();
+    const int w = (w_env >= 0) ? w_env : Pol::kTailWidth;
+    const int ew = std::min(w, (e_env > 0) ? e_env : Pol::kTailEmitWidth);
+    using Filled = physics::hadronic::HadronicStepResult<double, had::kInteractionSecondaryCap>;
+    const std::size_t eb = sizeof(typename Pol::Tail) * static_cast<std::size_t>(w);
+    const std::size_t bb = sizeof(int) * kTailBins * static_cast<std::size_t>(lanes);
+    const std::size_t ob = sizeof(int) * static_cast<std::size_t>(w);
+    const std::size_t fb = sizeof(Filled) * static_cast<std::size_t>(ew);
+    size_t free_b = 0, total_b = 0;
+    cudaMemGetInfo(&free_b, &total_b);
+    if (w > 0 && eb + bb + ob + fb + (std::size_t(1) << 30) < free_b) {
+      if (cudaMalloc(&p.tail_entries, eb) != cudaSuccess ||
+          cudaMalloc(&p.tail_bins, bb) != cudaSuccess ||
+          cudaMalloc(&p.tail_order, ob) != cudaSuccess ||
+          cudaMalloc(&p.tail_filled, fb) != cudaSuccess) {
+        cudaGetLastError();
+        cudaFree(p.tail_entries);
+        cudaFree(p.tail_bins);
+        cudaFree(p.tail_order);
+        cudaFree(p.tail_filled);
+        p.tail_entries = p.tail_filled = nullptr;
+        p.tail_bins = p.tail_order = nullptr;
+      } else {
+        p.tail_width = w;
+        p.tail_emit_width = ew;
+        p.tail_entry_bytes = sizeof(typename Pol::Tail);
+        p.tail_bytes = eb + bb + ob + fb;
+        p.bytes += p.tail_bytes;
+        TailArgs<Pol> t;
+        t.entries = static_cast<typename Pol::Tail*>(p.tail_entries);
+        t.filled = static_cast<Filled*>(p.tail_filled);
+        t.width = w;
+        t.emit_width = ew;
+        const int n_init = std::max(w, ew);
+        flat_tail_init<Pol><<<(n_init + 127) / 128, 128>>>(t);
+        cudaDeviceSynchronize();
+        // The continuation's workspaces (`bf::TailFallback`): `G4GPU_FLAT_TAIL_BIG` of them
+        // (default 32) at the slot's capacities, 536,576 B each.
+        int nbig = 32;
+        if (const char* v = std::getenv("G4GPU_FLAT_TAIL_BIG")) { nbig = std::max(1, std::atoi(v)); }
+        const deex::flat::BigWorkspaces big = deex::flat::build_big_workspaces(nbig);
+        p.tail_big = big.arrays;
+        p.tail_big_ws = big.views;
+        p.tail_big_busy = big.busy;
+        p.tail_big_n = big.n;
+        p.tail_bytes += big.bytes;
+        p.bytes += big.bytes;
+        std::printf("flat %s tail pool: %d entries of %zu B + %d emission buffers of %zu B + %d "
+                    "continuation workspaces, %.1f MB (docs/RISK.md V326)\n",
+                    (Pol::kModel == had::InelasticModel::kBinary) ? "Binary" : "light-ion", w,
+                    sizeof(typename Pol::Tail), ew, sizeof(Filled), big.n,
+                    double(p.tail_bytes) / 1048576.0);
+      }
+    }
+  }
+  // ---- end P41
   return p;
 }
 
@@ -635,6 +907,11 @@ struct KernelClock {
   long long solo_launches = 0;   ///< `flat_solo` launches
   long long solo = 0;            ///< stragglers finished on their own lane
   bool factory = false;
+  // P41: since the tail runs on its own stream, "tail" above is only its launch; what the round
+  // pays for it is the WAIT - from one round's end to the next round's claim, which waits on the
+  // device for the tail - and the tail stream's own spans (the pool's tail, its emission and the
+  // slot tail) overlap the set-up and step kernels.
+  double wait_ms = 0.0, pool_ms = 0.0, emit_ms = 0.0, slot_ms = 0.0;
   ~KernelClock() {
     if (!on || rounds == 0) { return; }
     double total = 0.0;
@@ -651,6 +928,29 @@ struct KernelClock {
                 setup_nuc ? 100.0 * setup_retry / setup_nuc : 0.0, nuclei,
                 setup_nuc ? double(nuclei) / setup_nuc : 0.0,
                 factory ? "from the factory" : "on the lanes", factory_lane, solo, solo_launches);
+    std::printf("flat %s tail: the rounds waited %.1f ms for it (%.0f%% of %.1f ms); on its stream "
+                "the pool's tail %.1f ms, its emission %.1f ms, the slot tail %.1f ms "
+                "(docs/RISK.md V325)\n",
+                model, wait_ms, 100.0 * wait_ms / (total + wait_ms), total + wait_ms, pool_ms,
+                emit_ms, slot_ms);
+  }
+};
+
+/// P41: the tail's own counts, printed at exit (one line a model).
+struct TailStats {
+  const char* model = nullptr;
+  long long pool_launches = 0, pool_tails = 0, slot_launches = 0, slot_tails = 0;
+  long long scratch_handed = 0;   ///< `kHandTailScratch`: no continuation workspace in bound
+  long long continued = 0;        ///< tails continued on a slot-sized workspace
+  ~TailStats() {
+    if (model == nullptr || (pool_launches == 0 && slot_launches == 0)) { return; }
+    std::printf("flat %s tails: %lld on the pool in %lld launches (%.1f a launch), %lld on slots "
+                "in %lld launches; %lld continued on a slot-sized workspace, %lld handed back past "
+                "the continuation's bound "
+                "(docs/RISK.md V326)\n",
+                model, pool_tails, pool_launches,
+                pool_launches ? double(pool_tails) / double(pool_launches) : 0.0, slot_tails,
+                slot_launches, continued, scratch_handed);
   }
 };
 
@@ -680,6 +980,18 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   a.base = base;
   a.idx = idx;
   a.q = items;
+  a.tail_bins = (fp.tail_width > 0) ? fp.tail_bins : nullptr;
+  a.bin_stride = fp.lanes;
+  TailArgs<Pol> ta;
+  ta.entries = static_cast<typename Pol::Tail*>(fp.tail_entries);
+  ta.order = fp.tail_order;
+  ta.filled = static_cast<physics::hadronic::HadronicStepResult<
+      double, had::kInteractionSecondaryCap>*>(fp.tail_filled);
+  ta.width = fp.tail_width;
+  ta.emit_width = fp.tail_emit_width;
+  ta.fb.big = static_cast<const preco::PrecoWorkspace*>(fp.tail_big_ws);
+  ta.fb.busy = fp.tail_big_busy;
+  ta.fb.n = fp.tail_big_n;
   cudaMemsetAsync(fp.counters, 0, sizeof(int) * kFcNum);
   // Only as many lanes as there are entries: a drain of 300 runs 300 lanes.
   a.lanes = (n < fp.lanes) ? n : fp.lanes;
@@ -721,12 +1033,20 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   }();
   clk.factory = factory_on;
   a.solo = factory_on ? 1 : 0;
+  static cudaEvent_t tev[4];
+  static cudaEvent_t evp[2];
+  bool have_prev = false;
+  static TailStats tstat;
+  tstat.model = (Pol::kModel == had::InelasticModel::kBinary) ? "Binary" : "light-ion";
   if (!clk.on) {
     const char* v = std::getenv("G4GPU_FLAT_PROFILE");
     if (v != nullptr && v[0] == '1') {
       clk.on = true;
       clk.model = (Pol::kModel == had::InelasticModel::kBinary) ? "Binary" : "light-ion";
       for (cudaEvent_t& e : ev) { cudaEventCreate(&e); }
+      for (cudaEvent_t& e : tev) { cudaEventCreate(&e); }
+      cudaEventCreate(&evp[0]);
+      cudaEventCreate(&evp[1]);
     }
   }
   auto tick = [&](int k) { if (clk.on) { cudaEventRecord(ev[k]); } };
@@ -762,6 +1082,22 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
                         : factory_on          ? 1
                                               : std::max(32, a.lanes / 16);
   const int tail_min = (tail_min_env >= 0) ? tail_min_env : std::max(1, n_tail_slots / 2);
+  // P41: the pool's gate and block (docs/RISK.md V326, measured). The pool's tail launches when
+  // the pool would fill or nothing else steps (`Pol::kTailPoolMin` = the width): every round a
+  // tail is in flight its claim waits for it, and a launch lasts as long as its slowest residual
+  // (up to 48 ms Binary, 96 ms light ion), so the fewer launches the better - Fe56 5k 31.3 s at
+  // a gate of 64, 24.2 s at 333, 21.8 s at full-or-idle; proton 6.7 s at 512, 6.1 s. One lane a
+  // block: 8 and 32 alike-cost lanes a warp were 7.5 and 8.6 s on the proton beam (divergence in
+  // the evaporation chain). `G4GPU_FLAT_POOL_MIN=n` and `G4GPU_FLAT_POOL_BLOCK=b` override.
+  static const int pool_min_env = [] {
+    const char* v = std::getenv("G4GPU_FLAT_POOL_MIN");
+    return v ? std::atoi(v) : -1;
+  }();
+  static const int pool_block = [] {
+    const char* v = std::getenv("G4GPU_FLAT_POOL_BLOCK");
+    return v ? std::max(1, std::atoi(v)) : Pol::kTailPoolBlock;
+  }();
+  const int pool_min = (pool_min_env >= 0) ? pool_min_env : Pol::kTailPoolMin;
   // THE TAIL ON ITS OWN STREAM (P37, V303-V306 on integ/p37: this card runs kernels on separate
   // streams concurrently when they are launched together). A tail launch takes the lanes listed
   // in `tail_list` and nothing else touches a lane in `kStTail`: the set-up takes `setup_list`'s,
@@ -792,6 +1128,7 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
     cudaMemsetAsync(fp.counters + kFcActive, 0, sizeof(int));
     cudaMemsetAsync(fp.counters + kFcSetupN, 0, sizeof(int) * 3);
     cudaMemsetAsync(fp.counters + kFcSoloN, 0, sizeof(int));
+    cudaMemsetAsync(fp.counters + kFcBin0, 0, sizeof(int) * kTailBins);
     flat_reap<Pol><<<blocks, kTh>>>(a);
     cudaMemcpy(h, fp.counters, sizeof(h), cudaMemcpyDeviceToHost);
     tick(2);
@@ -848,38 +1185,96 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
     }
     tick(8);
     const bool idle = (n_step == 0 && n_setup == 0);
+    cudaStream_t s = tail_stream_on ? ts : cudaStream_t(0);
+    bool tail_launched = false;
+    if (clk.on) { cudaEventRecord(tev[0], s); }
+    // ---- P41 (docs/RISK.md V326): the pool's tails, gathered in cost order (the bins from the
+    // most expensive down, so a warp's lanes are alike and the longest start first), then the
+    // tail on the entries, then the emission. `pool_min` and the entry count are the gate.
+    int n_pool = 0;
+    for (int b = 0; b < kTailBins; ++b) { n_pool += h[kFcBin0 + b]; }
+    if (n_pool > 0 && (n_pool >= std::min(pool_min, ta.width) || idle)) {
+      TailOrder o;
+      int at = 0;
+      for (int i = 0; i < kTailBins; ++i) {
+        const int b = kTailBins - 1 - i;
+        o.bin[i] = b;
+        o.off[i] = at;
+        at += std::min(h[kFcBin0 + b], ta.width - at);
+      }
+      o.off[kTailBins] = at;
+      flat_tail_gather<Pol><<<(at + 255) / 256, 256, 0, s>>>(a, ta, o);
+      flat_tail_pool<Pol><<<(at + pool_block - 1) / pool_block, pool_block, 0, s>>>(
+          a, ta, had, pool_ptr, at);
+      if (clk.on) { cudaEventRecord(tev[1], s); }
+      const int eb = 32;
+      const int ew = std::min(ta.emit_width, ((at + eb - 1) / eb) * eb);
+      flat_tail_emit<Pol><<<(ew + eb - 1) / eb, eb, 0, s>>>(
+          a, ta, scene, out, batch, score, voxel_score, had, pool_ptr, status_warn, sec, books,
+          hook, at);
+      stats.launches += 3;
+      tail_launched = true;
+      ++tstat.pool_launches;
+      tstat.pool_tails += at;
+    } else if (n_pool > 0) {
+      stats.tail_waits += n_pool;
+    }
+    if (clk.on && !tail_launched) { cudaEventRecord(tev[1], s); }
+    if (clk.on) { cudaEventRecord(tev[2], s); }
+    // ---- end P41: the tails that need a slot (all of them without a pool), as P36 ran them.
     if (n_tail > 0 && (n_tail >= tail_min || idle)) {
       const int nt = std::min(n_tail, n_tail_slots);
-      cudaStream_t s = tail_stream_on ? ts : cudaStream_t(0);
       flat_tail<Pol><<<(nt + tail_block - 1) / tail_block, tail_block, 0, s>>>(
           a, scene, out, batch, score, voxel_score, had, pool_ptr, n_tail_slots, traj,
           status_warn, sec, books, hook, nt);
-      if (tail_stream_on) {
-        cudaEventRecord(tdone, ts);
-        tail_busy = true;
-      }
       ++stats.launches;
+      tail_launched = true;
+      ++tstat.slot_launches;
+      tstat.slot_tails += nt;
     } else if (n_tail > 0) {
       stats.tail_waits += n_tail;
+    }
+    if (clk.on) { cudaEventRecord(tev[3], s); }
+    if (tail_launched && tail_stream_on) {
+      cudaEventRecord(tdone, ts);
+      tail_busy = true;
     }
     // P39: the stragglers, when the drain has nothing else to give the card - every entry
     // claimed, nothing to set up, step or de-excite - all at once, a thread each, as the thread
     // path ran P36's hand-backs at the drain's end. They come back as ordinary records (a tail,
     // or the drain's next set-up) with their flag cleared.
     const int n_solo = h[kFcSoloN];
-    if (n_solo > 0 && idle && n_tail == 0 && h[kFcNext] >= n) {
+    if (n_solo > 0 && idle && n_tail == 0 && n_pool == 0 && h[kFcNext] >= n) {
       const int b = block_for(n_solo);
       flat_solo<Pol><<<(n_solo + b - 1) / b, b>>>(a, pool_ptr, n_solo);
       ++stats.launches;
       clk.solo_launches += 1;
     }
     tick(9);
+    // P41: the round's end, on the main stream, BEFORE the host waits for anything below - the
+    // next round's claim waits on the device for the tail, and that gap is what the tail costs.
+    if (clk.on) { cudaEventRecord(evp[stats.rounds & 1]); }
     if (clk.on) {
       cudaEventSynchronize(ev[9]);
       for (int k = 0; k < KernelClock::kN; ++k) {
         float m = 0.f;
         cudaEventElapsedTime(&m, ev[k], ev[k + 1]);
         clk.ms[k] += m;
+      }
+      {
+        cudaEventSynchronize(tev[3]);
+        float m = 0.f;
+        cudaEventElapsedTime(&m, tev[0], tev[1]);
+        clk.pool_ms += m;
+        cudaEventElapsedTime(&m, tev[1], tev[2]);
+        clk.emit_ms += m;
+        cudaEventElapsedTime(&m, tev[2], tev[3]);
+        clk.slot_ms += m;
+        if (have_prev) {
+          cudaEventElapsedTime(&m, evp[(stats.rounds + 1) & 1], ev[0]);
+          clk.wait_ms += m;
+        }
+        have_prev = true;
       }
       ++clk.rounds;
     }
@@ -897,6 +1292,12 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   clk.factory_lane += h[kFcFactoryLane];
   clk.solo += h[kFcSolo];
   for (int k = 0; k < 8; ++k) { stats.handed[k] += h[kFcHand0 + k]; }
+  tstat.scratch_handed += h[kFcHand0 + bf::kHandTailScratch];
+  if (fp.tail_big_n > 0) {
+    int nc = 0;
+    cudaMemcpy(&nc, fp.tail_big_busy + fp.tail_big_n, sizeof(int), cudaMemcpyDeviceToHost);
+    tstat.continued = nc;
+  }
   return h[kFcStrag];
 }
 

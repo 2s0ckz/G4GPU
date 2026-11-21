@@ -191,7 +191,9 @@ enum IonEnd : int {
 template <int N, int P, int C>
 __host__ __device__ inline int ion_pack(FlatIon<N, P, C>& r, BlirStorage& store,
                                         const data::LevelTable& lt, const deex::FermiPool& pool,
-                                        const preco::PrecoWorkspace& ws, BlirFinalState& result) {
+                                        const preco::PrecoWorkspace& ws, BlirFinalState& result,
+                                        const TailFallback* fb = nullptr,
+                                        BlirProduct* cascaders_save = nullptr) {
   FlatCascade<N, P, C>& c = r.c;
   const BlirFrame& f = r.f;
   result.clear();
@@ -239,10 +241,36 @@ __host__ __device__ inline int ion_pack(FlatIon<N, P, C>& r, BlirStorage& store,
     if (std::sqrt(g4gpu::mag2(momentum.v)) - momentum.e < 10.0 * u::keV<double>()) {
       deex::DeexStatus dstatus;
       BlirCorrectorReport last;
+      // P41: what the spectators' de-excitation changes - the cascaders, their count and the
+      // generator - kept, so that a compact workspace that binds is CONTINUED from here on a
+      // slot-sized one (cascade_flat.cuh's `TailFallback`), never rerun from the key.
+      const Philox<double> rng_before = c.rng;
+      const int n_cascaders_before = n_cascaders;
+      if (fb != nullptr) {
+        for (int i = 0; i < n_cascaders; ++i) { cascaders_save[i] = store.cascaders[i]; }
+      }
       blir_deexcite_spectator(store.spectators, n_spectators, store.cascaders, n_cascaders,
                               store.cascader_capacity, spectator_a, spectator_z, f.pa,
                               r.projectile_excitation, momentum, p_initial_state,
                               p_final_state, lt, pool, ws.deex, c.rng, dstatus, ref, last);
+      if (fb != nullptr && dstatus.refused_capacity) {
+        const int k = fb->acquire();
+        if (k < 0) {
+          flat_hand_off(c, kHandTailScratch);
+          return kIonHandBack;
+        }
+        c.rng = rng_before;
+        n_cascaders = n_cascaders_before;
+        for (int i = 0; i < n_cascaders; ++i) { store.cascaders[i] = cascaders_save[i]; }
+        ref = BlirRefusal{};
+        dstatus = deex::DeexStatus{};
+        blir_deexcite_spectator(store.spectators, n_spectators, store.cascaders, n_cascaders,
+                                store.cascader_capacity, spectator_a, spectator_z, f.pa,
+                                r.projectile_excitation, momentum, p_initial_state,
+                                p_final_state, lt, pool, fb->big[k].deex, c.rng, dstatus, ref,
+                                last);
+        fb->release(k);
+      }
       if (ref.any()) {
         flat_hand_off(c, ref.capacity ? kHandCapacity : kHandRefused);
         return kIonHandBack;

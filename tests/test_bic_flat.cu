@@ -50,6 +50,7 @@
 #include "host/interaction_pool_build.cuh"
 #include "host/level_upload.cuh"
 #include "physics/hadronic/bic/flat/ion_flat.cuh"
+#include "physics/hadronic/deexcitation/flat/tail_pool.cuh"
 #include "physics/hadronic/interaction_apply.cuh"
 
 using real_t = double;
@@ -72,11 +73,13 @@ constexpr bool kIon = true;
 constexpr int kNuc = 64, kPool = 256, kColl = 512;
 using Rec = bf::FlatIon<kNuc, kPool, kColl>;
 constexpr int kMaxOut = bic::kBlirMaxSecondaries;
+using Tail = deex::flat::TailEntry<deex::flat::IonTailCaps, bic::BlirFinalState>;
 #else
 constexpr bool kIon = false;
 constexpr int kNuc = 64, kPool = 128, kColl = 256;
 using Rec = bf::FlatCascade<kNuc, kPool, kColl>;
 constexpr int kMaxOut = bic::kBicMaxSecondaries;
+using Tail = deex::flat::TailEntry<deex::flat::BinaryTailCaps, bic::BicFinalState>;
 #endif
 using Core = bf::FlatCascade<kNuc, kPool, kColl>;
 __host__ __device__ inline Core& core(Core& r) { return r; }
@@ -161,6 +164,8 @@ struct Args {
   Out* out;
   const had::InteractionPool<real_t>* pool;
   data::LevelTable lt;
+  Tail* tails;            ///< P41: one tail-pool entry a lane (null: every tail on a slot)
+  bf::TailFallback fb;    ///< P41: the continuation's slot-sized workspaces
 };
 
 __device__ bf::FlatEnv env_of(const Args& a) {
@@ -336,12 +341,41 @@ __global__ void k_tail(Args a, int n_slots) {
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
   if (c.stage != bf::kStTail) { return; }
+  // P41 (docs/RISK.md V326): the tail on the lane's own tail-pool entry - the transport's
+  // `flat_tail_pool` call: the entry's compact buffers, a capacity that binds handing back -
+  // unless it is one of the two that need a slot (`tail_needs_slot`), which run as P36's did.
+  if (a.tails != nullptr && !deex::flat::tail_needs_slot(c)) {
+    Tail& e = a.tails[lane];
+    const preco::PrecoWorkspace pws = deex::flat::tail_deex_workspace(e);
+    const bic::CascadeWorkspace ws = deex::flat::tail_cascade_view(e);
+    if (!bf::stage_tail(c, ws, deex::flat::tail_decay_list(e), Tail::caps::kDecay, a.lt,
+                        a.pool->fermi, pws, &a.fb)) {
+      return;
+    }
+#ifdef G4GPU_TEST_BLIR_FLAT
+    bic::BlirStorage bs = deex::flat::tail_blir_view(e);
+    if (bf::ion_pack(a.rec[lane], bs, a.lt, a.pool->fermi, pws, e.model_fs, &a.fb,
+                     e.cascaders_save) != bf::kIonFinalState) {
+      return;
+    }
+#else
+    if (!bf::flat_pack_nucleon(c, ws, e.model_fs)) { return; }
+#endif
+    // Perturbation 4, the tail pool's anti-vacuity: the last secondary lost in the hand-back.
+    if (a.perturb == 4 && e.model_fs.n_secondaries > 0) { --e.model_fs.n_secondaries; }
+    record(e.model_fs, a.out[a.job_of[lane]]);
+    c.stage = bf::kStDone;
+    return;
+  }
   const int si = atomicAdd(&a.ctr[2], 1);
   if (si >= n_slots) { return; }
   had::InteractionSlot<real_t>& s = *a.pool->slot(si);
   const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(s);
   const bic::BicStorage store = had::bic_storage_of<real_t>(s, *a.pool, pws);
-  if (!bf::stage_tail(c, store, a.lt, a.pool->fermi, pws)) { return; }
+  if (!bf::stage_tail(c, store.cascade, store.cascade.scratch->decay_list,
+                      bic::kCascadeMaxScratch, a.lt, a.pool->fermi, pws)) {
+    return;
+  }
 #ifdef G4GPU_TEST_BLIR_FLAT
   {
     bic::BlirStorage bs = had::blir_storage_of<real_t>(s, *a.pool);
@@ -427,6 +461,14 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   cudaMalloc(&a.buffers, sizeof(bic::CascadeBuffers));
   cudaMalloc(&a.ctr, sizeof(int) * 6);
   cudaMalloc(&a.items, sizeof(int) * a.item_capacity);
+  // P41: the tail pool, one entry a lane; `G4GPU_FLAT_TEST_SLOT_TAIL=1` runs every tail on a slot.
+  a.tails = nullptr;
+  const deex::flat::BigWorkspaces big = deex::flat::build_big_workspaces(8);
+  a.fb = deex::flat::fallback_of(big);
+  {
+    const char* st = std::getenv("G4GPU_FLAT_TEST_SLOT_TAIL");
+    if (!(st != nullptr && st[0] == '1')) { cudaMalloc(&a.tails, sizeof(Tail) * lanes); }
+  }
   Job* dj = nullptr;
   cudaMalloc(&dj, sizeof(Job) * n);
   cudaMemcpy(dj, jobs.data(), sizeof(Job) * n, cudaMemcpyHostToDevice);
@@ -494,6 +536,7 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
                 fell[0], fell[1]);
   }
   cudaFree(a.ctr); cudaFree(a.items); cudaFree(dj); cudaFree(a.out);
+  cudaFree(a.tails); cudaFree(big.arrays); cudaFree(big.views); cudaFree(big.busy);
   cudaFree(lists.req32); cudaFree(lists.count);
   return out;
 }
@@ -1101,6 +1144,31 @@ int main(int argc, char** argv) {
                 wp.row.c_str());
     wp.print("perturbed");
     check(std::fabs(wp.z) > 5.0, "the campaign catches the perturbed flat path");
+  }
+  // P41 (docs/RISK.md V326): the tail pool's own anti-vacuity - the last secondary of every
+  // final state lost in the entry's hand-back (perturbation 4, `k_tail`).
+  if (std::getenv("G4GPU_FLAT_TEST_SLOT_TAIL") == nullptr) {
+    float msp = 0.f;
+    int rp = 0;
+    std::vector<Out> pert = run_flat(jobs, pown, lown.view, lanes, 4, msp, rp);
+    for (int i = 0; i < n; ++i) {
+      if (pert[i].handed) { pert[i] = paired[i]; }
+    }
+    Worst wp;
+    for (std::size_t p = 0; p < pts.size(); ++p) {
+      Stats a, b;
+      const double m = proj_mass(pts[p].pdg, pts[p].mass);
+      const double e_in = pts[p].ekin + m + deex::nuclear_mass(pts[p].ta, pts[p].tz);
+      const int a_in = pts[p].ta + (kIon ? pts[p].pa : ((pts[p].pdg == 2212 || pts[p].pdg == 2112) ? 1 : 0));
+      for (int k = 0; k < per_point; ++k) {
+        a.add(pert[p * per_point + k], e_in, a_in);
+        b.add(thread[p * per_point + k], e_in, a_in);
+      }
+      compare(pts[p].name, a, b, wp);
+    }
+    std::printf("  ANTI-VACUITY (the tail pool's hand-back loses the last secondary): the worst "
+                "row %+.2f sigma (%s)\n", wp.z, wp.row.c_str());
+    check(std::fabs(wp.z) > 5.0, "the campaign catches the perturbed tail pool");
   }
 
   had::free_interaction_pool(pown);

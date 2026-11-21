@@ -45,6 +45,34 @@ struct BinaryPolicy {
     had::copy_final_state<double>(s.bic_fs, s.fs);
     return true;
   }
+
+  // ---- P41 (docs/RISK.md V325, V326): the tail pool. Capacities over V325's measured maxima
+  // (the handler's lists 5 / 27 / 26 / 27 / 27, the products 26, the final state 128 = the
+  // model's own `BicFinalState`, so `copy_final_state` never counts an overflow the slot's 856
+  // would not); width, gate and block are V326's measurements.
+  using TailCaps = deex::flat::BinaryTailCaps;
+  using Tail = deex::flat::TailEntry<TailCaps, bic::BicFinalState>;
+  static constexpr int kTailWidth = 4096;
+  static constexpr int kTailEmitWidth = 256;
+  static constexpr int kTailPoolMin = kTailWidth;
+  static constexpr int kTailPoolBlock = 1;
+  /// The cost bin a waiting tail is sorted into: V325's measurement says what predicts a
+  /// residual's de-excitation time before it runs.
+  __device__ static int tail_bin(const bic::flat::FlatCascade<kN, kP, kC>& c) {
+    return deex::flat::tail_cost_bin(c);
+  }
+  /// `apply_yourself`'s packing into the entry's `BicFinalState`.
+  __device__ static bool pack_entry(Rec& r, Tail& t, const had::InteractionPool<double>& pool,
+                                    const data::LevelTable& lt,
+                                    const preco::PrecoWorkspace& pws,
+                                    const bic::flat::TailFallback* fb) {
+    (void)fb;
+    (void)pool;
+    (void)lt;
+    (void)pws;
+    const bic::CascadeWorkspace ws = deex::flat::tail_cascade_view(t);
+    return bic::flat::flat_pack_nucleon(r, ws, t.model_fs);
+  }
 };
 
 }  // namespace
@@ -56,6 +84,30 @@ FlatPool flat_binary_pool_build(int lanes, int k_steps, int strag_capacity) {
 }
 
 void flat_binary_pool_free(FlatPool& p) { flatk::pool_free(p); }
+
+// P41 (docs/RISK.md V328): a view of the pool with its slots moved. The kernels index a slot -
+// and FTF's workspace - by their thread index from 0 (`pool.slot(i)`, `pool.ftf.slot(i)`), so a
+// launch handed this view uses slots [first, first + count) and FTF's [0, count) and nothing else.
+const had::InteractionPool<double>* flat_pool_range(const had::InteractionPool<double>* d_pool,
+                                                     int first, int count, bool with_ftf) {
+  had::InteractionPool<double> v;
+  if (cudaMemcpy(&v, d_pool, sizeof(v), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    cudaGetLastError();
+    return nullptr;
+  }
+  if (first < 0 || count <= 0 || first + count > v.n_slots) { return nullptr; }
+  v.slots += first;
+  v.n_slots = count;
+  v.ftf.n_slots = with_ftf ? std::min(v.ftf.n_slots, count) : 0;
+  had::InteractionPool<double>* d = nullptr;
+  if (cudaMalloc(&d, sizeof(v)) != cudaSuccess ||
+      cudaMemcpy(d, &v, sizeof(v), cudaMemcpyHostToDevice) != cudaSuccess) {
+    cudaGetLastError();
+    cudaFree(d);
+    return nullptr;
+  }
+  return d;
+}
 
 int flat_binary_drain(FlatPool& pool, const Scene<double>& scene,
                       const had::PendingInteraction<double>* items, const int* idx, int n,
