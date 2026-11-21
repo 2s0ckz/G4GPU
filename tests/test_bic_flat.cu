@@ -308,7 +308,8 @@ __global__ void k_solo(Args a) {
   }
   atomicAdd(&a.ctr[5], 1);
   bf::FlatEnv env = env_of(a);
-  env.k_steps = 1 << 30;
+  env.k_steps = 1 << 16;
+  env.solo = 0;  // past this bound the solo cascade is handed back, by name
   deex::Vec3d mom[kNuc];
   double fermi_p[kNuc];
   bic::NucleusSortEntry sums[kNuc];
@@ -396,9 +397,17 @@ __global__ void k_buffers(bic::CascadeBuffers* buf, const had::InteractionPool<r
   }
 }
 
+/// The transport's switch (flat_drain_kernels.cuh): the factory on for the Binary cascade, off
+/// for the light-ion reaction unless `G4GPU_FLAT_FACTORY_ION=1` (docs/RISK.md V322: its
+/// capacity hand-backs are reruns of different reactions under the factory).
 bool factory_enabled() {
   const char* v = std::getenv("G4GPU_FLAT_FACTORY");
-  return !(v != nullptr && v[0] == '0');
+  if (v != nullptr && v[0] == '0') { return false; }
+  if (kIon) {
+    const char* w = std::getenv("G4GPU_FLAT_FACTORY_ION");
+    return w != nullptr && w[0] == '1';
+  }
+  return true;
 }
 
 /// The flat campaign: returns the records, `ms` the device time, `rounds` the lockstep length.

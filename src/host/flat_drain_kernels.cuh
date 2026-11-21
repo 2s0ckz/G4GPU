@@ -240,7 +240,8 @@ __global__ void flat_solo(FlatArgs<Pol> a, const had::InteractionPool<double>* p
   typename Pol::Rec& r = a.rec[lane];
   bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(r);
   bf::FlatEnv env = flat_env(a, *pool_ptr);
-  env.k_steps = 1 << 30;
+  env.k_steps = 1 << 16;
+  env.solo = 0;  // past this bound the solo cascade is handed back, by name
   deex::Vec3d mom[Pol::kN];
   double fermi_p[Pol::kN];
   bic::NucleusSortEntry sums[Pol::kN];
@@ -702,9 +703,21 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   static cudaEvent_t ev[KernelClock::kN + 1];
   // P39: the set-up's nuclei from the factory (docs/RISK.md V321). `G4GPU_FLAT_FACTORY=0`
   // samples them on the set-up's lanes as P36 did - integ/p36's flat path, to the digit.
+  //
+  // THE LIGHT-ION REACTION KEEPS ITS NUCLEI ON THE LANE BY DEFAULT (V322): 5.7% of the campaign's
+  // Fe56-on-Al27 reactions outgrow the flat record's 256-track pool and are handed to the thread
+  // path, whose rerun from the key is - with the factory's nuclei - a different reaction, so the
+  // largest reactions are replaced by ordinary ones (-12 sigma on that case's multiplicities).
+  // Nothing short of a pool past the flat scratch lists' 256 entries removes the class (V323).
+  // `G4GPU_FLAT_FACTORY_ION=1` turns it on, for the measurement.
   static const bool factory_on = [] {
     const char* v = std::getenv("G4GPU_FLAT_FACTORY");
-    return !(v != nullptr && v[0] == '0');
+    if (v != nullptr && v[0] == '0') { return false; }
+    if (Pol::kModel == had::InelasticModel::kLightIon) {
+      const char* w = std::getenv("G4GPU_FLAT_FACTORY_ION");
+      return w != nullptr && w[0] == '1';
+    }
+    return true;
   }();
   clk.factory = factory_on;
   a.solo = factory_on ? 1 : 0;
