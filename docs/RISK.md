@@ -20797,3 +20797,54 @@ tail parts (`stage_tail`'s signature, `flat_tail_precompound`, `TailFallback`, `
 appended to `HandOff`) and `ion_flat.cuh`'s `ion_pack`; the restack onto P39's set-up should meet
 only in `flat_drain_kernels.cuh`'s reap (the tail branch) and the drain loop (the tail launch).
 build_all.bat's TESTS_GPU line gains `test_tail_flat`.
+
+### V330: P41 on integ/p39 - the tail pool and the factory together: proton 1 GeV 4.33 s, pi+ 7.13 s, Fe56 5k 20.2 s and 20k 48.2 s, every dose and step count integ/p39's to the digit; the campaign's stragglers finish solo (0 handed back) and every row is inside 3.6 sigma
+
+**THE TREE.** perf/flat_tail_p39 = integ/p39 (dfeb372) + V325-V329's two commits, cherry-picked.
+The conflicts, each resolved so that P39's set-up, request and solo code and P41's tail pool are
+both present: `flat_drain_kernels.cuh` - the factory's include and the tail pool's; P39's set-up
+and solo counters with P41's `kFcTailN` (slot tails only) and cost bins; `FlatArgs` with
+`solo_list`/`solo` and `tail_bins`/`bin_stride`; `pool_free` freeing both pools; the clock's set-up
+and tail fields and both exit lines; `ev[KernelClock::kN + 1]` (P39's ten ticks) with P41's tail
+events; the round's reset of both `kFcSoloN` and the bins; and the round's end - P41's tail-stream
+record, then P39's solo launch, which now also waits for the pool's tails (`n_pool == 0`: a solo
+straggler must not run while a pool tail is in flight on the same record set), then P39's
+`tick(9)`, then P41's round-end event. `cascade_flat.cuh` - P39's `flat_run_solo` before P41's
+`stage_tail` and its comment. `test_bic_flat.cu` - P39's factory read-back and frees plus the tail
+pool's. build_all.bat's TESTS_GPU = P39's line + `test_tail_flat`; README P39's rows then P41's;
+the plan's P41 text appended to P39's performance row; RISK P39's entries then V325-V329. The
+units rebuilt: the two flat units, the engine and P39's `transport_run_npool_factory` (6.5 GB
+peak), nothing else stale.
+
+**THE CAMPAIGNS** (`G4GPU_ORACLE` at the oracle): test_bic_flat - 0 of 640,000 differ twice and at
+4,103 lanes; **0 handed back** (V326's 216 stragglers now finish solo: 192 of them); flat against
+thread 3,124 rows, worst +3.59 sigma (camp_pim800_Al27, pi- kinetic energy bin 4); against Geant4
+2,420 rows, worst -3.33 sigma; `G4MesonAbsorption` dropped -17.53 sigma; the tail pool's
+perturbation -5,162 sigma; OK. test_blir_flat (the light-ion factory off) - V310's rows to the
+digit (1,078 capacity hand-backs, -2.66 / +3.65 sigma, perturbations +23.34 and -866); OK.
+test_tail_flat - V326's (-3.05 sigma over 518 rows; 0 differ twice and at two widths; 247,788
+continued and none differ); OK. test_npool_nucleus PASS.
+
+**THE BEAMS** (best of three; "0.26-0.29 GB left"):
+
+| beam | integ/p39 (V321-V324) | this tree | x | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| proton 1 GeV 200k | 4,773.9 ms | **4,326 / 4,341 / 4,344** | 1.10 | 391.091 nGy (1.33737) | 11,546,754 |
+| pi+ 10 GeV 100k | 7,386.8 | **7,126 / 7,183 / 7,204** | 1.04 | 333.181 nGy (2.01072) | 12,933,850 |
+| proton 10 GeV 50k | - | 5,462 / 5,495 / 5,553 | (6,172 on integ/p40) | 214.858 nGy (1.97412) | 7,152,954 |
+| Fe56 56 GeV 5k | 22,096.1 | **20,172 / 20,222 / 20,240** | 1.10 | 3.06318 uGy (53.0356) | 62,057,218 |
+| Fe56 56 GeV 20k | 56,520.3 | **48,173** | 1.17 | 12.3679 uGy (106.612) | 248,094,630 |
+| B1 gamma 2M | - | 403.0 / 405.6 / 406.3 | | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+
+Every dose and step count is integ/p39's to the digit. `G4GPU_CASCADE_FLAT=0`: proton 391.931 nGy
+(1.33866), 11,550,586; pi+ 333.4 (2.00918), 12,936,362; Fe56 5k 3.06391 uGy (53.0322), 62,058,769 -
+V299/V306's. Profile (proton): kBinary 3,395 ms of 81.4%; 90,322 tails on the pool in 35 launches,
+the rounds waiting 378 ms for them (12% of the flat drain), 0 continued; the set-up 266 launches,
+91,425 nuclei from the factory. Fe56 5k: kLightIon 10,905 ms (54.6%, the light-ion factory off),
+kBinary 3,851 ms.
+
+**THE ELEVEN GATES**, flat default and `G4GPU_CASCADE_FLAT=0`: every printed line equal to P40's
+gate run except the depth-dose gate with the flat path on, which is P39's: port 584,851.12 MeV,
+port/G4 -0.140%, plateau 1.00043, R80 77.694 mm, 80-20 1.200 mm, OK (CSV md5
+c6ca0b1f202b41dcb1303608939e48d4); with `G4GPU_CASCADE_FLAT=0` 584,663.45 MeV (-0.172%), CSV md5
+ba22d777a151c1d717ba48d0b62f23d1 - ba73's to the digit. Every check rc 0; B1 at 1.1045 sigma.
