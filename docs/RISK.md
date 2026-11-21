@@ -20184,3 +20184,253 @@ thread time a nucleus inside a 255-register one-thread interaction block (V297),
 224-232 B frame, 24-56 B of spill loads, 1.2-8.8 kB shared; the unit 8 s. The engine relinked
 with it, the proton 1 GeV 200k beam: 391.931 nGy (1.33866), 11,550,586 track-steps - unchanged
 (nothing launches it).
+
+### V320: P39's baseline and design - integ/p36's set-up is 40% of the proton beam's flat Binary kernels and 31% of Fe56's light-ion ones; a Binary set-up builds 1.00 nucleus (10.4% of them retries), a light-ion set-up 7.26 (3.6 tries of two); the factory goes between the reap and the set-up, keyed on the cascade and its nucleus count
+
+**THE TREE.** perf/factory_flat at integ/p36 (648d8c6; the worktree was cut at main and reset
+before anything else), P38's factory cherry-picked as e9e0cd7 (V680/V681 renumbered V318/V319,
+build_all's TESTS_GPU line gaining `test_npool_nucleus` after `test_blir_flat`). The baseline
+binary is the lead's own integ/p36 build of 2026-11-20 13:48 (its out\ objects copied, their
+dependency files rewritten to this worktree; its exampleB1.exe kept as out\p39\exampleB1_p36.exe).
+Every run on the Titan V alone under `out\gpu.lock`, released between runs, the default live
+count; "0.24-0.27 GB of 12.00 GB left" on every hadron run, the host process at most 0.77 GB.
+
+**THE BASELINE** (integ/p36 as built, the flat path on; three runs, the best, the others in
+brackets; Fe56 20k one run):
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| B1 gamma 6 MeV 2M | 432.8 ms (439.7, 439.2) | 4.621e6 | 6.02e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+| proton 1 GeV 200k | 7,160.3 ms (7,300.2, 7,192.2) | 27,932 | 1.61e6 | 391.933 nGy (1.33865) | 11,550,631 |
+| pi+ 10 GeV 100k | 8,763.0 ms (8,844.4, 8,789.5) | 11,412 | 1.48e6 | 333.391 nGy (2.00911) | 12,936,409 |
+| Fe56 56 GeV 5k | 24,379.6 ms (24,480.5, 24,507.5) | 205.1 | 2.55e6 | 3.06372 uGy (53.0331 nGy) | 62,057,540 |
+| Fe56 56 GeV 20k | 59,755.3 ms | 334.7 | 4.15e6 | 12.3684 uGy (106.602 nGy) | 248,088,528 |
+
+V309/V310's digits, every one (the times are under V309's because integ/p36 carries P37's
+streams). The lead's chain on the same binary the same hour: the same digits, Fe56 5k 24,335.5
+ms, 20k 59,283.6 ms; `G4GPU_CASCADE_FLAT=0` Fe56 5k 40,592 ms, 3.06391 uGy (53.0322),
+62,058,769 - V299's digits.
+
+**THE STAGE PROFILE** (`G4GPU_FLAT_PROFILE=1`; this package's build with `G4GPU_FLAT_FACTORY=0`,
+which is integ/p36's flat path to the digit - 391.933 nGy, 11,550,631; 3.06372 uGy, 62,057,540 -
+plus P39's set-up counters; the kernels timed with events, the tail on its own stream so its
+column is its launch only; V323 puts it back in the round):
+
+| | proton: Binary | Fe56 5k: Binary | Fe56 5k: light ion |
+|---|---|---|---|
+| rounds | 1,510 | 2,379 | 4,684 |
+| flat kernels | 2,649 ms | 3,026 ms | 6,804 ms |
+| set-up | **1,064 ms (40%)** | **1,446 ms (48%)** | **2,100 ms (31%)** |
+| move / post / pre | 706 / 512 / 141 ms | 672 / 444 / 158 ms | 1,471 / 1,762 / 781 ms |
+| set-up launches; lanes a launch | 150; 717 | 316; 139 | 77; 272 |
+| set-ups that reached the nucleus; retries (a record's second or later) | 91,042; 10.4% | 36,951; 13.7% | 20,678; 4.8% |
+| nuclei a set-up | 1.00 | 1.00 | **7.26** (3.6 tries of two inside one call) |
+
+So the Binary cascade's set-up is one nucleus a call (V318's 1.02 builds a cascade: an outer
+turn after a collision-less `Propagate`, or a `CheckResult` re-entry, is the 10% that come
+back), and its cost is the gate: a set-up launch waits for its slowest lane's `Init` (1,522 draws
+of rejection sampling, V300) and up to 200 impact points, so V309 ran it only when lanes/16
+waited - 150 launches in 1,510 rounds, a cascade waiting ~10 rounds for its nucleus. The light-ion
+set-up is 7.26 nuclei: `Interact`'s tries loop inside the call.
+
+**THE DESIGN.**
+
+* (a) WHO ASKS. The set-up's own list, the round it runs: after the reap, `flat_request` runs
+  over `setup_list` - the model's top (`stage_model` / `stage_ion_model`, which decide the
+  nuclide) and one request a target (two a light-ion try) - then the factory over the requests,
+  then `flat_setup`, in the round's stream. The brief's "assembled from round N's claims for round
+  N+1" is not needed: a request is a 40-byte record written by a 22-48-register kernel, and the
+  factory's time is measured (V321) at 6-8% of the drain; P37's overlap would hide that and
+  delay every cascade a round. Named, not built.
+* (b) THE KEY. A cascade keeps its generator's key - `rng_key` and `step`, as `Philox(rng_key,
+  step, kInteractionRngPurpose)` is made in the claim - and counts its nuclei. Nucleus t of a
+  Binary cascade is `factory_stream(rng_key, step, lane, phase, tag = t)`; a light-ion try t
+  asks for tags 2t (projectile) and 2t + 1 (target). The tag sits in bits 4-15 of the stream's
+  purpose word, so tag 0 is P38's stream word for word (test_npool_nucleus's digits did not
+  move: worst Ca43 +3.67). Never a lane, a list position or a round: the factory's list order is
+  an atomic counter's, and the nucleus does not depend on it.
+* (c) THE HAND-OVER. A request carries its record's nucleon array and report: the factory
+  writes the nucleus INTO the record (ReduceSum's scratch in the block's shared memory), and
+  `stage_nucleus` reads it with `flat_take_factory_nucleus` - `factory_nucleus_header` (`Init`'s
+  constants: density, Fermi, the hard-core distance, A, Z, L = 0, excitation 0, current -1;
+  capacity left at the record's) and the factory's `NucleusReport`, which is all of what
+  `nucleus_init` returns that the cascade reads (`fatal()` and its capacity flag;
+  `make_rk_propagation` only adds the hyper flag through `mass`).
+* (d) THE LIGHT ION: projectile and target from the factory, both keyed. A try that misses ends
+  the call; the next set-up asks for the next pair.
+* (e) THE FALL-BACK, by name: `G4GPU_FLAT_FACTORY=0`, a request outside A 1..64, past tag 4,095,
+  or a full list (unreachable: each list holds every lane's worst case) samples on the lane with
+  `nucleus_init` from the cascade's generator, as P36. A factory REFUSAL is the same law's
+  refusal and hands the cascade back as `nucleus_init`'s would.
+* (f) MEMORY. No nucleus buffer: the nucleons land in the records. Two request lists of every
+  lane's worst case, 40 B a request: 1.25 MB (Binary, 16,384 lanes) and 0.31 MB (light ion), and
+  the record's key, count, flag and report: the pools 623.7 -> 625.7 MB and 163.5 -> 164.0 MB.
+  The photon gate measured before and after in V321.
+
+### V321: the factory in the Binary set-up - the proton beam 1.50x, pi+ 1.19x, every dose inside 0.5 sigma of the thread path; the campaign's first run found that a straggler handed back is no longer the same cascade, and stragglers now finish on their own lane
+
+**WHAT WAS BUILT** (9059da7, aabad02): npool/nucleus_factory.cuh - P38's one-nucleus body as
+`factory_build` (every formula unchanged), the tag, `FactoryRequest` / `FactoryLists` /
+`factory_push` and `nucleus_factory_list_kernel<32|64>` (124 registers, 200 B frame, 3.5 / 6.9
+kB shared), launched from transport_run_npool_factory.cu; bic/flat/cascade_flat.cuh's key,
+count, report and `flat_take_factory_nucleus`; host/flat_drain_kernels.cuh's `flat_request`
+(22 registers Binary, 48 light ion), the factory's launch, the set-up counters and the factory
+column in `G4GPU_FLAT_PROFILE`; tests/test_bic_flat.cu drives the same path.
+
+**THE SET-UP GATE.** With the nucleus gone from the lane a set-up launch no longer waits for an
+`Init`, so it runs every round a lane waits (`setup_min` 1 with the factory; `G4GPU_FLAT_SETUP_MIN`
+still overrides). Measured on the factory build: the proton beam 5,549 ms at P36's gate, 5,056 at
+1 (its Binary drains 1,536 -> 597 rounds); Fe56 5k 25.9 s, 22.5 s at 8, 21.7 s at 1. The digits
+were the same at every gate (the nucleus is keyed, not batched).
+
+**THE FIRST CAMPAIGN FAILED, AND WHY.** test_bic_flat with the factory: pi+ 800 MeV on O16 and C12
++11.0 / +9.7 sigma on the baryon balance against the thread path and -9.9 / -8.7 sigma on the K+
+and Lambda multiplicities against Geant4; 192 of 640,000 calls handed back as stragglers (K =
+4,096 in the campaign). Two diagnostics settled it: the same failure with the nucleus sampled by
+`nucleus_init` on the lane from a factory-keyed generator (so not the factory), and the
+factory-off campaign handing back 216 stragglers too - V309's "0 handed back" was an earlier
+build's; these are `StepParticlesOut`'s 100 resets x 100 steps around a slow hyperon. P36 hands a
+straggler to the thread path, which reruns it from its key - the SAME cascade while the flat
+cascade's nucleus came from that key's generator. With the factory the rerun is a different
+cascade, so every long cascade is replaced by an ordinary one: the strange events lost.
+
+**THE FIX: a straggler is finished on its own lane.** `flat_straggle` flags it (with the factory
+on) instead of handing it back; the reap lists it apart (`solo_list`) and the step kernels skip
+it; when the drain has nothing else - every entry claimed, nothing to set up, step or de-excite -
+`flat_solo` runs every flagged record on a thread each through `flat_run_solo`: the drain's own
+stage functions in the drain's order (its nucleus from the factory if one waits, else
+`nucleus_init`), until it needs a tail slot. The same cascade bit for bit; only its time is one
+thread's. Past 65,536 steps (six times Geant4's 100 x 100) it is handed back by name - the ion
+campaign's anti-vacuity reactions that never end (V322) found the need for that bound. The
+kernel: 255 registers, 20,368 B frame (light ion 24,976 B), under the 28,672 B raise.
+
+**THE CAMPAIGN** (tests/test_bic_flat.cu, 32 points x 20,000, the factory on):
+
+| check | result |
+|---|---|
+| twice; at 4,103 lanes against 8,192 | 0 of 640,000 final states differ, both |
+| handed back | 0 (192 stragglers finished solo; 0 requests fell back to the lane) |
+| flat against thread, independent keys, 3,124 rows | worst **+3.59 sigma** (camp_pim800_Al27, pi- kinetic energy bin 4) |
+| flat against Geant4, 2,420 rows | worst **-3.33 sigma** (camp_n100_C12, (Z, A) = (6, 11) kinetic energy); the thread path on the same rows -3.49 |
+| ANTI-VACUITY (`G4MesonAbsorption` dropped) | caught at **-17.53 sigma** (camp_pip200_Fe56, proton multiplicity) |
+| `G4GPU_FLAT_FACTORY=0` | V309's campaign to the row: -4.11 / +4.60, -18.86, 216 handed back |
+
+**THE BEAMS** (final build aabad02, the light ion's nuclei on the lane - V322; three runs, best):
+
+| beam | integ/p36 | P39 | x | dose (rms) | thread path, this binary | sigma | track-steps |
+|---|--:|--:|--:|---|---|--:|--:|
+| B1 gamma 2M | 432.8 ms | 430.9 ms (438.3, 432.9) | 1.00 | 85.2055 nGy (173.586 pGy) | integ/p36's digits (no cascade reaches it) | 0 | 26,050,805 |
+| proton 1 GeV 200k | 7,160.3 ms | **4,773.9** (4,845.4, 4,861.6) | **1.50** | 391.091 nGy (1.33737) | 391.931 (1.33866), 8,566 ms | -0.44 | 11,546,754 |
+| pi+ 10 GeV 100k | 8,763.0 ms | **7,386.8** (7,431.2, 7,410.4) | **1.19** | 333.181 nGy (2.01072) | 333.4 (2.00918), 9,800 ms | -0.08 | 12,933,850 |
+
+events/s: proton 41,895, pi+ 13,538; track-steps/s 2.42e6 and 1.75e6. The sigma is the
+difference over the two runs' rms in quadrature. The doses moved by more than P36's hundredth of
+a sigma because the cascades now differ in their draws, not only in their last bits - what V302's
+rule admits and the campaign holds.
+
+**THE STAGE PROFILE AFTER** (proton, the factory on): 631 rounds (1,510); flat kernels 2,450 ms:
+factory 196 ms (8%), set-up 859 ms (35%; 1,064), move 414, post 391, pre 75, the solo
+stragglers' launch 384 ms (16%, 18 cascades in 2 launches), reap + read-back 85; 249 set-up
+launches of 434 lanes; 91,425 nuclei from the factory, none on a lane. What remains in the
+set-up is the impact-point loop (6.4 misses a cascade, each a target list and a pair search,
+V318) and the field maps, at one lane a cascade - the next package's, by name.
+
+**THE PHOTON GATE AND THE MEMORY.** The pools grew 2.5 MB (625.7 + 164.0 MB; the batch 3.80 GB,
+8,037,632 slots, 668 interaction slots, as before); the photon gate 430.9 ms against 432.8 -
+nothing lost.
+
+### V322: the factory in the light-ion set-up - measured, and OFF by default: 5.7% of the campaign's Fe56-on-Al27 reactions outgrow the 256-track pool, and their thread-path reruns are other reactions
+
+**WHAT IT DOES** with `G4GPU_FLAT_FACTORY_ION=1`: both nuclei of a try from the factory (tags
+2t, 2t + 1), one try a set-up call (V320 (d)). The Fe56 beam: 5k 21,344 / 21,594 ms (24,380 at
+integ/p36: 1.14x), 20k 51,207 / 51,316 ms (59,755: 1.17x); 3.08474 uGy (53.067 nGy), +0.28 sigma
+from the thread path, and 12.506 uGy (106.729), +0.91 sigma. The light-ion profile: set-up
+2,100 -> 978 ms, the factory 346 ms, the rounds 4,684 -> 2,934 (the set-up every round; a miss
+now costs a set-up round, 73.4% of the set-ups are retries, 2.00 nuclei each).
+
+**WHY IT IS OFF.** test_blir_flat with it on: ic_Fe56_1000_Al27 alone fails, -12.15 sigma against
+the thread path (cos theta of protons, bin 9) and -10.65 against Geant4 (proton multiplicity),
+every other case inside 3 sigma, the determinism checks exact. 1,139 of its 20,000 reactions are
+handed back for capacity - V310's 1,078, the 256-track flat pool - and, as with V321's
+stragglers, their reruns are other reactions under the factory: the largest reactions replaced by
+ordinary ones. A 4,096-entry collision list changed nothing (1,139 again), so the pool binds,
+and the pool cannot pass 256 here: `FlatScratch`'s lists are sized by it and
+`static_assert(P <= kCascadeMaxScratch)` holds it at the thread path's 256-entry scratch lists. A
+solo continuation needs the overflowing cascade's lists to grow, which the flat record cannot.
+On the beams the class is 1 (5k) and 2-3 (20k) reactions, but the rule is the campaign's.
+`G4GPU_FLAT_FACTORY_ION=0` (the default) is integ/p36's light-ion path: the campaign is V310's
+to the row (-2.66 / +3.65 sigma, 1,078 handed back, the anti-vacuity +23.34).
+
+**WHAT WOULD TURN IT ON** (the next package's, by name): the flat scratch lists' cap separated
+from the pool's size, so the light-ion record can hold the thread path's 1,024 tracks (+105 kB
+a lane: 2,048 lanes, 215 MB), and the capacity hand-back then reaches only what the thread path
+itself refuses; or a capacity rerun in a larger flat record from the same key, which reproduces
+the same reaction because the factory's nuclei are keyed.
+
+**THE FE56 BEAM AS SHIPPED** (the Binary cascade's factory only): 5k 21,976.3 ms (22,085.8,
+22,096.1), 227.5 events/s, 1.11x; 3.06318 uGy (53.0356 nGy), -0.01 sigma from the thread path,
+62,057,218 track-steps. 20k 56,520.3 ms, 353.9 events/s, 1.06x; 12.3679 uGy (106.612 nGy),
+-0.01 sigma, 248,094,630. Profile (5k): Binary 925 rounds (2,379), set-up 1,032 ms (1,446),
+factory 173 ms; light ion unchanged (set-up 2,068 ms, 30%).
+
+### V323: the de-excitation tail, measured with the set-up gone - not built
+
+The tail back in the round (`G4GPU_FLAT_TAIL_STREAM=0`, profile on; its column then holds the
+solo launches too, which the stream build's column alone measures and is subtracted here):
+
+| | proton: Binary | pi+: Binary | Fe56 5k: Binary | Fe56 5k: light ion |
+|---|--:|--:|--:|--:|
+| flat kernels, tail in the round | 4,005 ms | 4,404 ms | 5,370 ms | 9,293 ms (ion factory on) |
+| tail column | 2,198 ms | 2,596 ms | 3,049 ms | 4,345 ms |
+| of which solo stragglers (stream build's column) | 384 ms | 1,601 ms | 1,301 ms | 329 ms |
+| **the tail itself** | **~1.81 s (45%)** | **~1.0 s (23%)** | **~1.75 s (33%)** | **~4.0 s (43%)** |
+| integ/p36 (factory off), the tail in the round | 2,040 ms of 4,436 (46%) | - | 1,799 of 4,723 (38%) | 4,067 of 10,794 (38%) |
+| record-rounds waiting for a slot ("tail waits") | 66,070-79,738 (P36: 201,330-213,872) | 64,133-67,434 | 95,794 | 752,363 |
+| rounds | 599-631 | 507 | 925 | 4,684 |
+
+So the tail is now half of the proton beam's Binary drain and the largest single stage of every
+drain. It runs on the 667-668 interaction slots (1,617,672 B each, 1.08 GB), a slot a record; the
+records waiting for one average 116 a round on the proton beam (73,568 / 608) and 161 on the
+Fe56 light-ion drain. A residual's de-excitation touches 5.5 kB (Binary) to 7.6 kB (light ion) of
+the slot's 536 kB PreCompound workspace (V318); a tail lane of 16 kB (the products, the
+workspace's high-water arrays, a 128-wide final state) is 1% of a slot, so the 1.08 GB the slots
+hold is 67,000 such lanes - or the same 668-wide tail in 11 MB. What a wide queue needs: a
+de-excitation entry point that takes a residual (Z, A, E*, p) and those arrays instead of an
+`InteractionSlot`; the emission (`fill_result_into`, the secondaries' buffer) after it, on the
+same lane; and the solo stragglers (1.6 s of the pi+ beam's drain: 28 cascades of up to 10,000
+`StepParticlesOut` steps on one thread each) are the other long pole - P36's thread-path
+hand-backs paid the same. Numbers only; the next package's.
+
+### V324: P39 closed - the gates, the units, what was refused
+
+**THE GATES** (build aabad02; build_all's GPU phase after its tests, run by hand from the
+worktree; logs in out\p39\gates\on and \off):
+
+| | flat on (default) | `G4GPU_CASCADE_FLAT=0` |
+|---|---|---|
+| b1_gpu_sched 2M, example B1 2M (1.1045 sigma), batch = macro, mesh, the seven switches, the step hook, the pool size, two runs and the replay | every printed number ba73's | every printed number ba73's |
+| proton depth-dose (100 MeV in water) | port 584,851.12 MeV (-0.140%), plateau 1.00043, R80 77.694 mm, 80-20 1.200 mm: OK | 584,663.45 (-0.172%), 1.00125, 77.693 mm, 1.200 mm - ba73's to the digit |
+
+The depth gate is the one gate whose run reaches Binary cascades; under the factory its draws
+differ and it moved inside its own tolerance (P36's flat path had matched it to the digit,
+V309). The thread path (`G4GPU_CASCADE_FLAT=0`) on the beams: proton 391.931 nGy (1.33866),
+11,550,586; pi+ 333.4 (2.00918), 12,936,362; Fe56 5k 3.06391 uGy (53.0322), 62,058,769 - V299's.
+
+**THE GPU TESTS** on this build: test_bic_flat OK (V321), test_blir_flat OK (V322's default;
+FAILS with `G4GPU_FLAT_FACTORY_ION=1`, by name), test_npool_nucleus PASS (V319's digits: worst
+Ca43 +3.67, the halved hard core at -53.85 / -241.55 / -113.99, grid-independent),
+test_ion_primary PASS (it includes host/flat_drain.cuh). The other ten on TESTS_GPU include none
+of the files this package changed (their nvcc dependency lists, P36's out\deps) and were not
+rebuilt.
+
+**THE UNITS** (sm_70, CUDA 12.9, one at a time under `out\ptxas.lock` through the turn file):
+transport_run_int_binary_flat 5.0 min, transport_run_int_lightion_flat 6.0 min, the build's ptxas
+peak 6.9-7.2 GB (P36: 5.9 / 6.9 GB); transport_run_npool_factory seconds; the engine unit
+(flat_drain.cuh's `FlatPool`) rebuilt. Kernels: set-up 175 (158) / 140 (138) registers, 16,672 /
+21,344 B frames; `flat_request` 22 / 48; `flat_solo` 255, 20,368 / 24,976 B; the rest P36's.
+
+**REFUSED OR LEFT, BY NAME:** the factory's launch a round ahead on its own stream (6-8% of a
+drain, and it would cost every cascade a round); spare pairs for the light-ion tries (a miss is
+one set-up round now; 63 MB for three spare pairs, for an estimated 2% of the Fe56 beam); the
+light-ion factory by default (V322); the impact-point loop and the field maps flattened (the
+set-up's remaining 35-38%); the wide de-excitation queue (V323).

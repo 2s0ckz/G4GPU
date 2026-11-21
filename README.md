@@ -149,6 +149,11 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P36: Fe56 56 GeV, 20,000 events, final stage | 295.6 (116.9 before) | 67.7 s (171.1 s) |
 | Titan V, P40 (RISK V313-V317: the flat Bertini and FTF designs refused by measurement - a Bertini drain is as long as its slowest cascade, an FTF interaction has two strings and 70% of its time in the de-excitation; the flat pools only in the final hadronic stage): example B1 2M 6 MeV gammas, GPU time | 4.90 × 10⁶ | 408 ms (433 before P40: the pools no longer built in stage 1)
 | Titan V, P40: proton 10 GeV, 50,000 events, final stage (new row) | 8,085 | 6.18 s |
+| Titan V, P39 (RISK V320-V324: the Binary cascade's nuclei from P38's nucleus factory, a request per set-up keyed on the cascade, the set-up every round, stragglers finished on their own lane; the light-ion reaction's factory measured and off by default, V322): example B1 2M 6 MeV gammas, GPU time, best of 3 | 4.64 × 10⁶ | 431 ms (433 before P39) |
+| Titan V, P39: proton 1 GeV, 200,000 events, final stage | 41,895 (27,932 before) | 4.8 s (7.2 s) |
+| Titan V, P39: pi+ 10 GeV, 100,000 events, final stage | 13,538 (11,412 before) | 7.4 s (8.8 s) |
+| Titan V, P39: Fe56 56 GeV, 5,000 events, final stage | 227.5 (205.1 before; 234.3 with the light-ion factory on) | 22.0 s (24.4 s) |
+| Titan V, P39: Fe56 56 GeV, 20,000 events, final stage | 353.9 (334.7 before; 390.6 with the light-ion factory on) | 56.5 s (59.8 s) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no
