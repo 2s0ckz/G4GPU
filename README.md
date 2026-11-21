@@ -154,6 +154,12 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P39: pi+ 10 GeV, 100,000 events, final stage | 13,538 (11,412 before) | 7.4 s (8.8 s) |
 | Titan V, P39: Fe56 56 GeV, 5,000 events, final stage | 227.5 (205.1 before; 234.3 with the light-ion factory on) | 22.0 s (24.4 s) |
 | Titan V, P39: Fe56 56 GeV, 20,000 events, final stage | 353.9 (334.7 before; 390.6 with the light-ion factory on) | 56.5 s (59.8 s) |
+| Titan V, P41 (RISK V325-V329: the de-excitation tail off the interaction slots - a 4,096-entry tail pool for the flat Binary cascade and a 1,024-entry one for the light-ion reaction, launched when full or idle; every dose and step count integ/p40's to the digit): proton 1 GeV, 200,000 events, final stage | 32,800 (28,268 before) | 6.10 s (7.08 s) |
+| Titan V, P41: pi+ 10 GeV, 100,000 events, final stage | 11,921 (11,409 before) | 8.39 s (8.77 s) |
+| Titan V, P41: proton 10 GeV, 50,000 events, final stage | 8,852 (8,101 before) | 5.65 s (6.17 s) |
+| Titan V, P41: Fe56 56 GeV, 5,000 events, final stage | 223.3 (204.5 before) | 22.4 s (24.4 s) |
+| Titan V, P41: Fe56 56 GeV, 20,000 events, final stage | 401.9 (335.8 before) | 49.8 s (59.6 s) |
+| Titan V, P41: example B1 2M 6 MeV gammas, GPU time, best of 3 (no pool in stage 1) | 4.95 × 10⁶ | 404 ms (404 before) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no

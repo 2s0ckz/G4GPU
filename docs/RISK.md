@@ -20434,3 +20434,366 @@ drain, and it would cost every cascade a round); spare pairs for the light-ion t
 one set-up round now; 63 MB for three spare pairs, for an estimated 2% of the Fe56 beam); the
 light-ion factory by default (V322); the impact-point loop and the field maps flattened (the
 set-up's remaining 35-38%); the wide de-excitation queue (V323).
+
+### V325: P41's measurements before the design - the tail was a third of the Binary drain and ran on 667 slots; the Binary residual is a 0.6-ms, 11-draw, 2-step de-excitation (p99 6 ms) and the light-ion residual a 1.8-ms one with a 32-60 ms tail of hot projectile remnants; the handler writes 5 / 27 / 26 / 27 / 27 entries of its 536 kB, and everything the tail writes after it at most 85
+
+**THE TREE.** perf/flat_tail at integ/p40 (3b206f9), its out\ the lead's integ/p40 objects (copied
+from D:\g4gpu\out, the `.d` files' paths rewritten; transport_run.obj rebuilt, because the lead's
+was integ/p36's - P40's one change is in transport_run_engine.cuh, 0.26 GB ptxas, 40 s), exampleB1
+relinked from examples/B1's objects. Every run on the Titan V alone under `out\gpu.lock`, the
+default live count.
+
+**THE BASELINE** (exampleB1's own lines; three runs unless one; "0.24-0.27 GB of 12.00 GB left" on
+every hadron run, the host at most 0.75 GB):
+
+| beam | time | events/s | track-steps/s | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| B1 gamma 6 MeV 2M | 411.0 / 403.6 / 405.7 ms | 4.95e6 | 6.45e7 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+| proton 1 GeV 200k | 7,137 / 7,075 / 7,145 ms | 28,268 | 1.63e6 | 391.933 nGy (1.33865 nGy) | 11,550,631 |
+| pi+ 10 GeV 100k | 8,769 / 8,765 / 8,842 ms | 11,409 | 1.48e6 | 333.391 nGy (2.00911 nGy) | 12,936,409 |
+| proton 10 GeV 50k | 6,172 / 6,227 / 6,187 ms | 8,101 | 1.16e6 | 214.088 nGy (1.97054 nGy) | 7,151,649 |
+| Fe56 56 GeV 5k | 24,448 ms | 204.5 | 2.54e6 | 3.06372 uGy (53.0331 nGy) | 62,057,540 |
+| Fe56 56 GeV 20k | 59,556 ms | 335.8 | 4.17e6 | 12.3684 uGy (106.602 nGy) | 248,088,528 |
+
+V316's digits, every one (V313/V316's times within the card's spread).
+
+**WHERE THE DRAIN IS** (`G4GPU_LOOP_PROFILE=1`, `G4GPU_FLAT_PROFILE=1`): the proton beam's kBinary
+bucket 6,038 ms of 7,082 ms of GPU time (85.3%), of which the flat kernels' own spans are 2,632
+ms (set-up 1,065, move 701, post 505, pre 145, reap + read-back 139) - the other 3.4 s is the
+rounds WAITING for the tail, which since P36 runs on its own stream and which the profile's ticks
+(on the main stream) never saw: P36's V309 "tail 34%" was the in-round build's; on integ/p40 the
+tail is the gap between a round's end and its next claim. Fe56 5k: kLightIon 12,046 ms (49.8%),
+kBinary 6,857 ms (28.3%); pi+: kBinary 5,743 ms (67.2%), kFtfp 941, kBertini 618, kLightIon 317,
+kAtRest 254 (V313's shares). The tail's width was the slot count (667) and every residual its own
+one-thread block.
+
+**THE INSTRUMENT** (measurement only, never committed: the session's `tape_patch.pl` on a COPY of
+src, the two flat units rebuilt into out\p41\exp (6.5 GB ptxas, 572 s) and linked in front of the
+archive). Every tail a pool lane ran, one row: the residual handed to `bic_deexcite_fragment`
+(Z, A, E*, the exciton numbers), the tail's work, the lane's `clock64` span and its generator
+draws. Its doses and steps are the baseline's to the digit (proton 391.933 nGy, 11,550,631; Fe56
+3.06372 uGy, 62,057,540). A first instrument, inside `deexcite` itself on P36's slot tail (device
+globals per thread), hung the run before its first drain - two runs stopped by hand, not
+investigated, not used. The per-phase counters (PreCompound's transitions and emissions, the
+handler's BreakFragment passes, the products) come from the same residuals replayed in
+tests/test_tail_flat.cu (V326), which reads them from the two status reports.
+
+**THE TAPES** (proton 1 GeV 200k: 89,880 tails; Fe56 5k: 37,475 Binary + 19,688 light-ion tails;
+n, mean, p50 / p90 / p99 / p99.9, max; ms at the Titan V's 1,455 MHz, one lane a block, in situ):
+
+| quantity | proton: Binary residuals (81,567) | Fe56: Binary residuals (31,881) | Fe56: light-ion residuals (19,090) |
+|---|---|---|---|
+| lane time of the tail | 1.16 ms; 0.60 / 2.61 / 6.01 / 23.2; 47.6 | 1.13 ms; max 32.8 | **8.83 ms; 1.84 / 31.9 / 59.9 / 74.6; 95.9** |
+| draws | 16.6; 11 / 34 / 86 / 213; 325 | 17.6; max 275 | 64.2; 46 / 144 / 324 / 470; 616 |
+| residual A | 14.8; 15 / 16 / 39 / 41; 47 | 15.5; max 47 | 31.5; 32 / 54 / 56 / 56; 63 |
+| residual E* (MeV) | 22.9; 13.5 / 57.9 / 119 / 179; 335 | 24.1; max 286 | **76.1; 33.0 / 215 / 511 / 662; 826** |
+| E*/A (MeV) | 1.67; 0.93 / 4.23 / 9.61 / 15.5; 36.3 | 1.68 | 2.74; 1.36 / 7.47 / 16.8 / 25.0; 34.1 |
+| excitons (p + h) | 3.0; 2 / 6 / 11 / 16; 33 | 2.9 | 8.8; 5 / 23 / 49 / 59; 75 |
+| (Z, A, E*-bin) classes; the commonest | 945; N15 E* < 5 MeV 11.0%, O15 < 5 8.3%; the top 20 54% | 721 | 2,324; N15 < 5 2.6%, Fe55 < 5 1.2% |
+
+The PreCompound arm (a nucleon under `theBCminP`, no cascade): 8,299 proton-beam calls, 1.23 ms
+mean, 9.5 ms at most. A == 1 (`Propagate1H1`, no de-excitation): 8,239 proton-beam tails, which
+take a slot (below). The tail's other works - the void nucleus, the packing after an outer-loop
+turn - are 14 tails in 89,880.
+
+**THE COST AGAINST WHAT IS KNOWN BEFORE THE LAUNCH** (the residual's E*, from the record):
+
+| E* (MeV) | proton: share of residuals / mean lane ms / share of the tail's time | Fe56 light ion |
+|---|---|---|
+| < 5 | 28.4% / 0.41 / 10.0% | 19.4% / 0.81 / 1.8% |
+| 5-20 | 32.8% / 0.54 / 15.4% | 20.2% / 1.03 / 2.4% |
+| 20-60 | 29.6% / 1.70 / 42.9% | 24.8% / 2.27 / 6.4% |
+| 60-150 | 9.0% / 3.75 / 28.5% | 20.1% / 13.9 / 31.6% |
+| >= 150 | 0.3% / 13.1 / 3.3% | 15.4% / 33.2 / **57.9%** |
+
+**THE PHASES, PER CLASS** (tests/test_tail_flat.cu, 20,000 residuals a class at rest with the
+class's mean exciton numbers; device lanes in 32-lane blocks - their times are a warp's of one
+class, not the transport's one-lane blocks):
+
+| class | PreCompound transitions / emissions | handler BreakFragment passes (max) | draws (max) | products (max) |
+|---|---|---|---|---|
+| p: N15, E* 0-5 MeV | 0.70 / 0 | 1.0 (1) | 7.1 (20) | 2.0 (2) |
+| p: O16, 20-40 | 0 / 0 | 1.9 (4) | 16.7 (430) | 3.6 (7) |
+| p: O15, 60-100 | 2.0 / 0.48 | 2.9 (7) | 53.5 (373) | 5.4 (10) |
+| p: K39, 20-40 | 2.0 / 0.14 | 3.1 (5) | 33.3 (108) | 5.0 (11) |
+| fe: Fe55, 0-5 | 0 / 0 | 2.0 (2) | 11.0 (34) | 3.1 (7) |
+| fe: Cr51, 150-250 | 0 / 0 | 10.4 (16) | 120 (599) | 12.2 (21) |
+| fe: Mn52, 150-250 | 0.19 / 0.17 | 10.2 (16) | 119 (515) | 12.2 (20) |
+| fe: spectator Ca40, 60-150 | (handler only) | 6.4 (11) | 65.7 (403) | 8.4 (15) |
+
+So a Binary residual's chain is SHORT - one or two evaporation passes, two or three products,
+about a dozen draws - and the handler's cost is the 68-channel probability scan of each pass,
+not the chain's length; a hot projectile remnant (E* >= 150 MeV) is ten passes and twelve
+products, and those 15% of the light-ion reactions are 58% of its tail.
+
+**THE STATE THE TAIL TOUCHES** (V680's poisoned-slot high-water marks, P38, on the same two beams,
+and this tape's product counts): the handler's evaporation list 5, results 27, one pass's step 26,
+products 27, PreCompound's list 27 - 5,456 B (Binary) and 7,632 B (light ion) of the slot's
+536,576 B; the cascade's products at most 26 (Binary) and 85 (light ion) of the slot's 512; the
+final states 21 secondaries at most against the 856-wide `fs`, `filled` and `pdg_mass` (143 kB).
+
+**THE DESIGN THE NUMBERS FIX** (V326-V328 build it):
+
+* **The record: an entry of a tail pool, off the slots** - `deex::flat::TailEntry`
+  (src/physics/hadronic/deexcitation/flat/tail_pool.cuh). ONE buffer is compact: the de-excitation
+  workspace, at 16 / 64 / 64 / 64 / 64 over the measured 5 / 27 / 26 / 27 / 27 (18,560 B). Every
+  list the tail writes AFTER the record has moved on - the PreCompound and cascade products, the
+  decay list, `SortResult`'s two - is at the SLOT'S capacity, so it refuses exactly when the slot
+  tail would; the final state is the model's own (`BicFinalState` 128, `BlirFinalState` 168), so
+  `copy_final_state` never counts an overflow the slot would not. The workspace, the decay list and
+  the copied final state are never live at once and share one area. An entry is 88,304 B (Binary)
+  and 177,360 B (light ion: `SortResult`'s two lists at 512 and a copy of the cascaders) - 6% and
+  11% of a slot.
+* **A compact workspace that binds is CONTINUED, never rerun** (the lead's note of 2026-11-20 from
+  P39's measurement: a rerun from the key is a different cascade, and the rerun subset is selected
+  by the failure). The generator is put back where it was before the call - nothing else the call
+  wrote is read again - and the same call runs on one of 32 slot-sized workspaces
+  (`bic::flat::TailFallback`, 536,576 B each) borrowed by a flag; a lane that finds none free in
+  2^20 tries is handed back by name (`kHandTailScratch`). No beam tail bound the compact
+  workspace (0 continued of 90,055 proton-beam and 57,255 Fe56-beam pool tails; 0 of 280,000 in
+  the test); the test drives 247,788 residuals
+  through the continuation on a 1-2 entry workspace and every one comes out to the bit.
+* **The width** - the pool's entries: 4,096 Binary (362 MB), 1,024 light ion (182 MB), plus 256 /
+  128 emission buffers and the continuation's 17 MB each - 577 MB, built only in the final stage
+  with the flat pools (P40's gating), so the photon gate does not pay for it. It comes out of the
+  hadron beams' track buffers (3.80 -> 3.24 GB, 8.04M -> 6.84M live slots); the flat Binary pool's
+  16,384 lanes are measured against 10,240 in V326.
+* **The kernels** - GATHER (the waiting lanes in cost order: 16 bins of the residual's E*, the
+  most expensive first, so the longest start first), TAIL (one lane per waiting tail on entry k:
+  `stage_tail` with the entry's views, the packing, `CheckResult`, the K0 mixing), EMIT (the narrow
+  emission: one 856-wide `filled` buffer a thread, 256 threads striding the launch - the one
+  buffer the emission's `emit_interaction_result` takes by type). One lane a block, as P36's tail:
+  V326 measured 8 and 32 same-bin lanes a warp slower (divergence in the chain). Not evaporation
+  steps as rounds: the chain is one or two passes for 70% of the Binary residuals and the pass's
+  68-channel scan is the cost - there is no chain to cut into rounds.
+* **The two tails that keep a slot** - A == 1 (`apply_yourself_h1`: a nucleus build and
+  `Propagate1H1` on the slot's cascade arrays; no de-excitation) and `DecayVoidNucleus` (its lists
+  are `BicScratch`'s) - 8,239 and 0 of the proton beam's tails, run by P36's slot tail.
+* **The hand-back of products** - EMIT is `run_interaction_entry` around the model call, one
+  function (`flat_emit`) for the slot's tail and the pool's emission, `fill_result_into` templated
+  on the source capacity (formulas byte for byte).
+* **The generator** - the record's own `Philox` (the entry's track key, P36's), consumed in the
+  thread path's order; which entry, launch or emission thread a tail gets moves time only.
+* **The concurrent drains** (V328): the thread-path kFtfp/kAtRest drains on one stream and
+  kBertini on another, on slot ranges kept apart from the flat drains' (hand-backs and the slot
+  tails, [0, 128)), beside the flat Binary drain - V313's bound: up to 1.6 s of the pion beam's
+  8.5.
+
+### V326: the tail pool for the Binary cascade - every tail that needs no slot runs on an entry of a 4,096-wide pool, launched when the pool would fill or nothing else steps; the proton beam 1.16x, the proton 10 GeV beam 1.09x, the pion beam 1.04x, every dose and step count integ/p40's to the digit
+
+**WHAT WAS BUILT** (V325's design):
+
+* `src/physics/hadronic/deexcitation/flat/tail_pool.cuh` - the entry (`TailEntry<Caps, ModelFs>`),
+  its capacities (`BinaryTailCaps`, `IonTailCaps`), the views it hands the tail's functions
+  (`tail_deex_workspace`, `tail_cascade_view`, `tail_blir_view`, `tail_decay_list`, `tail_fs`),
+  `tail_needs_slot`, the cost bins, and the continuation's slot-sized workspaces
+  (`build_big_workspaces`).
+* `bic/flat/cascade_flat.cuh`, its tail parts only: `stage_tail` takes the product lists and the
+  decay list as views (one body for the slot and the entry), `flat_tail_precompound` split out of
+  `flat_tail_direct`, `TailFallback` and the continuation in both, `kHandTailScratch`.
+* `src/host/flat_drain_kernels.cuh`: `flat_emit` (`run_interaction_entry` around the model call,
+  now one function for the slot's tail and the pool's emission), `flat_check_and_mix`
+  (`CheckResult` and the K0 mixing), the kernels GATHER / TAIL / EMIT, the reap's split of the
+  waiting tails (cost bins for the pool, `tail_list` for the slot), the gate, the tail-stream
+  profile; `flat_drain.cuh`: the pool's fields in `FlatPool`; the two units' policies.
+* tests/test_tail_flat.cu (and its classes, `test_tail_flat_classes.inc`); test_bic_flat.cu's
+  `k_tail` on the pool's entries (and P36's slot tail with `G4GPU_FLAT_TEST_SLOT_TAIL=1`) and its
+  tail perturbation; build_all.bat's TESTS_GPU line gains `test_tail_flat`.
+
+**THE GATE AND THE BLOCK, MEASURED** (the proton 1 GeV and Fe56 5k beams, one run each, the
+pool built; the slot tail's gate was half the slot count):
+
+| pool gate | proton 1 GeV | Fe56 5k | launches (Binary / light ion) |
+|---|--:|--:|---|
+| the slots, P36's tail (`G4GPU_FLAT_TAIL_WIDTH=0`) | 7,225 ms | 24,573 ms | 72 slot launches / 71 |
+| 512 Binary, 64 light ion | 6,701-6,785 | 31,320 | 121 / 270 (73 a launch) |
+| 333 | - | 24,231 | - / 71 |
+| 2,000 | 6,152 | - | |
+| **full or idle (the width)** | **6,075** | **21,763** | 32 / 35 (2,814 and 563 a launch) |
+| full or idle, 8 lanes a block | 7,513 | | |
+| full or idle, 32 lanes a block | 8,600 | | |
+
+Every launch of the tail costs the round its slowest residual (48 ms Binary, 96 ms light ion,
+V325), so the fewer the launches the shorter the drain - the opposite of the step kernels. The
+light-ion gate of 64 made a reaction-wide 8.8-ms tail into 270 launches of its slowest: 31.3 s
+against the slots' 24.6. Warps of alike-cost residuals lose: a residual's cost is its passes'
+68-channel scans and its chain's branches, and 8 or 32 of them in lockstep diverge more than the
+cost bins align them. The default: one lane a block, launched when the pool would fill or nothing
+steps; the cost bins order the launch (the hottest first).
+
+**THE BEAMS** (the final binary, the concurrent drains of V328 off; three runs each; "0.26-0.29 GB
+of 12.00 GB left", the host at most 0.77 GB):
+
+| beam | integ/p40 (V325) | this build | x | dose (rms) | track-steps |
+|---|--:|--:|--:|---|--:|
+| proton 1 GeV 200k | 7,075-7,145 ms | **6,092 / 6,098 / 6,168 ms** | **1.16** | 391.933 nGy (1.33865) | 11,550,631 |
+| pi+ 10 GeV 100k | 8,765-8,842 | 8,388 / 8,425 / 8,505 | 1.04 | 333.391 nGy (2.00911) | 12,936,409 |
+| proton 10 GeV 50k | 6,172-6,227 | 5,649 / 5,686 / 5,703 | 1.09 | 214.088 nGy (1.97054) | 7,151,649 |
+| B1 gamma 2M | 403.6-411.0 | 404.2 / 404.5 / 405.4 | 1.00 | 85.2055 nGy (173.586 pGy) | 26,050,805 |
+
+EVERY DOSE AND EVERY STEP COUNT IS integ/p40's TO THE DIGIT: the pool's tail runs the slot tail's
+functions in the same order on the same generator, and here they round alike - the relaxed rule
+is not even used (the campaign below finds the same final states as P36's slot tail, row for
+row). The photon gate builds no pool (stage 1, P40's V316): 404.2-405.4 ms, inside 1% of 408-416.
+
+**WHERE THE PROTON BEAM'S DRAIN WENT** (`G4GPU_FLAT_PROFILE=1`, `G4GPU_LOOP_PROFILE=1`): kBinary
+6,038 -> 4,970 ms; 90,055 tails on the pool in 33 launches (2,729 a launch), the pool's tail
+611 ms on its own stream and its emission 42 ms, 8,239 A == 1 tails on slots in 21 launches
+(171 ms); the rounds WAITED 248 ms for the tail (9% of the drain, from a round's end to its
+next claim); the flat kernels' own spans unchanged (2,598 ms). No tail was continued (0 of
+90,055) and none handed back. The tail is no longer what the
+Binary drain waits for: the set-up (1,079 ms, 42% - P39's) and the step kernels are.
+
+**THE MEMORY.** The two pools are 379.1 MB (Binary: 4,096 x 88,304 B, 256 x 68,568 B emission
+buffers, 32 continuation workspaces) and 198.1 MB (light ion: 1,024 x 177,360 B, 128, 32), built
+with P36's pools in the final stage only and counted in their bytes, so the hadron beams' track
+buffers give them up: 3.80 -> 3.24 GB (8.04M -> 6.84M live slots a side), the interaction slots
+667 -> 684 (sized after, from what is left), 0.26-0.29 GB left after the raise. The flat Binary
+pool's lanes were the other candidate: 10,240 lanes (-241 MB) made the proton beam 6,316 /
+6,317 ms against 6,141 and left Fe56 5k and 20k as they were (22,385 and 49,470 ms) - the
+16,384 stay. The photon beam's track buffers are 4.60 GB as before.
+
+**THE CAMPAIGN** (tests/test_bic_flat.cu, V309's 32 points x 20,000; the tail on the pool, the
+A == 1 and void-nucleus tails on slots; `G4GPU_ORACLE` at the oracle):
+
+| check | result |
+|---|---|
+| twice; at 4,103 lanes against 8,192 | 0 of 640,000 final states differ, both |
+| flat against thread, independent keys: 3,127 rows | worst **-4.11 sigma** (camp_n800_Fe56, pi0 kinetic energy bin 6) - V309's rows, the same five worst to the digit |
+| flat against Geant4: 2,423 rows | worst +4.60 sigma (camp_p1400_C12, the (1, 2) multiplicity) - V309's |
+| handed back | 216 stragglers, as P36's slot tail on the same binary (`G4GPU_FLAT_TEST_SLOT_TAIL=1`: 216) |
+| anti-vacuity, P36's (`G4MesonAbsorption` dropped) | -18.86 sigma, V309's |
+| ANTI-VACUITY, the pool's hand-back loses the last secondary of every final state | caught at -6,028 sigma (camp_pim800_Al27, the energy balance) |
+
+**THE TAIL-SPECIFIC COMPARISON** (tests/test_tail_flat.cu; V325's 14 classes - 8 of the proton
+beam's Binary residuals, 4 of the Fe56 beam's light-ion residuals, 2 of its spectators - 20,000
+residuals a class, 280,000; the pool's lane on the device, entry workspace and capacity rule,
+against the thread path's `bic_deexcite_fragment` / `deexcite` on the host at the slot's
+capacities, independent keys):
+
+| check | result |
+|---|---|
+| per class: multiplicities of n, p, d, t, He3, alpha, gamma, e-, A > 4; kinetic-energy spectra of n, p, alpha, gamma, A > 4 in 12 bins; products in 12 bins; the summed kinetic energy: 518 rows | worst **-3.05 sigma** (p: K39, E* 20-40 MeV, gamma kinetic energy bin 5); the next -2.94, -2.53 |
+| twice; at 1,056 entries against 4,096 | 0 of 280,000 differ, both |
+| handed back | 0; continued 0 |
+| THE CONTINUATION: the same residuals on a 1-2 entry workspace | 247,788 continued on a slot-sized one, 0 past the bound, **0 differ** from the uncontinued residuals to the bit |
+| same key as the host's thread path, to the bit | 33,840 of 280,000 (the host's and the device's compilers round apart, V301) |
+| ANTI-VACUITY, the last product of every de-excitation dropped in the hand-back | caught (the gamma multiplicity of N15 at rest: every pool residual one gamma short) |
+
+**THE UNITS** (ptxas, sm_70, CUDA 12.9; under the turn file, `out\p41\ptxas_peaks.log`):
+
+| unit | ptxas peak | kernels (registers, frame) |
+|---|--:|---|
+| transport_run_int_binary_flat | 6.48 GB (the build's peak; the two flat units and the engine one after another, 760-823 s) | the pool's tail 255 / 18,096 B; emit 240 / 800; gather 9; slot tail 255 / 18,368; P36's: post 250 / 10,624, move 212 / 720, setup 158 / 16,656, claim 144 / 792, pre 74, finish 70 |
+| transport_run_int_lightion_flat | (within the same 6.48 GB peak) | the pool's tail 255 / 18,608 B; emit 240 / 800; slot tail 255 / 18,704; setup 138 / 21,328 (P36's) |
+| transport_run (the engine) | 0.26 GB, 40 s | |
+| tests/test_bic_flat, test_blir_flat | 5.16 and 6.11 GB, 179 and 210 s | |
+| tests/test_tail_flat | 1.30 GB, 61 s | |
+
+Every frame under `run_interaction<kAtRest>`'s 21,472 B, so the raise stays 28,672 B. The seven
+thread-path interaction units were not recompiled; `interaction_pool.cuh` was not touched.
+
+### V327: the light-ion tail on the same pool - `ion_pack` on an entry, the spectators' de-excitation continued from its state; Fe56 5k 1.09x and 20k 1.21x, every digit integ/p40's
+
+**WHAT CHANGED.** `ion_pack` (`bic/flat/ion_flat.cuh`, after `Interact`) takes the continuation:
+before the spectators' `G4ExcitationHandler` call it keeps the cascaders, their count and the
+generator (`cascaders_save` in the entry), and if the compact workspace binds it puts all three
+back and makes the same call on a slot-sized workspace. The light-ion policy's `pack_entry` hands
+it the entry's `BlirStorage` view (products 512, `SortResult`'s two lists 512 - the slot's), so no
+list refuses that the slot would not. The light-ion pool is 1,024 entries of 177,360 B.
+
+**THE FE56 BEAM:**
+
+| events | integ/p40 (V325) | this build | x | dose (rms) | track-steps |
+|--:|--:|--:|--:|---|--:|
+| 5,000 | 24,448 ms | **22,390 / 22,469 ms** | **1.09** | 3.06372 uGy (53.0331 nGy) | 62,057,540 |
+| 20,000 | 59,556 | **49,767** | **1.21** | 12.3684 uGy (106.602 nGy) | 248,088,528 |
+
+Profile (5k): kLightIon 12,046 -> 10,906 ms; 19,699 light-ion tails on the pool in 35 launches
+(563 a launch, 2,772 ms on the tail's stream; the rounds waited 925 ms for it, 12% of the
+drain), the Binary cascade's 37,556 in 24 (kBinary 6,857 -> 6,124 ms); 0 continued. The light-ion
+reaction's tail is bound by its hot remnants (V325: 15% of the reactions, 58% of the tail, up to
+96 ms a lane): the drain's end waits for the slowest of them, which one lane can only shorten by
+being started first - the cost bins start them first.
+
+**THE CAMPAIGN** (tests/test_blir_flat.cu, V310's six cases x 20,000): 0 of 120,000 differ twice
+and at 4,103 lanes; 1,078 handed back (V310's: the 256-track pool against Fe56 + Al27);
+flat against thread 606 rows, worst -2.66 sigma (V310's); against Geant4 585 rows, worst +3.65
+(V310's); P36's perturbation (a move item dropped) +23.34 sigma; THE TAIL POOL'S (the last
+secondary lost in the hand-back) -866 sigma (ic_a200_C12, the energy balance).
+
+### V328: the thread-path drains beside the flat Binary drain - built, the slot ranges apart, every digit kept, and NOT a gain: the drains ran beside it and the flat drain grew by what they saved; off by default
+
+**WHAT WAS BUILT** (transport_run_engine.cuh, one delimited P41 block in `drain_interactions` and
+one at the top; `flat_pool_range` in transport_run_int_binary_flat.cu). With the flat tails off
+the slots, the slots are the thread-path drains' alone; each drain gets a device view of the one
+pool with its `slots` moved: [0, 128) the flat drains' (their hand-backs and the A == 1 /
+void-nucleus tails), [128, 256) kFtfp's then kAtRest's (FTF's 128 workspaces, indexed from 0),
+[256, n) kBertini's. kFtfp + kAtRest go on one non-blocking stream, kBertini on another, forked
+from the main stream after the binning and joined before anything steps; the flat Binary and
+light-ion drains run on the main stream between. No two drains share a slot or a workspace (V294's
+non-identity was exactly that), and every dose and step count is the sequential order's to the
+digit (all five hadron beams, below and V326).
+
+**THE MEASUREMENT** (pi+ 100k, `G4GPU_LOOP_PROFILE=1` + `G4GPU_FLAT_PROFILE=1`):
+
+| | streams (`G4GPU_DRAIN_STREAMS=1`) | one after the other |
+|---|--:|--:|
+| pi+ 10 GeV 100k, five runs each (two builds of the same code) | 8,299 / 8,313 / 8,327 / 8,366 / 8,581 ms (mean 8,377) | 8,388 / 8,425 / 8,435 / 8,460 / 8,505 ms (mean 8,443) |
+| proton 10 GeV 50k | 5,645 / 5,710 / 5,729 | 5,649 / 5,659 / 5,686 / 5,703 / 5,728 |
+| kFtfp + kBertini + kAtRest (main-stream spans) | overlapped | 1,909 ms |
+| the flat Binary drain (kBinary) | **7,298 ms** | 5,477 ms |
+| its round's reap + read-back | **1,594 ms** | 138 ms |
+
+V313's bound (1.6 s of 8.5) assumed the flat drain would not notice the thread-path drains. It
+does: those kernels are one 255-register thread a block with a 28,672-B frame, they hold the SMs
+for 40-80 ms each, and the flat round's small kernels (claim, reap, the 76-byte read-back) queue
+behind them - the round's bookkeeping went 0.14 -> 1.59 s and the Binary drain grew by 1.8 s of
+the 1.9 s it hid. The pion beam moved 0.8%, inside its run-to-run spread (8,299-8,581 against
+8,388-8,505). **OFF BY DEFAULT**
+(`G4GPU_DRAIN_STREAMS=1` turns it on; the ranges are built only then); what would make it pay is
+a flat round that does not need the whole card between its launches - a persistent flat drain, or
+the thread-path drains confined to fewer SMs - named, not done.
+
+### V329: P41 closed - the gates on and off, the GPU tests, and what was refused by name
+
+**THE ELEVEN GATES** (build_all.bat's gate section command for command, `out\p41\gates.bat`, the
+drivers b1_gpu_sched, g4dose and proton_depth rebuilt against this engine; with the flat path
+at its default and with `G4GPU_CASCADE_FLAT=0`): every printed number equal to P40's gate run
+(perf/flat_bertini_ftf outp40gateslat, itself P36's and ba73's digest) - the B1 dose, the
+macro run, the mesh, the physics switches, the step hook (PASSED), the three pool sizes, the
+two-run sequence and its replay; B1 against Geant4 at 1.1045 sigma; the proton depth-dose CSV md5
+ba22d777a151c1d717ba48d0b62f23d1, ba73's; every check rc 0. The one line that differs is the
+depth CSV's own path. The gates run in stage 1, where no pool - flat or tail - is built.
+
+**THE GPU TESTS.** test_bic_flat, test_blir_flat and test_tail_flat as V326/V327 report them (OK,
+with `G4GPU_ORACLE` at the oracle); test_bic_flat with P36's slot tail (`G4GPU_FLAT_TEST_SLOT_TAIL=1`)
+the same 216 hand-backs and rows; test_ion_primary (the one other GPU test that compiles the
+engine's header) PASS. The other ten GPU tests include none of the changed files and were not
+rebuilt.
+
+**THE THREAD PATH UNTOUCHED** (`G4GPU_CASCADE_FLAT=0`, this binary): pi+ 333.4 nGy (2.00918),
+12,936,362 steps (V299's); Fe56 5k 3.06391 uGy (53.0322), 62,058,769 (V306's); proton 1 GeV 391.931 nGy (1.33866), 11,550,586 (V299's).
+
+**REFUSED OR LEFT, BY NAME:**
+
+* Evaporation steps as rounds (V325): 70% of the Binary residuals are one or two BreakFragment
+  passes; there is no chain to cut, and a pass is the 68-channel scan.
+* Alike-cost warps (V326): 8 and 32 lanes a block measured 1.24x and 1.42x slower than one.
+* Sorting by (Z, A): (Z, A) does not predict the cost (an O15 residual is 0.4 ms cold and 19 ms
+  at 60-100 MeV); E* orders the launch.
+* Fewer flat Binary lanes to pay for the pool (V326: 10,240 lanes cost the proton beam 3%).
+* The concurrent thread-path drains on by default (V328, measured).
+* A rerun from the key for a tail that cannot finish on its entry: the continuation instead (the
+  lead's note, P39's measurement); the one remaining hand-back, `kHandTailScratch` (no
+  slot-sized workspace free in 2^20 tries), is reported by name at exit and was 0 in every run.
+
+**FOR THE LEAD.** Units: transport_run_int_binary_flat and _lightion_flat (the flat units'
+alone) and transport_run (the engine); no interaction unit, no `interaction_pool.cuh`.
+transport_run_engine.cuh: two delimited P41 blocks (the drains' ranges at the top; in
+`drain_interactions`, the concurrent branch before P34's `G4GPU_DRAIN` sequence, which is wrapped
+in `if (!p41_conc) { ... }` - two lines). P39's files untouched except `cascade_flat.cuh`'s
+tail parts (`stage_tail`'s signature, `flat_tail_precompound`, `TailFallback`, `kHandTailScratch`
+appended to `HandOff`) and `ion_flat.cuh`'s `ion_pack`; the restack onto P39's set-up should meet
+only in `flat_drain_kernels.cuh`'s reap (the tail branch) and the drain loop (the tail launch).
+build_all.bat's TESTS_GPU line gains `test_tail_flat`.

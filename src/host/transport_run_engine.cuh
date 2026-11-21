@@ -78,8 +78,8 @@ inline bool flat_requested_() {
 // OFF BY DEFAULT, BY MEASUREMENT (V328): on the pion beam the three thread-path drains' 1.9 s ran
 // beside the flat Binary drain and the flat drain grew by 1.8 s - its per-round reap and
 // read-back 0.14 -> 1.59 s, its small kernels queued behind the 255-register, one-thread-a-block
-// FTF and Bertini kernels holding the SMs - so the beam moved 8.45 -> 8.43 s (pion) and 5.70 ->
-// 5.70 s (proton 10 GeV), inside the run-to-run spread. `G4GPU_DRAIN_STREAMS=1` turns it on;
+// FTF and Bertini kernels holding the SMs - so the pion beam moved 8.44 -> 8.38 s (five runs each)
+// and the proton 10 GeV beam 5.69 -> 5.69 s, inside the run-to-run spread. `G4GPU_DRAIN_STREAMS=1` turns it on;
 // `G4GPU_DRAIN_FLAT_SLOTS=n` sets the flat drains' range (default 128).
 struct P41DrainLanes {
   bool built = false;
