@@ -19924,3 +19924,263 @@ the pools built at first use (V316: the track buffers would have to be resizable
 pion beam's next levers, measured here: the FTF workspace count (2%), the Bertini and FTFP drains
 overlapped with the Binary drain (up to 1.6 s of 8.5, the thread-path drain's schedule), and the
 shared de-excitation (V312's (1)).
+### V318: P38's design document, measured - a Binary cascade is 7.4 rounds of 1.7 rows and a light-ion reaction 21 rounds of 8.4, so lane-per-participant pays where the reaction is wide (the light ion) and adds 1.7x over lane-per-cascade on half of a Binary cascade; the de-excitation needs 5.5-7.6 kB of its 536 kB; the design is not refused
+
+**THE TREE AND THE MEASUREMENT.** perf/nuclear_pool at integ/p35 (918092f; the worktree was cut
+at main e2d5e89 and reset to integ/p35 before anything was done), out\ copied from P35's
+worktree (its baseline objects, the sm_70 build V299 measured). Instrumentation of the thread
+path, NOT committed: a copy of src (out\p38\src_instr) with the session's instrument_p38.pl
+applied - exclusive `__rdtsc` time per phase on a phase stack, a counting wrapper around the
+cascade's `Philox` that books every `uniform()` to the phase that drew it, per-cascade counters
+(rounds, rows a round, pair tests, collisions, Pauli verdicts, decays, Propagate hits and
+misses, list sizes, nucleus trials) - and a host harness (out\p38\harness\p38_measure.cu) that
+runs a tape of inputs through `bic::apply_yourself` / `bic::blir_apply_yourself` with the
+transport slot's own capacities, poisons the slot's de-excitation and cascade arrays and reads
+their high-water marks back. THE INPUTS ARE THE BEAMS' OWN: an experiment build of
+`transport_run_int_binary` and `_lightion` (`-DG4GPU_P38_TAPE`, a printf of every model call's
+projectile, kinetic energy and sampled target, gated on `G4GPU_FTFP_TAPE` for its FIFO) ran the
+proton 1 GeV 200k beam and the Fe56 56 GeV 5k beam (`G4GPU_HADRONIC_STAGE=final`) on the Titan
+V under out\gpu.lock - 391.931 nGy (1.33866), 11,550,586 track-steps and 3.06391 uGy
+(53.0322), 62,058,769, V299's digits - and taped 98,135 Binary cascades and 19,978 light-ion
+reactions, every one of which the harness then ran. The two counts are V297's (98,135 and
+19,978). The harness's draws a cascade, 1,573.6 and 10,171, are V300's 1,567 and 10,040 within
+the run-to-run spread of the cascades themselves; its thread-time SHARES are an i9-10850K core's
+and are printed beside V300's card shares. (The tape units' ptxas peaked at 30.65 GB (Binary,
+780 s) and 25.74 GB (light ion, 731 s): the integ/p35 units plus one printf, built alone under
+the turn file - an experiment, not a unit of the design; noted against the 30 GB rule.)
+
+The proton beam's Binary mix, from the tape: p 78,712, n 14,966, pi+ 3,662, pi- 795; on O16
+76,519, C12 8,270, H1 8,239, Ca40 2,514, P31 1,334, N14 747 and 21 rarer nuclides. The Fe56
+beam's light-ion mix: Fe56 (and Fe55/54 fragments) on O16 and H1 (5,136 of the heaviest), and
+d, He3, alpha on O16, H1 and C12; 9,118 reactions with a projectile of A >= 40, 3,457 of 12-39
+and 7,403 of A < 12.
+
+**WHERE A CASCADE'S TIME GOES, AND WHAT IT IS MADE OF:**
+
+| | Binary (proton beam, 98,135) | light ion (Fe56 beam, 19,978) |
+|---|--:|--:|
+| card thread time a cascade (V297) | 18.0 ms | 59.4 ms |
+| host core time a cascade (this harness) | 0.550 ms (33x faster) | 1.424 ms (42x) |
+| field transport of the secondaries (host / card V300) | 33.7% / 35.3% | 45.7% / 45.6% |
+| pair search `FindCollisions` | 15.5% / 14.8% | 9.5% / 8.2% |
+| `G4Fancy3DNucleus::Init` | 15.1% / 8.3% | 11.9% / 13.1% |
+| fragment de-excitation (PreCompound + evaporation) | 13.7% / 12.1% | 22.7% / 20.4% |
+| collisions' final states | 7.5% / 10.0% | 2.4% / 4.1% |
+| field maps | 3.6% / 3.8% | 1.8% / 1.5% |
+| Propagate set-up, Absorb/Capture, time-step and list work, apply rest, tail, entry | 10.5% | 5.0% |
+| spectators' de-excitation | - | 1.1% / 1.1% |
+| `Propagate` calls that MISS (no collision scheduled), inclusive | 9.0% | 3.2% |
+| draws a cascade; the nucleus's | 1,574; 1,522 (97%) | 10,171; 10,058 (99%) |
+| impact parameters (Propagate calls) a cascade | 7.3 (6.4 miss) | 3.8 (2.8 miss) |
+| nucleus builds a cascade; trials a build; hard-core refusals | 1.02; 203; 0.64% | 7.55; 177; 1.13% |
+| ROUNDS (transports of the secondary list) a cascade: mean / p50 / p90 / p99 / p99.9 / max | **7.4** / 7 / 15 / 24 / 36 / 100 | **21.3** / 14 / 51 / 98 / 117 / 198 |
+| of which StepParticlesOut's | 2.8 | 5.3 |
+| the longest 1% of cascades, rounds | 29.6 | 107.3 |
+| ROWS (secondaries in flight) a round: a cascade's mean / row-weighted mean | **1.73** / 2.62 | **8.38** / 16.0 |
+| rows a cascade, max over its rounds: mean / p99 / max | 3.0 / 9 / 20 | 13.0 / 53 / 86 |
+| pair tests (secondary x target) a cascade; a round; rounds with none | 190; 25.4; 53% | 1,451; 62.9; 61% |
+| collisions attempted / applied a cascade | 4.6 / 2.55 | 16.0 / 7.25 |
+| Pauli-blocked of attempted collisions | **40.8%** | **51.9%** |
+| decays applied a cascade | 0.61 | 1.21 |
+| pool entries (`n_pool`, targets + secondaries + finals): mean max / p99 / max | 18.6 / 49 / 90 | 54.4 / 154 / 258 |
+| collision list: mean max / p99 / max | 6.5 / 31 / 96 | 28.2 / 191 / 307 |
+
+Rounds by target, Binary: A=12 8.4, A=16 7.9, A=31 9.7, A=40 11.9 (H1 0: `Propagate1H1` has no
+transport). Light ion by projectile: A >= 40 30.4 rounds of 19.4 rows; A 12-39 20.6 of 14.7;
+A < 12 10.3 of 4.9.
+
+**THE DE-EXCITATION HANDLER'S WORKING SET** (the slot's arrays poisoned before each cascade, the
+highest element written read back after it, over every cascade of both tapes):
+
+| array | capacity (slot) | Binary high-water | light-ion high-water |
+|---|--:|--:|--:|
+| `evap_list` (Fragment, 72 B) | 4,096 = 294,912 B | 5 = 360 B | 5 = 360 B |
+| `evap_results` | 1,024 = 73,728 B | 19 = 1,368 B | 27 = 1,944 B |
+| `evap_step` | 512 = 36,864 B | 18 = 1,296 B | 26 = 1,872 B |
+| `deex_products` (64 B) | 1,024 = 65,536 B | 19 = 1,216 B | 27 = 1,728 B |
+| `preco_out` | 1,024 = 65,536 B | 19 = 1,216 B | 27 = 1,728 B |
+| **all** | **536,576 B** | **5,456 B** | **7,632 B** |
+
+So a residual lane needs about 8 kB of buffers, 1.4% of what every slot reserves; with a
+power-of-two margin (16 kB) 20,000 residual lanes are 320 MB. The cascade's own arrays likewise:
+pool 90 of 1,024 `CascadeTrack`s (12,240 of 139,264 B) on the Binary tape and 258 on the ion
+tape, collisions 96 / 307 of 8,192, products 26 / 85 of 512; `BicScratch` is 51,200 B and
+`CascadeBuffers` 32,464 B of fixed arrays per slot.
+
+**WHAT THE NUMBERS SAY ABOUT THE DESIGN.**
+
+1. *Lane = participant is wide where the reaction is wide.* A Binary cascade has 1.7 secondaries
+   in flight a round (2.6 row-weighted) - the PROPAGATE kernel's lanes are 1.7x P36's lanes
+   (lane = cascade) for the same cascades - and its pair search 25 pairs a round in the 47% of
+   rounds that search. A light-ion reaction has 8.4 a round (16.0 row-weighted, 19.4 for the
+   Fe56-class projectiles) and 63 pairs: there the lanes are 8-19x a lane-per-cascade's. The two
+   phases that take a lane per row or pair are 49% of a Binary cascade and 55% of a light-ion
+   reaction. The Fe56 beam's drains are ~200 reactions each (V299), which on lanes per cascade
+   is 200 lanes and per participant ~3,200-3,900 - the card's width; the proton beam's bursts
+   are thousands of cascades (the busiest iteration 7,250), which fill the card either way.
+2. *The nucleus is a factory, measured* (V319): the per-nucleon phases are exactly the same law
+   with a lane each, ~4 draws a trial instead of the `shootArray` block's ~1,500 a nucleus.
+3. *The serial remainder stays one lane a cascade*: final states (7.5% / 2.4%), de-excitation
+   (13.7% / 22.7%), field maps, set-up, list work - ~35% of a Binary cascade and ~33% of a
+   light-ion reaction, at P36's granularity. Of it the de-excitation is the one LONG serial
+   piece: V297's worst fragment de-excitation is 253 ms of one thread inside the worst light-ion
+   reaction. With every other phase spread over lanes it becomes the light-ion pool's latency
+   floor, which is the brief's condition for the pooled de-excitation (V685) - measured first.
+4. *Stragglers do not bound occupancy, because nothing waits for them.* The longest 1% of
+   cascades take 4x (Binary) and 5x (light ion) the mean rounds; in a pool that is never
+   drained they hold 4-5% of the row-rounds and no lane of anyone else's cascade. They bound
+   only when a waiting track resumes, which the deferral (V294) already tolerates. The tail of
+   the run is the slowest cascade's rounds: 100 rounds x the per-round latency (below), ~10 ms.
+5. *Misses are a set-up round each.* 6.4 of a Binary cascade's 7.3 impact parameters schedule
+   nothing (9.0% of its time): each is a target list plus one secondary's pair search over A
+   targets - an A-wide FIND round on the cascade's targets, then the next impact parameter.
+   The pool runs them as rounds of the same kernels, with no transport.
+
+**THE SoA LAYOUT AND THE BUDGET.** A PARTICIPANT row is the `CascadeTrack` flattened (136 B AoS):
+cascade id 4, pdg 4, kind/state/list/owner bytes 4, charge+baryon 2, nucleon index 2, final and
+captured sequence 4, 4-momentum 32, position 24, formation time 8, projectile potential 8,
+PDG mass 8, creator/parent ids 12, hit 1 -> **112 B** a row in 17 arrays. Targets are rows too
+(list = target, never transported: the Binary cascade does not move its targets). A CASCADE row:
+`BicCascadeState`'s scalars (~200 B), the projectile, the propagator's parameters (~120 B) and
+its two field tables (`kMaxFieldTable` 256 doubles each - built per nucleus from its outer
+radius, so per cascade: up to 4 kB), the round key, counters - ~4.5 kB. COLLISION rows 32 B
+(`CollisionInitialState`) with a cascade id. PRODUCT rows 72 B. Rows are allocated by count
+(a prefix sum of each round's requests), so the AVERAGE sizes the pool, not the slot's maxima:
+
+| in flight | Binary rows (18.6 x 112 B) | collisions (6.5 x 32) | cascades (4.5 kB) | products (26 x 72) | residual lanes (16 kB, ~10% live) | total |
+|--:|--:|--:|--:|--:|--:|--:|
+| 1,000 | 2.1 MB | 0.2 MB | 4.5 MB | 1.9 MB | 1.6 MB | **10 MB** |
+| 20,000 | 41.7 MB | 4.2 MB | 90 MB | 37 MB | 32 MB | **205 MB** |
+| 100,000 | 208 MB | 21 MB | 450 MB | 187 MB | 160 MB | **1.03 GB** |
+| light ion, 20,000 (54.4 rows, 28 collisions, 85 products) | 122 MB | 18 MB | 90 MB | 122 MB | 32 MB | **384 MB** |
+
+Against today's 628 slots of 1,617,672 B (1,016 MB) that hold 628 cascades. 100,000 in flight is
+the slot pool's memory and the card has 0.25 GB left (V293), so the pool at 100k takes the
+memory the slots give up: the Binary and light-ion buckets leave the slot union, which then
+shrinks by the cascade arrays (411 kB a slot, V285's measurement) - P36's change as much as
+this one, and recorded for the lead.
+
+**THE PHASE KERNELS** - one unit a family, each calling the thread path's own per-particle
+function; registers are ptxas's to measure (V22), the expectations here are from the units
+that hold the same calls:
+
+| kernel | lane = | calls | expected registers / divergence |
+|---|---|---|---|
+| FACTORY (V319) | nucleon | `fancy_3d_nucleus`'s pieces, `reduce_sum` on lane 0 | **measured: 72-80, 224-232 B frame, 8 s of ptxas** |
+| SETUP | cascade | `build_target_list`, `make_rk_propagation`, `get_sphere_point`, `cut_on_p` | ~128; uniform |
+| PROPAGATE | secondary row | `RkPropagation::transport_one` on its cascade's propagator (by value, transfer from zero) | ~128-168 (the RK driver's arrays); divergent in substep count, inside/outside |
+| BOUNDARY | cascade | `correct_barions_on_boundary`, the gone-in/out lists, `push_final`, captures | ~96; light |
+| FIND | (secondary, target) pair | `imr::scatterer_time_to_interaction`, `imr::time_to_absorption`, `find_and_fill_cluster` | ~168 (the cross sections); divergent by species pair |
+| COLLECT | cascade | appends a cascade's found collisions in the serial order (absorptions, then scatterings, target order) and `schedule_decay`'s one draw | ~64 |
+| SELECT | cascade (segment) | `next_collision`: a segmented minimum of collision time, ties to the lower list index | ~32 |
+| APPLY | collision, sorted by channel | `collision_final_state` (im_r/*), `check_pauli_principle`, the Fermi corrections; new rows appended | ~200; one channel a warp after the sort |
+| ABSORB/CAPTURE | cascade | `absorb`, `capture_decision` | ~64 |
+| FINISH | cascade | the void branch, `find_fragments`, `correct_final_p_and_e`, the final decays, `products_add_*` | ~200; rare branches |
+| DEEXCITE | residual | `bic_deexcite_fragment` (P6/P3, one Markov chain a lane) | the precompound unit's |
+
+**DETERMINISM.** Every draw is keyed on (cascade key, participant or nucleon, round, phase) -
+the cascade key from the track's `(rng_key, step)` as `run_interaction` keys today (V284) -
+never on a lane, a block or a launch. Rows are kept contiguous per cascade by a counting sort on
+the cascade id each round, stable on (cascade, row index), so every per-cascade scan reads its
+rows in one order whatever the arrival order. SELECT's segmented minimum breaks ties on
+(time, collision index); the momentum transfer is summed per cascade in row order. So a run is
+its own replay to the bit, which the two-runs and N+N gates require.
+
+**THE PREDICTED COST** (an estimate with its assumptions, to be replaced by D3's measurement at
+1k/10k/100k in flight). Today the Binary drain is 98,135 cascades in 7.2 s (V295's profile), 73
+us of card a cascade, against an ideal of 98,135 x 18.0 ms / 628 = 2.81 s: the one-thread
+blocks run 39% packed (each launch waits on its slowest thread). Assume the pool's kernels keep
+~5,000 lanes busy when >= 3,000 cascades are in flight (the photon beam's measured width, V283)
+at half the per-lane speed of a lone thread (SoA global loads, divergence): 98,135 x 18.0 ms /
+2,500 = 0.71 s, plus the rounds' launches - ~40 bursts x ~100 rounds x ~8 kernels x ~10 us =
+0.32 s - **~1.0 s, ~10 us of card a cascade (7x)**, the proton beam ~9.0 -> ~2.8 s. A cascade's
+LATENCY is its rounds x a round's: ~17 rounds (7.4 transport, 7.3 impact parameters, finish)
+x ~80-100 us = **~1.5 ms against 18.0 ms on one thread**; a light-ion reaction ~30 rounds
+(21.3 + 3.8 + finish) ~3 ms against 59.4 ms - until the de-excitation lane (11.5 ms mean, 253
+ms worst on one thread, V297) is the floor.
+
+**THE PITFALLS OF V283-V302, AND HOW THE DESIGN MEETS EACH.** The slot count as width (V285,
+V295): no slot - rows by count, the width is the rows. The grid wider than its work (V294's 201
+track-steps): every kernel strides over a row count read on the device, and a lane past the
+last row returns; no lane owns a slot it may not have. Two streams (V294): one stream, the
+pool's rounds between the stepping launches. The synchronous drain's tail (V293-V295): never
+drained; a cascade leaves the round it finishes. The warp cascade's Amdahl (V301): lanes are
+independent rows of different cascades, no lane 0 serial section in a warp. The 42 GB ptxas
+(V301): a unit a phase family, none holding the whole cascade, PreCompound only in the
+de-excitation unit; the factory measured at 8 s. Register budgets forced by `__launch_bounds__`
+(V288): none forced, measured. Field maps carried between interactions (V297): built per
+cascade in SETUP and dropped with it. The frames and the raise (V296): the pool's kernels carry
+no 20 kB frame and do not raise the device stack; the raise stays `kAtRest`'s.
+
+**WHAT THIS PACKAGE BUILT AND DID NOT.** Deliverable 2 (the factory, V319) is built and passes.
+Deliverables 3-7 - the participant pool and its campaign, the wiring under
+`G4GPU_NUCLEAR_POOL`, the light-ion pool, the residual lane, the docs - are NOT built in this
+package; by name, V682-V686 are not written. The measurements do not refuse the design, and they
+reorder it: the light-ion reaction is where lane-per-participant is 8-19x lane-per-cascade, and
+the Binary cascade is where it is 1.7x on half the work over what P36's lane-per-cascade
+already gives - so the order the numbers argue for is the light-ion pool first, on P36's
+SoA cascade state where the two overlap, with the de-excitation lane measured as the floor.
+
+### V319: the nucleus factory - a block a nucleus, a lane a nucleon, keyed draws, the hard core as a wavefront; 27 nuclides of B1's materials at 20,000 nuclei a path, 2,139 rows, the worst +3.67 sigma, the halved hard core caught at 54-242 sigma, grid-independent to the bit
+
+**WHAT IT IS.** `src/physics/hadronic/npool/nucleus_factory.cuh` (the kernel, its shared state,
+the per-nucleon candidate and the constants `Init` sets), `nucleus_factory_launch.cuh` and the
+unit `src/host/transport_run_npool_factory.cu` (the four block widths 32/64/128/256 and
+`npool::launch_nucleus_factory`; nothing in the transport calls it yet), and
+`tests/test_npool_nucleus.cu` (TESTS_GPU). The header carries the proof; in short:
+
+* ChooseNucleons: Geant4's loop is an i.i.d. Bernoulli(Z/A) sequence up to the slot where one
+  kind runs out, the other kind after it - A lanes draw it, lane 0 finds the slot.
+* ChoosePositions: every test but the hard core is independent of the other nucleons, so lane i
+  draws candidates already through the ball, the density and (for a proton) the barrier. The
+  hard core is a wavefront: each round every non-final lane tests its HELD candidate against the
+  current candidates of the lower lanes, the final prefix grows by the conflict-free run after
+  it, and a lane discards its candidate only when it conflicts with a FINAL lane - the serial
+  verdict. So lane i's position is the first candidate of its own i.i.d. stream that clears the
+  final positions 0..i-1: the serial process with independent draws, the same joint law.
+  Geant4's 1000 A trial budget is the sum over lanes. The C12 cluster branch is the same
+  wavefront on Gaussian candidates with per-cluster refusal budgets; its rotation and
+  `CenterNucleons` are lane 0's.
+* ChooseFermiMomenta per lane; `bic::reduce_sum` on lane 0, unchanged, over the factory's
+  arrays; the four-momentum and binding energy per lane, as `Init` writes them.
+
+**THE CAMPAIGN** (the Titan V under out\gpu.lock; 20,000 nuclei of each nuclide from the factory
+and from `bic::nucleus_init` one thread a nucleus; the nucleus the unit of every variance: each
+bin a two-sample z of per-nucleus means). The nuclides: every natural isotope of H, C, N, O, F,
+Mg, P, S, Ca, Ar - G4_WATER, G4_A-150_TISSUE, G4_BONE_COMPACT_ICRU and G4_AIR (27). The rows:
+radial |r| (all, and protons), |p|, nearest-neighbour distance, outer radius, log10|sum p|,
+P(slot k is a proton) for every k, per-nucleus mean |r|, |p| and nn, the ReduceSum failure and
+zeroed-proton rates.
+
+| nuclide | worst row | z | factory rounds a nucleus |
+|---|---|--:|--:|
+| H1 / H2 | mean r / momentum bin 17 | +0.54 / -2.01 | 1.00 / 1.09 |
+| C12 (the cluster branch) | momentum bin 12 | -2.74 | 8.80 |
+| O16 / O17 / O18 | momentum bins 16 / 35 / 37 | -2.77 / +3.04 / +2.46 | 2.07-2.21 |
+| P31 / S34 / Ar40 | momentum bin 19 / log10 sum p bin 3 / slot 1 | -2.77 / +3.23 / -2.83 | 2.97-3.40 |
+| **Ca43** (the worst of 2,139) | momentum bin 28 | **+3.67** | 3.52 |
+| Ca48 | momentum bin 26 | +2.71 | 3.72 |
+
+Every nuclide inside 3.7 sigma (2,139 rows, where Gaussian noise alone puts the largest near
+3.5); no nuclide refused by either path. Run twice: the same digits.
+
+**ANTI-VACUITY.** The factory's hard-core distance halved (`FactoryJob::distance_scale` 0.5,
+the test's only use of it): O16 -53.9, C12 -241.6, Ca40 -114.0 sigma on the per-nucleus mean
+nearest-neighbour distance - CAUGHT on all three.
+
+**DETERMINISM.** O16 and C12, 20,000 nuclei each, a block a nucleus against a grid of 37 blocks
+striding: identical to the bit, field by field.
+
+**THROUGHPUT** (kernel time by events, 20,000 nuclei): O16 3.85e6 nuclei/s from the factory
+against 2.11e6 from `nucleus_init` one thread a nucleus in a lean 64-thread-block kernel (1.82x);
+over all 27 nuclides 224 ms against 370 ms (1.65x); C12 and the two hydrogens are faster on the
+thread path (the cluster wavefront's 8.8 rounds, and one or two lanes in a 32-lane block). The
+comparison that matters for the transport is with the thread path where it runs today: 1.6 ms of
+thread time a nucleus inside a 255-register one-thread interaction block (V297), 628 at a time -
+2.5 us of card a nucleus against the factory's 0.26 us for O16, ~10x; and the draws, ~4 a trial
+(177-203 trials a build) against `shootArray`'s 1,522 a nucleus.
+
+**ptxas** (sm_70, CUDA 12.9): `nucleus_factory_kernel<32/64/128/256>` 80/72/72/80 registers,
+224-232 B frame, 24-56 B of spill loads, 1.2-8.8 kB shared; the unit 8 s. The engine relinked
+with it, the proton 1 GeV 200k beam: 391.931 nGy (1.33866), 11,550,586 track-steps - unchanged
+(nothing launches it).
