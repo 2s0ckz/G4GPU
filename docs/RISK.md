@@ -20848,3 +20848,298 @@ gate run except the depth-dose gate with the flat path on, which is P39's: port 
 port/G4 -0.140%, plateau 1.00043, R80 77.694 mm, 80-20 1.200 mm, OK (CSV md5
 c6ca0b1f202b41dcb1303608939e48d4); with `G4GPU_CASCADE_FLAT=0` 584,663.45 MeV (-0.172%), CSV md5
 ba22d777a151c1d717ba48d0b62f23d1 - ba73's to the digit. Every check rc 0; B1 at 1.1045 sigma.
+
+### V331: P42's measurement and design - every one of the campaign's 1,139 Fe56-on-Al27 overflows happens in the TAIL (the final decays re-add every final track: 199-317 tracks), none in a time step, the largest reaction needs 317 tracks and 381 collisions; the beam has 1 in 19,587; a reaction that would outgrow its record is CONTINUED on a record with the thread path's capacities, at the boundary before the stage that could overflow, never rerun
+
+**THE TREE.** perf/ion_factory_cap at integ/p41 (e90773e; the worktree was cut at main and reset
+before anything else). Its out\ is P41's combined build (agent-aa6119da6db959c60, 21:06 on
+2026-11-20: the same sources but for the renumbered comments, checked line by line with the V
+numbers masked), the `.d` files' paths rewritten; every unit fresh by tools\freshness.ps1. Every
+run on the Titan V alone under `out\gpu.lock`, released between runs.
+
+**THE FAILURE REPRODUCED** (test_blir_flat, `G4GPU_FLAT_FACTORY_ION=1`, integ/p41's binary): 1,139
+of 120,000 calls handed back for capacity (all on ic_Fe56_1000_Al27), flat against thread -12.15
+sigma (ic_Fe56_1000_Al27 cos p bin 9; the next four -12.14 / -12.03 / -11.95 / -11.86: n, pi+, p,
+n multiplicities), against Geant4 -10.65 (proton multiplicity); determinism exact twice and at
+4,103 lanes. V322's numbers, to the row.
+
+**THE INSTRUMENT** (measurement only, never committed: a COPY of src in out\p42\exp\src). The
+campaign rebuilt with the thread path's capacities from the start - 1,024 tracks, 8,192 collisions
+(`FlatIon<64, 1024, 8192>`, 451,616 B), the move items' lane/track code widened to 10 bits - and a
+tape in the reap: per reaction the high-water marks of the track pool and of the collision list,
+the reap at which the pool first passed 256 and the stage then, the steps, the rounds. The same
+patch on the transport's light-ion unit (8 min, linked in front of the archive) for the Fe56 5k
+beam with the factory on. At those capacities nothing is handed back (0 of 120,000; 0 of 19,587).
+
+**THE DISTRIBUTION** (track high-water p50 / p90 / p99 / p99.9 / max; collisions the same):
+
+| sample | reactions | tracks | > 256 | > 512 | collisions | > 512 | after the set-up's round |
+|---|--:|---|--:|--:|---|--:|---|
+| ic_d1000_O16 | 20,000 | 29 / 41 / 52 / 60 / 71 | 0 | 0 | 7 / 22 / 37 / 48 / 60 | 0 | max 22 |
+| ic_a200_C12 | 20,000 | 27 / 34 / 41 / 45 / 50 | 0 | 0 | max 57 | 0 | max 27 |
+| ic_a1000_O16 | 20,000 | 35 / 52 / 65 / 73 / 79 | 0 | 0 | max 71 | 0 | max 28 |
+| ic_C12200_O16 | 20,000 | 49 / 63 / 71 / 76 / 82 | 0 | 0 | max 76 | 0 | max 50 |
+| ic_C121000_C12 | 20,000 | 52 / 69 / 79 / 85 / 89 | 0 | 0 | max 93 | 0 | max 60 |
+| **ic_Fe56_1000_Al27** | 20,000 | **151 / 242 / 284 / 304 / 317** | **1,139 (5.70%)** | **0** | 66 / 224 / 304 / 346 / **381** | 0 | p99 124, max 160 |
+| Fe56 56 GeV 5k beam, factory on | 19,587 | 62 / 127 / 197 / 229 / 269 | **1** (0.005%) | 0 | 27 / 117 / 208 / 252 / 290 | 0 | max 224 |
+
+None needs more than 512 tracks; the thread path's 1,024 are three times the largest.
+
+**WHEN.** Every one of the 1,139 first passes 256 in the round its reaction ends, at the reap that
+finds it done: the TAIL. `stage_tail`, after the de-excitation and `G4DecayKineticTracks`, re-adds
+every final track to the pool (`st.lists.add` for each of the `m` decay outputs, copies of the
+final list included), so the pool's count roughly doubles there; a time step adds at most 4 (one
+`ApplyCollision`, `CollisionProducts::track[4]`). The beam's one: 199 tracks before its tail, 70
+added by it. So no reaction overflows before or between its collisions; there are 0 time steps
+after the overflow point, and what is left of the reaction is its tail - the residuals'
+de-excitation, `SortResult`, the corrector and the spectators' de-excitation, then the emission.
+
+**THE MEMORY OF A LARGER RECORD** (`sizeof`, CUDA 12.9): `FlatIon<64, 256, 512>` 82,208 B (V322's
+82,164 plus P39/P41's fields); 512 tracks / 1,024 collisions 139,808 B; 512 / 2,048 172,576 B;
+1,024 / 4,096 320,544 B; 1,024 / 8,192 (the thread path's slot) 451,616 B. A track costs 161 B of
+record (the track, its pre-state, its transfer) and a collision 32 B. Every lane at 1,024 tracks
+would be +369 kB a lane, 755 MB at 2,048 lanes - for 0.005% of the beam's reactions.
+
+**THE DESIGN: (a), the continuation on a larger keyed record, P39's solo runner.**
+
+* **Where a reaction stops.** At the boundary BEFORE a stage that could outgrow its record, with
+  the record exactly as that boundary left it - so what continues is the state, not the key:
+  (1) before a time step, when `n_pool + 4` passes the pool or `colls.n + 4 x (1 + 2 T)` (+ the
+  reset's `FindCollisions` over every secondary when `StepParticlesOut`'s counter is at 100)
+  passes the collision list (`flat_room_for_step`: one collision an iteration, at most 4
+  products, each new track's `FindCollisions` one decay, one absorption and one scattering a
+  target nucleon at most - exact upper bounds); (2) in the tail, after the decays and BEFORE the
+  `m` adds, when `n_pool + m` passes the pool - exactly the condition under which one of the adds
+  would refuse (`CascadeLists::add` refuses only when full); up to there the tail has written its
+  own buffers and the generator only, and the generator goes back to where the tail found it (P41's
+  V326 pattern). The record's `grow` flag is set; nothing is refused.
+* **What it continues on.** `FlatIon<64, 1,024, 8,192>`: the thread path's slot capacities
+  (`kSlotPoolCap`, `kSlotCollisionCap`), so the continued reaction refuses for capacity exactly
+  where the thread path would. 64 of them in the transport (28.9 MB), 256 in the campaign.
+  `ion_grow_copy` copies the state - the record's head (the generator, the counters, the frame,
+  the nuclei's headers, the propagator) as bytes, the arrays to their fill - and points every
+  pointer that pointed into the old record at the new one.
+* **Who runs it.** `flat_grow`, when the drain has nothing else (P39's condition for its
+  stragglers; the slots are then free - no tail launched that round, and the round's claim waited
+  for the last): one thread a reaction, `flat_run_solo`'s stages on the larger record, the tail on
+  a thread-path slot (P36's slot tail: the thread path's de-excitation workspace, decay list,
+  product and `SortResult` lists), `CheckResult`, the K0 mixing and the emission - the same
+  functions in the drain's order. A set-up there (a try without products, a `CheckResult`
+  re-entry) samples its nuclei on the lane (`nucleus_init`, P39's solo fall-back), counted.
+* **Bounds, by name.** K lifted to 65,536 steps (P39's solo bound) and 128 passes of stages and
+  tail; past either the reaction is handed back as a straggler and counted. A set-up whose
+  collisions overflow the small record (measured at most 224 of 1,024) still refuses for capacity
+  and is handed back by name - not continued, because a set-up centres the projectile's nucleons
+  in place and cannot be put back; the class was empty in every run.
+* **The collision list of the small record: 512 -> 1,024** (+16 kB a lane, 33.5 MB at 2,048
+  lanes). With 512 the step bound `4 x (1 + 2 x 56) = 452` would have moved every Fe56 reaction
+  past 60 collisions - 10,448 of the 20,000 Fe56-on-Al27 reactions; at 1,024 one past 572, and the
+  largest measured anywhere is 381.
+* **`FlatScratch`'s cap apart from the pool.** Its lists are `min(P, kCascadeMaxScratch)` long
+  (the thread path's 256), and its two unbounded writes get the thread path's bounds (`Propagate`'s
+  initial list and `Capture`'s list: a capacity refusal at 256, unreachable below 257 tracks). The
+  `static_assert(P <= kCascadeMaxScratch)` is gone; at P <= 256 nothing changes.
+
+**THE EXACTNESS ARGUMENT.** Nothing is drawn twice and nothing is skipped: at a step boundary the
+record has drawn exactly what it has; in the tail the generator is put back to the tail's own
+start and the tail's own buffers are rewritten from it. The larger record runs the same template
+functions on the same state in the drain's order, its numbers depend on its record alone (which
+larger record, which slot, which launch moves time only), and the capacities are not read except
+to refuse. So the continued reaction is the reaction the lane would have computed with the room -
+up to how the same arithmetic in another instantiation rounds (V301), which V332 measures.
+
+**WHY NOT (b) or (c).** (b) a larger record for every lane: +369 kB a lane at 1,024 tracks for 1 in
+19,587 beam reactions, out of the hadron beams' track buffers (P41's V326 measured 10,240 Binary
+lanes cost 3%); and 512 tracks would bound the class without a proof. (c) the state to a thread-
+path slot run by the thread path's own functions: `propagate` is one monolithic function from the
+first time step; it cannot be entered at the tail of a flat record without rewriting bic/, which
+is the thread path's and untouched. (a) runs the flat path's own stage functions, which take the
+record by its capacities as template arguments - the only way that is the same code.
+
+**THE PITFALLS OF V283-V330 IT MEETS.** V321/V322: the rerun from the key under factory nuclei
+(none here: 0 capacity hand-backs). P39's 2 h 44 min solo hang: every loop bounded and reported.
+V326: the continuation from state with the generator put back - the same pattern. V301: rounding
+across instantiations - measured in V332. V328: work beside the flat drain queues its rounds - the
+grow kernel runs only when the drain is idle. V294/V304: slots shared between concurrent drains -
+the grow kernel uses slots only in rounds that launched no tail, after the claim waited for the
+last one.
+
+### V332: the continuation built - the campaign with the light-ion factory on passes (0 capacity hand-backs, 1,139 reactions continued, worst +3.05 / -3.09 sigma) and the continued campaign is the larger-record campaign to the bit, 0 of 120,000 differ; the light-ion factory ON by default
+
+**WHAT WAS BUILT** (V331's design; one commit):
+
+* `bic/flat/cascade_flat.cuh`: `FlatScratch` at `min(P, kCascadeMaxScratch)` with the thread path's
+  bounds on its two unbounded lists (the `static_assert` gone); `FlatCascade::grow`, `FlatEnv::grow`;
+  `flat_room_for_step` and its call at the top of `stage_pre`; `stage_tail`'s check before the
+  final decays' adds (a trailing `grow` argument, default 0 - the slot tail and the Binary path
+  pass nothing and are unchanged); `flat_run_solo` stops at a `grow` boundary.
+* `bic/flat/ion_flat.cuh`: `ion_grow_copy`, the state from a `FlatIon<N, P, C>` into a
+  `FlatIon<N, P2, C2>`.
+* `host/flat_drain_kernels.cuh`: `factory_enabled` (the switch, read once; the light ion's now on
+  unless `G4GPU_FLAT_FACTORY_ION=0`); the `grow` list in the reap (before P39's solo list; a
+  waiting record counts as neither stepping nor set-up, so the drain goes idle around it);
+  `flat_grow` / `flat_grow_steps` / `flat_grow_tail`, launched under P39's solo condition, up to
+  `n_big` a launch; the larger records built with the pool (`Pol::kBigRecords`, 64;
+  `G4GPU_FLAT_GROW_RECORDS` overrides) when the policy has them and its factory is on;
+  `flat_check_and_mix` templated on the record's capacities; the counters and the exit line.
+  `flat_drain.cuh`: `FlatPool::big`, `n_big`. P39's set-up/request code and P41's tail pool are
+  not edited beyond the `grow` argument in `flat_tail_pool`'s `stage_tail` call.
+* `host/transport_run_int_lightion_flat.cu`: the collision list 512 -> 1,024 (V331), `Big =
+  FlatIon<64, kSlotPoolCap, kSlotCollisionCap>` and its four functions.
+* `tests/test_bic_flat.cu`: the ion campaign's collision list 1,024, `k_grow` (the transport's
+  `flat_grow` at model level: 256 larger records, the tail on slot k), the factory on by default
+  for the light ion (`G4GPU_FLAT_TEST_GROW=0` keeps P39's capacity hand-back), the check that no
+  call is handed back for capacity, `G4GPU_FLAT_TEST_HASHES` (every call's final-state hash).
+
+**THE CAMPAIGN** (tests/test_blir_flat.cu, V310's six cases x 20,000, the factory ON; `G4GPU_ORACLE`
+at the oracle):
+
+| check | result |
+|---|---|
+| twice; at 4,103 lanes against 8,192 | 0 of 120,000 final states differ, both |
+| continued on a larger record | **1,139** (V331's class, every one), 0 set-ups there, 0 handed back from one |
+| handed back | **0** (straggler 0, capacity 0, refused 0); 1 straggler finished solo |
+| flat against thread, independent keys, 603 rows | worst **+3.05 sigma** (ic_Fe56_1000_Al27 ke n bin 3); next -3.02, -2.93, -2.90, -2.87 |
+| flat against Geant4, 585 rows | worst **-3.09 sigma** (ic_Fe56_1000_Al27 ke 4007); the thread path on the same rows -3.32 |
+| ANTI-VACUITY, P36's (the step's last secondary not moved) | caught at +95.79 sigma (ic_d1000_O16 energy balance) - 2,481 continued, 68,726 stragglers solo |
+| ANTI-VACUITY, P41's (the tail pool's hand-back loses the last secondary) | caught at -866.44 sigma |
+| integ/p41 with the factory on (V331) | -12.15 / -10.65 sigma, 1,139 capacity reruns |
+
+The campaign ran 40 min (24 with integ/p41's binary): the perturbed run's never-ending reactions
+now run solo to 65,536 steps where they were handed back; checked for a hang at 30 min (the card
+at 98-100%, the log advancing) and not one.
+
+**THE CONTINUATION IS EXACT, MEASURED.** The campaign's every final-state hash from this build
+(`G4GPU_FLAT_TEST_HASHES`) against V331's measurement build, whose records had the thread path's
+1,024 tracks and 8,192 collisions FROM THE START (no stop, no copy, no continuation; tails on the
+compact pool entries): **0 of 120,000 differ** - the 1,139 continued reactions included. So
+stopping at the boundary, copying the state into another instantiation and finishing on a slot
+changes no bit: V301's rounding across instantiations did not arise here. The Fe56 5k beam says
+the same (V333): this build's 3.08481 uGy (53.0665 nGy), 62,561,195 track-steps, its one
+continued reaction included, are the measurement build's digits.
+
+**`G4GPU_FLAT_FACTORY_ION=0`** (P39's default): test_blir_flat V310's rows to the digit
+(1,078 capacity hand-backs, exact reruns with the nuclei on the lane; -2.66 / +3.65 sigma; +23.34 and -866.44 sigma; the determinism checks exact); the Fe56 5k and 20k beams V330's digits (V333).
+
+**THE OTHER CAMPAIGNS.** test_bic_flat: V330's rows to the digit (0 of 640,000 differ twice and at
+4,103 lanes; 0 handed back, 192 stragglers solo; +3.59 / -3.33 sigma; -17.53 and -5,161.59 sigma).
+test_tail_flat: V326's (518 rows, worst -3.05 sigma; 0 of 280,000 differ twice and at 1,056 entries; 247,788 continued and 0 differ). test_ion_primary (it compiles the engine's header): PASS.
+
+**THE UNITS** (sm_70, CUDA 12.9, under the turn file): transport_run_int_binary_flat and
+_lightion_flat and transport_run (the engine; `FlatPool`), the build's ptxas peak 17.9 GB (the
+units side by side as build_engine.bat runs them; no unit near 30 GB), 23 min for the three.
+Light-ion kernels: `flat_grow` 255 registers, 28,144 B cumulative stack (the raise is 28,672 B);
+`flat_solo` 255 / 24,928; `flat_tail_pool` 255 / 18,608; `flat_post` 250 / 15,248, `flat_pre` 74 /
+11,264, `flat_setup` 144 / 21,344, `flat_claim` 152 / 792 - P41's. Binary kernels P41's (post 250 /
+10,640, setup 175 / 16,672). test_blir_flat 10.5 min (`k_grow` 255 / 27,760 B); test_bic_flat 4
+min; test_tail_flat 1 min; test_ion_primary 2.4 min. The seven thread-path interaction units were
+not recompiled (their dependency files name none of the changed headers); `interaction_pool.cuh`
+and bic/ outside bic/flat/ untouched.
+
+### V333: the beams - Fe56 5k 1.05x, Fe56 20k 1.11x, C12 12 GeV 50k 1.07x with the light-ion factory on, every dose inside 1 sigma of the thread path; the light-ion set-up 2,088 -> 987 ms; proton 1 GeV and the photon gate to the digit, pi+ and proton 10 GeV moved inside 0.02 sigma because they DO reach the light-ion path
+
+**THE RUNS.** "Before" is integ/p41's own binary (P41's combined build, kept as
+out\p42\exampleB1_p41.exe), "after" this package's, the same hour, alternated by beam; every run
+under `out\gpu.lock`, the default live count, "0.24-0.31 GB of 12.00 GB left", the host at most
+0.81 GB; best of three, the others in brackets.
+
+| beam | integ/p41 | P42 | x | dose (rms), P42 | integ/p41's dose | the thread path (this binary) | P42 vs thread | track-steps, P42 |
+|---|--:|--:|--:|---|---|---|--:|--:|
+| Fe56 56 GeV 5k | 20,200.4 ms (20,204, 20,225) | **19,319.5** (19,417, 19,463) | **1.05** | 3.08481 uGy (53.0665 nGy) | 3.06318 (53.0356) | 3.06391 (53.0322), 40,686 ms | +0.28 sigma | 62,561,195 |
+| Fe56 56 GeV 20k | 48,146.4 (48,206, 48,306) | **43,537.8** (43,793, 43,915) | **1.11** | 12.5056 uGy (106.727 nGy) | 12.3679 (106.612) | 12.3689 (106.6), 153,868 ms | +0.91 sigma | 249,303,436 |
+| C12 12 GeV 50k | 23,047.8 (23,289, 23,354) | **21,632.5** (21,775, 21,866) | **1.07** | 1.57671 uGy (6.34385 nGy) | 1.57033 (6.3308) | 1.57139 (6.33185), 46,859 ms | +0.59 sigma | 50,013,972 |
+
+events/s: Fe56 5k 258.8 (247.5), 20k 459.4 (415.4), C12 2,311 (2,169); track-steps/s 3.24e6,
+5.73e6, 2.31e6. The sigma is the difference over the two runs' rms in quadrature. P39 measured the
+same light-ion factory on integ/p36 at +0.28 and +0.91 sigma (V322) - the same law, this time with
+no reaction replaced. Continued on a larger record: 1 reaction on the 5k beam, 2 on the 20k, 0 on
+the C12 beam; 0 set-ups there, 0 handed back; the light-ion capacity hand-backs 1 / 3 / 0 before,
+0 / 0 / 0 after (the 20k beam's one straggler before is 0 after: a different stream). The 5k beam's
+dose and step count are V331's measurement build's (records of 1,024 tracks from the start) to the
+digit.
+
+**THE STAGE PROFILE** (Fe56 5k, `G4GPU_FLAT_PROFILE=1`, one run each):
+
+| | integ/p41: light ion | P42: light ion |
+|---|--:|--:|
+| rounds | 4,684 | 2,935 |
+| flat kernels | 6,928 ms | 5,497 ms |
+| set-up | 2,088 ms (30%), 77 launches, 7.26 nuclei a set-up on the lanes | **987 ms (18%)**, 678 launches, 2.00 a set-up from the factory (73.4% retries) |
+| factory | 11 ms | 318 ms (6%) |
+| pre / move / post / finish | 775 / 1,506 / 1,753 / 241 | 509 / 1,271 / 1,409 / 210 |
+| the rounds waiting for the tail | 933 ms | 1,016 ms |
+
+The Binary drain of the same runs: 2,717 -> 3,734 ms of kernels, its set-up 1,020 -> 1,378 ms and
+its last column (the tail launch and the solo stragglers, 3 -> 6 launches) 725 -> 1,377 ms: the
+Binary cascades are other cascades now (the light-ion reactions' products differ; 36,974 -> 36,182
+nuclei) and its stragglers took longer. So of the light-ion drain's 1.4 s, about 0.9 s reaches the
+beam's clock.
+
+**THE BEAMS THAT DO NOT REACH THE CHANGE**:
+
+| beam | integ/p41 | P42 | dose and track-steps |
+|---|--:|--:|---|
+| proton 1 GeV 200k, alternated new/old x 3 | 4,343 / 4,378 / 4,340 ms | 4,441 / 4,441 / 4,477 ms | 391.091 nGy (1.33737), 11,546,754 - V330's to the digit (14 light-ion reactions on the flat path, none moved a digit) |
+| the same, `G4GPU_FLAT_GROW_RECORDS=1` | | 4,078 / 4,133 ms | the same digits |
+| pi+ 10 GeV 100k | 7,158 (7,179, 7,214) | 7,135 (7,199, 7,210) | **333.171 nGy (2.0107), 12,933,586** - V330's 333.181 (2.01072), 12,933,850: -0.004 sigma |
+| proton 10 GeV 50k | 5,529 | 5,517 | **214.814 nGy (1.97334), 7,153,522** - V330's 214.858 (1.97412), 7,152,954: -0.016 sigma |
+| B1 gamma 2M | 406.5 / 408.7 / 412.2 ms | 406.2 / 408.5 / 412.2 ms | 85.2055 nGy (173.586 pGy), 26,050,805 - to the digit |
+
+The brief expected pi+ unchanged: it is not, and should not be - the pion beam makes 732 light-ion
+entries (112 reach the flat path; 620 are the fusion arm, handed to the thread path), the proton
+10 GeV beam 1,174 (303), and those 112 and 303 reactions now take their nuclei from the factory.
+Both moved by under 0.02 sigma. The proton 1 GeV beam's 14 did not move its digits. The proton
+1 GeV clock is a SIZING effect, not work: the build's light-ion pool is 61 MB larger (the collision
+list 512 -> 1,024: 33.9 MB; 64 larger records: 27.6 MB), so the track buffers are 3.24 -> 3.18 GB
+(6.84M -> 6.72M live slots) and the batch runs 643 iterations instead of 651; with one larger
+record (`G4GPU_FLAT_GROW_RECORDS=1`, 3.20 GB) it runs 651 and takes 4,078-4,133 ms - 6% FASTER
+than integ/p41. The pion, proton 10 GeV and photon clocks are integ/p41's.
+
+**`G4GPU_FLAT_FACTORY_ION=0`** on this binary: Fe56 5k 3.06318 uGy (53.0356), 62,057,218; 20k
+12.3679 (106.612), 248,094,630 - V330's to the digit; 20,243 and 48,414 ms.
+
+**`G4GPU_CASCADE_FLAT=0`** on this binary: Fe56 5k 3.06391 uGy (53.0322), 62,058,769 (V306's);
+proton 1 GeV 391.931 nGy (1.33866), 11,550,586 and pi+ 333.4 (2.00918), 12,936,362 (V299's).
+
+### V334: P42 closed - the gates on and off, the GPU tests, and what was refused by name
+
+**THE ELEVEN GATES** (build_all.bat's gate section command for command, out\p42\gates.bat; the
+drivers b1_gpu_sched, g4dose and proton_depth rebuilt against this engine; the flat default and
+`G4GPU_CASCADE_FLAT=0`): every printed line equal to P41's combined gate run (integ/p41's) - the B1
+dose, the macro run, the mesh, the physics switches, the step hook, the three pool sizes, the
+two-run sequence and its replay; every check rc 0. The depth-dose gate with the flat path on is
+P39's: port 584,851.12 MeV, port/G4 -0.140%, plateau 1.00043, R80 77.694 mm, 80-20 1.200 mm, OK, CSV
+md5 c6ca0b1f202b41dcb1303608939e48d4; with `G4GPU_CASCADE_FLAT=0` 584,663.45 MeV (-0.172%), md5
+ba22d777a151c1d717ba48d0b62f23d1 - ba73's to the digit. The one differing line is the CSV's own
+path.
+
+**THE GPU TESTS** on this build: test_blir_flat OK with the factory on (V332) and with
+`G4GPU_FLAT_FACTORY_ION=0` (V310's rows); test_bic_flat OK (V330's rows); test_tail_flat OK
+(V326's); test_ion_primary PASS. test_npool_nucleus and the other ten include none of the changed
+files and were not rebuilt. build_all.bat's TESTS_GPU line is unchanged (no new test).
+
+**REFUSED OR LEFT, BY NAME:**
+
+* A larger record for every lane, (b): 1,024 tracks a lane would be +369 kB, 755 MB at 2,048
+  lanes, for 1 reaction in 19,587; 512 bounds the measured class (317) but not by proof.
+* The state to the thread path's own `propagate`, (c): it cannot be entered at a flat record's
+  stage without editing bic/.
+* A set-up that would overflow its collision list is still a capacity refusal (handed back, by
+  name), not a continuation: the set-up centres the projectile's nucleons in place, so it cannot
+  be put back; the class was empty everywhere (224 of 1,024 at most).
+* A set-up on a larger record (a try without products, a `CheckResult` re-entry) samples its
+  nuclei on the lane, P39's solo fall-back - counted; 0 in every run.
+* The larger records' count tuned on the proton clock: 64 is the campaign-free default (the
+  beams need 1-2), `G4GPU_FLAT_GROW_RECORDS` overrides; the proton beam's 2% either way is the
+  track buffers' size, measured above.
+
+**FOR THE LEAD.** Units: transport_run_int_binary_flat, transport_run_int_lightion_flat and
+transport_run (the engine, `FlatPool`); no interaction unit, no `interaction_pool.cuh`, no
+transport_run_engine.cuh change. Files: cascade_flat.cuh (`FlatScratch`, `grow`,
+`flat_room_for_step`, `stage_pre`'s first lines, `stage_tail`'s check and trailing argument,
+`flat_run_solo`'s stop, two thread-path bounds), ion_flat.cuh (`ion_grow_copy`),
+flat_drain_kernels.cuh (`factory_enabled` replacing the drain's local switch, the grow list, the
+grow kernels after `flat_tail`, the build of the larger records, `flat_check_and_mix`'s template,
+the 4th lane list, the counters), flat_drain.cuh (two fields), the light-ion unit (the policy),
+test_bic_flat.cu; README's performance rows and the plan row; RISK V331-V334. P39's set-up and
+request code and P41's tail pool are not edited beyond the one `grow` argument.

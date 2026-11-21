@@ -160,6 +160,9 @@ primary and running every batch, the same scope as Geant4's own `G4Timer`, which
 | Titan V, P41: Fe56 56 GeV, 5,000 events, final stage | 223.3 (204.5 before) | 22.4 s (24.4 s) |
 | Titan V, P41: Fe56 56 GeV, 20,000 events, final stage | 401.9 (335.8 before) | 49.8 s (59.6 s) |
 | Titan V, P41: example B1 2M 6 MeV gammas, GPU time, best of 3 (no pool in stage 1) | 4.95 × 10⁶ | 404 ms (404 before) |
+| Titan V, P42 (RISK V331-V334: the light-ion reaction's nuclei from the nucleus factory by default - a reaction that would outgrow its 256-track flat record is CONTINUED from its state on a record with the thread path's capacities, never rerun; 0 capacity hand-backs, the campaign inside 3.1 sigma): Fe56 56 GeV, 5,000 events, final stage, best of 3 | 258.8 (247.5 before, integ/p41) | 19.3 s (20.2 s) |
+| Titan V, P42: Fe56 56 GeV, 20,000 events, final stage | 459.4 (415.4 before) | 43.5 s (48.1 s) |
+| Titan V, P42: C12 12 GeV (ref/b1ion/C12_12000.mac), 50,000 events, final stage | 2,311 (2,169 before) | 21.6 s (23.0 s) |
 
 The first row is **10.4% slower** than the same program built at the commit before the step
 hook and the pooled scheduler - 1.91 × 10⁶ - measured interleaved, five runs each way, with no
