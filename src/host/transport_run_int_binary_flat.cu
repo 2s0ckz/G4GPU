@@ -17,6 +17,7 @@ struct BinaryPolicy {
   static constexpr int kP = 128;
   static constexpr int kC = 256;
   static constexpr int kItemsPerLane = 3;
+  static constexpr int kNucleiPerTry = 1;  ///< P39: the target
   using Rec = bic::flat::FlatCascade<kN, kP, kC>;
   static constexpr had::InelasticModel kModel = had::InelasticModel::kBinary;
   __device__ static Rec& core(Rec& r) { return r; }
@@ -25,6 +26,10 @@ struct BinaryPolicy {
     bic::flat::flat_start(r, e, p.pdg, p.kin_energy, 0, 0, rng);
   }
   __device__ static void model(Rec& r) { bic::flat::stage_model(r); }
+  /// P39: the turn's target, from the nucleus factory (docs/RISK.md V321).
+  __device__ static void request(Rec& r, const npool::FactoryLists& lists) {
+    bic::flat::flat_request_target(r, lists);
+  }
   __device__ static void nucleus(Rec& r, const bic::flat::FlatEnv& env,
                                  bic::Nucleus3DScratch& nsc,
                                  bic::flat::FlatScratch<kN, kP>& scr) {

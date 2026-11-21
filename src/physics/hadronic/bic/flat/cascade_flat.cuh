@@ -38,6 +38,7 @@
 
 #include "core/rng.cuh"
 #include "physics/hadronic/bic/binary_cascade.cuh"
+#include "physics/hadronic/npool/nucleus_factory.cuh"
 
 namespace g4gpu::bic::flat {
 
@@ -135,6 +136,14 @@ struct FlatCascade {
   int out_steps = 0;          ///< `StepParticlesOut`'s `counter`
   int out_resets = 0;         ///< and its `countreset`
 
+  // ---- P39: the nucleus from the factory (docs/RISK.md V320, V321)
+  unsigned nkey_lo = 0;       ///< the cascade's key - its generator's (rng_key, step) - which
+  unsigned nkey_hi = 0;       ///< every nucleus it asks the factory for is keyed on
+  int n_nuclei = 0;           ///< nuclei (pairs, for the light ion) asked for: the next tag
+  int nuc_ready = 0;          ///< the factory has filled `nucleons` for this set-up
+  NucleusReport nuc_rep;      ///< and what it reported, as `nucleus_init` would have
+  int solo = 0;               ///< past K: waits for `flat_run_solo` (FlatEnv::solo)
+
   // ---- the arrays; every pointer above points into these, inside the record
   Nucleon nucleons[kNuc];
   double proton_field[kMaxFieldTable];
@@ -171,6 +180,10 @@ struct FlatEnv {
   /// tests/test_bic_flat.cu's anti-vacuity switches: 1 skips `Capture`, 2 drops
   /// `G4MesonAbsorption` from `FindCollisions`. Zero in the transport.
   int perturb = 0;
+  /// P39 (docs/RISK.md V321): a straggler is finished on its own lane (`flat_run_solo`) instead
+  /// of being handed to the thread path - set whenever the nuclei come from the factory, whose
+  /// nucleus the thread path's rerun from the key could not reproduce.
+  int solo = 0;
 };
 
 /// The lists the per-cascade stages fill and empty within one call - `DoTimeStep`'s five,
@@ -299,7 +312,95 @@ __host__ __device__ inline void flat_start(FlatCascade<N, P, C>& c, int entry, i
   c.rng = rng;
   c.st = BicCascadeState{};
   c.nucleus = Nucleus3D{};
+  c.nkey_lo = 0u;
+  c.nkey_hi = 0u;
+  c.n_nuclei = 0;
+  c.nuc_ready = 0;
+  c.solo = 0;
   flat_bind(c);
+}
+
+/// A cascade past the straggler bound K. P36 hands it to the thread path, which reruns the
+/// entry from its key - exactly the flat cascade's answer while the flat cascade drew its nucleus
+/// from that key's generator. With the nuclei from the factory the rerun is a DIFFERENT cascade,
+/// so the hand-back would replace every long cascade by an ordinary one: P39's first campaign
+/// (docs/RISK.md V321) measured it - 192 of 640,000 calls, `StepParticlesOut`'s 100 x 100 steps
+/// around a slow hyperon, and the pi+ 800 MeV points' K+ and Lambda multiplicities 8.7-9.9
+/// sigma under Geant4's. So with `env.solo` the cascade is flagged instead, and finished on its
+/// own lane by `flat_run_solo` - the same stage functions in the same order, its own generator.
+template <int N, int P, int C>
+__host__ __device__ inline void flat_straggle(FlatCascade<N, P, C>& c, const FlatEnv& env) {
+  if (env.solo) {
+    c.solo = 1;
+  } else {
+    flat_hand_off(c, kHandStraggler);
+  }
+}
+
+// =============================================================================================
+// P39: the nucleus from the factory (npool/nucleus_factory.cuh, docs/RISK.md V320, V321).
+//
+// THE KEY. Every nucleus a cascade asks for is keyed on the cascade - the (rng_key, step) its
+// own generator is made from - and on its index among the cascade's nuclei (the tag), never on
+// the lane, the round or the request's place in a list. So a rerun gets the same nucleus, the
+// next outer-loop turn, `CheckResult` re-entry or light-ion try a fresh one, and two cascades
+// never share one. The factory's draws are no longer the cascade generator's: the impact points
+// and everything after draw from `rng` as before, minus the nucleus's ~1,522 uniforms - a
+// different stream of the same law, which is what the relaxed rule of V302 admits and the
+// campaigns hold statistically (P38 proved the per-nucleon phases are `Init`'s law, V319).
+//
+// THE FALL-BACK, by name: a cascade past `kFactoryMaxTag` nuclei, a nuclide outside A 1..64,
+// or the factory switched off (`G4GPU_FLAT_FACTORY=0`) samples on its lane with
+// `nucleus_init` from `rng`, as P36 did - each a function of the cascade alone. A factory
+// REFUSAL (placement or ReduceSum's logic) is not a fall-back: it is the same law's refusal,
+// and it hands the cascade back exactly as `nucleus_init`'s would.
+// =============================================================================================
+
+/// The cascade's key, from the caller that made its generator.
+template <int N, int P, int C>
+__host__ __device__ inline void flat_set_key(FlatCascade<N, P, C>& c, unsigned key_lo,
+                                             unsigned key_hi) {
+  c.nkey_lo = key_lo;
+  c.nkey_hi = key_hi & 0xffffffu;
+}
+
+/// A request for `(a, z)` into `nucleons` / `rep`, tag `tag`; false if the factory cannot take
+/// it (the caller samples on the lane).
+__device__ inline bool flat_push_nucleus(const npool::FactoryLists& lists, Nucleon* nucleons,
+                                         NucleusReport* rep, int a, int z, unsigned key_lo,
+                                         unsigned key_hi, int tag) {
+  if (tag < 0 || static_cast<unsigned>(tag) > npool::kFactoryMaxTag) { return false; }
+  npool::FactoryRequest r;
+  r.nucleons = nucleons;
+  r.report = rep;
+  r.a = a;
+  r.z = z;
+  r.key_lo = key_lo;
+  r.key_hi = key_hi;
+  r.tag = static_cast<unsigned>(tag);
+  return npool::factory_push(lists, r);
+}
+
+/// The Binary set-up's request: the target of this outer-loop turn, tag = the turn's index.
+template <int N, int P, int C>
+__device__ inline void flat_request_target(FlatCascade<N, P, C>& c,
+                                           const npool::FactoryLists& lists) {
+  const int tag = c.n_nuclei++;
+  c.nuc_ready = flat_push_nucleus(lists, c.nucleons, &c.nuc_rep, c.ta, c.tz, c.nkey_lo,
+                                  c.nkey_hi, tag)
+                    ? 1
+                    : 0;
+}
+
+/// What `nucleus_init` leaves in `nuc` besides the nucleons - `Init`'s constants, the header the
+/// factory itself built with - and its report, for a nucleus the factory made in `nucleons`.
+__host__ __device__ inline NucleusReport flat_take_factory_nucleus(Nucleus3D& nuc,
+                                                                   Nucleon* nucleons,
+                                                                   int capacity, int a, int z,
+                                                                   const NucleusReport& rep) {
+  npool::factory_nucleus_header(nuc, nucleons, a, z);
+  nuc.capacity = capacity;  // `nucleus_init` leaves the caller's capacity, not A
+  return rep;
 }
 
 /// `G4BinaryCascade::ApplyYourself`'s outer-loop test, after a `Propagate` that collided:
@@ -415,8 +516,15 @@ __host__ __device__ inline void stage_nucleus(FlatCascade<N, P, C>& c, const Fla
                                               Nucleus3DScratch& nsc, FlatScratch<N, P>& scr) {
   // An outer-loop turn is a nucleus and up to 200 impact points: it counts on the straggler
   // clock like a time step, because V307's slowest cascades are the ones that turn it most.
-  if (++c.steps > env.k_steps) { return flat_hand_off(c, kHandStraggler); }
-  NucleusReport nrep = nucleus_init(c.nucleus, nsc, c.ta, c.tz, c.rng);
+  if (++c.steps > env.k_steps) { return flat_straggle(c, env); }
+  // P39: the nucleus the factory built for this turn, or (the fall-back) one sampled here.
+  NucleusReport nrep;
+  if (c.nuc_ready) {
+    c.nuc_ready = 0;
+    nrep = flat_take_factory_nucleus(c.nucleus, c.nucleons, N, c.ta, c.tz, c.nuc_rep);
+  } else {
+    nrep = nucleus_init(c.nucleus, nsc, c.ta, c.tz, c.rng);
+  }
   if (nrep.fatal()) { return flat_hand_off(c, nrep.capacity ? kHandCapacity : kHandRefused); }
   c.prop = make_rk_propagation(c.nucleus, nrep, c.proton_field, c.neutron_field,
                                kMaxFieldTable);
@@ -777,7 +885,7 @@ __host__ __device__ inline void stage_post(FlatCascade<N, P, C>& c, const FlatEn
       }
     }
   }
-  if (c.steps > env.k_steps) { flat_hand_off(c, kHandStraggler); }
+  if (c.steps > env.k_steps) { flat_straggle(c, env); }
 }
 
 // =============================================================================================
@@ -846,6 +954,53 @@ __host__ __device__ inline void stage_finish_b(FlatCascade<N, P, C>& c) {
   c.frag = find_fragments(st);
   c.stage = kStTail;
   c.tail_work = kTailDeexcite;
+}
+
+// =============================================================================================
+// P39: a straggler finished on its own lane (docs/RISK.md V321). Every stage the drain would
+// have given it, in the drain's order - the set-up (`setup`, the model's own: its nucleus from
+// the factory if one waits in the record, else `nucleus_init` from the cascade's generator), the
+// step's PRE, its move items one after another, POST, the finish - until the cascade needs a
+// tail slot or has left. Nothing here reads another record, so a solo cascade is the one the
+// drain would have computed, bit for bit; only its time is a single thread's. `env.k_steps` is
+// the caller's to lift (the bound has done its work: it found the straggler).
+// =============================================================================================
+template <int N, int P, int C, typename Setup>
+__host__ __device__ inline void flat_run_solo(FlatCascade<N, P, C>& c, const FlatEnv& env,
+                                              FlatScratch<N, P>& scr, Setup&& setup) {
+  // Geant4's own bounds end every loop below (`StepParticlesOut`'s 100 resets of 100 steps, the
+  // collision loop's 1,000,000, the outer loop's 100 turns); this guard only keeps a defect
+  // from hanging the card, and hands the cascade back by name if it is ever reached.
+  for (int guard = 0; guard < (1 << 22); ++guard) {
+    switch (c.stage) {
+      case kStModel:
+      case kStNucleus:
+        setup();
+        break;
+      case kStStep:
+      case kStStepOut:
+        stage_pre(c, env, scr);
+        if (c.stage != kStStep && c.stage != kStStepOut) { break; }
+        if (c.stepping) {
+          for (int i = 0; i < c.st.lists.n_pool; ++i) {
+            if (c.prestate[i] >= 0) { item_transport(c, i); }
+          }
+        }
+        stage_post(c, env, scr);
+        break;
+      case kStFinishA:
+        stage_finish_a(c, env, scr);
+        break;
+      case kStFinishB:
+        stage_finish_b(c);
+        break;
+      default:
+        c.solo = 0;
+        return;
+    }
+  }
+  c.solo = 0;
+  flat_hand_off(c, kHandStraggler);
 }
 
 // =============================================================================================

@@ -31,6 +31,7 @@ struct FlatIon {
   double mass = 0.0;
   Nucleon proj_nucleons[N];
   CascadeTrack initial[N];  ///< `Interact`'s secondaries, one a projectile nucleon
+  NucleusReport proj_rep;   ///< P39: the factory's report for the projectile
 };
 
 /// A lane takes a light-ion reaction.
@@ -47,6 +48,20 @@ __host__ __device__ inline void ion_start(FlatIon<N, P, C>& r, int entry, int pd
   r.proj.nucleons = r.proj_nucleons;
   r.proj.capacity = N;
   r.projectile_excitation = 0.0;
+}
+
+/// P39: the light-ion set-up's requests - this try's projectile and target, keyed on the
+/// reaction and the try: tags 2t and 2t + 1 (cascade_flat.cuh's note). Both or neither: a try
+/// whose second request could not be placed samples both on its lane.
+template <int N, int P, int C>
+__device__ inline void ion_request(FlatIon<N, P, C>& r, const npool::FactoryLists& lists) {
+  FlatCascade<N, P, C>& c = r.c;
+  const int t = c.n_nuclei++;
+  const bool p_ok = flat_push_nucleus(lists, r.proj_nucleons, &r.proj_rep, r.f.pa, r.f.pz,
+                                      c.nkey_lo, c.nkey_hi, 2 * t);
+  const bool t_ok = p_ok && flat_push_nucleus(lists, c.nucleons, &c.nuc_rep, r.f.ta, r.f.tz,
+                                              c.nkey_lo, c.nkey_hi, 2 * t + 1);
+  c.nuc_ready = t_ok ? 1 : 0;
 }
 
 /// `blir_apply_yourself` above `Interact`: the anti/hyper test, `SetLighterAsProjectile`, the
@@ -85,16 +100,25 @@ __host__ __device__ inline void stage_ion_nucleus(FlatIon<N, P, C>& r, const Fla
   FlatCascade<N, P, C>& c = r.c;
   const BlirFrame& f = r.f;
   for (;;) {
-    if (++c.steps > env.k_steps) { return flat_hand_off(c, kHandStraggler); }
+    if (++c.steps > env.k_steps) { return flat_straggle(c, env); }
     ++c.try_count;
+    // P39: this try's two nuclei from the factory (requested by `ion_request` before this
+    // launch), or - the fall-back - sampled here in `Interact`'s order.
+    const bool from_factory = (c.nuc_ready != 0);
+    c.nuc_ready = 0;
     r.proj.nucleons = r.proj_nucleons;
     r.proj.capacity = N;
-    const NucleusReport prep = nucleus_init(r.proj, nsc, f.pa, f.pz, c.rng);
+    const NucleusReport prep =
+        from_factory ? flat_take_factory_nucleus(r.proj, r.proj_nucleons, N, f.pa, f.pz,
+                                                 r.proj_rep)
+                     : nucleus_init(r.proj, nsc, f.pa, f.pz, c.rng);
     if (prep.fatal()) { return flat_hand_off(c, prep.capacity ? kHandCapacity : kHandRefused); }
     r.proj.center_nucleons();
     c.nucleus.nucleons = c.nucleons;
     c.nucleus.capacity = N;
-    const NucleusReport trep = nucleus_init(c.nucleus, nsc, f.ta, f.tz, c.rng);
+    const NucleusReport trep =
+        from_factory ? flat_take_factory_nucleus(c.nucleus, c.nucleons, N, f.ta, f.tz, c.nuc_rep)
+                     : nucleus_init(c.nucleus, nsc, f.ta, f.tz, c.rng);
     if (trep.fatal()) { return flat_hand_off(c, trep.capacity ? kHandCapacity : kHandRefused); }
 
     const double impact_max = c.nucleus.outer_radius() + r.proj.outer_radius();
@@ -142,6 +166,10 @@ __host__ __device__ inline void stage_ion_nucleus(FlatIon<N, P, C>& r, const Fla
       c.tail_work = kTailResult;
       return;
     }
+    // P39: a try on the factory's nuclei ends the call - the record stays in `kStNucleus`, and
+    // the next set-up asks the factory for the next try's pair (tags 2t + 2, 2t + 3) - so a
+    // miss costs a set-up round where it cost two `G4Fancy3DNucleus::Init`s on this lane.
+    if (from_factory) { return; }
   }
   c.loop_guard = 1000000;
   c.have_products = false;

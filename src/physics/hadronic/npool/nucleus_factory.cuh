@@ -90,13 +90,20 @@ enum FactoryPhase : unsigned {
   kFactoryRotation = 4u,
 };
 
-/// One lane's stream in one phase: Philox with (key_lo, key_hi << 8 | lane, P38 salt | phase).
-/// `key_hi` must stay below 2^24 so that no two (key_hi, lane) pairs share a word.
+/// One lane's stream in one phase: Philox with (key_lo, key_hi << 8 | lane, P38 salt | tag << 4
+/// | phase). `key_hi` must stay below 2^24 so that no two (key_hi, lane) pairs share a word, and
+/// `tag` below 2^12. P39 (docs/RISK.md V321) adds the tag - which nucleus of a cascade this is,
+/// and whether it is the projectile or the target - so that a cascade keyed (key_lo, key_hi)
+/// gets a different nucleus for every try; tag 0 is P38's stream, word for word.
 __host__ __device__ inline Philox<double> factory_stream(unsigned key_lo, unsigned key_hi,
-                                                        int lane, unsigned phase) {
+                                                        int lane, unsigned phase,
+                                                        unsigned tag = 0u) {
   return Philox<double>(key_lo, (key_hi << 8) | static_cast<unsigned>(lane & 0xff),
-                        0x50380000u | phase);
+                        0x50380000u | ((tag & 0xfffu) << 4) | phase);
 }
+
+/// The largest tag `factory_stream` keeps apart.
+inline constexpr unsigned kFactoryMaxTag = 0xfffu;
 
 /// What one launch samples: `n` nuclei of one nuclide, nucleus k keyed (key_lo + k, key_hi).
 struct FactoryJob {
@@ -204,17 +211,35 @@ __device__ inline deex::Vec3d factory_c12_candidate(int lane, Rng& rng) {
   return bic::gauss_triplet(rng, disp) * deex::fermi() + corner[lane / 4];
 }
 
+/// ONE nucleus as the block builds it: its nuclide, its key and where its nucleons, report and
+/// ReduceSum scratch go. `factory_build_one` (a job's k-th nucleus) and the request list of the
+/// flat cascade (P39, `nucleus_factory_list_kernel`) both come down to this.
+struct FactoryNucleus {
+  int a = 0;
+  int z = 0;
+  unsigned key_lo = 0;
+  unsigned key_hi = 0;
+  unsigned tag = 0;
+  double distance_scale = 1.0;
+  bic::Nucleon* nucleons = nullptr;   ///< [a]
+  bic::NucleusReport* report = nullptr;
+  int* rounds = nullptr;              ///< optional
+  deex::Vec3d* momentum = nullptr;    ///< [a] ReduceSum's scratch
+  double* fermi_p = nullptr;          ///< [a]
+  bic::NucleusSortEntry* test_sums = nullptr;  ///< [a]
+};
+
 /// One nucleus on one block. Every lane of the block calls it; lanes >= A only meet the
-/// barriers. `k` is the nucleus's index in the job.
+/// barriers.
 template <int kW>
-__device__ inline void factory_build_one(const FactoryJob& job, const FactoryOutput& out, int k,
-                                         FactoryShared<kW>& sh) {
+__device__ inline void factory_build(const FactoryNucleus& job, FactoryShared<kW>& sh) {
   const int lane = static_cast<int>(threadIdx.x);
   const int a = job.a;
   const int z = job.z;
   const bool live = lane < a;
-  const unsigned key_lo = job.key_lo + static_cast<unsigned>(k);
-  bic::Nucleon* nucleons = out.nucleons + static_cast<size_t>(k) * a;
+  const unsigned key_lo = job.key_lo;
+  const unsigned tag = job.tag;
+  bic::Nucleon* nucleons = job.nucleons;
 
   bic::Nucleus3D nuc;
   factory_nucleus_header(nuc, nucleons, a, z);
@@ -224,7 +249,7 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
 
   // ---- 1. ChooseNucleons
   if (live) {
-    Philox<double> rt = factory_stream(key_lo, job.key_hi, lane, kFactoryTypes);
+    Philox<double> rt = factory_stream(key_lo, job.key_hi, lane, kFactoryTypes, tag);
     const double prob_proton = static_cast<double>(z) / static_cast<double>(a);
     sh.type_draw[lane] = (rt.uniform() < prob_proton) ? bic::kProton : bic::kNeutron;
   }
@@ -260,7 +285,7 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
   const int my_type = live ? sh.type[lane] : bic::kNucleonNone;
 
   // ---- 2. ChoosePositions, the wavefront
-  Philox<double> rp = factory_stream(key_lo, job.key_hi, lane, kFactoryPositions);
+  Philox<double> rp = factory_stream(key_lo, job.key_hi, lane, kFactoryPositions, tag);
   const bool c12 = (a == 12);
   const double max_r = nuc.nuclear_radius(0.001);
   const double barrier = nuc.coulomb_barrier();
@@ -344,8 +369,8 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
   __syncthreads();
   if (sh.fail) {
     if (lane == 0) {
-      out.reports[k] = rep;
-      if (out.rounds != nullptr) { out.rounds[k] = sh.rounds; }
+      *job.report = rep;
+      if (job.rounds != nullptr) { *job.rounds = sh.rounds; }
     }
     return;
   }
@@ -361,7 +386,7 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
     // The random rotation (`rotateZ(2 pi U)`, `rotateY(acos(2U - 1))`), then CenterNucleons -
     // both as `bic::choose_positions_c12` and `bic::nucleus_init` write them, on lane 0.
     if (lane == 0) {
-      Philox<double> rr = factory_stream(key_lo, job.key_hi, 0, kFactoryRotation);
+      Philox<double> rr = factory_stream(key_lo, job.key_hi, 0, kFactoryRotation, tag);
       const double phi = g4gpu::units::twopi<double>() * rr.uniform();
       const double theta = std::acos(2.0 * rr.uniform() - 1.0);
       sh.rot[0] = std::cos(phi);
@@ -384,10 +409,10 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
   }
 
   // ---- 4. ChooseFermiMomenta: per nucleon, then ReduceSum on lane 0
-  deex::Vec3d* momentum = out.momentum + static_cast<size_t>(k) * a;
-  double* fermi_p = out.fermi_p + static_cast<size_t>(k) * a;
+  deex::Vec3d* momentum = job.momentum;
+  double* fermi_p = job.fermi_p;
   if (live) {
-    Philox<double> rm = factory_stream(key_lo, job.key_hi, lane, kFactoryMomenta);
+    Philox<double> rm = factory_stream(key_lo, job.key_hi, lane, kFactoryMomenta, tag);
     const deex::Vec3d pos = nucleons[lane].position;
     const double dens = nuc.density.density(pos);
     double pf = nuc.fermi.fermi_momentum(dens);
@@ -413,11 +438,11 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
     bic::Nucleus3DScratch sc;
     sc.momentum = momentum;
     sc.fermi_p = fermi_p;
-    sc.test_sums = out.test_sums + static_cast<size_t>(k) * a;
+    sc.test_sums = job.test_sums;
     sc.capacity = a;
     if (!bic::reduce_sum(nuc, sc, rep)) { rep.reduce_sum_failed = true; }
-    out.reports[k] = rep;
-    if (out.rounds != nullptr) { out.rounds[k] = sh.rounds; }
+    *job.report = rep;
+    if (job.rounds != nullptr) { *job.rounds = sh.rounds; }
   }
   __syncthreads();
   if (live) {
@@ -426,6 +451,27 @@ __device__ inline void factory_build_one(const FactoryJob& job, const FactoryOut
     nn.momentum = bic::LorentzVector(momentum[lane], nn.pdg_mass() - e_binding);
     nn.binding_energy = e_binding;
   }
+}
+
+/// A job's nucleus k: keyed (key_lo + k, key_hi), tag 0, its arrays at k * a.
+template <int kW>
+__device__ inline void factory_build_one(const FactoryJob& job, const FactoryOutput& out, int k,
+                                         FactoryShared<kW>& sh) {
+  const size_t off = static_cast<size_t>(k) * job.a;
+  FactoryNucleus n;
+  n.a = job.a;
+  n.z = job.z;
+  n.key_lo = job.key_lo + static_cast<unsigned>(k);
+  n.key_hi = job.key_hi;
+  n.tag = 0u;
+  n.distance_scale = job.distance_scale;
+  n.nucleons = out.nucleons + off;
+  n.report = out.reports + k;
+  n.rounds = (out.rounds != nullptr) ? out.rounds + k : nullptr;
+  n.momentum = out.momentum + off;
+  n.fermi_p = out.fermi_p + off;
+  n.test_sums = out.test_sums + off;
+  factory_build<kW>(n, sh);
 }
 
 /// The factory: one block of `kW` lanes per nucleus, the grid striding over the job's nuclei.
@@ -441,6 +487,79 @@ __global__ void __launch_bounds__(kW) nucleus_factory_kernel(FactoryJob job, Fac
 /// The block width for a nuclide: the smallest of 32, 64, 128, 256 that holds A.
 __host__ __device__ inline int factory_width(int a) {
   return (a <= 32) ? 32 : (a <= 64) ? 64 : (a <= 128) ? 128 : 256;
+}
+
+// =============================================================================================
+// P39: THE REQUEST LIST - nuclei of MIXED nuclides, each written where its cascade reads it.
+//
+// The flat cascade (bic/flat/, docs/RISK.md V321) asks for one nucleus a set-up (the Binary
+// target; the light-ion reaction's projectile and target), each of its own (A, Z) and key, into
+// the cascade's own record. A request names all of that; the list kernel builds request k on
+// block k (striding), the count read on the device, so the host launches without knowing it.
+// ReduceSum's scratch is the block's shared memory, not a global buffer: nothing is allocated
+// per nucleus beyond the request itself, and the nucleons land in the record.
+// =============================================================================================
+
+/// One nucleus a cascade asked for.
+struct FactoryRequest {
+  bic::Nucleon* nucleons = nullptr;      ///< the record's array, at least `a` long
+  bic::NucleusReport* report = nullptr;  ///< the record's report
+  int a = 0;
+  int z = 0;
+  unsigned key_lo = 0;
+  unsigned key_hi = 0;
+  unsigned tag = 0;
+};
+
+/// Where a set-up writes its requests: two lists by block width, `count[0]` and `count[1]`
+/// their lengths. Each list holds `cap` requests - every lane's worst case (one a Binary
+/// cascade, two a light-ion reaction) - so a push never finds a list full: if it could, which
+/// cascade fell back to its lane would depend on the atomic order, not on the cascade.
+struct FactoryLists {
+  FactoryRequest* req32 = nullptr;
+  FactoryRequest* req64 = nullptr;
+  int* count = nullptr;
+  int cap = 0;
+};
+
+/// Appends a request; false (the caller samples on its lane) if A is outside 1..64 or the list
+/// is full, which the sizing above makes unreachable.
+__device__ inline bool factory_push(const FactoryLists& lists, const FactoryRequest& r) {
+  if (r.a < 1 || r.a > 64 || r.tag > kFactoryMaxTag) { return false; }
+  const int w = (r.a <= 32) ? 0 : 1;
+  const int k = atomicAdd(&lists.count[w], 1);
+  if (k >= lists.cap) { return false; }
+  (w == 0 ? lists.req32 : lists.req64)[k] = r;
+  return true;
+}
+
+/// `min(count[0], cap)` requests of width `kW` (every A <= kW), one block of `kW` lanes each.
+template <int kW>
+__global__ void __launch_bounds__(kW) nucleus_factory_list_kernel(const FactoryRequest* req,
+                                                                  const int* count, int cap) {
+  __shared__ FactoryShared<kW> sh;
+  // `NucleusSortEntry` has default member initialisers, which a `__shared__` object may not
+  // run, so ReduceSum's three arrays are raw shared storage of the right size and alignment.
+  __shared__ __align__(16) unsigned char raw_mom[kW * sizeof(deex::Vec3d)];
+  __shared__ __align__(16) unsigned char raw_fp[kW * sizeof(double)];
+  __shared__ __align__(16) unsigned char raw_ts[kW * sizeof(bic::NucleusSortEntry)];
+  const int n = (*count < cap) ? *count : cap;
+  for (int k = static_cast<int>(blockIdx.x); k < n; k += static_cast<int>(gridDim.x)) {
+    const FactoryRequest r = req[k];
+    FactoryNucleus job;
+    job.a = r.a;
+    job.z = r.z;
+    job.key_lo = r.key_lo;
+    job.key_hi = r.key_hi;
+    job.tag = r.tag;
+    job.nucleons = r.nucleons;
+    job.report = r.report;
+    job.momentum = reinterpret_cast<deex::Vec3d*>(raw_mom);
+    job.fermi_p = reinterpret_cast<double*>(raw_fp);
+    job.test_sums = reinterpret_cast<bic::NucleusSortEntry*>(raw_ts);
+    factory_build<kW>(job, sh);
+    __syncthreads();
+  }
 }
 
 }  // namespace g4gpu::npool

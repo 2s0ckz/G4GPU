@@ -17,6 +17,7 @@ struct IonPolicy {
   static constexpr int kP = 256;
   static constexpr int kC = 512;
   static constexpr int kItemsPerLane = 16;
+  static constexpr int kNucleiPerTry = 2;  ///< P39: the projectile and the target
   using Rec = bic::flat::FlatIon<kN, kP, kC>;
   static constexpr had::InelasticModel kModel = had::InelasticModel::kLightIon;
   __device__ static bic::flat::FlatCascade<kN, kP, kC>& core(Rec& r) { return r.c; }
@@ -27,6 +28,10 @@ struct IonPolicy {
   }
   /// `blir_apply_yourself` is handed `HadNucleus{z, a, 0}`: no lambdas.
   __device__ static void model(Rec& r) { bic::flat::stage_ion_model(r, 0); }
+  /// P39: the try's projectile and target, from the nucleus factory (docs/RISK.md V322).
+  __device__ static void request(Rec& r, const npool::FactoryLists& lists) {
+    bic::flat::ion_request(r, lists);
+  }
   __device__ static void nucleus(Rec& r, const bic::flat::FlatEnv& env,
                                  bic::Nucleus3DScratch& nsc,
                                  bic::flat::FlatScratch<kN, kP>& scr) {

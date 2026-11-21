@@ -39,6 +39,12 @@ struct FlatPool {
   int* counters = nullptr;      ///< the drain's device counters
   int* items = nullptr;         ///< TRANSPORT's (cascade, secondary) items
   int* strag = nullptr;         ///< the entries handed to the thread path, by queue index
+  /// P39 (docs/RISK.md V321): the nucleus factory's two request lists (A <= 32, A <= 64) of
+  /// `factory_cap` requests each and their two counts - the set-up's nuclei, built in the
+  /// records by `npool::nucleus_factory_list_kernel` before the set-up reads them.
+  void* factory_req = nullptr;
+  int* factory_count = nullptr;
+  int factory_cap = 0;
   int lanes = 0;
   int item_capacity = 0;
   int k_steps = 0;              ///< the straggler bound K

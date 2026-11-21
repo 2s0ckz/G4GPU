@@ -26,6 +26,12 @@
 // otherwise the comparison could not see a change of that size and the pass above says nothing.
 //
 // DETERMINISM: the flat campaign is run twice and every final state must agree to the bit.
+//
+// P39 (docs/RISK.md V321, V322): the flat path's nuclei come from the nucleus factory
+// (npool/nucleus_factory.cuh), requested before the set-up and keyed on the call's key and its
+// nucleus count, as the transport's drain does it; a straggler is finished on its own lane
+// (`k_solo`) rather than handed back. `G4GPU_FLAT_FACTORY=0` runs P36's flat path (the nucleus
+// on the lane from the call's generator, the stragglers handed back).
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -150,6 +156,7 @@ struct Args {
   int lanes;
   int n;
   int perturb;
+  int solo;               ///< P39: stragglers finished on their lane (the factory is on)
   const Job* jobs;
   Out* out;
   const had::InteractionPool<real_t>* pool;
@@ -165,6 +172,7 @@ __device__ bf::FlatEnv env_of(const Args& a) {
   // perturbed one that never ends (a secondary that never moves never leaves) is handed back.
   e.k_steps = 4096;
   e.perturb = a.perturb;
+  e.solo = a.solo;
   return e;
 }
 
@@ -181,6 +189,29 @@ __global__ void k_claim(Args a) {
 #else
   bf::flat_start(a.rec[lane], e, j.pdg, j.ekin, j.tz, j.ta, rng);
 #endif
+  // P39: the nuclei are keyed on the call's generator key, as the transport keys them.
+  bf::flat_set_key(core(a.rec[lane]), j.key, 7u);
+}
+// P39 (docs/RISK.md V321, V322): the transport's set-up - the model's top and the requests to
+// the nucleus factory, then the factory, then `k_setup` reading what it built.
+__global__ void k_request(Args a, npool::FactoryLists lists) {
+  const int lane = blockIdx.x * blockDim.x + threadIdx.x;
+  if (lane >= a.lanes) { return; }
+  Core& c = core(a.rec[lane]);
+  if (c.stage == bf::kStModel) {
+#ifdef G4GPU_TEST_BLIR_FLAT
+    bf::stage_ion_model(a.rec[lane], 0);
+#else
+    bf::stage_model(c);
+#endif
+  }
+  if (c.stage != bf::kStNucleus) { return; }
+#ifdef G4GPU_TEST_BLIR_FLAT
+  bf::ion_request(a.rec[lane], lists);
+#else
+  bf::flat_request_target(c, lists);
+#endif
+  if (!c.nuc_ready) { atomicAdd(&a.ctr[4], 1); }
 }
 __global__ void k_setup(Args a) {
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
@@ -216,6 +247,7 @@ __global__ void k_pre(Args a) {
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
+  if (c.solo) { return; }
   bf::FlatScratch<kNuc, kPool> scr;
   bf::stage_pre(c, env_of(a), scr);
   if (!c.stepping) { return; }
@@ -251,6 +283,7 @@ __global__ void k_post(Args a) {
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
+  if (c.solo) { return; }
   bf::FlatScratch<kNuc, kPool> scr;
   bf::stage_post(c, env_of(a), scr);
 }
@@ -258,9 +291,44 @@ __global__ void k_finish(Args a) {
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
+  if (c.solo) { return; }
   bf::FlatScratch<kNuc, kPool> scr;
   if (c.stage == bf::kStFinishA) { bf::stage_finish_a(c, env_of(a), scr); }
   else if (c.stage == bf::kStFinishB) { bf::stage_finish_b(c); }
+}
+// P39 (docs/RISK.md V321): a straggler finished on its own lane, as the transport's `flat_solo`.
+__global__ void k_solo(Args a) {
+  const int lane = blockIdx.x * blockDim.x + threadIdx.x;
+  if (lane >= a.lanes) { return; }
+  Core& c = core(a.rec[lane]);
+  if (!c.solo) { return; }
+  if (c.stage == bf::kStFree || c.stage == bf::kStTail) {
+    c.solo = 0;
+    return;
+  }
+  atomicAdd(&a.ctr[5], 1);
+  bf::FlatEnv env = env_of(a);
+  env.k_steps = 1 << 30;
+  deex::Vec3d mom[kNuc];
+  double fermi_p[kNuc];
+  bic::NucleusSortEntry sums[kNuc];
+  double flat_block[bic::kFlatBlock];
+  bic::Nucleus3DScratch nsc;
+  nsc.momentum = mom;
+  nsc.fermi_p = fermi_p;
+  nsc.test_sums = sums;
+  nsc.flat_block = flat_block;
+  nsc.capacity = kNuc;
+  bf::FlatScratch<kNuc, kPool> scr;
+  bf::flat_run_solo(c, env, scr, [&] {
+#ifdef G4GPU_TEST_BLIR_FLAT
+    if (c.stage == bf::kStModel) { bf::stage_ion_model(a.rec[lane], 0); }
+    if (c.stage == bf::kStNucleus) { bf::stage_ion_nucleus(a.rec[lane], env, nsc, scr); }
+#else
+    if (c.stage == bf::kStModel) { bf::stage_model(c); }
+    if (c.stage == bf::kStNucleus) { bf::stage_nucleus(c, env, nsc, scr); }
+#endif
+  });
 }
 __global__ void k_tail(Args a, int n_slots) {
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
@@ -328,6 +396,11 @@ __global__ void k_buffers(bic::CascadeBuffers* buf, const had::InteractionPool<r
   }
 }
 
+bool factory_enabled() {
+  const char* v = std::getenv("G4GPU_FLAT_FACTORY");
+  return !(v != nullptr && v[0] == '0');
+}
+
 /// The flat campaign: returns the records, `ms` the device time, `rounds` the lockstep length.
 std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPoolOwner<real_t>& po,
                           const data::LevelTable& dev_lt, int lanes, int perturb, float& ms,
@@ -343,7 +416,7 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   cudaMalloc(&a.rec, sizeof(Rec) * lanes);
   cudaMalloc(&a.job_of, sizeof(int) * lanes);
   cudaMalloc(&a.buffers, sizeof(bic::CascadeBuffers));
-  cudaMalloc(&a.ctr, sizeof(int) * 4);
+  cudaMalloc(&a.ctr, sizeof(int) * 6);
   cudaMalloc(&a.items, sizeof(int) * a.item_capacity);
   Job* dj = nullptr;
   cudaMalloc(&dj, sizeof(Job) * n);
@@ -351,7 +424,17 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   a.jobs = dj;
   cudaMalloc(&a.out, sizeof(Out) * n);
   cudaMemset(a.out, 0, sizeof(Out) * n);
-  cudaMemset(a.ctr, 0, sizeof(int) * 4);
+  cudaMemset(a.ctr, 0, sizeof(int) * 6);
+  // P39: the factory's two request lists, every lane's worst case each (one nucleus a Binary
+  // set-up, two a light-ion try). `G4GPU_FLAT_FACTORY=0` samples on the lanes as P36 did.
+  const bool factory_on = factory_enabled();
+  a.solo = factory_on ? 1 : 0;
+  constexpr int kNucleiPerTry = kIon ? 2 : 1;
+  npool::FactoryLists lists;
+  lists.cap = lanes * kNucleiPerTry;
+  cudaMalloc(&lists.req32, sizeof(npool::FactoryRequest) * 2 * lists.cap);
+  lists.req64 = lists.req32 + lists.cap;
+  cudaMalloc(&lists.count, sizeof(int) * 2);
   const int th = 64, bl = (lanes + th - 1) / th;
   k_init<<<bl, th>>>(a.rec, lanes);
   k_buffers<<<1, 1>>>(a.buffers, po.d_pool);
@@ -362,17 +445,26 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   rounds = 0;
   for (;;) {
     k_claim<<<bl, th>>>(a);
+    if (factory_on) {
+      cudaMemsetAsync(lists.count, 0, sizeof(int) * 2);
+      k_request<<<bl, th>>>(a, lists);
+      npool::nucleus_factory_list_kernel<32><<<lists.cap, 32>>>(lists.req32, lists.count,
+                                                               lists.cap);
+      npool::nucleus_factory_list_kernel<64><<<lists.cap, 64>>>(lists.req64, lists.count + 1,
+                                                               lists.cap);
+    }
     k_setup<<<bl, th>>>(a);
     cudaMemsetAsync(a.ctr + 1, 0, sizeof(int));
     k_pre<<<bl, th>>>(a);
     k_move<<<(lanes * 4 + 127) / 128, 128>>>(a);
     k_post<<<bl, th>>>(a);
     k_finish<<<bl, th>>>(a);
+    if (factory_on) { k_solo<<<bl, th>>>(a); }
     cudaMemsetAsync(a.ctr + 2, 0, sizeof(int));
     k_tail<<<bl, th>>>(a, po.n_slots);
     cudaMemsetAsync(a.ctr + 3, 0, sizeof(int));
     k_reap<<<bl, th>>>(a);
-    int h[4];
+    int h[5];
     if (cudaMemcpy(h, a.ctr, sizeof h, cudaMemcpyDeviceToHost) != cudaSuccess) {
       std::printf("  FATAL: %s\n", cudaGetErrorString(cudaGetLastError()));
       std::exit(1);
@@ -386,7 +478,14 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   std::vector<Out> out(n);
   cudaMemcpy(out.data(), a.out, sizeof(Out) * n, cudaMemcpyDeviceToHost);
   cudaFree(a.rec); cudaFree(a.job_of); cudaFree(a.buffers);
+  int fell[2] = {0, 0};
+  cudaMemcpy(fell, a.ctr + 4, sizeof(fell), cudaMemcpyDeviceToHost);
+  if (factory_on) {
+    std::printf("  (factory on: %d requests fell back to the lane; %d stragglers finished solo)\n",
+                fell[0], fell[1]);
+  }
   cudaFree(a.ctr); cudaFree(a.items); cudaFree(dj); cudaFree(a.out);
+  cudaFree(lists.req32); cudaFree(lists.count);
   return out;
 }
 
