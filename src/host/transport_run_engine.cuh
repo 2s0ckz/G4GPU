@@ -366,7 +366,7 @@ __global__ void scatter_species(TrackBuffer<real_t> pool, int n,
 /// that crosses the bus now, where the 5,120 counts went down and their 5,120 cursors came back.
 constexpr int kSortScanThreads = 1024;
 constexpr int kSortScanPer = (kNumTrackSpecies * kSortKeys + kSortScanThreads - 1) / kSortScanThreads;
-__global__ void __launch_bounds__(kSortScanThreads) scan_species_buckets(int* counts,
+static __global__ void __launch_bounds__(kSortScanThreads) scan_species_buckets(int* counts,
                                                                          int* summary,
                                                                          int* host_out) {
   constexpr int kBuckets = kNumTrackSpecies * kSortKeys;
@@ -409,7 +409,7 @@ __global__ void __launch_bounds__(kSortScanThreads) scan_species_buckets(int* co
 /// append cursor. On this card under WDDM a `cudaMemcpy` of four bytes after a launch costs 62 us
 /// and the launch plus a synchronisation 25 us (V304's probe); a kernel writing the host's
 /// memory and a stream synchronisation is the second.
-__global__ void copy_int_to_host(const int* src, int* host_out) {
+static __global__ void copy_int_to_host(const int* src, int* host_out) {
   if (threadIdx.x == 0) { *host_out = *src; }
 }
 

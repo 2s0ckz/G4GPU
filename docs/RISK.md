@@ -21143,3 +21143,16 @@ grow kernels after `flat_tail`, the build of the larger records, `flat_check_and
 the 4th lane list, the counters), flat_drain.cuh (two fields), the light-ion unit (the policy),
 test_bic_flat.cu; README's performance rows and the plan row; RISK V331-V334. P39's set-up and
 request code and P41's tail pool are not edited beyond the one `grow` argument.
+
+### V335: the gate ba74 - build_all green (108 tests, the eleven gates, B1 at 1.1045 sigma), the extras refused by the linker on P37's two non-template kernels, fixed by making them static
+
+ba74 on integ/p42 (2026-11-20 23:40 to 2026-11-21 02:45, `out/lead/logs/ba74.log`): build_all ALL OK at 01:14
+(108 passed, 0 failed; the eleven dose gates as ba73; B1 1.1045 sigma). build_extras exited 1 at 02:45: every
+hook unit of the hook library carried its own definition of `scan_species_buckets` and `copy_int_to_host`
+(P37, V304: the sort's prefix sum on the card and the read-back into mapped memory), the only two
+`__global__` functions in transport_run_engine.cuh that are not templates on `real_t`, so
+test_custom_hook's link saw them multiply defined (LNK2005, 28 times) and failed. build_all never links
+two hook units together, which is why ba74's first stage passed and why P37's own gates (V306) could not see
+it. The fix is two words: both kernels are `static __global__`, so each translation unit that launches
+them - the engine's transport_run unit, the hook projects' host unit - keeps its own copy and nothing is
+exported. No formula, no launch, no digit changes; the gate ba75 proves it on the whole chain.
