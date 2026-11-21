@@ -70,16 +70,20 @@ namespace {
 // ref/oracle/bic_blirapply.csv.
 #ifdef G4GPU_TEST_BLIR_FLAT
 constexpr bool kIon = true;
-constexpr int kNuc = 64, kPool = 256, kColl = 512;
+constexpr int kNuc = 64, kPool = 256, kColl = 1024;
 using Rec = bf::FlatIon<kNuc, kPool, kColl>;
 constexpr int kMaxOut = bic::kBlirMaxSecondaries;
 using Tail = deex::flat::TailEntry<deex::flat::IonTailCaps, bic::BlirFinalState>;
+/// P42: the larger record - the thread path's slot capacities, as the transport's `IonPolicy::Big`.
+constexpr int kBigPool = bic::kSlotPoolCap, kBigColl = bic::kSlotCollisionCap;
+using Big = bf::FlatIon<kNuc, kBigPool, kBigColl>;
 #else
 constexpr bool kIon = false;
 constexpr int kNuc = 64, kPool = 128, kColl = 256;
 using Rec = bf::FlatCascade<kNuc, kPool, kColl>;
 constexpr int kMaxOut = bic::kBicMaxSecondaries;
 using Tail = deex::flat::TailEntry<deex::flat::BinaryTailCaps, bic::BicFinalState>;
+using Big = Rec;  ///< the Binary campaign has no larger record (P42 is the light ion's)
 #endif
 using Core = bf::FlatCascade<kNuc, kPool, kColl>;
 __host__ __device__ inline Core& core(Core& r) { return r; }
@@ -108,6 +112,10 @@ struct Out {
   int handed = 0;        ///< the flat path handed it back (answered by the thread path)
   uint64_t hash = 0;
 };
+
+/// P42: the last `run_flat`'s reactions continued on a larger record, and handed back from one.
+int g_grown = -1;
+int g_grow_handed = 0;
 
 __host__ __device__ inline void mix(uint64_t& h, uint64_t v) {
   h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
@@ -166,6 +174,11 @@ struct Args {
   data::LevelTable lt;
   Tail* tails;            ///< P41: one tail-pool entry a lane (null: every tail on a slot)
   bf::TailFallback fb;    ///< P41: the continuation's slot-sized workspaces
+  /// P42 (docs/RISK.md V331): a light-ion record that would outgrow itself waits (`grow`) and is
+  /// continued on one of `n_big` larger records (`k_grow`), as the transport's `flat_grow`.
+  int grow;
+  Big* big;
+  int n_big;
 };
 
 __device__ bf::FlatEnv env_of(const Args& a) {
@@ -178,6 +191,7 @@ __device__ bf::FlatEnv env_of(const Args& a) {
   e.k_steps = 4096;
   e.perturb = a.perturb;
   e.solo = a.solo;
+  e.grow = a.grow;
   return e;
 }
 
@@ -252,7 +266,7 @@ __global__ void k_pre(Args a) {
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
-  if (c.solo) { return; }
+  if (c.solo || c.grow) { return; }  // P39: a straggler; P42: a record waiting to grow
   bf::FlatScratch<kNuc, kPool> scr;
   bf::stage_pre(c, env_of(a), scr);
   if (!c.stepping) { return; }
@@ -288,7 +302,7 @@ __global__ void k_post(Args a) {
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
-  if (c.solo) { return; }
+  if (c.solo || c.grow) { return; }  // P39: a straggler; P42: a record waiting to grow
   bf::FlatScratch<kNuc, kPool> scr;
   bf::stage_post(c, env_of(a), scr);
 }
@@ -296,7 +310,7 @@ __global__ void k_finish(Args a) {
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
-  if (c.solo) { return; }
+  if (c.solo || c.grow) { return; }  // P39: a straggler; P42: a record waiting to grow
   bf::FlatScratch<kNuc, kPool> scr;
   if (c.stage == bf::kStFinishA) { bf::stage_finish_a(c, env_of(a), scr); }
   else if (c.stage == bf::kStFinishB) { bf::stage_finish_b(c); }
@@ -336,11 +350,90 @@ __global__ void k_solo(Args a) {
 #endif
   });
 }
+#ifdef G4GPU_TEST_BLIR_FLAT
+// P42 (docs/RISK.md V331): a record that would outgrow itself, continued on a larger one - the
+// transport's `flat_grow`: the state copied (`ion_grow_copy`), the stages on one thread
+// (`flat_run_solo`), the tail on slot k (P36's slot tail, the thread path's lists). Up to
+// `n_big` a launch, the rest the next round. ctr[6] hands out the larger records this launch;
+// ctr[7] counts the reactions continued, ctr[8] the set-ups on a larger record, ctr[9] those
+// handed back from one.
+__device__ __noinline__ void grow_steps(Big& b, const bf::FlatEnv& env, int* ctr) {
+  deex::Vec3d mom[kNuc];
+  double fermi_p[kNuc];
+  bic::NucleusSortEntry sums[kNuc];
+  double flat_block[bic::kFlatBlock];
+  bic::Nucleus3DScratch nsc;
+  nsc.momentum = mom;
+  nsc.fermi_p = fermi_p;
+  nsc.test_sums = sums;
+  nsc.flat_block = flat_block;
+  nsc.capacity = kNuc;
+  bf::FlatScratch<kNuc, kBigPool> scr;
+  bf::flat_run_solo(b.c, env, scr, [&] {
+    if (b.c.stage == bf::kStModel) { bf::stage_ion_model(b, 0); }
+    if (b.c.stage == bf::kStNucleus) {
+      atomicAdd(&ctr[8], 1);
+      bf::stage_ion_nucleus(b, env, nsc, scr);
+    }
+  });
+}
+/// 0: recorded; 1: back to the stages; 2: handed back.
+__device__ __noinline__ int grow_tail(Big& b, const Args& a, int k, Out& o) {
+  had::InteractionSlot<real_t>& s = *a.pool->slot(k);
+  const preco::PrecoWorkspace pws = had::preco_workspace_of<real_t>(s);
+  const bic::BicStorage store = had::bic_storage_of<real_t>(s, *a.pool, pws);
+  if (!bf::stage_tail(b.c, store.cascade, store.cascade.scratch->decay_list,
+                      bic::kCascadeMaxScratch, a.lt, a.pool->fermi, pws)) {
+    return (b.c.stage == bf::kStThread) ? 2 : 1;
+  }
+  bic::BlirStorage bs = had::blir_storage_of<real_t>(s, *a.pool);
+  if (bf::ion_pack(b, bs, a.lt, a.pool->fermi, pws, s.blir_fs) != bf::kIonFinalState) {
+    return 2;
+  }
+  record(s.blir_fs, o);
+  return 0;
+}
+__global__ void k_grow(Args a) {
+  const int lane = blockIdx.x * blockDim.x + threadIdx.x;
+  if (lane >= a.lanes) { return; }
+  Core& c = core(a.rec[lane]);
+  if (!c.grow || c.stage == bf::kStFree) { return; }
+  const int k = atomicAdd(&a.ctr[6], 1);
+  if (k >= a.n_big) { return; }  // waits for the next round
+  Big& b = a.big[k];
+  c.grow = 0;
+  if (!bf::ion_grow_copy(b, a.rec[lane])) {
+    atomicAdd(&a.ctr[9], 1);
+    return bf::flat_hand_off(c, bf::kHandCapacity);
+  }
+  atomicAdd(&a.ctr[7], 1);
+  bf::FlatEnv env = env_of(a);
+  env.k_steps = 1 << 16;
+  env.solo = 0;
+  env.grow = 0;
+  int done = -1;
+  for (int pass = 0; pass < 128 && done < 0; ++pass) {
+    if (b.c.stage != bf::kStTail) { grow_steps(b, env, a.ctr); }
+    if (b.c.stage == bf::kStTail) {
+      const int rr = grow_tail(b, a, k, a.out[a.job_of[lane]]);
+      if (rr == 0) { done = 1; }
+      continue;
+    }
+    if (b.c.stage < bf::kStModel || b.c.stage > bf::kStTail) { done = 0; }
+  }
+  if (done == 1) {
+    c.stage = bf::kStDone;
+    return;
+  }
+  atomicAdd(&a.ctr[9], 1);
+  bf::flat_hand_off(c, (b.c.stage == bf::kStThread) ? b.c.hand_off : int(bf::kHandStraggler));
+}
+#endif
 __global__ void k_tail(Args a, int n_slots) {
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
   if (lane >= a.lanes) { return; }
   Core& c = core(a.rec[lane]);
-  if (c.stage != bf::kStTail) { return; }
+  if (c.stage != bf::kStTail || c.grow) { return; }
   // P41 (docs/RISK.md V326): the tail on the lane's own tail-pool entry - the transport's
   // `flat_tail_pool` call: the entry's compact buffers, a capacity that binds handing back -
   // unless it is one of the two that need a slot (`tail_needs_slot`), which run as P36's did.
@@ -349,8 +442,8 @@ __global__ void k_tail(Args a, int n_slots) {
     const preco::PrecoWorkspace pws = deex::flat::tail_deex_workspace(e);
     const bic::CascadeWorkspace ws = deex::flat::tail_cascade_view(e);
     if (!bf::stage_tail(c, ws, deex::flat::tail_decay_list(e), Tail::caps::kDecay, a.lt,
-                        a.pool->fermi, pws, &a.fb)) {
-      return;
+                        a.pool->fermi, pws, &a.fb, a.grow)) {
+      return;  // back to the stages, waiting to grow (P42), or handed back
     }
 #ifdef G4GPU_TEST_BLIR_FLAT
     bic::BlirStorage bs = deex::flat::tail_blir_view(e);
@@ -431,15 +524,15 @@ __global__ void k_buffers(bic::CascadeBuffers* buf, const had::InteractionPool<r
   }
 }
 
-/// The transport's switch (flat_drain_kernels.cuh): the factory on for the Binary cascade, off
-/// for the light-ion reaction unless `G4GPU_FLAT_FACTORY_ION=1` (docs/RISK.md V322: its
-/// capacity hand-backs are reruns of different reactions under the factory).
+/// The transport's switch (flat_drain_kernels.cuh's `factory_enabled`): the factory on for both
+/// models; `G4GPU_FLAT_FACTORY_ION=0` turns the light ion's off (P42, docs/RISK.md V332: its
+/// capacity overflows are continued on a larger record, so none is a rerun of another reaction).
 bool factory_enabled() {
   const char* v = std::getenv("G4GPU_FLAT_FACTORY");
   if (v != nullptr && v[0] == '0') { return false; }
   if (kIon) {
     const char* w = std::getenv("G4GPU_FLAT_FACTORY_ION");
-    return w != nullptr && w[0] == '1';
+    return !(w != nullptr && w[0] == '0');
   }
   return true;
 }
@@ -459,7 +552,7 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   cudaMalloc(&a.rec, sizeof(Rec) * lanes);
   cudaMalloc(&a.job_of, sizeof(int) * lanes);
   cudaMalloc(&a.buffers, sizeof(bic::CascadeBuffers));
-  cudaMalloc(&a.ctr, sizeof(int) * 6);
+  cudaMalloc(&a.ctr, sizeof(int) * 10);
   cudaMalloc(&a.items, sizeof(int) * a.item_capacity);
   // P41: the tail pool, one entry a lane; `G4GPU_FLAT_TEST_SLOT_TAIL=1` runs every tail on a slot.
   a.tails = nullptr;
@@ -475,11 +568,25 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
   a.jobs = dj;
   cudaMalloc(&a.out, sizeof(Out) * n);
   cudaMemset(a.out, 0, sizeof(Out) * n);
-  cudaMemset(a.ctr, 0, sizeof(int) * 6);
+  cudaMemset(a.ctr, 0, sizeof(int) * 10);
   // P39: the factory's two request lists, every lane's worst case each (one nucleus a Binary
   // set-up, two a light-ion try). `G4GPU_FLAT_FACTORY=0` samples on the lanes as P36 did.
   const bool factory_on = factory_enabled();
   a.solo = factory_on ? 1 : 0;
+  // P42: the larger records, with the light ion's factory on (`G4GPU_FLAT_TEST_GROW=0` leaves
+  // P39's capacity hand-back, for the comparison). 256 of them (115 MB), so that the ~470
+  // Fe56-on-Al27 reactions the 8,192 lanes hold at once move in two launches.
+  a.grow = 0;
+  a.big = nullptr;
+  a.n_big = 0;
+  if (kIon && factory_on) {
+    const char* g = std::getenv("G4GPU_FLAT_TEST_GROW");
+    if (!(g != nullptr && g[0] == '0')) {
+      a.n_big = 256;
+      cudaMalloc(&a.big, sizeof(Big) * a.n_big);
+      a.grow = 1;
+    }
+  }
   constexpr int kNucleiPerTry = kIon ? 2 : 1;
   npool::FactoryLists lists;
   lists.cap = lanes * kNucleiPerTry;
@@ -513,6 +620,12 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
     if (factory_on) { k_solo<<<bl, th>>>(a); }
     cudaMemsetAsync(a.ctr + 2, 0, sizeof(int));
     k_tail<<<bl, th>>>(a, po.n_slots);
+#ifdef G4GPU_TEST_BLIR_FLAT
+    if (a.grow) {
+      cudaMemsetAsync(a.ctr + 6, 0, sizeof(int));
+      k_grow<<<bl, th>>>(a);
+    }
+#endif
     cudaMemsetAsync(a.ctr + 3, 0, sizeof(int));
     k_reap<<<bl, th>>>(a);
     int h[5];
@@ -535,6 +648,16 @@ std::vector<Out> run_flat(const std::vector<Job>& jobs, const had::InteractionPo
     std::printf("  (factory on: %d requests fell back to the lane; %d stragglers finished solo)\n",
                 fell[0], fell[1]);
   }
+  if (a.grow) {
+    int g[3] = {0, 0, 0};
+    cudaMemcpy(g, a.ctr + 7, sizeof(g), cudaMemcpyDeviceToHost);
+    std::printf("  (P42: %d reactions that would outgrow their record continued on a larger one, "
+                "%d set-ups there on the lane's sampling, %d handed back from it)\n",
+                g[0], g[1], g[2]);
+    g_grown = g[0];
+    g_grow_handed = g[2];
+  }
+  cudaFree(a.big);
   cudaFree(a.ctr); cudaFree(a.items); cudaFree(dj); cudaFree(a.out);
   cudaFree(a.tails); cudaFree(big.arrays); cudaFree(big.views); cudaFree(big.busy);
   cudaFree(lists.req32); cudaFree(lists.count);
@@ -951,6 +1074,17 @@ int main(int argc, char** argv) {
   int rounds = 0;
   std::vector<Out> flat = run_flat(jobs, pown, lown.view, lanes, 0, ms, rounds);
   std::printf("  flat: %d calls on %d lanes in %.1f ms, %d rounds\n", n, lanes, ms, rounds);
+  if (const char* hp = std::getenv("G4GPU_FLAT_TEST_HASHES")) {
+    // P42 (docs/RISK.md V332): every call's final-state hash, one a line, for comparing two
+    // builds' flat paths call by call (the continuation against a larger record from the start).
+    if (FILE* f = std::fopen(hp, "w")) {
+      for (int i = 0; i < n; ++i) {
+        std::fprintf(f, "%d %d %llu\n", i, flat[i].status,
+                     static_cast<unsigned long long>(flat[i].hash));
+      }
+      std::fclose(f);
+    }
+  }
   float ms2 = 0.f;
   int rounds2 = 0;
   const std::vector<Out> flat2 = run_flat(jobs, pown, lown.view, lanes, 0, ms2, rounds2);
@@ -997,6 +1131,14 @@ int main(int argc, char** argv) {
               "PreCompound or fusion %d, re-entry %d\n",
               why[bf::kHandStraggler], why[bf::kHandCapacity], why[bf::kHandRefused],
               why[bf::kHandHydrogen], why[bf::kHandPrecompound], why[bf::kHandReentry]);
+  if (kIon && g_grown >= 0) {
+    // P42 (docs/RISK.md V332): with the factory on, no reaction may be rerun from its key for
+    // capacity - every one that would have outgrown its record was continued on a larger one.
+    std::printf("  P42: %d continued on a larger record, %d handed back from one; %d capacity "
+                "hand-backs (reruns from the key)\n", g_grown, g_grow_handed,
+                why[bf::kHandCapacity]);
+    check(why[bf::kHandCapacity] == 0, "no capacity hand-back: every overflow continued");
+  }
   int same = 0;
   for (int i = 0; i < n; ++i) { same += (flat[i].hash == paired[i].hash) ? 1 : 0; }
   std::printf("  %d of %d flat final states are the host thread path's on the same key, to the "

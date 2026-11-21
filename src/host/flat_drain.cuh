@@ -68,6 +68,10 @@ struct FlatPool {
   std::size_t tail_entry_bytes = 0;
   std::size_t tail_bytes = 0;   ///< all of the above, inside `bytes`
   // ---- end P41
+  // ---- P42 (docs/RISK.md V331): the larger records a reaction that would outgrow its own is
+  // continued on (the light-ion reaction with its factory on), `n_big` of them, in `bytes`.
+  void* big = nullptr;
+  int n_big = 0;
   bool ok() const { return records != nullptr && lanes > 0; }
 };
 

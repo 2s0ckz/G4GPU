@@ -147,6 +147,10 @@ struct FlatCascade {
   int nuc_ready = 0;          ///< the factory has filled `nucleons` for this set-up
   NucleusReport nuc_rep;      ///< and what it reported, as `nucleus_init` would have
   int solo = 0;               ///< past K: waits for `flat_run_solo` (FlatEnv::solo)
+  /// P42 (docs/RISK.md V331): the record's next stage could outgrow it, so it waits - stopped
+  /// at that stage boundary, its generator where the boundary left it - to be CONTINUED on a
+  /// record with the thread path's capacities (FlatEnv::grow).
+  int grow = 0;
 
   // ---- the arrays; every pointer above points into these, inside the record
   Nucleon nucleons[kNuc];
@@ -188,21 +192,33 @@ struct FlatEnv {
   /// of being handed to the thread path - set whenever the nuclei come from the factory, whose
   /// nucleus the thread path's rerun from the key could not reproduce.
   int solo = 0;
+  /// P42 (docs/RISK.md V331): a record whose next step could outgrow its pool or its collision
+  /// list stops before it (`flat_room_for_step`) and is continued on a larger record, instead of
+  /// refusing for capacity and being rerun from its key. Zero runs P36's capacity hand-back.
+  int grow = 0;
 };
 
 /// The lists the per-cascade stages fill and empty within one call - `DoTimeStep`'s five,
 /// `Capture`'s, `StepParticlesOut`'s two, `Propagate`'s initial list and `FindAndFillCluster`'s
 /// three - ON THE CALLING THREAD'S FRAME, where the thread path keeps them in the slot's
-/// `BicScratch` (51,200 B). A cascade's lists hold pool indices, so `P` entries is every list's
-/// bound, and the thread path's 256-entry caps (`kCascadeMaxScratch`) never bind below it; the
-/// cluster lists hold target nucleons, at most `N`.
+/// `BicScratch` (51,200 B). A cascade's lists hold pool indices, so `P` entries bound every
+/// list, and the cluster lists hold target nucleons, at most `N`.
+///
+/// P42 (docs/RISK.md V331): the lists' length is `min(P, kCascadeMaxScratch)` - the thread path's
+/// own 256 - and no longer the pool's size. Until P42 a `static_assert(P <= kCascadeMaxScratch)`
+/// tied the two, so no flat record could hold more than 256 tracks however much memory it had;
+/// the thread path's slot holds 1,024 tracks with these same 256-entry lists. Every write into
+/// them is bounded as the thread path bounds it (cascade_step.cuh, cascade_propagate.cuh,
+/// cascade_finish.cuh): a silent cut at 256 where it cuts, a capacity refusal where it refuses
+/// (`flat_prologue`'s initial list, `flat_capture`). For a pool of at most 256 nothing changes:
+/// a list never holds more entries than the pool has tracks, so no bound can bind.
 template <int N, int P>
 struct FlatScratch {
-  static_assert(P <= kCascadeMaxScratch, "a flat list must not outgrow the thread path's cap");
-  int initial[P];
-  int was_outside[P], was_inside[P], gone_in[P], gone_out[P], captured[P];
-  int capture[P];
-  int stepout_secondaries[P], stepout_captured[P];
+  static constexpr int kLen = (P < kCascadeMaxScratch) ? P : kCascadeMaxScratch;
+  int initial[kLen];
+  int was_outside[kLen], was_inside[kLen], gone_in[kLen], gone_out[kLen], captured[kLen];
+  int capture[kLen];
+  int stepout_secondaries[kLen], stepout_captured[kLen];
   int cluster_charges[N];
   deex::Vec3d cluster_positions[N];
   int cluster_ids[N];
@@ -321,6 +337,7 @@ __host__ __device__ inline void flat_start(FlatCascade<N, P, C>& c, int entry, i
   c.n_nuclei = 0;
   c.nuc_ready = 0;
   c.solo = 0;
+  c.grow = 0;
   flat_bind(c);
 }
 
@@ -505,6 +522,11 @@ __host__ __device__ inline bool flat_prologue(FlatCascade<N, P, C>& c, CascadeTr
   int n_initial = 0;
   for (int i = 0; i < st.lists.n_pool; ++i) {
     if (st.lists.pool[i].list != kListSecondary) { continue; }
+    // P42: the thread path's bound (cascade_propagate.cuh), unreachable below 257 tracks.
+    if (n_initial >= kCascadeMaxScratch) {
+      flat_hand_off(c, kHandCapacity);
+      return false;
+    }
     initial[n_initial++] = i;
   }
   flat_find_collisions(st, c.colls, initial, n_initial, env, c.prop, c.rng, scr, ref);
@@ -593,6 +615,12 @@ __host__ __device__ inline bool flat_capture(FlatCascade<N, P, C>& c, const Flat
     CascadeTrack& t = st.lists.pool[i];
     if (t.list != kListSecondary || t.state != kInside) { continue; }
     if (t.pdg != imr::kPdgProton && t.pdg != imr::kPdgNeutron) { continue; }
+    // P42: the thread path's bound on `captured` (cascade_propagate.cuh: a capacity refusal of
+    // the whole call). Unreachable for a pool of at most 256 tracks.
+    if (n_cap >= kCascadeMaxScratch) {
+      flat_hand_off(c, kHandCapacity);
+      return false;
+    }
     push_captured(st, i);
     mark_hit(st, i);
     captured[n_cap++] = i;
@@ -612,12 +640,50 @@ __host__ __device__ inline void flat_choose_step(FlatCascade<N, P, C>& c, double
   c.stepping = true;
 }
 
+/// P42 (docs/RISK.md V331): can the iteration PRE is about to start finish in this record? An
+/// upper bound on what one iteration adds, from the record alone:
+///
+///   * tracks: at most 4 - one `ApplyCollision` an iteration, in both loops, and its products
+///     are `CollisionProducts::track[4]` (cascade_find.cuh); `DoTimeStep`, `Absorb`, `Capture`
+///     and the finish stages add none;
+///   * collisions: each new track's `FindCollisions` is one decay, at most one absorption and at
+///     most one scattering per target nucleon (`schedule_*`, cascade_find.cuh), so 4 x (1 + 2 T)
+///     for T targets; and a `StepParticlesOut` iteration that may reset (`counter` at 100) runs
+///     `FindCollisions` over every secondary as well (at most 256: its list's bound).
+///
+/// Both bounds are loose by design - a record that fails them is not refused, only continued
+/// elsewhere - and both are exact upper bounds, so a record that passes them cannot refuse for
+/// capacity in the iteration, and the record's numbers never depend on where it ran.
+template <int N, int P, int C>
+__host__ __device__ inline bool flat_room_for_step(const FlatCascade<N, P, C>& c) {
+  const BicCascadeState& st = c.st;
+  if (c.mode == kModeLast) { return true; }  // `DoTimeStep(DBL_MAX)` then the finish: no adds
+  if (st.lists.n_pool + 4 > P) { return false; }
+  int n_target = 0, n_sec = 0;
+  for (int i = 0; i < st.lists.n_pool; ++i) {
+    n_target += (st.lists.pool[i].list == kListTarget) ? 1 : 0;
+    n_sec += (st.lists.pool[i].list == kListSecondary) ? 1 : 0;
+  }
+  const int per_track = 1 + 2 * n_target;
+  int colls = 4 * per_track;
+  if (c.mode == kModeOut && c.out_steps >= 100) {
+    const int reset = (n_sec + 4 < kCascadeMaxScratch) ? n_sec + 4 : kCascadeMaxScratch;
+    colls += reset * per_track;
+  }
+  return c.colls.n + colls <= C;
+}
+
 /// PRE: the top of an iteration of `Propagate`'s loop or of `StepParticlesOut`'s, up to the
 /// time step. Leaves `stepping` set when TRANSPORT owes the record a step.
 template <int N, int P, int C>
 __host__ __device__ inline void stage_pre(FlatCascade<N, P, C>& c, const FlatEnv& env,
                                           FlatScratch<N, P>& scr) {
   c.stepping = false;
+  // P42: an iteration that could outgrow the record is not started here (FlatEnv::grow).
+  if (env.grow && !flat_room_for_step(c)) {
+    c.grow = 1;
+    return;
+  }
   BicCascadeState& st = c.st;
   if (c.mode == kModeMain) {
     // `while (Entries() && currentZ && --collisionLoopMaxCount > 0)`
@@ -976,6 +1042,13 @@ __host__ __device__ inline void flat_run_solo(FlatCascade<N, P, C>& c, const Fla
   // collision loop's 1,000,000, the outer loop's 100 turns); this guard only keeps a defect
   // from hanging the card, and hands the cascade back by name if it is ever reached.
   for (int guard = 0; guard < (1 << 22); ++guard) {
+    // P42: a straggler that would outgrow its record stops at that boundary and is continued
+    // on a larger one (`FlatEnv::grow`), unflagged as a straggler: the larger record's runner
+    // finishes it on one thread as this loop would have.
+    if (c.grow) {
+      c.solo = 0;
+      return;
+    }
     switch (c.stage) {
       case kStModel:
       case kStNucleus:
@@ -1074,9 +1147,13 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const Cascad
                                            const data::LevelTable& lt,
                                            const deex::FermiPool& fpool,
                                            const preco::PrecoWorkspace& pws,
-                                           const TailFallback* fb = nullptr) {
+                                           const TailFallback* fb = nullptr, int grow = 0) {
   BicCascadeState& st = c.st;
   CascadeRefusal ref;
+  // P42 (docs/RISK.md V331): the generator where the tail found it, so that a tail whose final
+  // decays would outgrow the record's pool can be put back - nothing else it wrote is in the
+  // record yet - and CONTINUED, the same call on a record with the thread path's capacities.
+  const Philox<double> rng_tail = c.rng;
   if (c.tail_work == kTailVoid) {
     VoidReport vrep;
     const int n = fill_void_nucleus_products(st, c.colls, ws.products, ws.product_capacity,
@@ -1186,6 +1263,15 @@ __host__ __device__ inline bool stage_tail(FlatCascade<N, P, C>& c, const Cascad
     decay_kinetic_tracks(dl, m, decay_capacity, c.rng, kref);
     if (kref.any()) {
       flat_hand_off(c, kHandRefused);
+      return false;
+    }
+    // P42: the `m` adds below fail exactly when `n_pool + m` passes the pool (`CascadeLists::
+    // add` refuses only when full), so this is the refusal they would make, made before any of
+    // them. Up to here the tail has written its own buffers and the generator only (the
+    // void-nucleus arm, which writes the record, is excluded): the generator goes back.
+    if (grow && frag.a >= 1 && st.lists.n_pool + m > st.lists.capacity) {
+      c.rng = rng_tail;
+      c.grow = 1;
       return false;
     }
     for (int i = 0; i < st.lists.n_pool; ++i) {

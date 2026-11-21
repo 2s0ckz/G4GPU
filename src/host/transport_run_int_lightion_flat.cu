@@ -10,12 +10,15 @@ namespace g4gpu::host {
 namespace {
 
 /// The light-ion reaction. 64 nucleons a nucleus (V307: the heavier nucleus is at most Fe56);
-/// 256 tracks (V307's high-water 259 - the one call past it goes to the thread path) and 512
-/// collisions (303 measured).
+/// 256 tracks (V307's high-water 259) and, since P42, 1,024 collisions (V331: 381 at most in
+/// the campaign's Fe56 on Al27, 160 after a set-up; the room `flat_room_for_step` asks before an
+/// iteration is up to 4 x (1 + 2 x 56) = 452 collisions, so at 512 nearly every Fe56 reaction
+/// would have moved to a larger record, at 1,024 only one past 572). A reaction that would
+/// outgrow either moves to `Big` (P42, V331).
 struct IonPolicy {
   static constexpr int kN = 64;
   static constexpr int kP = 256;
-  static constexpr int kC = 512;
+  static constexpr int kC = 1024;
   static constexpr int kItemsPerLane = 16;
   static constexpr int kNucleiPerTry = 2;  ///< P39: the projectile and the target
   using Rec = bic::flat::FlatIon<kN, kP, kC>;
@@ -44,6 +47,32 @@ struct IonPolicy {
                               const data::LevelTable& lt, const preco::PrecoWorkspace& pws) {
     bic::BlirStorage store = had::blir_storage_of<double>(s, pool);
     if (bic::flat::ion_pack(r, store, lt, pool.fermi, pws, s.blir_fs) !=
+        bic::flat::kIonFinalState) {
+      return false;
+    }
+    had::copy_final_state<double>(s.blir_fs, s.fs);
+    return true;
+  }
+
+  // ---- P42 (docs/RISK.md V331): the larger record a reaction that would outgrow its own is
+  // continued on - the thread path's slot capacities (`kSlotPoolCap`, `kSlotCollisionCap`), so
+  // it refuses for capacity exactly where the thread path would. 451,616 B each; 64 of them.
+  static constexpr int kBigP = bic::kSlotPoolCap;
+  static constexpr int kBigC = bic::kSlotCollisionCap;
+  static constexpr int kBigRecords = 64;
+  using Big = bic::flat::FlatIon<kN, kBigP, kBigC>;
+  __device__ static bool grow_copy(Big& b, const Rec& r) { return bic::flat::ion_grow_copy(b, r); }
+  __device__ static void big_model(Big& b) { bic::flat::stage_ion_model(b, 0); }
+  __device__ static void big_nucleus(Big& b, const bic::flat::FlatEnv& env,
+                                     bic::Nucleus3DScratch& nsc,
+                                     bic::flat::FlatScratch<kN, kBigP>& scr) {
+    bic::flat::stage_ion_nucleus(b, env, nsc, scr);
+  }
+  __device__ static bool big_pack(Big& b, had::InteractionSlot<double>& s,
+                                  const had::InteractionPool<double>& pool,
+                                  const data::LevelTable& lt, const preco::PrecoWorkspace& pws) {
+    bic::BlirStorage store = had::blir_storage_of<double>(s, pool);
+    if (bic::flat::ion_pack(b, store, lt, pool.fermi, pws, s.blir_fs) !=
         bic::flat::kIonFinalState) {
       return false;
     }

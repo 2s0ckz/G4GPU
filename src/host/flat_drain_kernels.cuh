@@ -23,6 +23,7 @@
 // another lane: which lane, which round or which tail slot an entry got moves time, not numbers.
 #pragma once
 
+#include <type_traits>
 #include <vector>
 
 #include "host/flat_drain.cuh"
@@ -59,7 +60,14 @@ enum FlatCounter : int {
   kFcHand0,         ///< + `bf::HandOff`
   /// P41: lanes in `kStTail` waiting for a pool entry, by cost bin (`tail_bins`).
   kFcBin0 = kFcHand0 + 8,
-  kFcNum = kFcBin0 + 16
+  // P42 (docs/RISK.md V331): the records waiting for a larger one (`grow_list`), and over the
+  // drain: reactions continued there, the set-ups they needed there, those handed back past the
+  // runner's bound.
+  kFcGrowN = kFcBin0 + 16,
+  kFcGrown,
+  kFcGrowSetup,
+  kFcGrowHand,
+  kFcNum
 };
 
 /// P41: how many cost bins the pool's waiting tails are sorted into (`Pol::tail_bin`).
@@ -89,6 +97,13 @@ struct FlatArgs {
   /// has no tail pool (every tail then takes a slot, as before).
   int* tail_bins;
   int bin_stride;
+  /// P42 (docs/RISK.md V331): the records that would outgrow theirs, waiting for `flat_grow`;
+  /// `grow` set when they wait (the light-ion reaction with the factory on), else P36's
+  /// capacity hand-back; `big` the larger records, `n_big` of them.
+  int* grow_list;
+  int grow;
+  void* big;
+  int n_big;
   int lanes;
   int item_capacity;
   int k_steps;
@@ -107,8 +122,15 @@ __device__ __forceinline__ bf::FlatEnv flat_env(const FlatArgs<Pol>& a,
   e.buffers = a.buffers;
   e.k_steps = a.k_steps;
   e.solo = a.solo;
+  e.grow = a.grow;
   return e;
 }
+
+/// P42: does the policy carry a larger record (`Pol::Big`) to continue overflows on?
+template <class P, class = void>
+struct HasGrow : std::false_type {};
+template <class P>
+struct HasGrow<P, std::void_t<typename P::Big>> : std::true_type {};
 
 /// The projectile `run_interaction_entry` builds from a queue entry, for the model and for
 /// `CheckResult`.
@@ -279,7 +301,7 @@ __global__ void flat_pre(FlatArgs<Pol> a, const had::InteractionPool<double>* po
   if (lane >= a.lanes) { return; }
   bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
-  if (c.solo) { return; }  // P39: a straggler waits for `flat_solo`
+  if (c.solo || c.grow) { return; }  // P39: a straggler waits for `flat_solo`; P42 a grower
   bf::FlatScratch<Pol::kN, Pol::kP> scr;
   bf::stage_pre(c, flat_env(a, *pool_ptr), scr);
   if (!c.stepping) { return; }
@@ -313,7 +335,7 @@ __global__ void flat_post(FlatArgs<Pol> a, const had::InteractionPool<double>* p
   if (lane >= a.lanes) { return; }
   bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(a.rec[lane]);
   if (c.stage != bf::kStStep && c.stage != bf::kStStepOut) { return; }
-  if (c.solo) { return; }  // P39: a straggler waits for `flat_solo`
+  if (c.solo || c.grow) { return; }  // P39: a straggler waits for `flat_solo`; P42 a grower
   bf::FlatScratch<Pol::kN, Pol::kP> scr;
   bf::stage_post(c, flat_env(a, *pool_ptr), scr);
 }
@@ -324,7 +346,7 @@ __global__ void flat_finish(FlatArgs<Pol> a, const had::InteractionPool<double>*
   const int lane = blockIdx.x * blockDim.x + threadIdx.x;
   if (lane >= a.lanes) { return; }
   bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(a.rec[lane]);
-  if (c.solo) { return; }  // P39: a straggler waits for `flat_solo`
+  if (c.solo || c.grow) { return; }  // P39: a straggler waits for `flat_solo`; P42 a grower
   if (c.stage == bf::kStFinishA) {
     bf::FlatScratch<Pol::kN, Pol::kP> scr;
     bf::stage_finish_a(c, flat_env(a, *pool_ptr), scr);
@@ -455,8 +477,8 @@ __device__ __noinline__ void flat_emit(
 /// `fs` with `pdg_mass` beside it (interaction_apply.cuh's lines, as the slot's tail ran them).
 /// Returns false when `CheckResult` refused: the record is back at `kStModel` with its generator
 /// where it is - the loop's next `ApplyYourself` - or, after 100, handed back.
-template <class Pol, int kCap>
-__device__ inline bool flat_check_and_mix(bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c,
+template <class Pol, int kCap, int N, int P, int C>
+__device__ inline bool flat_check_and_mix(bf::FlatCascade<N, P, C>& c,
                                           FlatEntry& en,
                                           const had::PendingInteraction<double>& q,
                                           physics::hadronic::HadFinalState<double, kCap>& fs,
@@ -558,6 +580,128 @@ __global__ void flat_tail(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<doub
 }
 
 // =============================================================================================
+// P42 (docs/RISK.md V331): A RECORD THAT WOULD OUTGROW ITSELF IS CONTINUED ON A LARGER ONE.
+//
+// A record whose next iteration could add more tracks or collisions than it has room for
+// (`bf::flat_room_for_step`), or whose tail's final decays would (`bf::stage_tail`'s check), stops
+// at that boundary with `grow` set - its generator where the boundary left it - and waits in
+// `grow_list`. When the drain has nothing else (P39's condition for its stragglers), `flat_grow`
+// takes up to `n_big` of them, one thread each: the record's state is copied into a `Pol::Big`
+// record with the thread path's capacities (1,024 tracks, 8,192 collisions: `bf::ion_grow_copy`),
+// and the reaction runs on from there through the same stage functions in the drain's order
+// (`flat_run_solo`), its tail on a thread-path slot (P36's slot tail, the thread path's lists)
+// and its emission. What it computes is what the lane would have computed with the room: no
+// draw is repeated or skipped, nothing is rerun from the key (the hand-back rule; V322 measured
+// what reruns did). Its bounds, each reported by name: K lifted to 65,536 steps as P39's solo
+// runner, and 128 passes of stages-then-tail; past either the reaction is handed back.
+// =============================================================================================
+
+/// The stages up to the tail, on the larger record. A set-up there - a new `Interact` try after
+/// a try without products, or `CheckResult`'s re-entry - samples its nuclei with `nucleus_init`
+/// from the reaction's generator, P39's solo fall-back (the factory serves the lanes' records),
+/// counted as `kFcGrowSetup`.
+template <class Pol>
+__device__ __noinline__ void flat_grow_steps(typename Pol::Big& b, const bf::FlatEnv& env,
+                                             int* ctr) {
+  deex::Vec3d mom[Pol::kN];
+  double fermi_p[Pol::kN];
+  bic::NucleusSortEntry sums[Pol::kN];
+  double flat_block[bic::kFlatBlock];
+  bic::Nucleus3DScratch nsc;
+  nsc.momentum = mom;
+  nsc.fermi_p = fermi_p;
+  nsc.test_sums = sums;
+  nsc.flat_block = flat_block;
+  nsc.capacity = Pol::kN;
+  bf::FlatScratch<Pol::kN, Pol::kBigP> scr;
+  bf::flat_run_solo(b.c, env, scr, [&] {
+    if (b.c.stage == bf::kStModel) { Pol::big_model(b); }
+    if (b.c.stage == bf::kStNucleus) {
+      atomicAdd(&ctr[kFcGrowSetup], 1);
+      Pol::big_nucleus(b, env, nsc, scr);
+    }
+  });
+}
+
+/// The tail on slot `slot_index`, then `CheckResult`, the K0 mixing and the emission - P36's
+/// `flat_tail` on the larger record. 0: emitted; 1: back to the stages; 2: handed back.
+template <class Pol>
+__device__ __noinline__ int flat_grow_tail(typename Pol::Big& b, FlatEntry& en,
+                                           const had::PendingInteraction<double>& q,
+                                           int slot_index, const Scene<double>& scene,
+                                           TrackBuffer<double> out, int batch, double* score,
+                                           double* voxel_score,
+                                           const had::HadronicWiring<double>& had,
+                                           const had::InteractionPool<double>& pool,
+                                           int* status_warn, SecondaryArena sec,
+                                           EmitterBooks books, StepTap<double> hook) {
+  had::InteractionSlot<double>* slot = pool.slot(slot_index);
+  const preco::PrecoWorkspace pws = had::preco_workspace_of<double>(*slot);
+  bic::BicStorage store = had::bic_storage_of<double>(*slot, pool, pws);
+  if (!bf::stage_tail(b.c, store.cascade, store.cascade.scratch->decay_list,
+                      bic::kCascadeMaxScratch, had.level_data, pool.fermi, pws)) {
+    return (b.c.stage == bf::kStThread) ? 2 : 1;
+  }
+  if (!Pol::big_pack(b, *slot, pool, had.level_data, pws)) { return 2; }
+  if (!flat_check_and_mix<Pol, had::kInteractionSecondaryCap>(b.c, en, q, slot->fs,
+                                                              slot->pdg_mass)) {
+    return (b.c.stage == bf::kStThread) ? 2 : 1;
+  }
+  const had::InteractionOutcome outc = flat_outcome<Pol>(en, slot->fs.n_secondaries);
+  flat_emit<had::kInteractionSecondaryCap>(q, outc, slot->fs, slot->pdg_mass, slot->filled,
+                                           scene, out, batch, score, voxel_score, had, pool,
+                                           status_warn, sec, books, hook);
+  return 0;
+}
+
+template <class Pol>
+__global__ void flat_grow(FlatArgs<Pol> a, Scene<double> scene, TrackBuffer<double> out,
+                          int batch, double* score, double* voxel_score,
+                          had::HadronicWiring<double> had,
+                          const had::InteractionPool<double>* pool_ptr, int* status_warn,
+                          SecondaryArena sec, EmitterBooks books, StepTap<double> hook,
+                          int n_run) {
+  const int k_ = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k_ >= n_run) { return; }
+  const int lane = a.grow_list[k_];
+  typename Pol::Rec& r = a.rec[lane];
+  bf::FlatCascade<Pol::kN, Pol::kP, Pol::kC>& c = Pol::core(r);
+  typename Pol::Big& b = static_cast<typename Pol::Big*>(a.big)[k_];
+  c.grow = 0;
+  if (!Pol::grow_copy(b, r)) {
+    atomicAdd(&a.ctr[kFcGrowHand], 1);
+    return bf::flat_hand_off(c, bf::kHandCapacity);
+  }
+  atomicAdd(&a.ctr[kFcGrown], 1);
+  bf::FlatEnv env = flat_env(a, *pool_ptr);
+  env.k_steps = 1 << 16;  // P39's solo bound
+  env.solo = 0;           // past it the reaction is handed back, by name
+  env.grow = 0;           // the larger record refuses where the thread path's slot refuses
+  FlatEntry& en = a.ent[lane];
+  const had::PendingInteraction<double>& q = a.q[en.qi];
+  int done = -1;
+  for (int pass = 0; pass < 128 && done < 0; ++pass) {
+    if (b.c.stage != bf::kStTail) { flat_grow_steps<Pol>(b, env, a.ctr); }
+    if (b.c.stage == bf::kStTail) {
+      const int rr = flat_grow_tail<Pol>(b, en, q, k_, scene, out, batch, score, voxel_score,
+                                         had, *pool_ptr, status_warn, sec, books, hook);
+      if (rr == 0) { done = 1; }
+      continue;
+    }
+    if (b.c.stage < bf::kStModel || b.c.stage > bf::kStTail) { done = 0; }
+  }
+  if (done == 1) {
+    __threadfence();
+    c.stage = bf::kStDone;
+    return;
+  }
+  // Handed back: by its own refusal (the thread path's capacities, or a refusal it books), or
+  // past the bounds above (`kHandStraggler`). Reported by name with the drain's hand-offs.
+  atomicAdd(&a.ctr[kFcGrowHand], 1);
+  bf::flat_hand_off(c, (b.c.stage == bf::kStThread) ? b.c.hand_off : int(bf::kHandStraggler));
+}
+
+// =============================================================================================
 // P41: THE TAIL POOL (docs/RISK.md V325-V327). One lane per waiting tail on an entry of the
 // pool (deexcitation/flat/tail_pool.cuh) instead of a slot: GATHER puts the waiting lanes in
 // cost order, TAIL runs `stage_tail` (the residual's PreCompound and handler, the decays, the
@@ -628,9 +772,9 @@ __global__ void flat_tail_pool(FlatArgs<Pol> a, TailArgs<Pol> t, had::HadronicWi
   if (!packed) {
     const bic::CascadeWorkspace ws = deex::flat::tail_cascade_view(e);
     if (!bf::stage_tail(c, ws, deex::flat::tail_decay_list(e), Pol::Tail::caps::kDecay,
-                        had.level_data, pool.fermi, pws, &t.fb) ||
+                        had.level_data, pool.fermi, pws, &t.fb, a.grow) ||
         !Pol::pack_entry(r, e, pool, had.level_data, pws, &t.fb)) {
-      return;  // back to the flat stages, or handed to the thread path
+      return;  // back to the flat stages, to a larger record (P42), or to the thread path
     }
   }
   // The area's last tenant: the final state, copied as `run_arm_binary` / `run_arm_light_ion`
@@ -704,7 +848,11 @@ __global__ void flat_reap(FlatArgs<Pol> a) {
     c.stage = bf::kStFree;
   }
   if (c.stage != bf::kStFree) { atomicAdd(&a.ctr[kFcActive], 1); }
-  if (c.solo && c.stage != bf::kStFree && c.stage != bf::kStTail) {
+  if (c.grow && c.stage != bf::kStFree) {
+    // P42: a record whose next stage could outgrow it, frozen at that boundary until the drain
+    // has nothing else (`flat_grow`), as P39's stragglers are.
+    a.grow_list[atomicAdd(&a.ctr[kFcGrowN], 1)] = lane;
+  } else if (c.solo && c.stage != bf::kStFree && c.stage != bf::kStTail) {
     // P39: a straggler, frozen where it is until the drain has nothing else (`flat_solo`).
     a.solo_list[atomicAdd(&a.ctr[kFcSoloN], 1)] = lane;
   } else if (c.stage == bf::kStModel || c.stage == bf::kStNucleus) {
@@ -773,8 +921,34 @@ inline void pool_free(FlatPool& p) {
   cudaFree(p.tail_big);
   cudaFree(p.tail_big_ws);
   cudaFree(p.tail_big_busy);
+  cudaFree(p.big);
   p = FlatPool{};
 }
+
+/// P39's switch, read once: are this model's nuclei from the factory? `G4GPU_FLAT_FACTORY=0`
+/// samples every nucleus on its lane, as P36 did - integ/p36's flat path to the digit.
+///
+/// P42 (docs/RISK.md V331-V333): THE LIGHT-ION REACTION'S FACTORY IS ON BY DEFAULT. P39 left it
+/// off (V322) because 5.7% of the campaign's Fe56-on-Al27 reactions outgrew the 256-track flat
+/// record and were handed to the thread path, whose rerun from the key is - with the factory's
+/// nuclei - another reaction: the largest reactions replaced by ordinary ones, -12.15 sigma.
+/// With the factory on, such a reaction is now CONTINUED on a larger record (`flat_grow`) and
+/// never rerun. `G4GPU_FLAT_FACTORY_ION=0` restores P39's default - the light ion's nuclei on
+/// the lane and its capacity hand-backs exact reruns - V330's digits.
+template <class Pol>
+bool factory_enabled() {
+  static const bool on = [] {
+    const char* v = std::getenv("G4GPU_FLAT_FACTORY");
+    if (v != nullptr && v[0] == '0') { return false; }
+    if (Pol::kModel == had::InelasticModel::kLightIon) {
+      const char* w = std::getenv("G4GPU_FLAT_FACTORY_ION");
+      return !(w != nullptr && w[0] == '0');
+    }
+    return true;
+  }();
+  return on;
+}
+
 template <class Pol>
 std::size_t lane_bytes() {
   return sizeof(typename Pol::Rec) + sizeof(FlatEntry) +
@@ -799,7 +973,7 @@ FlatPool pool_build(int lanes, int k_steps, int strag_capacity) {
       cudaMalloc(&p.buffers, sizeof(bic::CascadeBuffers)) != cudaSuccess ||
       cudaMalloc(&p.counters, sizeof(int) * kFcNum) != cudaSuccess ||
       cudaMalloc(&p.items, sizeof(int) * (static_cast<std::size_t>(p.item_capacity) +
-                                          3 * static_cast<std::size_t>(lanes))) != cudaSuccess ||
+                                          4 * static_cast<std::size_t>(lanes))) != cudaSuccess ||
       cudaMalloc(&p.strag, sizeof(int) * static_cast<std::size_t>(strag_capacity)) !=
           cudaSuccess ||
       cudaMalloc(&p.factory_req, req_bytes) != cudaSuccess ||
@@ -809,12 +983,34 @@ FlatPool pool_build(int lanes, int k_steps, int strag_capacity) {
     return FlatPool{};
   }
   p.bytes = rec + sizeof(bic::CascadeBuffers) + sizeof(int) * kFcNum +
-            sizeof(int) * (static_cast<std::size_t>(p.item_capacity) + 3 * static_cast<std::size_t>(lanes)) +
+            sizeof(int) * (static_cast<std::size_t>(p.item_capacity) + 4 * static_cast<std::size_t>(lanes)) +
             sizeof(int) * static_cast<std::size_t>(strag_capacity) + req_bytes +
             2 * sizeof(int);
   flat_init_records<Pol><<<(lanes + 127) / 128, 128>>>(static_cast<typename Pol::Rec*>(p.records),
                                                        lanes);
   cudaDeviceSynchronize();
+  // ---- P42 (docs/RISK.md V331): the larger records, `Pol::kBigRecords` of them (default; the
+  // environment's `G4GPU_FLAT_GROW_RECORDS` overrides), only where the policy has them and its
+  // factory is on - with the factory off a capacity hand-back is an exact rerun (V310).
+  if constexpr (HasGrow<Pol>::value) {
+    if (factory_enabled<Pol>()) {
+      int nb = Pol::kBigRecords;
+      if (const char* v = std::getenv("G4GPU_FLAT_GROW_RECORDS")) { nb = std::max(1, std::atoi(v)); }
+      const std::size_t bb = sizeof(typename Pol::Big) * static_cast<std::size_t>(nb);
+      if (cudaMalloc(&p.big, bb) == cudaSuccess) {
+        p.n_big = nb;
+        p.bytes += bb;
+        std::printf("flat light-ion reaction: %d larger records of %zu B (1,024 tracks, 8,192 "
+                    "collisions), %.1f MB, for the reactions that would outgrow theirs "
+                    "(docs/RISK.md V331)\n",
+                    nb, sizeof(typename Pol::Big), double(bb) / 1048576.0);
+      } else {
+        cudaGetLastError();
+        p.big = nullptr;
+      }
+    }
+  }
+  // ---- end P42
   // ---- P41: the tail pool (docs/RISK.md V326). `G4GPU_FLAT_TAIL_WIDTH` entries (default the
   // policy's), `G4GPU_FLAT_TAIL_EMIT` emission buffers; it is refused - and the slots keep every
   // tail - if the card could not hold it with 1 GB to spare, since the pool is built before the
@@ -954,6 +1150,19 @@ struct TailStats {
   }
 };
 
+/// P42: the larger records' counts, printed at exit (docs/RISK.md V331).
+struct GrowStats {
+  long long launches = 0, grown = 0, setups = 0, handed = 0;
+  bool used = false;
+  ~GrowStats() {
+    if (!used) { return; }
+    std::printf("flat light-ion reaction: %lld reactions that would outgrow their record continued "
+                "on a larger one in %lld launches, %lld set-ups there on the lane's sampling, "
+                "%lld handed back from it (docs/RISK.md V331)\n",
+                grown, launches, setups, handed);
+  }
+};
+
 template <class Pol>
 int drain(
 FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>* items,
@@ -1013,30 +1222,22 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   int h[kFcNum];
   static KernelClock clk;
   static cudaEvent_t ev[KernelClock::kN + 1];
-  // P39: the set-up's nuclei from the factory (docs/RISK.md V321). `G4GPU_FLAT_FACTORY=0`
-  // samples them on the set-up's lanes as P36 did - integ/p36's flat path, to the digit.
-  //
-  // THE LIGHT-ION REACTION KEEPS ITS NUCLEI ON THE LANE BY DEFAULT (V322): 5.7% of the campaign's
-  // Fe56-on-Al27 reactions outgrow the flat record's 256-track pool and are handed to the thread
-  // path, whose rerun from the key is - with the factory's nuclei - a different reaction, so the
-  // largest reactions are replaced by ordinary ones (-12 sigma on that case's multiplicities).
-  // Nothing short of a pool past the flat scratch lists' 256 entries removes the class (V323).
-  // `G4GPU_FLAT_FACTORY_ION=1` turns it on, for the measurement.
-  static const bool factory_on = [] {
-    const char* v = std::getenv("G4GPU_FLAT_FACTORY");
-    if (v != nullptr && v[0] == '0') { return false; }
-    if (Pol::kModel == had::InelasticModel::kLightIon) {
-      const char* w = std::getenv("G4GPU_FLAT_FACTORY_ION");
-      return w != nullptr && w[0] == '1';
-    }
-    return true;
-  }();
+  // P39: the set-up's nuclei from the factory (docs/RISK.md V321); P42: the light ion's too, by
+  // default (`factory_enabled`, V331-V333).
+  const bool factory_on = factory_enabled<Pol>();
   clk.factory = factory_on;
   a.solo = factory_on ? 1 : 0;
+  // P42: with the factory on, a light-ion record that would outgrow itself waits for a larger
+  // one instead of being handed back for capacity (`flat_grow`).
+  a.grow = (factory_on && fp.big != nullptr && fp.n_big > 0) ? 1 : 0;
+  a.big = fp.big;
+  a.n_big = fp.n_big;
   static cudaEvent_t tev[4];
   static cudaEvent_t evp[2];
   bool have_prev = false;
   static TailStats tstat;
+  static GrowStats gstat;
+  if (a.grow) { gstat.used = true; }
   tstat.model = (Pol::kModel == had::InelasticModel::kBinary) ? "Binary" : "light-ion";
   if (!clk.on) {
     const char* v = std::getenv("G4GPU_FLAT_PROFILE");
@@ -1053,6 +1254,7 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   a.setup_list = fp.items + fp.item_capacity;
   a.tail_list = a.setup_list + fp.lanes;
   a.solo_list = a.tail_list + fp.lanes;
+  a.grow_list = a.solo_list + fp.lanes;
   // THE GATES. A set-up (a nucleus, up to 200 impact points) and a tail (the de-excitation) cost
   // a cascade milliseconds, a time step a fraction of one, and every launch waits for its slowest
   // lane - so the two long stages run only when enough lanes are waiting for them, or when
@@ -1128,6 +1330,7 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
     cudaMemsetAsync(fp.counters + kFcActive, 0, sizeof(int));
     cudaMemsetAsync(fp.counters + kFcSetupN, 0, sizeof(int) * 3);
     cudaMemsetAsync(fp.counters + kFcSoloN, 0, sizeof(int));
+    cudaMemsetAsync(fp.counters + kFcGrowN, 0, sizeof(int));
     cudaMemsetAsync(fp.counters + kFcBin0, 0, sizeof(int) * kTailBins);
     flat_reap<Pol><<<blocks, kTh>>>(a);
     cudaMemcpy(h, fp.counters, sizeof(h), cudaMemcpyDeviceToHost);
@@ -1250,6 +1453,19 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
       ++stats.launches;
       clk.solo_launches += 1;
     }
+    // P42 (docs/RISK.md V331): the records that would outgrow theirs, under the same condition -
+    // the slots are then free: no tail was launched this round and the round's claim waited for
+    // the last one - up to `n_big` a launch (the rest wait for the next round), one thread each.
+    if constexpr (HasGrow<Pol>::value) {
+      const int n_grow = h[kFcGrowN];
+      if (n_grow > 0 && idle && n_tail == 0 && n_pool == 0 && h[kFcNext] >= n) {
+        const int n_run = std::min(std::min(n_grow, fp.n_big), n_tail_slots);
+        flat_grow<Pol><<<n_run, 1>>>(a, scene, out, batch, score, voxel_score, had, pool_ptr,
+                                     status_warn, sec, books, hook, n_run);
+        ++stats.launches;
+        ++gstat.launches;
+      }
+    }
     tick(9);
     // P41: the round's end, on the main stream, BEFORE the host waits for anything below - the
     // next round's claim waits on the device for the tail, and that gap is what the tail costs.
@@ -1293,6 +1509,9 @@ FlatPool& fp, const Scene<double>& scene, const had::PendingInteraction<double>*
   clk.solo += h[kFcSolo];
   for (int k = 0; k < 8; ++k) { stats.handed[k] += h[kFcHand0 + k]; }
   tstat.scratch_handed += h[kFcHand0 + bf::kHandTailScratch];
+  gstat.grown += h[kFcGrown];
+  gstat.setups += h[kFcGrowSetup];
+  gstat.handed += h[kFcGrowHand];
   if (fp.tail_big_n > 0) {
     int nc = 0;
     cudaMemcpy(&nc, fp.tail_big_busy + fp.tail_big_n, sizeof(int), cudaMemcpyDeviceToHost);

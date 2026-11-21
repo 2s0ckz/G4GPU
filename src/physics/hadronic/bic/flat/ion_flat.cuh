@@ -16,6 +16,9 @@
 #ifndef G4GPU_BIC_FLAT_ION_FLAT_CUH
 #define G4GPU_BIC_FLAT_ION_FLAT_CUH
 
+#include <cstddef>
+#include <cstring>
+
 #include "physics/hadronic/bic/flat/cascade_flat.cuh"
 
 namespace g4gpu::bic::flat {
@@ -176,6 +179,66 @@ __host__ __device__ inline void stage_ion_nucleus(FlatIon<N, P, C>& r, const Fla
   c.mode = kModeMain;
   c.stepping = false;
   c.stage = kStStep;
+}
+
+/// P42 (docs/RISK.md V331): a reaction's state moved, at a stage boundary, from a record of `P`
+/// tracks and `C` collisions to one of `P2` and `C2` (the thread path's slot: 1,024 and 8,192),
+/// where it is CONTINUED - the generator, the counters, the nuclei, every track and every
+/// collision as they are, so the larger record computes exactly what the smaller would have
+/// computed had it had the room. Never a rerun from the key (the hand-back rule, V322).
+///
+/// `FlatCascade`'s members before `nucleons` depend on neither capacity, so they are copied as
+/// bytes; the arrays are copied up to their fill; then every pointer that pointed into the
+/// source record is pointed at the same member of the destination, and the two capacities are
+/// the destination's. Returns false (and copies nothing) if the layouts ever disagreed.
+template <int N, int P, int C, int P2, int C2>
+__host__ __device__ inline bool ion_grow_copy(FlatIon<N, P2, C2>& d, const FlatIon<N, P, C>& s) {
+  static_assert(P2 >= P && C2 >= C, "a reaction only ever moves to a larger record");
+  const FlatCascade<N, P, C>& a = s.c;
+  FlatCascade<N, P2, C2>& b = d.c;
+  const std::size_t head = static_cast<std::size_t>(reinterpret_cast<const char*>(a.nucleons) -
+                                                    reinterpret_cast<const char*>(&a));
+  const std::size_t head2 = static_cast<std::size_t>(reinterpret_cast<const char*>(b.nucleons) -
+                                                     reinterpret_cast<const char*>(&b));
+  if (head != head2) { return false; }
+  memcpy(static_cast<void*>(&b), static_cast<const void*>(&a), head);
+  for (int i = 0; i < N; ++i) { b.nucleons[i] = a.nucleons[i]; }
+  for (int i = 0; i < kMaxFieldTable; ++i) {
+    b.proton_field[i] = a.proton_field[i];
+    b.neutron_field[i] = a.neutron_field[i];
+  }
+  const int np = a.st.lists.n_pool;
+  for (int i = 0; i < np; ++i) {
+    b.pool[i] = a.pool[i];
+    b.prestate[i] = a.prestate[i];
+    b.transfer[i] = a.transfer[i];
+  }
+  for (int i = 0; i < a.colls.n; ++i) { b.coll_items[i] = a.coll_items[i]; }
+  d.proj = s.proj;
+  d.f = s.f;
+  d.projectile_excitation = s.projectile_excitation;
+  d.baryon = s.baryon;
+  d.charge = s.charge;
+  d.mass = s.mass;
+  for (int i = 0; i < N; ++i) {
+    d.proj_nucleons[i] = s.proj_nucleons[i];
+    d.initial[i] = s.initial[i];
+  }
+  d.proj_rep = s.proj_rep;
+  // The pointers into the record.
+  b.st.lists.pool = b.pool;
+  b.st.lists.capacity = P2;
+  b.colls.items = b.coll_items;
+  b.colls.capacity = C2;
+  b.nucleus.nucleons = b.nucleons;
+  if (a.st.nucleons == a.nucleons) { b.st.nucleons = b.nucleons; }
+  if (a.st.projectile_nucleons == s.proj_nucleons) { b.st.projectile_nucleons = d.proj_nucleons; }
+  if (s.proj.nucleons == s.proj_nucleons) { d.proj.nucleons = d.proj_nucleons; }
+  if (a.prop.proton.nucleon.table == a.proton_field) { b.prop.proton.nucleon.table = b.proton_field; }
+  if (a.prop.neutron.nucleon.table == a.neutron_field) {
+    b.prop.neutron.nucleon.table = b.neutron_field;
+  }
+  return true;
 }
 
 /// What the light-ion arm's end decided, for the caller's `run_arm_light_ion` mapping.
