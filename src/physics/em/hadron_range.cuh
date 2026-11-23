@@ -671,6 +671,14 @@ struct HadronRangeTable {
   /// that. The abscissae are the range row itself, so only the derivatives need their own array.
   real_t inv_d2[static_cast<int>(HadronSpecies::kCount)][data::kMaxMaterials][kHadronRangeBins];
 
+  /// P46: `G4MuPairProductionModel`'s sampling tables, for mu+ and mu- alike - QBBC registers ONE
+  /// `G4MuPairProduction` on both (G4EmBuilder::ConstructCharged), so one model and one table,
+  /// which depends on the muon mass alone. Here rather than in a Scene member of its own because
+  /// this struct is uploaded whole and read by the one stepper that needs it, so no engine
+  /// host code changes; 841 kB in double beside the range tables' megabyte. Built by
+  /// `build_hadron_range_table`, so every caller that builds the ranges has it.
+  MuPairSamplingTable<real_t> mu_pair;
+
   /// Restricted ionisation dE/dx at this energy, MeV/mm.
   ///
   /// G4VEnergyLossProcess::GetDEDXForScaledEnergy: the spline, then a sqrt taper below
@@ -818,6 +826,8 @@ __host__ inline void build_hadron_range_table(const data::Material<real_t>* mats
   t.e_min = real_t(kHadronRangeEMin);
   t.e_max = real_t(kHadronRangeEMax);
   t.n_materials = n_materials;
+  build_mu_pair_sampling_table<real_t>(
+      t.mu_pair, static_cast<double>(particle_def<real_t>(ParticleType::kMuonMinus).mass));
 
   for (int b = 0; b < kHadronRangeBins; ++b) {
     t.energy[b] = static_cast<real_t>(

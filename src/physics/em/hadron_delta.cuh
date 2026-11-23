@@ -100,6 +100,17 @@ __host__ __device__ inline real_t hadron_delta_xs(const data::Material<real_t>& 
   const ParticleDef<real_t> pd = particle_def<real_t>(type);
   if (pd.mass <= real_t(0) || kinetic <= real_t(0)) { return real_t(0); }
   const HadronIoniModel model = hadron_ioni_model(type, pd, kinetic);
+  // P46: A MUON ABOVE 200 keV IS G4MuBetheBlochModel'S, RATE AND SPECTRUM. This function took
+  // every Bethe-Bloch-family model to `bethe_bloch_delta_xs`, so the transported muon's delta
+  // rate lacked Kokoulin's radiative correction - the O(alpha) term for transfers above 100 keV
+  // that `mu_bethe_bloch_delta_xs` carries and `tests/test_muon.cu` checks against the model.
+  // Measured against G4EmCalculator in water (docs/RISK.md V346): -0.19% at 100 MeV, -0.38% at
+  // 300 MeV, -0.69% at 1 GeV, -1.03% at 3 GeV, -1.42% at 10 GeV - the deficit P27 saw growing
+  // with energy in every material. Shared file, muon-only line: no other species reaches
+  // kMuBetheBloch (`hadron_ioni_model`).
+  if (model == HadronIoniModel::kMuBetheBloch) {
+    return mu_bethe_bloch_delta_xs(m, type, kinetic, cut, max_energy);
+  }
   // The lower bound of the transfer window, and the low-energy models do not agree on it.
   // Both Bragg models floor the cut at 0.25 keV * massRate, G4ICRU73QOModel at 5 keV *
   // massRate, and Bethe-Bloch takes the cut as given. The floor is where each parameterisation
@@ -140,6 +151,70 @@ __host__ __device__ inline real_t hadron_delta_xs(const data::Material<real_t>& 
 // SampleSecondaries without proposing a change, and the difference between suppressing a
 // transfer and redistributing it is exactly the thing a rewrite gets wrong.
 
+/// `G4MuBetheBlochModel::SampleSecondaries` (11.1.1), for a muon above 200 keV (P46).
+///
+/// Three differences from G4BetheBlochModel's sampler below, each the source's: the rejection
+/// function carries the radiative factor (1 + alphaprime*a1*(a3 - a1)) above 100 keV; the
+/// majorant is 1 + alphaprime*ln^2(2E/m) when tmax exceeds 100 keV, not the spin term's; and
+/// there is no form factor and no magnetic-moment rejection, so every accepted transfer is a
+/// secondary. The momentum is `totEnergy*sqrt(beta2)` and the angle's sine `sqrt(1 - cost^2)`,
+/// as written there. maxEnergy is DBL_MAX (G4VEnergyLossProcess::PostStepDoIt), so the window is
+/// (cut, tmax). The do/while is unbounded in Geant4; here it gives up after 100000 trials with
+/// no secondary, which the acceptance (f/grej >~ 1/2 over the window) makes unreachable.
+template <typename real_t, typename Rng>
+__host__ __device__ inline DeltaRay<real_t> sample_mu_bethe_bloch_delta(
+    const ParticleDef<real_t>& pd, real_t kinetic, real_t cut, const Vec3<real_t>& dir,
+    Rng& rng) {
+  DeltaRay<real_t> out{dir, real_t(0), dir, kinetic, false};
+  const real_t me = units::electron_mass_c2<real_t>();
+  const real_t tmax = hadron_max_secondary_energy(pd, kinetic);
+  const real_t max_kin = tmax;  // min(maxEnergy = DBL_MAX, tmax)
+  const real_t min_kin = cut;
+  if (min_kin >= max_kin) { return out; }
+
+  const real_t mass = pd.mass;
+  const real_t mass2 = mass * mass;
+  const real_t tot = kinetic + mass;
+  const real_t etot2 = tot * tot;
+  const real_t beta2 = kinetic * (kinetic + real_t(2) * mass) / etot2;
+  const real_t limit = kMuLimitKinEnergy<real_t>();
+  const real_t ap = alpha_prime<real_t>();
+
+  real_t grej = real_t(1);
+  if (tmax > limit) {
+    const real_t a0 = log(real_t(2) * tot / mass);
+    grej += ap * a0 * a0;
+  }
+  real_t tkin = real_t(0);
+  bool accepted = false;
+  for (int it = 0; it < 100000 && !accepted; ++it) {
+    const real_t q = rng.uniform();
+    tkin = min_kin * max_kin / (min_kin * (real_t(1) - q) + max_kin * q);
+    real_t f = real_t(1) - beta2 * tkin / tmax + real_t(0.5) * tkin * tkin / etot2;
+    if (tkin > limit) {
+      const real_t a1 = log(real_t(1) + real_t(2) * tkin / me);
+      const real_t a3 = log(real_t(4) * tot * (tot - tkin) / mass2);
+      f *= (real_t(1) + ap * a1 * (a3 - a1));
+    }
+    accepted = !(grej * rng.uniform() > f);
+  }
+  if (!accepted) { return out; }
+
+  const real_t delta_momentum = sqrt(tkin * (tkin + real_t(2) * me));
+  const real_t total_momentum = tot * sqrt(beta2);
+  const real_t cost = tkin * (tot + me) / (delta_momentum * total_momentum);
+  // sqrt(1 - cost*cost) as written; the fmax only keeps a cost a rounding above 1 - which
+  // Geant4 would turn into a NaN - from doing the same here.
+  const real_t sint = sqrt(fmax(real_t(1) - cost * cost, real_t(0)));
+  const real_t phi = units::twopi<real_t>() * rng.uniform();
+  out.delta_dir = rotate_uz(Vec3<real_t>{sint * cos(phi), sint * sin(phi), cost}, dir);
+  out.delta_ekin = tkin;
+  out.produced = true;
+  out.primary_ekin = kinetic - tkin;
+  out.primary_dir = mu_unit(total_momentum * dir - delta_momentum * out.delta_dir);
+  return out;
+}
+
 /// Samples the knock-on electron for the projectile DEFINITION `pd` with the model `model`.
 ///
 /// P26b split this out of `sample_hadron_delta` so that a real nucleus can be sampled on its own
@@ -169,10 +244,13 @@ __host__ __device__ inline DeltaRay<real_t> sample_delta_for_definition(
   // G4BraggModel, G4BraggIonModel and G4ICRU73QOModel have identical SampleSecondaries bodies
   // apart from the floor.
   //
-  // NOT included: G4MuBetheBlochModel. A muon above 200 keV samples with a radiative
-  // correction term this does not carry, so it would fall through to the plain Bethe-Bloch
-  // branch below. That is a real gap and it is inert only because muons are not transported;
-  // the delta *rate* for one is already right (em::mu_bethe_bloch_delta_xs, tests/test_muon).
+  // G4MuBetheBlochModel samples with Kokoulin's radiative correction and its own majorant, and
+  // has its own function (P46). This comment used to call the gap "inert only because muons
+  // are not transported"; they had been since P1, and every muon delta ray above 200 keV was
+  // drawn from G4BetheBlochModel's spectrum (docs/RISK.md V346).
+  if (model == HadronIoniModel::kMuBetheBloch) {
+    return sample_mu_bethe_bloch_delta<real_t>(pd, kinetic, cut, dir, rng);
+  }
   const bool low_energy = (model != HadronIoniModel::kBetheBloch
                            && model != HadronIoniModel::kMuBetheBloch);
   const bool bragg = low_energy;
