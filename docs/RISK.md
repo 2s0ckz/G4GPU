@@ -21869,3 +21869,147 @@ interactions, so 4e-5 of a 1 GeV dose at most) - and the element is drawn agains
 cross sections at the energy, not G4EmElementSelector's table (on the same deviate, 21 of 1,400
 pair draws between 900 MeV and 10 TeV and 1 of 1,400 brem draws, at 150 MeV, pick the other
 element - the deviates that land within the table's interpolation error of a boundary).
+
+### V347: the fix - G4MuBetheBlochModel's delta ray in the transport, muBrems and muPairProd drawn, every final state replayed deviate for deviate against QBBC's own model objects and the pair tables equal to Geant4's bit for bit
+
+**WHAT WAS PORTED, three pieces, three commits.**
+
+1. **muIoni's delta ray** (`em/hadron_delta.cuh`). `hadron_delta_xs` returns
+   `mu_bethe_bloch_delta_xs` for `HadronIoniModel::kMuBetheBloch`, and `sample_delta_for_definition`
+   sends that model to the new `sample_mu_bethe_bloch_delta` - G4MuBetheBlochModel::SampleSecondaries
+   line for line: the radiative factor (1 + alphaprime a1 (a3 - a1)) above 100 keV, the majorant
+   1 + alphaprime ln^2(2E/m), no form factor and no moment rejection, the momentum totEnergy*sqrt(beta2).
+   The file is shared; the two lines are muon-only (no other species reaches kMuBetheBloch).
+2. **The two radiative final states** (`em/muon_radiative.cuh`): `sample_mu_brem`
+   (G4MuBremsstrahlungModel::SampleSecondaries, the photon by G4ModifiedMephi::SampleDirection),
+   `sample_mu_pair` (G4MuPairProductionModel::SampleSecondaries: the zdat bracketing in Z, up to ten
+   FindScaledEnergy draws, r uniform within its limit, G4ModifiedMephi::SamplePairDirections), the
+   sampling tables (`build_mu_pair_sampling_table` = Initialise's scale + MakeSamplingTables, x
+   accumulated as `x += dy` as there; G4Physics2DVector's FindBin / Value / InterpolateLinearX /
+   FindLinearX on the device), the element draw (`mu_rad_select_element`). The table rides in
+   `HadronRangeTable::mu_pair` (841 kB, built by `build_hadron_range_table` - a struct every
+   stepping unit sees, so the layout change is shared).
+3. **The wiring** (`stepper.cuh`, `step_hadron`): for mu+- the two rates at the pre-step energy
+   (one `__noinline__` call, `em::mu_radiative_xs`), a length each where the rate is non-zero, the
+   firing order muIoni, muBrems, muPairProd, CoulombScat, muonNuclear (the manager's), the
+   PostStepDoIt on the post-step state through one `__noinline__` call (`em::mu_radiative_sample`),
+   every secondary pushed (a pair lepton may be under the cut: G4VEnergyLossProcess applies none),
+   `rep.process` fBremsstrahlung / fPairProdByCharged. The one shared line is CoulombScat's
+   `!mu_radiates`, constant true outside the two muon kernels. The muon kernels: 255 registers, frame
+   5,632 -> 5,760 B.
+
+**THE ORACLE** (`ref/dump/dump_mu_radiative.cc`, `G4GPU_DUMP_ONLY=mu_radiative`; `tests/test_mu_radiative.cu`):
+
+| check | points | worst |
+|---|--:|--:|
+| pair sampling tables, every node (x, y, value) of the five zdat elements | 105,105 | **0** (bit for bit) |
+| muIoni rate per volume at the couple's cut, the transport's `hadron_delta_xs` against G4MuBetheBlochModel, 100 MeV-100 TeV, four materials, both muons | 488 | 1.6e-9 (the electron density) |
+| muBrems rate at the photon cut | 488 | 3.0e-10 |
+| muPairProd rate at the positron cut | 488 | 5.0e-16 |
+| G4MuBetheBlochModel::SampleSecondaries replayed on Geant4's recorded deviates, 0.25 MeV-1 TeV | 2,000 | same deviate count; energies 0, directions 2.2e-16 |
+| G4MuBremsstrahlungModel::SampleSecondaries, 150 MeV-10 TeV | 1,400 | energies 4.9e-15, directions 2.1e-15 |
+| G4MuPairProductionModel::SampleSecondaries, 900 MeV-10 TeV | 1,400 | energies 1.1e-16, directions 3.3e-16 |
+
+The element in a compound is Geant4's in the replay (its first deviate is G4EmElementSelector's
+table draw); from that same deviate the port's partials pick the other element in 21 of 1,400 pair
+calls (900 MeV-10 TeV) and 1 of 1,400 brem calls (150 MeV) - the port's convention, printed by the
+test and bounded at 2%. Geant4's lambda tables against its own models, printed beside the rates and
+not asserted: muIoni 1.9e-4, muBrems 33% (air, 126 MeV, beside the 100 MeV threshold), muPairProd 38%
+(A-150, 1 GeV, beside the 850 MeV first node) - where the port's model-at-the-energy convention and
+Geant4's table part, and only near the thresholds, where the rates are smallest.
+
+**REFUSED BY NAME / NOT DONE.** The sub-cut radiative dE/dx stays out of the muon's range table
+(the brem's 2.5e-9 of the total in water; the pair's exactly zero in every B1 material - it would
+be needed for a positron cut above 2.04 MeV). G4hBremsstrahlung / G4hPairProduction for pi+-, K+-,
+p and pbar are the same two models and the samplers take a mass, but they are not wired: not P46's
+(PORTED 1.4). The integral approach and G4EmElementSelector's tables remain the port's convention
+for every discrete EM process (V78).
+
+### V348: P27's muon rows rerun - every 3 and 10 GeV row inside 3 sigma (-0.62% -> +0.05% at 10 GeV), 36 of 38 rows inside; the two left are 300 MeV in air (-0.34%, the gas, P44's); the port's tape now Geant4's to 0.06%; the eleven gates to the digit; the muon rate 0.57-0.76x above 1 GeV - the per-step pair integral
+
+**THE TAPE, AFTER** (the scratch driver of V346 on this branch's engine, 500,000 events, 10 GeV mu-
+in B1's water, MeV an event):
+
+| | port 04eda72 | port P46 | Geant4 |
+|---|--:|--:|--:|
+| the muon's own steps | 6.2009 +/- 0.0065 | 6.1998 +/- 0.0065 | 6.2042 +/- 0.0023 |
+| everything else | 1.8067 | 1.8712 | 1.8715 |
+| of it e+ | 0.0076 | 0.0131 | |
+| total | 8.0075 | 8.0710 | 8.0757 |
+
+The secondaries' 0.065 MeV came back to 0.0003; the total is -0.06% (-0.6 sigma).
+
+**P27's MUON ROWS**, `tools/p27_sweep.ps1 -Sides port` on this branch's exampleB1 (the gate's
+binary, every default), Geant4's box rows from docs/sweep/p27/runs.csv unchanged (none failed the 5%
+rule); tier 1 mu+- x 100 MeV-10 GeV x water, bone; tier 2 x 300 MeV, 1, 10 GeV x air, Al, PE. Per
+event, port - QBBC (sigma):
+
+| row | before (V337/V338) | after |
+|---|--:|--:|
+| mu- / mu+ 100 MeV water | +0.11% (+1.7) / +0.03% (+0.4) | +0.12% (+1.9) / +0.05% (+0.7) |
+| mu- / mu+ 100 MeV bone | +0.24% (+2.7) / +0.22% (+2.5) | +0.26% (+3.0) / +0.25% (+2.9) |
+| mu- / mu+ 300 MeV water | +0.01% / +0.00% | +0.06% (+1.0) / +0.06% (+0.8) |
+| mu- / mu+ 300 MeV bone | +0.00% / +0.00% | +0.05% (+0.8) / +0.05% (+0.8) |
+| mu- / mu+ 1 GeV water | -0.11% (-1.4) / -0.07% (-1.1) | +0.07% (+1.0) / +0.10% (+1.6) |
+| mu- / mu+ 1 GeV bone | -0.13% (-2.0) / -0.13% (-2.0) | +0.04% (+0.6) / +0.03% (+0.5) |
+| mu- / mu+ 3 GeV water | **-0.28% (-4.0) / -0.28% (-4.0)** | +0.06% (+0.9) / +0.06% (+0.8) |
+| mu- / mu+ 3 GeV bone | **-0.32% (-4.5) / -0.29% (-4.1)** | +0.03% (+0.4) / +0.05% (+0.7) |
+| mu- / mu+ 10 GeV water | **-0.62% (-8.6) / -0.62% (-8.6)** | +0.05% (+0.7) / +0.04% (+0.6) |
+| mu- / mu+ 10 GeV bone | **-0.64% (-8.7) / -0.68% (-9.5)** | +0.05% (+0.6) / +0.02% (+0.3) |
+| mu- / mu+ 300 MeV air | **-0.35% (-3.3) / -0.36% (-3.4)** | **-0.34% (-3.5) / -0.34% (-3.2)** |
+| mu- / mu+ 300 MeV Al, PE | +0.00 to +0.01% | +0.06% (+0.9) / +0.05-0.06% (+0.8-1.0) |
+| mu- / mu+ 1 GeV air | -0.23% (-2.3) / -0.22% (-2.1) | -0.11% (-1.1) / -0.09% (-0.9) |
+| mu- / mu+ 1 GeV Al | -0.14% (-2.1) / -0.13% (-2.0) | +0.02% (+0.3) / +0.01% (+0.2) |
+| mu- / mu+ 1 GeV PE | -0.08% (-1.2) / -0.08% (-1.2) | +0.09% (+1.3) / +0.10% (+1.4) |
+| mu- / mu+ 10 GeV air | **-0.63% (-5.9) / -0.63% (-6.0)** | -0.08% (-0.8) / -0.08% (-0.8) |
+| mu- / mu+ 10 GeV Al | **-0.74% (-10.0) / -0.72% (-9.9)** | +0.01% (+0.2) / +0.02% (+0.3) |
+| mu- / mu+ 10 GeV PE | **-0.61% (-7.8) / -0.60% (-7.7)** | +0.04% (+0.6) / +0.05% (+0.7) |
+
+16 of the 38 muon rows were outside 3 sigma; 2 are now, and they are the two that P46 did not
+expect to move: 300 MeV in AIR, unchanged at -0.34% - not the muon's physics (at 300 MeV in air the
+radiative correction is 1e-4 of a delta rate set by air's 990 eV cut, and the brem rate is 1e-6 /mm)
+but V340 item 2's gas, P44's package. The 100 MeV bone rows sit at the edge (+0.26%, +3.0 sigma; were
++2.7) - the delta-rate correction there is +0.19%, and 100 MeV is the deep row whose muon stops in
+the trapezoid; worth one more look with the gas package's cut audit, not a P46 regression on its
+own. Every muon row's ledger is 0.
+
+**THE RATE**, at each row's first saturated count, before (docs/sweep/p27) and after: 100 MeV
+unchanged (0.99-1.00x); 300 MeV 0.84-0.93x (the brem's rate above 100 MeV); 1, 3, 10 GeV 0.57-0.76x,
+bone the slowest (four elements to integrate against water's two) - the pair cross section computed
+by its full Gauss-Legendre integral (up to 8 x 8 nodes, each an inner 8-point rule) on EVERY muon
+step above 850 MeV. mu- 1 GeV in bone (README's muon row): 480,533 -> 297,578 ev/s, 35.5x -> 22.0x
+one core, 6.3x -> 3.9x the box. The 100 MeV rows being unmoved says the cost is the new rate and not
+the machine: P43's lead rows interleaved on the card under the lock, and the host was shared with the
+other packages (P44 among them), 2026-11-23 12:54-13:24 (doses are unaffected; the rates carry that sharing). The remedy is named,
+not taken: Geant4's own lambda tables for muBrems and muPairProd per couple (G4VEnergyLossProcess's
+`theLambdaTable`, linear, from MinPrimaryEnergy to 100 TeV) - which is also the one place the port's
+convention parts from Geant4 by more than a per cent (V346's 38% beside the pair threshold).
+
+**THE ELEVEN DOSE GATES** (build_all's gate section, command for command, this branch's binaries):
+every digit is ba76's - b1_gpu_sched 427.699 pGy (ratio 1.0007); exampleB1 426.028 +/- 0.867928,
+1.10452 sigma; the macro 426.263 (0.02 sigma); mesh 427.3055 / 427.3033, 6,508,913 / 6,508,701
+steps; the switches 427.3899 / 425.6943 / 108.9339 / 427.6061 / 385.6767 / 432.0186 / 428.3688 /
+430.3298; the hook 43,353 steps, rel 0; the pool 427.3899 x3; two runs 842.260 then 871.530 (1.19
+sigma), replayed exactly, 1,713.790 = 1,713.790; the depth-dose 584,851 MeV (97.4752%), plateau
+1.00043, R80 -0.026 mm, width +0.031 mm, its 200-slab CSV byte-identical to main's. No digit moved,
+as expected: none of the gates' beams makes a muon above 200 keV that reaches a muon kernel's new
+lines with a different draw (the 6 MeV photon cannot make one; the 100 MeV proton is below the pion
+threshold), and every new line folds away outside the two muon kernels.
+
+**THE TESTS**: the 94 host tests (with `test_mu_radiative`) and the 15 GPU tests pass on this branch.
+
+### V349: P46 closed - the docs, and what is left by name
+
+docs/PORTED.md: G4MuBetheBlochModel's row carries the delta ray; G4MuBremsstrahlungModel,
+G4MuPairProductionModel, G4MuBremsstrahlung / G4MuPairProduction and G4ModifiedMephi are `T`, with
+the conventions and the numbers of V346-V347; G4hBremsstrahlung / G4hPairProduction stay `P`.
+docs/B1_SWEEP.md's P27 section gains the muon rows after P46; README's muon throughput row is
+re-measured (mu- 1 GeV in bone 297,578 ev/s, 22.0x a core, 3.9x the box) and its count of rows inside
+3 sigma moves by the 14 muon rows fixed; docs/HADRONIC_PLAN.md has a P46 row.
+
+**LEFT, BY NAME:** (1) the muon rate above 1 GeV, 0.57-0.76x of 04eda72's, from the pair cross
+section's integral on every step - the remedy is Geant4's own per-couple lambda tables (V348); (2)
+the 300 MeV air rows, -0.34%, the gas (P44); (3) the 100 MeV bone rows at +3.0 sigma, the edge; (4)
+hBrems / hPairProd for the hadrons (PORTED 1.4), the same models with the hadron's differential
+cross section; (5) the radiative sub-cut dE/dx in the muon's range table (2.5e-9 in water, zero for
+the pair below a 2.04 MeV positron cut).

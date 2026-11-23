@@ -120,7 +120,7 @@ ships on both sides. "port": events/s at the row's first saturated count (the co
 the rate rose by no more than 3%). "per core": Geant4 serial, events / User. "box": Geant4 on ten
 workers (the ten physical cores), events / Real, its start-up measured inside the timer and under
 5% of User. Every row is a line of `docs/sweep/p27/runs.csv`; 549 of the sweep's 630 compared rows
-agree with Geant4 inside 3 sigma, and the 81 that do not are named in V340.
+agree with Geant4 inside 3 sigma, and the 81 that do not are named in V340 (P46 brought 14 muon rows inside: 563 and 67, V348).
 
 | class | beam (trapezoid) | port, saturated | per core | box | x core | x box |
 |---|---|--:|--:|--:|--:|--:|
@@ -128,7 +128,7 @@ agree with Geant4 inside 3 sigma, and the 81 that do not are named in V340.
 | photons, low end | 1 MeV (water, gun at the face) | 4,392,360 | 158,712 | 255,316 | 27.7 | 17.2 |
 | electrons | 1 GeV (bone) | 139,040 | 3,883 | 27,382 | 35.8 | 5.1 |
 | electrons, low end | 1 MeV (water, at the face) | 4,312,980 | 120,090 | 239,875 | 35.9 | 18.0 |
-| muons | mu- 1 GeV (bone) | 480,533 | 13,529 | 76,828 | 35.5 | 6.3 |
+| muons | mu- 1 GeV (bone), after P46 (V348: 480,533 before) | 297,578 | 13,529 | 76,828 | 22.0 | 3.9 |
 | protons | 1 GeV (bone) | 55,806 | 4,451 | 30,994 | 12.5 | 1.8 |
 | protons, low end | 10 MeV (water, at the face) | 1,496,920 | 119,739 | 239,089 | 12.5 | 6.3 |
 | pions | pi+ 1 GeV (bone) | 24,507 | 3,645 | 27,893 | 6.7 | 0.88 |
@@ -351,12 +351,12 @@ resolution. Machine-precision figures are quoted as they are printed.
 | `G4BraggIonModel` | ion dE/dx below 2 MeV/u, ASTAR branch | `test_bragg` | 0.001% |
 | `G4BetheBlochModel` | dE/dx and delta rays above the boundary | `test_hadron` | < 1e-6 |
 | `G4ICRU73QOModel` | dE/dx for **negative** hadrons below the boundary | `test_icru73qo` | < 1e-6 (1,212 pts) |
-| `G4MuBetheBlochModel` | muon dE/dx and delta rays | `test_muon` | < 1e-6 |
+| `G4MuBetheBlochModel` | muon dE/dx and delta rays (the transport's since P46) | `test_muon`, `test_mu_radiative` | < 1e-6; delta rays replayed deviate for deviate |
 | `G4EmCorrections` | shell, Barkas, Bloch, Mott, high-order | `test_corrections` | 0.0003% |
 | `G4ionEffectiveCharge` | effective charge and its correction | `test_ion_charge` | < 1e-6 |
 | `G4ICRU49NuclearStoppingModel` | nuclear stopping | `test_nuclear_stopping` | 0.0017% |
 | `G4IonFluctuations` | fluctuations for alpha, He3 and ions (Yang + Geissel) | `test_ion_fluctuation` | **6.3e-16** (2,058 pts) |
-| `G4MuBremsstrahlungModel`, `G4MuPairProductionModel` | muon radiative losses | `test_muon` | < 1e-6 |
+| `G4MuBremsstrahlungModel`, `G4MuPairProductionModel`, `G4ModifiedMephi` | muon radiative losses and, since P46, their final states and the pair sampling tables | `test_muon`, `test_mu_radiative` | < 1e-6; final states replayed deviate for deviate to 5e-15, tables bit for bit |
 | `G4hBremsstrahlungModel`, `G4hPairProductionModel` | hadron radiative losses | `test_hadron_radiative` | < 1e-6 |
 | `G4WentzelOKandVIxSection` | the Wentzel single-scattering engine | `test_wentzel` | 0.0002% (12,266 pts) |
 | `G4UrbanMscModel`, ion branch | multiple scattering for alpha, He3, the deuteron, the triton and every real nuclide — the model QBBC actually gives them, `fMinimal` step limit, `facrange` 0.2, no lateral displacement. Validated, and **live in transport since P8e**: `kUrbanIonMscWired` is true, open question 2 | `test_ion_msc` | transport mfp **6.9e-16** (1,200 pts); step limit and both path conversions **exactly 0** (750 rows); angle within 3.4 σ and χ²/bin 2.18 over 300 cells × 400,000 draws |

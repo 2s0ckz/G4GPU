@@ -962,7 +962,7 @@ box on the same machine):
 | photons, low end | 1 MeV (water, gun at the face) | 4,392,360 | 158,712 | 255,316 | 27.7 | 17.2 |
 | electrons | 1 GeV (bone) | 139,040 | 3,883 | 27,382 | 35.8 | 5.1 |
 | electrons, low end | 1 MeV (water, at the face) | 4,312,980 | 120,090 | 239,875 | 35.9 | 18.0 |
-| muons | mu- 1 GeV (bone) | 480,533 | 13,529 | 76,828 | 35.5 | 6.3 |
+| muons | mu- 1 GeV (bone), after P46 (V348: 480,533 before) | 297,578 | 13,529 | 76,828 | 22.0 | 3.9 |
 | protons | 1 GeV (bone) | 55,806 | 4,451 | 30,994 | 12.5 | 1.8 |
 | protons, low end | 10 MeV (water, at the face) | 1,496,920 | 119,739 | 239,089 | 12.5 | 6.3 |
 | pions | pi+ 1 GeV (bone) | 24,507 | 3,645 | 27,893 | 6.7 | 0.88 |
@@ -986,3 +986,20 @@ costs as much as the event), so the low-end "x box" is against a box that cannot
 batch can fall (proton 10 GeV in bone: 15,063 ev/s at 800,000, 9,589 at 1,600,000), and an EM run of
 4M events at the automatic batch, or a hadron run of 3.2M, is refused by the paging guard: EM runs
 past 1M took batches of 1M, the one departure from the defaults.
+
+### The muon rows after P46 (2026-11-23)
+
+P27's muon deficit (-0.3% at 3 GeV, -0.6% at 10 GeV, every material, both charges) was the
+muon's delta ray drawn from G4BetheBlochModel's rate and spectrum - G4MuBetheBlochModel's
+radiative correction missing, -1.42% in the rate at 10 GeV - plus muBrems and muPairProd never
+drawn (0.13% of the 10 GeV dose). P46 ported the three final states exactly (RISK V346-V347) and
+reran the 38 muon rows against the same Geant4 box rows (V348's table):
+
+| | outside 3 sigma before | after |
+|---|--:|--:|
+| tier 1: mu+- x 100 MeV-10 GeV x water, bone (20 rows) | 8 (3 and 10 GeV, -4.0 to -9.5) | 0 (worst +3.0, 100 MeV bone) |
+| tier 2: mu+- x 300 MeV, 1, 10 GeV x air, Al, PE (18 rows) | 8 (10 GeV every material, -5.9 to -10.0; 300 MeV air) | 2 (300 MeV air, -3.5 and -3.2: the gas, unchanged) |
+
+At 10 GeV the rows read +0.01% to +0.05% where they read -0.60% to -0.74%. The muon rate above 1
+GeV is 0.57-0.76x what it was - the pair cross section integrated on every step; mu- 1 GeV in bone
+480,533 -> 297,578 ev/s (22.0x one core, 3.9x the box). The rows are in V348.
