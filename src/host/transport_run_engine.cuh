@@ -784,6 +784,12 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // can make one above 100 MeV, and `step_lepton` reads it without a null check for the
     // reason Scene's field says.
     d_wv_ = upload_wv_lepton<real_t>(h_mats_.data(), n_materials_);
+    // ---- P44 (docs/RISK.md V351): eIoni's and eBrem's lambda tables, for the e+- integral
+    // approach in `step_lepton`. On the scene's materials and elements, like the brems tables.
+    cudaFree(d_lepton_lambda_);
+    d_lepton_lambda_ =
+        upload_lepton_lambda<real_t>(default_sb_dir(), h_mats_.data(), n_materials_, zs);
+    // ---- end P44
 
     // hadElastic's device tables, beside the hadron range table and for the same reason: a run
     // that will carry a charged hadron needs them before the first primary is seeded. The
@@ -867,6 +873,7 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
                            d_wv_,      d_hrt_,
                            static_cast<real_t>(scene.range_cut_mm),
                            -1,         processes_};
+    scene_.lepton_lambda = d_lepton_lambda_;  // P44: null is the pre-P44 arithmetic
 
     // ---- how big a batch, and who decided.
     //
@@ -3605,6 +3612,8 @@ void TransportEngine<real_t, StepHook>::Free() {
     cudaFree(d_mats_);
     cudaFree(d_rt_);
     cudaFree(d_wv_);
+    cudaFree(d_lepton_lambda_);  // P44
+    d_lepton_lambda_ = nullptr;
     cudaFree(d_score_);
     cudaFree(d_status_warn_);
     d_status_warn_ = nullptr;

@@ -1,0 +1,11 @@
+# P44 (docs/RISK.md V351): Geant4 11.1.1 writes its physics tables in ASCII - the oracle of
+# tests/test_lepton_lambda.cu (Lambda.eIoni.e-.asc, Lambda.eIoni.e+.asc, Lambda.eBrem.e-.asc,
+# Lambda.eBrem.e+.asc). B1 as it ships (the couples G4_AIR, G4_WATER, G4_A-150_TISSUE,
+# G4_BONE_COMPACT_ICRU), one event so the tables exist, then the store. Serial:
+#   set G4FORCE_RUN_MANAGER_TYPE=Serial
+#   ref\b1mat\run.bat <absolute path of this file>    (from the directory to hold g4tables\)
+#   tests\test_lepton_lambda.exe g4tables
+/run/initialize
+/run/particle/setStoredInAscii 1
+/run/beamOn 1
+/run/particle/storePhysicsTable g4tables

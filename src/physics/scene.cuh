@@ -11,6 +11,7 @@
 #include "geometry/navigator.cuh"
 #include "physics/em/electron_processes.cuh"
 #include "physics/em/hadron_range.cuh"
+#include "physics/em/lepton_lambda.cuh"  // P44
 #include "physics/em/urban_msc.cuh"
 #include "physics/em/wentzel_msc.cuh"
 
@@ -74,6 +75,12 @@ struct Scene {
   /// per-volume flag now, so that any number of volumes can be scored.
   int scoring_volume;
   ProcessFlags processes{};
+  /// P44 (docs/RISK.md V351): the e+- lambda tables of eIoni and eBrem and their peaks, from which
+  /// `step_lepton` draws its delta-ray, brems and annihilation rates with Geant4's integral
+  /// approach. LAST, and defaulted, so every aggregate initialiser of a Scene written before P44
+  /// still compiles - and leaves it null, which is the pre-P44 arithmetic (the models at the
+  /// pre-step energy, no rejection). `G4GPU_EM_INTEGRAL=0` is the engine's way to ask for that.
+  const em::LeptonLambdaTables<real_t>* lepton_lambda = nullptr;
 };
 
 /// Fraction of the residual range a lepton may travel in one step. This is Geant4's

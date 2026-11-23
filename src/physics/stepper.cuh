@@ -729,19 +729,37 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
     // splits ionisation the same way: transfers below the production cut are the continuous
     // restricted dE/dx, transfers above it produce a transportable electron. These
     // interaction lengths are *true* path lengths, like every other limit below.
-    const real_t delta_xs = em::delta_ray_xs(s.materials[mat], p.ekin, is_positron);
+    //
+    // ---- P44 (docs/RISK.md V351): THE INTEGRAL APPROACH, `em/lepton_lambda.cuh`. With the tables
+    // uploaded (the default; `G4GPU_EM_INTEGRAL=0` leaves `s.lepton_lambda` null and every line
+    // below is what it was before P44, uniform for uniform), the three rates are Geant4's
+    // `preStepLambda`: eIoni and eBrem from their lambda tables at the majorant energy
+    // `ComputeLambdaForScaledEnergy` picks, the annihilation from the model at lambdaFactor*E
+    // (fEmDecreasing). Each one is then thinned at the post-step energy below
+    // (`integral_accept`), which is `PostStepDoIt`'s first act. The draws are the same three
+    // `-log(u)` in the same order, so only the rates differ.
+    const em::LeptonLambdaTables<real_t>* const llt = s.lepton_lambda;
+    const real_t loge_pre = (llt != nullptr) ? log(p.ekin) : real_t(0);
+    const real_t delta_xs =
+        (llt != nullptr) ? llt->ioni_majorant(mat, is_positron, p.ekin, loge_pre)
+                         : em::delta_ray_xs(s.materials[mat], p.ekin, is_positron);
     const real_t d_delta = (delta_xs > real_t(0)) ? -log(rng.uniform()) / delta_xs
                                                  : geom::kInfinity<real_t>();
     // Bremsstrahlung photon emission is a third discrete competitor.
     const real_t brem_xs =
         (s.brems != nullptr && s.processes.bremsstrahlung)
-            ? s.brems->xs_at(mat, is_positron, p.ekin) : real_t(0);
+            ? ((llt != nullptr) ? llt->brem_majorant(mat, is_positron, p.ekin, loge_pre)
+                                : s.brems->xs_at(mat, is_positron, p.ekin))
+            : real_t(0);
     const real_t d_brem = (brem_xs > real_t(0)) ? -log(rng.uniform()) / brem_xs
                                                 : geom::kInfinity<real_t>();
     // A positron can also annihilate in flight (G4eplusAnnihilation), a fourth competitor.
     const real_t annih_xs =
         (is_positron && s.processes.annihilation)
-            ? em::annihilation_xs(s.materials[mat], p.ekin) : real_t(0);
+            ? ((llt != nullptr) ? em::annihilation_majorant(s.materials[mat], p.ekin)
+                                : em::annihilation_xs(s.materials[mat], p.ekin))
+            : real_t(0);
+    // ---- end P44
     const real_t d_annih = (annih_xs > real_t(0)) ? -log(rng.uniform()) / annih_xs
                                                   : geom::kInfinity<real_t>();
     // ---- G4CoulombScattering, a fifth discrete competitor, and ONLY above 100 MeV.
@@ -1258,8 +1276,29 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       p.ekin = real_t(0);
     }
 
+    // ---- P44 (docs/RISK.md V351): `PostStepDoIt`'s integral-approach rejection, on the
+    // post-step energy - after the continuous loss and the scattering, as `G4Step::UpdateTrack`
+    // leaves the track before the one PostStepDoIt that won - and BEFORE the model draws anything,
+    // which is where `G4VEnergyLossProcess::PostStepDoIt` (and G4VEmProcess's, for the
+    // annihilation) puts its `G4UniformRand()`. A rejected interaction leaves the step defined by
+    // its process and the track untouched, as Geant4's `return &fParticleChange` does. A positron
+    // the step brought to rest is not thinned: Geant4's G4VEmProcess returns on fStopButAlive
+    // before the rejection, and the at-rest annihilation below is that branch.
+    bool do_annih = annihilates, do_brem = emits_brem, do_delta = emits_delta;
+    if (llt != nullptr && p.ekin > real_t(0)) {
+      if (annihilates) {
+        do_annih = em::integral_accept(annih_xs, em::annihilation_xs(s.materials[mat], p.ekin),
+                                       rng);
+      } else if (emits_brem) {
+        do_brem = em::integral_accept(brem_xs, llt->brem_post(mat, is_positron, p.ekin), rng);
+      } else if (emits_delta) {
+        do_delta = em::integral_accept(delta_xs, llt->ioni_post(mat, is_positron, p.ekin), rng);
+      }
+    }
+    // ---- end P44
+
     // In-flight annihilation consumes the positron: two photons, no track survives.
-    if (annihilates) {
+    if (do_annih) {
       // If the step took the positron to rest, Geant4 takes the at-rest branch; the
       // in-flight sampler divides by tau and would produce a NaN direction at zero.
       const auto a = (p.ekin > real_t(0))
@@ -1273,7 +1312,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       return false;
     }
 
-    if (emits_brem && p.ekin > real_t(0) && s.sb != nullptr) {
+    if (do_brem && p.ekin > real_t(0) && s.sb != nullptr) {
       const data::Material<real_t>& mm = s.materials[mat];
       // Element choice weighted by Z^2 * n, the scaling of the brems cross section.
       real_t tot = real_t(0);
@@ -1310,7 +1349,7 @@ __device__ inline bool step_lepton(const Scene<real_t>& s, TrackState<real_t>& p
       }
     }
 
-    if (emits_delta && p.ekin > real_t(0)) {
+    if (do_delta && p.ekin > real_t(0)) {
       const auto d = em::sample_delta_ray(s.materials[mat], p.ekin, p.dir, is_positron, rng);
       if (d.produced) {
         em.pos = p.pos;

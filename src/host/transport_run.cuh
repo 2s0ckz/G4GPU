@@ -21,6 +21,7 @@
 #include "host/hadronic_upload.cuh"
 #include "host/level_upload.cuh"
 #include "host/neutron_upload.cuh"
+#include "host/lepton_lambda_upload.cuh"  // P44
 #include "host/pe_upload.cuh"
 // P15's interaction pool as the host sees it: declared types, sizes, a builder - and no model
 // header. Until docs/RISK.md V233 this line included `interaction_apply.cuh`, the one header
@@ -581,6 +582,9 @@ class TransportEngine {
   /// above `em::kMscEnergyLimit()`. Always built, because any run that makes a lepton can make
   /// one above 100 MeV: a 1 GeV photon beam's first pair does. See em/wentzel_msc.cuh.
   em::WentzelLeptonTable<real_t>* d_wv_ = nullptr;
+  /// P44: eIoni's and eBrem's lambda tables for the e+- integral approach; null with
+  /// `G4GPU_EM_INTEGRAL=0`. See host/lepton_lambda_upload.cuh.
+  em::LeptonLambdaTables<real_t>* d_lepton_lambda_ = nullptr;
   /// Built only when the scene can actually see a hadron - it is 256 bins x 2 species x
   /// every material, and a photon run has no use for it. Null in Scene when not built.
   em::HadronRangeTable<real_t>* d_hrt_ = nullptr;
