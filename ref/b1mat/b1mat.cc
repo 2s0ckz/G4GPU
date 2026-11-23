@@ -57,8 +57,228 @@
 #include "QBBC.hh"
 
 #include <cstdio>
+#include <iomanip>
+#include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "G4EmCalculator.hh"
+#include "G4Event.hh"
+#include "G4EventManager.hh"
+#include "G4ParticleTable.hh"
+#include "G4ProductionCutsTable.hh"
+#include "G4Run.hh"
+#include "G4Step.hh"
+#include "G4Track.hh"
+#include "G4UIcmdWithoutParameter.hh"
+#include "G4UserTrackingAction.hh"
+#include "G4VProcess.hh"
 
 namespace {
+
+// ---- /B1/tape/on (P46, docs/RISK.md V346): the per-process deposit tape.
+//
+// WHY. P27 found the muon 0.6% low at 10 GeV in every material and for both charges (V337,
+// V338). B1 scores one number per event; which process the missing energy belongs to is not in
+// it. The tape splits the scoring trapezoid's deposit by the FIRST-GENERATION process the
+// depositing track descends from - the primary's own steps are "primary", a delta ray and its
+// whole shower are "muIoni", a bremsstrahlung photon's shower is "muBrems", and so on - and
+// counts the primary's own discrete interactions anywhere in the world. It is an observer:
+// B1's stepping action still runs first, unchanged, so the dose B1 prints is the dose B1
+// prints without the tape (it draws no random number). Off unless the command is given, which
+// keeps every P27 row's executable exactly what V336 measured.
+G4bool gTape = false;
+std::mutex gTapeMutex;
+struct TapeSum {
+  double sum = 0, sum2 = 0;  // per-event deposit in the trapezoid: sum and sum of squares
+};
+std::map<std::string, TapeSum> gTapeEdep;
+std::map<std::string, double> gTapeFirstGenN, gTapeFirstGenE, gTapePrimaryHits;
+long long gTapeEvents = 0;
+
+struct TapeThread {
+  G4int event = -1;
+  std::unordered_map<G4int, std::string> root;
+  std::map<std::string, double> ev;  // this event's deposit per root process
+  std::map<std::string, TapeSum> edep;
+  std::map<std::string, double> fgn, fge, hits;
+  long long events = 0;
+  G4LogicalVolume* shape2 = nullptr;
+
+  void flush_event() {
+    if (event < 0) { return; }
+    for (auto& kv : ev) {
+      edep[kv.first].sum += kv.second;
+      edep[kv.first].sum2 += kv.second * kv.second;
+    }
+    ev.clear();
+    ++events;
+  }
+  void merge() {
+    flush_event();
+    event = -1;
+    std::lock_guard<std::mutex> lock(gTapeMutex);
+    for (auto& kv : edep) {
+      gTapeEdep[kv.first].sum += kv.second.sum;
+      gTapeEdep[kv.first].sum2 += kv.second.sum2;
+    }
+    for (auto& kv : fgn) { gTapeFirstGenN[kv.first] += kv.second; }
+    for (auto& kv : fge) { gTapeFirstGenE[kv.first] += kv.second; }
+    for (auto& kv : hits) { gTapePrimaryHits[kv.first] += kv.second; }
+    gTapeEvents += events;
+    edep.clear();
+    fgn.clear();
+    fge.clear();
+    hits.clear();
+    events = 0;
+  }
+};
+G4ThreadLocal TapeThread* tTape = nullptr;
+TapeThread& tape() {
+  if (tTape == nullptr) { tTape = new TapeThread; }
+  return *tTape;
+}
+
+class TapeTrackingAction : public G4UserTrackingAction {
+ public:
+  void PreUserTrackingAction(const G4Track* t) override {
+    TapeThread& tp = tape();
+    const G4int ev = G4EventManager::GetEventManager()->GetConstCurrentEvent()->GetEventID();
+    if (ev != tp.event) {
+      tp.flush_event();
+      tp.event = ev;
+      tp.root.clear();
+    }
+    std::string r;
+    if (t->GetParentID() == 0) {
+      r = "primary";
+    } else if (t->GetParentID() == 1) {
+      r = (t->GetCreatorProcess() != nullptr) ? std::string(t->GetCreatorProcess()->GetProcessName())
+                                              : std::string("none");
+      tp.fgn[r] += 1;
+      tp.fge[r] += t->GetKineticEnergy();
+    } else {
+      auto it = tp.root.find(t->GetParentID());
+      r = (it != tp.root.end()) ? it->second : std::string("orphan");
+    }
+    tp.root[t->GetTrackID()] = r;
+  }
+};
+
+class TapeSteppingAction : public B1::SteppingAction {
+ public:
+  using B1::SteppingAction::SteppingAction;
+  void UserSteppingAction(const G4Step* step) override {
+    B1::SteppingAction::UserSteppingAction(step);
+    TapeThread& tp = tape();
+    const G4Track* t = step->GetTrack();
+    if (t->GetTrackID() == 1) {
+      const G4VProcess* pr = step->GetPostStepPoint()->GetProcessDefinedStep();
+      if (pr != nullptr) { tp.hits[std::string(pr->GetProcessName())] += 1; }
+    }
+    if (tp.shape2 == nullptr) {
+      tp.shape2 = G4LogicalVolumeStore::GetInstance()->GetVolume("Shape2");
+    }
+    if (step->GetPreStepPoint()->GetTouchableHandle()->GetVolume()->GetLogicalVolume()
+        != tp.shape2) {
+      return;
+    }
+    const G4double e = step->GetTotalEnergyDeposit();
+    if (e == 0.) { return; }
+    auto it = tp.root.find(t->GetTrackID());
+    tp.ev[(it != tp.root.end()) ? it->second : std::string("untracked")] += e;
+  }
+};
+
+// Each worker's run action merges its thread's tape at the end of its run. The master's run
+// action is B1's own: G4MTRunManager calls BuildForMaster when the action initialisation is SET,
+// before any macro command, so the master never sees /B1/tape/on - main prints the merged tape
+// after the macro instead (PrintTape). Serial mode has one run action, which merges here.
+class TapeRunAction : public B1::RunAction {
+ public:
+  void EndOfRunAction(const G4Run* run) override {
+    B1::RunAction::EndOfRunAction(run);
+    if (!IsMaster() || !G4Threading::IsMultithreadedApplication()) { tape().merge(); }
+  }
+};
+
+void PrintTape() {
+  {
+    std::lock_guard<std::mutex> lock(gTapeMutex);
+    const double n = static_cast<double>(gTapeEvents);
+    G4cout << "\nTAPE events " << gTapeEvents << "\n"
+           << "TAPE edep,root,MeV_per_event,sigma_MeV_per_event\n";
+    double tot = 0;
+    for (auto& kv : gTapeEdep) {
+      const double m = kv.second.sum / n;
+      const double var = (kv.second.sum2 / n - m * m) / n;
+      tot += m;
+      G4cout << "TAPE edep," << kv.first << "," << std::setprecision(9) << m / MeV << ","
+             << std::sqrt(var > 0 ? var : 0) / MeV << "\n";
+    }
+    G4cout << "TAPE edep,TOTAL," << tot / MeV << ",\n";
+    G4cout << "TAPE firstgen,process,per_event,MeV_per_event_at_birth\n";
+    for (auto& kv : gTapeFirstGenN) {
+      G4cout << "TAPE firstgen," << kv.first << "," << kv.second / n << ","
+             << gTapeFirstGenE[kv.first] / n / MeV << "\n";
+    }
+    G4cout << "TAPE primary_step_end,process,per_event\n";
+    for (auto& kv : gTapePrimaryHits) {
+      G4cout << "TAPE primary_step_end," << kv.first << "," << kv.second / n << "\n";
+    }
+    G4cout << G4endl;
+    gTapeEdep.clear();
+    gTapeFirstGenN.clear();
+    gTapeFirstGenE.clear();
+    gTapePrimaryHits.clear();
+    gTapeEvents = 0;
+  }
+}
+
+// /B1/tape/tables: G4EmCalculator's answers for mu- and mu+ in every material with a couple, at
+// P46's five energies - the restricted dE/dx the transport reads (GetDEDX, every energy-loss
+// process summed), each process's restricted dE/dx at the couple's own cut (ComputeDEDX), the
+// range, and each discrete process's cross section from its table (GetCrossSectionPerVolume) and
+// from the model (ComputeCrossSectionPerVolume). After a /run/beamOn, so the tables exist.
+void PrintMuonTables() {
+  G4EmCalculator calc;
+  const G4ProductionCutsTable* ct = G4ProductionCutsTable::GetProductionCutsTable();
+  const char* parts[2] = {"mu-", "mu+"};
+  const double es[] = {100., 300., 1000., 3000., 10000.};
+  const char* procs[] = {"muIoni", "muBrems", "muPairProd", "muonNuclear", "CoulombScat"};
+  G4cout << "TABLE particle,material,E_MeV,ecut_MeV,gcut_MeV,dedx_total,range_mm,"
+            "dedx_muIoni,dedx_muBrems,dedx_muPairProd,"
+            "xs_tab_muIoni,xs_tab_muBrems,xs_tab_muPairProd,xs_tab_muonNuclear,"
+            "xs_tab_CoulombScat,xs_mod_muIoni,xs_mod_muBrems,xs_mod_muPairProd,"
+            "xs_mod_muonNuclear\n";
+  for (const char* pn : parts) {
+    const G4ParticleDefinition* p = G4ParticleTable::GetParticleTable()->FindParticle(pn);
+    for (std::size_t i = 0; i < ct->GetTableSize(); ++i) {
+      const G4MaterialCutsCouple* c = ct->GetMaterialCutsCouple(static_cast<G4int>(i));
+      const G4Material* m = c->GetMaterial();
+      const double ecut = (*ct->GetEnergyCutsVector(1))[c->GetIndex()];
+      const double gcut = (*ct->GetEnergyCutsVector(0))[c->GetIndex()];
+      for (double e : es) {
+        G4cout << std::setprecision(10) << "TABLE " << pn << "," << m->GetName() << "," << e
+               << "," << ecut << "," << gcut << "," << calc.GetDEDX(e, p, m) * mm / MeV << ","
+               << calc.GetRangeFromRestricteDEDX(e, p, m) / mm;
+        G4cout << "," << calc.ComputeDEDX(e, p, "muIoni", m, ecut) * mm / MeV << ","
+               << calc.ComputeDEDX(e, p, "muBrems", m, gcut) * mm / MeV << ","
+               << calc.ComputeDEDX(e, p, "muPairProd", m, ecut) * mm / MeV;
+        for (const char* pr : procs) {
+          G4cout << "," << calc.GetCrossSectionPerVolume(e, p, pr, m) * mm;
+        }
+        G4cout << "," << calc.ComputeCrossSectionPerVolume(e, p, "muIoni", m, ecut) * mm << ","
+               << calc.ComputeCrossSectionPerVolume(e, p, "muBrems", m, gcut) * mm << ","
+               << calc.ComputeCrossSectionPerVolume(e, p, "muPairProd", m, ecut) * mm << ","
+               << calc.ComputeCrossSectionPerVolume(e, p, "muonNuclear", m, ecut) * mm << "\n";
+      }
+    }
+  }
+  G4cout << G4endl;
+}
 
 class MaterialDetectorConstruction : public B1::DetectorConstruction {
  public:
@@ -118,14 +338,22 @@ class GunZPrimaryGeneratorAction : public B1::PrimaryGeneratorAction {
 // B1::ActionInitialization's two methods with the generator above in Build().
 class GunZActionInitialization : public G4VUserActionInitialization {
  public:
-  void BuildForMaster() const override { SetUserAction(new B1::RunAction); }
+  void BuildForMaster() const override {
+    SetUserAction(gTape ? new TapeRunAction : new B1::RunAction);
+  }
   void Build() const override {
     SetUserAction(new GunZPrimaryGeneratorAction);
-    auto* runAction = new B1::RunAction;
+    auto* runAction = gTape ? new TapeRunAction : new B1::RunAction;
     SetUserAction(runAction);
     auto* eventAction = new B1::EventAction(runAction);
     SetUserAction(eventAction);
-    SetUserAction(new B1::SteppingAction(eventAction));
+    if (gTape) {
+      // P46's tape: B1's stepping action runs first inside TapeSteppingAction, unchanged.
+      SetUserAction(new TapeSteppingAction(eventAction));
+      SetUserAction(new TapeTrackingAction);
+    } else {
+      SetUserAction(new B1::SteppingAction(eventAction));
+    }
   }
 };
 
@@ -148,8 +376,21 @@ class MaterialMessenger : public G4UImessenger {
     fGunZ->SetDefaultUnit("mm");
     fGunZ->AvailableForStates(G4State_PreInit, G4State_Idle);
     fGunZ->SetToBeBroadcasted(false);
+    fTapeDir = new G4UIdirectory("/B1/tape/");
+    fTapeDir->SetGuidance("P46's per-process deposit tape (docs/RISK.md V346); off by default.");
+    fTapeOn = new G4UIcmdWithoutParameter("/B1/tape/on", this);
+    fTapeOn->SetGuidance("Split Shape2's deposit by first-generation process; before init.");
+    fTapeOn->AvailableForStates(G4State_PreInit);
+    fTapeOn->SetToBeBroadcasted(false);
+    fTables = new G4UIcmdWithoutParameter("/B1/tape/tables", this);
+    fTables->SetGuidance("Print G4EmCalculator's muon tables (after a /run/beamOn).");
+    fTables->AvailableForStates(G4State_Idle);
+    fTables->SetToBeBroadcasted(false);
   }
   ~MaterialMessenger() override {
+    delete fTables;
+    delete fTapeOn;
+    delete fTapeDir;
     delete fGunZ;
     delete fGunDir;
     delete fCmd;
@@ -162,6 +403,8 @@ class MaterialMessenger : public G4UImessenger {
       gHasGunZ = true;
       G4cout << "/B1/gun/z: the gun fires from z = " << gGunZ / mm << " mm" << G4endl;
     }
+    if (cmd == fTapeOn) { gTape = true; }
+    if (cmd == fTables) { PrintMuonTables(); }
   }
 
  private:
@@ -170,6 +413,9 @@ class MaterialMessenger : public G4UImessenger {
   G4UIcmdWithAString* fCmd = nullptr;
   G4UIdirectory* fGunDir = nullptr;
   G4UIcmdWithADoubleAndUnit* fGunZ = nullptr;
+  G4UIdirectory* fTapeDir = nullptr;
+  G4UIcmdWithoutParameter* fTapeOn = nullptr;
+  G4UIcmdWithoutParameter* fTables = nullptr;
 };
 
 }  // namespace
@@ -193,6 +439,7 @@ int main(int argc, char** argv) {
   // until /B1/gun/z is given (V336's proof covers the default).
   runManager->SetUserInitialization(new GunZActionInitialization());
   G4UImanager::GetUIpointer()->ApplyCommand(G4String("/control/execute ") + argv[1]);
+  if (gTape) { PrintTape(); }
   delete messenger;
   delete runManager;
   return 0;

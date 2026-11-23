@@ -21758,3 +21758,114 @@ the proton/pion/light-ion gates - a package of their own); the 3-sigma tables of
 recounted beyond the four face rows (553 of 630 inside with them, from 549); the slow-ion -0.5%
 of V341's inside rows, which this does not touch (a nucleus started inside always deposited
 there).
+### V346: P46's diagnosis - the muon's deficit is two pieces: muIoni's delta rays drawn from G4BetheBlochModel's rate and spectrum instead of G4MuBetheBlochModel's (-0.19% at 100 MeV to -1.42% at 10 GeV in the rate, the bulk of the dose), and muBrems / muPairProd never drawn (0.13% of the 10 GeV dose in Geant4's own tape); the dE/dx and range tables agree to 1e-5
+
+**THE FINDING BEING DIAGNOSED** (V337 tier 1, V338 tier 2, V340 item 4): mu+ and mu- -0.3% at 3 GeV
+and -0.6% at 10 GeV against QBBC, in water, bone, air, Al and PE alike, -4 to -10 sigma; -1 to -2
+sigma at 1 GeV; nothing at 300 MeV in water and bone. P27 suspected the radiative processes. That
+was half of it.
+
+**(a) THE PROCESS LISTS.** QBBC's mu- (`ref/oracle/species_processes.csv`): Transportation, msc
+(WentzelVIUni), muIoni (ICRU73QO below 200 keV, MuBetheBloch above, UrbanFluc), muBrems (MuBrem),
+muPairProd (muPairProd), CoulombScat, muonNuclear, Decay, muMinusCaptureAtRest; mu+ the same
+less the capture. The port's `step_hadron` for a muon: Transportation, WentzelVI msc, the
+ionisation's continuous loss on the muon's own range table (`hadron_total_dedx` -> MuBetheBloch,
+exact since V38/V46), the ionisation's DISCRETE half (the delta ray), CoulombScat (P8b), muonNuclear
+(P19), Decay (P8), the capture (P12). Two discrepancies in that list:
+
+1. **muIoni's delta ray was G4BetheBlochModel's.** `em::hadron_delta_xs` sent every
+   Bethe-Bloch-family model to `bethe_bloch_delta_xs`, and `sample_delta_for_definition` sent
+   kMuBetheBloch to the plain Bethe-Bloch sampler - with a comment calling the gap "inert only
+   because muons are not transported". They have been transported since P1. The exact
+   `em::mu_bethe_bloch_delta_xs` existed, tested by `tests/test_muon.cu` against the model, and
+   nothing in the transport called it - the V38 shape again (a tested function, an untested call
+   site). G4MuBetheBlochModel's rate and spectrum carry Kokoulin's radiative correction for
+   transfers above 100 keV, which grows with the muon's energy.
+2. **muBrems and muPairProd were never drawn.** `em/muon_radiative.cuh` had both models' dE/dx and
+   cross sections, exact, and neither SampleSecondaries; `stepper.cuh` said so (PORTED 1.3's `P`).
+
+**(b) THE TABLES THE TRANSPORT READS**, water, mu-, the port's `HadronRangeTable` against
+G4EmCalculator on the running QBBC (`ref/b1mat`'s new `/B1/tape/tables`; mu+ the same to the same
+digits):
+
+| E | dE/dx port | Geant4 (GetDEDX) | range port | Geant4 | muBrems sub-cut dE/dx | muPairProd sub-cut |
+|--:|--:|--:|--:|--:|--:|--:|
+| 100 MeV | 0.2067352 | 0.2067375 | 329.0113 mm | 329.0019 | 0 | 0 |
+| 300 MeV | 0.1717482 | 0.1717489 | 1431.054 | 1431.038 | 4.24e-10 | 0 |
+| 1 GeV | 0.1679006 | 0.1679007 | 5592.195 | 5592.171 | 4.25e-10 | 0 |
+| 3 GeV | 0.1702825 | 0.1702826 | 17403.16 | 17403.13 | 4.25e-10 | 0 |
+| 10 GeV | 0.1719305 | 0.1719305 | 58248.48 | 58248.44 | 4.25e-10 | 0 |
+
+Agreement to 1e-5 and better, falling with energy. The radiative processes' sub-cut losses are
+the brem's 4.25e-10 MeV/mm at the photon cut (2.5 keV in water: 2.5e-9 of the total, which the
+port's table omits) and exactly zero for the pair, whose 4 m_e threshold is above water's 0.271 MeV
+positron cut. The continuous loss is not where the deficit is.
+
+**(c) THE DISCRETE RATES**, per mm, water, mu-, the port's against G4MuBetheBlochModel /
+G4MuBremsstrahlungModel / G4MuPairProductionModel's `CrossSectionPerVolume` and (in brackets)
+Geant4's lambda table:
+
+| E | delta rate, port | Geant4 model [table] | port / G4 | muBrems (port = model) [table] | muPairProd (port = model) [table] |
+|--:|--:|--:|--:|--:|--:|
+| 100 MeV | 0.0305282 | 0.0305870 [0.0305862] | **-0.19%** | 0 [0] | 0 [0] |
+| 300 MeV | 0.0298099 | 0.0299236 [0.0299236] | **-0.38%** | 1.2366e-6 [1.2345e-6] | 0 [0] |
+| 1 GeV | 0.0303965 | 0.0306090 [0.0306090] | **-0.69%** | 1.5418e-6 [1.5418e-6] | 5.516e-7 [3.419e-7] |
+| 3 GeV | 0.0306240 | 0.0309433 [0.0309433] | **-1.03%** | 1.8418e-6 [1.8385e-6] | 3.0862e-6 [3.0828e-6] |
+| 10 GeV | 0.0306822 | 0.0311235 [0.0311235] | **-1.42%** | 2.1636e-6 [2.1636e-6] | 1.1572e-5 [1.1516e-5] |
+
+The delta rate is low by an amount that grows with energy - the P27 signature. The brem and pair
+rates were right and unused (mean free paths 462 m and 86 m at 10 GeV); muonNuclear is P19's,
+exact against `G4KokoulinMuonNuclearXS` (`tests/test_emextra_xs.cu`).
+
+**(d) THE DEPOSIT TAPE**, 10 GeV mu- into B1 with the trapezoid in water (`ref/b1mat`'s new
+`/B1/tape/on`: Shape2's deposit by the first-generation process the depositing track descends from;
+4,000,000 events, MT, QBBC as it ships; the dose B1 prints is unchanged by the tape):
+
+| root process | Geant4, MeV/event | Geant4 with muBrems and muPairProd inactivated |
+|---|--:|--:|
+| the muon's own steps | 6.20416 +/- 0.0023 | 6.20397 |
+| muIoni (delta rays and their showers) | 1.85903 +/- 0.0018 | 1.85639 |
+| muPairProd | 0.01034 +/- 0.0002 | - |
+| muBrems | 0.00034 +/- 0.00004 | - |
+| muonNuclear | 0.00172 +/- 0.00017 | 0.00178 |
+| CoulombScat recoils, Decay | 0.00010 | 0.00009 |
+| **total** | **8.07568** | **8.06222** |
+
+Per event the primary makes 9.61 delta rays, 0.0068 pair electrons/positrons (0.0034 pairs),
+0.00063 brem photons and 0.00015 muon-nuclear interactions anywhere in the world. B1's dose:
+5.52935 +/- 0.0023 uGy as shipped, 5.52013 +/- 0.0023 with the two processes inactivated -
+**-0.17% +/- 0.06%**. The port's P27 row is -0.62%, so the radiative processes are about a quarter
+of it. The rest is the delta ray: the muon's own steps are the range table's (b) and agree; what
+the port lacks is in the muIoni column, 2.4% of which is the 0.044 MeV left - the share a
+radiative-corrected spectrum carries, since the missing deltas are the hard ones (the correction
+grows with the transfer).
+
+The port's side of the tape (a scratch driver, not committed: the same geometry and gun on the
+engine's `StepTap` at scorer 0, 500,000 events, the deposit split by the depositing track's
+species - which separates "the muon's own steps" from everything else exactly as Geant4's
+"primary" row does), main's engine at 04eda72:
+
+| | port (04eda72) | Geant4 |
+|---|--:|--:|
+| the muon's own steps | 6.2009 +/- 0.0065 | 6.2042 +/- 0.0023 |
+| everything else (e-, e+, gamma, hadrons) | 1.8067 | 1.8715 |
+| total | 8.0075 | 8.0757 |
+
+The muon's own deposit agrees (-0.5 sigma); the whole deficit, 0.065 MeV an event, is in the
+secondaries - 0.011 of it the radiative showers the port never made, the rest the delta rays.
+The 3 GeV tape says the same with the radiative share smaller still: muPairProd 0.0017 and
+muBrems 0.0002 of 7.903 MeV (0.024%), B1's dose -0.05% +/- 0.06% with both inactivated, against
+P27's -0.3% - so at 3 GeV the deficit is almost all the delta rate.
+
+**WHAT IS PORTED, decided here:** (1) G4MuBetheBlochModel's delta rate and SampleSecondaries in the
+transport; (2) G4MuBremsstrahlungModel::SampleSecondaries and G4MuPairProductionModel's sampling
+tables and SampleSecondaries, with G4ModifiedMephi, drawn as discrete processes. The dE/dx tables
+stay as they are (2.5e-9 omitted, said in PORTED). Two conventions are kept and named, both the
+port's for every discrete EM process (V78, PORTED 1.6): the rate is the model at the pre-step
+energy, not the lambda table with the integral approach - which for muPairProd at 1 GeV is a
+real difference, the table 38% under the model there because its first node is 850 MeV and the
+cross section rises steeply (0.5% at 10 GeV; the pair rate at 1 GeV is 1e-4 of an event's
+interactions, so 4e-5 of a 1 GeV dose at most) - and the element is drawn against the partial
+cross sections at the energy, not G4EmElementSelector's table (on the same deviate, 21 of 1,400
+pair draws between 900 MeV and 10 TeV and 1 of 1,400 brem draws, at 150 MeV, pick the other
+element - the deviates that land within the table's interpolation error of a boundary).
