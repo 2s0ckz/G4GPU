@@ -929,6 +929,12 @@ beam, to every digit): `/B1/det/material <NIST name>` - Shape2's material, befor
   secondaries' transport across a dense-to-gas boundary.
 - **A nucleus at 1 MeV/n is deposited where it starts** (C12, Fe56 at 1 MeV/n fired 1 um from the
   trapezoid: one step, nothing in the trapezoid); at 1.5 MeV/n, or started inside, it agrees.
+  **FIXED by P45 (V342-V344):** `step_hadron` deposited any nucleus whose residual range was under
+  10 um where it stood, a floor Geant4 does not have (Fe56 at 1 MeV/n has 6.4 um, C12 9.3 um). A
+  GenericIon is now stepped at any range, as `G4VEnergyLossProcess` steps it, and the four rows read
+  C12 water -0.09% (-0.4 sigma), bone +0.02% (+0.1), Fe56 water +0.04% (+0.1), bone +0.07% (+0.6);
+  every other C12/Fe56 row of tiers 1 and 4 and the light ions at 1 MeV/n inside 1.9 sigma on the
+  same binary (docs/sweep/p27/p45/). With them, 553 of the 630 compared rows are inside 3 sigma.
 - **Muons at 3 and 10 GeV**: -0.3% and -0.6% in every material (up to -10 sigma).
 - **e+- at 100 keV in air**: -1.5% and -1.7%.
 - **The triton at 100 MeV/n**: -1.4% (a Bragg peak inside the trapezoid).

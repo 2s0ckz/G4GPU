@@ -21611,3 +21611,150 @@ these rows is not ten cores: a 1 MeV photon serial is 158,712 ev/s on one core a
 box 255,316 - 1.6x - because G4TaskRunManager's dispatch of an event costs as much as the event;
 the photon, electron and light-hadron box rows of tier 4 sit at 115,000-290,000 ev/s. The port is 4.4M ev/s on that beam: 28x one
 core, 17x the box.
+
+### V342: P45 located - a nucleus whose residual range is under 10 um was deposited where it stood: `step_hadron`'s `kMinUsefulRange` floor, which Geant4 does not have; C12 and Fe56 at 1 MeV/n have 9.32 and 6.40 um in water, so fired 1 um before the trapezoid they never took a step
+
+**THE TAPE** (Fe56 at 56 MeV, the gun 1 um before a water box; the port's from a host harness of
+`step_hadron` - two water/bone volumes, not committed - and Geant4's from ref/b1mat with
+`/tracking/verbose 1`, Geant4 11.1.1 QBBC, its sources untouched; the events of 20 that hit Shape2):
+
+| | step | volume | length | dE | limiter | status after |
+|---|--:|---|--:|--:|---|---|
+| Geant4 | 1 | Envelope | 1 um | 5.097 / 4.972 / 5.064 MeV | Transportation | crosses |
+| Geant4 | 2 | Shape2 (water) | 5.787-5.802 um | the rest, 50.9-51.0 MeV | ionIoni (the range) | stopped |
+| Geant4 | 2 | Shape2 (bone) | 3.425-3.434 um | the rest | ionIoni | stopped |
+| port before | 1 | Envelope | **0** | **56 MeV, all of it** | the 10 um floor (range 6.400 um) | fStopAndKill, BelowTrackingCut |
+| port after | 1 | Envelope | 1.0000 um | 5.098 MeV (mean of 2,000: 5.111) | Transportation | crosses |
+| port after | 2 | Shape2 (water / bone) | 5.787 / 3.425 um | the rest | ionIoni (the range) | stopped |
+
+C12 at 12 MeV: Geant4 1 um, 713-752 keV, then 8.53-8.57 um in Shape2; the port after 1 um,
+752 keV (mean 756), then 8.52 um. The port's range for the first step (6.4001 um) is Geant4's
+6.4 um step in the events that missed Shape2.
+
+**THE RULE BROKEN.** `step_hadron` steps a track only while `p.ekin >= kHadronTrackingCut` AND
+`range >= kMinUsefulRange` (10 um); otherwise it goes to the dying branch and deposits `p.ekin`
+in the volume it is in, with a zero step. `G4VEnergyLossProcess` has no residual-range floor: its
+step limit below `finalRangeIons` (0.1 mm) is the whole range (G4VEnergyLossProcess.cc:583-584),
+and its only stop is `length >= fRange || preStepKinEnergy <= lowestKinEnergy` (:812), with
+`lowestKinEnergy` 1 keV for anything over 1 MeV of mass (:261). So Geant4 steps the 6.4 um
+nucleus, Transportation cuts the step at the boundary 1 um away, and it crosses. Not the
+limiter, not the range table (the port's range is Geant4's to the printed digit), not the msc:
+the floor. The light ions cross because their ranges at 1 MeV/n are over 10 um (alpha 19.3 um);
+at 1.5 MeV/n C12 has 17.0 um and crosses (V341's -0.2%); started inside, the floor deposits in the
+right volume (V341's inside rows).
+
+**WHERE ELSE IT BITES.** Every GenericIon with a range under 10 um within that range of a
+boundary: the recoils and residual nuclei every hadronic event makes (an O16 recoil of 0.55 MeV
+has 1.3 um). Inside a volume the deposit is the same; at a boundary it lands on the wrong side.
+The signature, measured with the fix (V344): the proton depth-dose gate's CSV moves in exactly two
+slab pairs, 5.360 MeV from slab 29 to 30 and 0.171 MeV from 108 to 109, the total unchanged to
+the digit - two recoils of 6,000 protons born within a range of a 0.5 mm slab face. In B1 the
+trapezoid's faces are the only scored boundaries and the effect on the beams is 0.003-0.04 sigma
+(V344). The sweep's nuclei at the face above 1.5 MeV/n do NOT hide a partial version: their
+primaries have ranges over 10 um and cross, and their port runs at equal counts are the same to
+the digit before and after (C12 3 MeV/n 50k-800k, Fe56 10 MeV/n 50k-800k).
+
+**THE SAME FLOOR IN THE HADRON BRANCH** (and in `step_lepton`'s own 10 um guard): a proton under
+~0.5 MeV within 10 um of a boundary is deposited on the wrong side. Equally un-Geant4, left
+unchanged here because removing it moves the proton, pion and light-ion gates - named for a
+package of its own.
+
+### V343: the fix - `range_floor = (kt != kGenericIon)`; a nucleus is stepped at any range and stops by Geant4's rules alone
+
+`src/physics/stepper.cuh`, `step_hadron`: the guard is `p.ekin >= kHadronTrackingCut && (!range_floor
+|| range >= kMinUsefulRange)` with `range_floor` false for `kGenericIon` only. `kt` is the kernel's
+compile-time type (`run_step_hadron<kType>`; the strange group's representative is kSigmaPlus), so
+the condition folds to the old one in every other kernel - no line the hadron branch executes
+changed. What then happens to a short-range nucleus is the code the hadron branch already had,
+and it IS Geant4's: the step limit `max_step = range` below `finalRange` (0.1 mm), the boundary
+cut, `step_len >= range` taking the whole energy (:812), the linear loss and the long-step
+inversion at `linLossLimit` 0.02 (:825-834), the ion corrections and G4IonFluctuations. The
+floor's purpose - a track that never stops - does not arise: with the range under `finalRange` the
+physics step is the range itself and one step ends it.
+
+`tests/test_ion_transport.cu`: section 5's oxygen at 0.55 MeV used to be asserted to run a path of
+exactly ZERO (the floor's behaviour, and the comment called it Geant4's); it now must run its
+range (1.347e-3 mm, one step), as must C12/N14/Ca40 at 2.99-3.52 um. Section 7 is new: Fe56 and
+C12 at 1 MeV/n fired 1 um before a water or bone box, every first step ending on the boundary,
+the 1 um keeping Geant4's tape loss to 5% (5.110 vs 5.044 MeV, 0.756 vs 0.736 MeV), box plus
+envelope exactly the energy fired. With the floor put back the file fails 10 assertions (four in
+section 5, six in section 7). Units staled: all 25 stepping units and the 9 interaction units
+(every one includes stepper.cuh); compiled here in full, CUDA 12.9, sm_70.
+
+### V344: the proof - the four face rows from -100% to inside 0.6 sigma; every other ion row inside 1.9 sigma; the photon gate and the eleven gates to the digit, the proton depth CSV's total to the digit with 5.5 MeV moved across two slab faces; the beams' doses move by 0.003-0.04 sigma
+
+**P27's ION ROWS** (`tools/p27_sweep.ps1 -Sides port` on this binary; Geant4's rows are
+docs/sweep/p27/runs.csv's, every one inside the 5% start-up rule; docs/sweep/p27/p45/ has the
+reports and the port's runs). Before = V341/V337's row, after = this; sigma over both rms:
+
+| row (gun at the face, tier 4) | before | after |
+|---|--:|--:|
+| C12 1 MeV/n water | -100.00%, **-839.3** | -0.09%, -0.4 |
+| C12 1 MeV/n bone | -100.00%, **-839.3** | +0.02%, +0.1 |
+| Fe56 1 MeV/n water | -100.00%, **-567.5** | +0.04%, +0.1 |
+| Fe56 1 MeV/n bone | -100.00%, **-839.3** | +0.07%, +0.6 |
+| C12 3 / 10 / 30 / 100 MeV/n water | +1.2, +1.0, +0.2, -1.1 | -0.2, +0.3, -0.4, -1.2 |
+| C12 3 / 10 / 30 / 100 MeV/n bone | +1.3, +0.9, +0.2, -0.6 | -0.1, +1.0, +0.2, -0.2 |
+| Fe56 3 / 10 / 30 / 100 MeV/n water | +1.5, +1.0, +0.1, -0.2 | -0.5, -0.3, +0.6, +0.4 |
+| Fe56 3 / 10 / 30 / 100 MeV/n bone | +1.5, +1.0, +0.6, +0.6 | 0.0, -0.6, +0.4, +1.2 |
+| d, t, He3, alpha 1 MeV/n water | +0.2, +0.2, -1.5, -0.4 | -0.6, -1.2, -1.5, -0.7 |
+| d, t, He3, alpha 1 MeV/n bone | -0.5, +0.7, -0.9, -0.5 | -1.8, -0.3, -0.9, -1.9 |
+| **tier 1, B1's gun** | | |
+| C12 100 / 1000 MeV/n water | -0.3, -0.2 | -0.3, -0.2 (the same digits) |
+| C12 100 / 1000 MeV/n bone | +1.3, +0.0 | +1.0, -0.2 |
+| Fe56 100 / 1000 MeV/n water | +2.2, -0.8 | +2.2, -0.8 (the same digits) |
+| Fe56 100 / 1000 MeV/n bone | +2.1, -1.1 | +1.8, -1.1 |
+
+WHY THE OTHER ROWS MOVE AT ALL: the saturation protocol stops each row at the count its timing
+decides, and that count is not the same run to run - at EQUAL counts the face rows above 1 MeV/n
+and the light-ion rows are the same digits before and after (z_C12_3 water 50k-800k, z_Fe56_10
+water 50k-800k, z_deuteron, z_alpha, z_He3 at every count both ran; z_triton water at 1.6M moves in the 7th digit,
+3.81742 -> 3.81743e-7 Gy: a triton's hadElastic recoil off oxygen is a GenericIon). The tier-1
+water rows are the same digits at the same counts (C12 100 MeV/n 3.2M: 112.545 nGy, 94,359,330 ->
+94,360,647 steps; Fe56 1 GeV/n 200k: 128.255 uGy, 2,636,448,911 -> 2,636,451,604 steps). The tier-1
+BONE rows at the same counts move inside one sigma: C12 100 MeV/n 3.2M 107.095 -> 106.727 nGy (rms
+0.797; -0.46 sigma of one run), Fe56 100 MeV/n 1.6M 96.8242 -> 96.4071 nGy (rms 0.777; -0.54),
+Fe56 1 GeV/n 100k 63.267 -> 63.264 uGy (rms 0.240; -0.01) - the dose in those rows is secondaries'
+in the trapezoid, made by neutrons and fragments whose GenericIon recoils now step; both moved
+rows went TOWARDS Geant4 (+1.58% -> +1.23%, +2.67% -> +2.23%).
+
+**THE BEAMS** (exampleB1, final stage, default live count, before = main 04eda72's binary, after
+= this; the Geant4 row for Fe56 is P27's Fe56_1000 bone box row, 6.3993e-10 +/- 6.1e-12 Gy an event):
+
+| beam | before | after | moved by |
+|---|---|---|---|
+| photon 6 MeV 2M | 85.2055 nGy (0.173586), 26,050,805 steps | the same digits | 0 |
+| proton 1 GeV 200k | 391.091 nGy (1.33737), 11,546,754 | 391.038 (1.33725), 11,547,431 | -0.04 sigma |
+| pi+ 10 GeV 100k | 333.171 nGy (2.0107), 12,933,586 | 333.143 (2.01057), 12,933,910 | -0.01 sigma |
+| Fe56 1 GeV/n 5k | 3.08481 uGy (53.0665 nGy), 62,561,195 | 3.08466 (53.0673), 62,562,443 | -0.003 sigma; vs Geant4 -1.88 -> -1.88 |
+| Fe56 1 GeV/n 20k | 12.5056 uGy (106.727 nGy), 249,303,436 | 12.5050 (106.729), 249,308,285 | -0.006 sigma; vs Geant4 -1.81 -> -1.81 |
+
+The proton and pi+ beams move because their hadronic events make GenericIon residuals and recoils:
+that is this fix acting on nuclei, not a shared line - the steps added (+677, +324, +1,248,
++4,849) are the nuclei now taking a step across a boundary they used to die short of. Rates are not
+quoted: the after beams ran beside a compile.
+
+**THE ELEVEN GATES** (build_all.bat's gate section command for command, drivers rebuilt against
+this engine, under one hold of the lock as build_all takes it): every printed dose, sigma, step
+count and pool/sequence check equal to ba76's (B1 at 1.1045 sigma; B1 427.3055 +/- 1.7400 pGy,
+6,508,913 steps; B1mesh 427.3033, 6,508,701; the switches, the step hook, the pools, the two-run
+sequence). The proton depth-dose gate: the total 584,851.12 MeV (97.4752%), plateau 1.00043, R80
+77.694 mm and the width 1.200 mm identical; the CSV differs in four slabs - 29/30 by -/+5.35993 MeV
+and 108/109 by -/+0.17056 MeV, summing to zero: two oxygen recoils that now cross a slab face (md5
+c6ca0b1f... -> bb4c71e8...). The gate is stage 1, where hadElastic's recoils are the only nuclei.
+
+**THE GPU TESTS** that include stepper.cuh, rebuilt and run: test_ion_transport PASS (with the
+oracle), test_step_hadron, test_ion_msc, test_inelastic_transport PASSED, test_ion_primary PASS,
+test_strange_tracks 301 comparisons 0 failures. The host test_ion_* oracle tests include no file
+this changed.
+
+### V345: docs - B1_SWEEP's P27 section and the plan row: the nucleus at the face closed
+
+docs/B1_SWEEP.md's P27 list: the 1 MeV/n line now says what it was and that it is fixed (V342-V344);
+docs/HADRONIC_PLAN.md's P27 row the same. README carries no ion gate digit, so it is unchanged.
+
+**REFUSED OR LEFT, BY NAME:** the hadron branch's and `step_lepton`'s 10 um floors (V342: they move
+the proton/pion/light-ion gates - a package of their own); the 3-sigma tables of B1_SWEEP not
+recounted beyond the four face rows (553 of 630 inside with them, from 549); the slow-ion -0.5%
+of V341's inside rows, which this does not touch (a nucleus started inside always deposited
+there).
