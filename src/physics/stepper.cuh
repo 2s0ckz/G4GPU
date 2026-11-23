@@ -1780,6 +1780,27 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
                                           mm, p.ekin, rng, munuc_xs)
             : geom::kInfinity<real_t>();
 
+    // ---- `muBrems` and `muPairProd`, for mu- and mu+ only (P46, docs/RISK.md V346-V347).
+    //
+    // G4EmBuilder::ConstructCharged registers one G4MuBremsstrahlung and one G4MuPairProduction
+    // on both muons (QBBC reaches 100 TeV, so `isHEP`). Both are discrete in every B1 material -
+    // the sub-cut losses are 4e-10 MeV/mm and 0 - and until P46 neither was drawn: at 10 GeV in
+    // water Geant4's tape puts 0.13% of the trapezoid's dose in their showers. The cuts are the
+    // processes' SECONDARY particles': the photon's for the brem, the POSITRON's for the pair.
+    // The rate is the model at the pre-step energy, the convention every discrete EM process in
+    // this stepper follows (docs/RISK.md V78); each length is drawn only where its cross section
+    // is non-zero - above 100 MeV and 850 MeV - so a muon below those consumes the uniforms it
+    // did before. `is_muon` folds in the other kernels and the lines vanish.
+    real_t mubrem_xs = real_t(0), mupair_xs = real_t(0);
+    if (is_muon) {
+      em::mu_radiative_xs<real_t>(mm, type, p.ekin, mm.cut_gamma, mm.cut_positron, mubrem_xs,
+                                  mupair_xs);
+    }
+    const real_t d_mubrem = (mubrem_xs > real_t(0)) ? -log(rng.uniform()) / mubrem_xs
+                                                    : geom::kInfinity<real_t>();
+    const real_t d_mupair = (mupair_xs > real_t(0)) ? -log(rng.uniform()) / mupair_xs
+                                                    : geom::kInfinity<real_t>();
+
     // Continuous-loss limit, G4VEnergyLossProcess::AlongStepGetPhysicalInteractionLength with
     // the mu/hadron step function (0.2, 0.1 mm).
     const real_t finR = em::kHadronFinalRange<real_t>();
@@ -1872,7 +1893,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // Behind `is_muon` and not merely an `fmin` with 1e30, because a hadron crossing a
     // near-vacuum can have a range past 1e30 mm and an unconditional `fmin` would then clip its
     // step; for the eleven other species the line does not exist after `is_muon` folds.
-    if (is_muon) { t_step = fmin(t_step, d_munuc); }
+    if (is_muon) { t_step = fmin(fmin(t_step, d_munuc), fmin(d_mubrem, d_mupair)); }
 
     // The energy after the whole true step, and the transport mfp at the mean energy - both
     // are inputs to WentzelVI's true/geometric conversion, so both are computed from the
@@ -1950,12 +1971,22 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // two continuous distributions has probability zero; what it must not do is fire both.
     const bool decays = !hits_boundary && (d_decay <= t_step) && (d_decay < d_delta);
     const bool emits_delta = !hits_boundary && !decays && (d_delta <= t_step);
+    // P46: the muon's two radiative processes, after muIoni and before CoulombScat - the
+    // manager's order for mu+- (`species_processes.csv`: msc, muIoni, muBrems, muPairProd,
+    // CoulombScat, muonNuclear, Decay). Constant false outside the muon kernels.
+    const bool emits_mu_brem = is_muon && !hits_boundary && !decays && !emits_delta
+                               && (mubrem_xs > real_t(0)) && (d_mubrem <= t_step);
+    const bool emits_mu_pair = is_muon && !hits_boundary && !decays && !emits_delta
+                               && !emits_mu_brem && (mupair_xs > real_t(0))
+                               && (d_mupair <= t_step);
+    const bool mu_radiates = emits_mu_brem || emits_mu_pair;
     // Coulomb scattering last, as in step_lepton: `G4EmBuilder::ConstructLightHadrons`
     // registers msc, hIoni, hBrems, hPairProd and then G4CoulombScattering, and G4DecayPhysics
     // runs before G4EmStandardPhysics in QBBC's constructor list - so Decay is ahead of every EM
     // process on the manager and CoulombScat is behind all of them. See the note on ties above.
+    // (`!mu_radiates` is P46's and folds to true for every species but the muons.)
     const bool coulomb_scatters =
-        !hits_boundary && !decays && !emits_delta && (d_coul <= t_step);
+        !hits_boundary && !decays && !emits_delta && !mu_radiates && (d_coul <= t_step);
     // And hadElastic after both, because `G4HadronElasticPhysicsXS` is registered after
     // `G4EmStandardPhysics` and `G4DecayPhysics` in QBBC's constructor list - so it is last on
     // the process manager and loses every tie. `ref/oracle/species_processes.csv` has the order
@@ -1980,7 +2011,7 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     // decay goes to the decay here. `munuc_xs > 0` for the reason `step_lepton` gives for its
     // `enuc_xs`: a length of 1e30 is not a process.
     const bool interacts_muon_nuclear = is_muon && !hits_boundary && !decays && !emits_delta
-                                        && !coulomb_scatters && !scatters_elastic
+                                        && !mu_radiates && !coulomb_scatters && !scatters_elastic
                                         && !interacts_inelastic && (munuc_xs > real_t(0))
                                         && (d_munuc <= t_step);
 
@@ -1995,6 +2026,12 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
     } else if (emits_delta) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fIonisation;
+    } else if (emits_mu_brem) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fBremsstrahlung;
+    } else if (emits_mu_pair) {
+      rep.status = StepStatus::fPostStepDoItProc;
+      rep.process = ProcessId::fPairProdByCharged;
     } else if (coulomb_scatters) {
       rep.status = StepStatus::fPostStepDoItProc;
       rep.process = ProcessId::fCoulombScattering;
@@ -2183,6 +2220,28 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
         em.push(ParticleType::kElectron, d.delta_dir, d.delta_ekin, p.event);
         p.ekin = d.primary_ekin;
         p.dir = d.primary_dir;
+      }
+    }
+
+    // ---- P46: `muBrems` / `muPairProd` PostStepDoIt on the post-step state, as the delta ray
+    // above: the element by the partial cross sections at this energy (one uniform where the
+    // material has more than one element, as G4EmElementSelector draws), then the model's
+    // SampleSecondaries. Every secondary is pushed - G4VEnergyLossProcess applies no cut to them
+    // (ApplyCuts is false), and a pair's electron or positron may be below the cut - in
+    // Geant4's push order, the brem's photon, the pair's electron then positron.
+    if (mu_radiates && p.ekin > real_t(0)) {
+      const em::MuRadFinalState<real_t> fs = em::mu_radiative_sample<real_t>(
+          s.hadron_range->mu_pair, mm, emits_mu_pair, p.ekin, pd.mass, mm.cut_gamma,
+          mm.cut_positron, p.dir, rng);
+      if (fs.n > 0) {
+        em.pos = p.pos;
+        em.volume = p.volume;
+        em.event = p.event;
+        for (int k = 0; k < fs.n; ++k) {
+          em.push(fs.sec_type[k], fs.sec_dir[k], fs.sec_ekin[k], p.event);
+        }
+        p.ekin = fs.primary_ekin;
+        p.dir = fs.primary_dir;
       }
     }
 
