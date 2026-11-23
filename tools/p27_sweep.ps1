@@ -139,7 +139,7 @@ switch ($Tier) {
   default { throw "tier ${Tier}: 1, 2, 3 or 4" }
 }
 foreach ($g in $groups) {
-  if ($Species -ne "")   { $w = $Species -split ","; $g.Spec = @($g.Spec + $core + $extra | Where-Object { $w -contains $_.Name } | Sort-Object Name -Unique) }
+  if ($Species -ne "")   { $w = $Species -split ","; $g.Spec = @(@($g.Spec) + @($core) + @($extra) | Where-Object { $w -contains $_.Name } | Sort-Object Name -Unique) }
   if ($Materials -ne "") { $g.Mats = $Materials -split "," }
   if ($Energies -ne "")  { $g.Ens = @($Energies -split "," | ForEach-Object { [double]$_ }) }
 }

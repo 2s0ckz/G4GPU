@@ -21210,7 +21210,7 @@ sides, applied before /run/initialize.
   G4State_PreInit only and not broadcast (only the master constructs). The main is exampleB1.cc's
   batch path less the visualisation manager; run.bat is runb1.bat's environment and leaves the
   run manager to the caller.
-- THE PROOF that the shipped default is untouched, measured 2026-11-21 06:10-06:50. The port:
+- THE PROOF that the shipped default is untouched, measured 2026-11-21 06:05-06:13. The port:
   ba75's own exampleB1 against this package's relink of the same engine (ba75's
   transport_run.lib and vis_manager.obj, the seven B1 objects recompiled), and the relink again
   with `/B1/det/material G4_BONE_COMPACT_ICRU` in front of /run/initialize, on build_all's four
