@@ -22013,3 +22013,270 @@ the 300 MeV air rows, -0.34%, the gas (P44); (3) the 100 MeV bone rows at +3.0 s
 hBrems / hPairProd for the hadrons (PORTED 1.4), the same models with the hadron's differential
 cross section; (5) the radiative sub-cut dE/dx in the muon's range table (2.5e-9 in water, zero for
 the pair below a 2.04 MeV positron cut).
+### V350: P44's deposit tape - a 1 MeV neutron's dose in an air cavity is the recoil protons Geant4 makes ON the cavity's water walls (51,552 per 4M neutrons, 92.5% of the dose), and the port killed every one of them in the water by a 10 um range guard Geant4 does not have; e+- at 100 keV in air are short of delta rays (-4.1%) because the port drew eIoni/eBrem at the pre-step energy where Geant4 uses its lambda tables and the integral approach; the cut audit agrees in the gas (990 eV floor on both sides) and is 1e-5 to 3e-4 off in the dense materials
+
+**THE TAPE.** P27's diagnosis (V338, V340 item 2, V341) was a suspect, not a cause. P44 taped every
+step whose pre-step point is in the scoring trapezoid, on both sides, for the failing and the
+agreeing cases, at the same counts, the gun 1 um upstream of the trapezoid (`/B1/gun/z 39.999 mm`):
+- the port: the engine's own `StepTap<double>` (core/step_hook.cuh, scorer 0, every step) installed
+  by a modified `exampleB1.cc` linked against P27's copy of the gate engine (the same `src/` as
+  04eda72) - not committed; the records aggregated by species, the process that ended the step
+  and its status, and by flow (a track's first record: born in the volume or entered it; a step
+  that leaves it alive);
+- Geant4: ref/b1mat with a stepping action DERIVED from B1::SteppingAction (B1's own call first,
+  then the tape; Geant4's sources untouched), serial, keyed by species, creator process, the
+  step-defining process and the kind (continuous, boundary, killed), plus the same flows and the
+  first 15 "born" protons' positions - not committed.
+
+**NEUTRON 1 MeV INTO AIR, 4,000,000 events a side** (MeV deposited in the trapezoid; G4 1.57977 uGy,
+the port 0.2425 uGy, -84.6%):
+
+| species | Geant4 | port (04eda72) | what it is |
+|---|--:|--:|---|
+| proton | 10,571.7 | 1,541.5 | G4: 51,552 protons "born" in the air, every one at a point ON the trapezoid's surface (z = 40.000000 or 100.000000 mm, or a side face), status fUndefined, parent the primary neutron, 0.22 MeV mean - 11,336 MeV; plus 1,347 entering (170 MeV). Port: none born, 2,962 entering (1,853 MeV, 0.63 MeV mean) |
+| GenericIon (N, O recoils) | 504.3 | 118.1 | G4: 4,821 born (518 MeV) - its own N/O recoils in the air and O recoils from the walls; port: 867 (118.5 MeV), the air's own only |
+| neutron (sub-70 keV recoils, local) | 23.9 | 25.6 | the same: the elastic in the air itself agrees (2,162 vs 2,152 interactions) |
+| e- | 17.9 | 21.8 | |
+| total | 11,119.2 | 1,707.0 | |
+
+Pure O and N gas, the same 4M: G4 11,385.7 / 11,046.1 MeV, protons 10,717.6 / 10,538.8 of it, 51,957
+protons born on the walls of an OXYGEN cavity - which has no hydrogen. Water (500,000, the control):
+G4 211,376, port 210,294 MeV, protons 183,588 / 182,501.
+
+**WHY GEANT4 MAKES PROTONS ON THE WALL.** `G4NeutronGeneralProcess::PostStepGetPhysicalInteraction
+Length` refreshes `currentInteractionLength` for the CURRENT material before it charges the previous
+step (V219: `CurrentCrossSection(track)` first, then `theNumberOfInteractionLengthLeft -=
+previousStepSize/currentInteractionLength`). A neutron that crossed centimetres of air into the water
+has those centimetres charged at the water's 1.8 cm mean free path: the count goes to 0 and the
+neutron interacts at the wall, a zero-length step in the water - half the time on hydrogen. The
+recoil's G4Track is made with the parent's touchable (the water), and `G4SteppingManager::
+SetInitialStep` calls `ResetHierarchyAndLocate(position, DIRECTION, touchable)`: a point on the
+surface is located into the volume the direction points into, so a recoil heading back into the
+cavity starts in the air and deposits there. That is QBBC as it ships and the reference; the port
+transcribes the same order (P22, `had::neutron_general_length`, kGeant4_11_1_1 by default), so its
+neutron interacts at the wall too - and its recoil proton, 1e-7 mm (`kPushDistance`) inside the water
+with a few um of range, was killed there by `step_hadron`'s guard `range >= 10 um` before geometry
+was asked anything. A proton below ~0.45 MeV and every slow nucleus. Above it the proton crossed - the
+2,962. In water and bone the same protons are created and deposited in the same material, which is
+why every dense row agreed.
+
+**E- AND E+ 100 keV INTO AIR, 100,000 events a side**: e- G4 2,264.8 / port 2,242.6 MeV (-1.0%);
+delta rays born in the air G4 167,264 (534.3 MeV) / port 160,471 (511.4 MeV), -4.1% in number and
+-4.3% in energy, with the same mean (3.19 keV) - so the missing dose is the missing delta rays, not
+their spectrum; the energy leaving the volume is +31 MeV on the port's side. e+: G4 2,396.1 / port
+2,330.9 (-2.7%), deltas -6.4%, the annihilation photons born in air -13%. Two causes, separated with
+Geant4's own switch: `/process/em/integral false` (2,000,000 e- a side, serial) moves Geant4's air
+dose from 6.48607 to 6.44486 uGy (-0.64%, 4.8 sigma), and the port (6.39478, -1.41%) sits a further
+-0.78% below that. The first is V78: `G4VEnergyLossProcess` draws eIoni and eBrem from its lambda
+tables at `preStepLambda`, the cross section's maximum over the energies the step passes through,
+and rejects at the post-step energy; the port drew the models at the pre-step energy, which above the
+Moller peak (3.8 keV in air at the 990 eV cut) is the step's MINIMUM. In a dense material the e- cut
+is 280-460 keV and the discrete share of the loss is small; in a gas it is almost all of it. The
+second is the same 10 um guard in `step_lepton`: an electron below ~22 keV within 10 um of the
+water wall was killed in the water instead of crossing back into the cavity.
+
+**PROTON 10 MeV INTO AIR** (the agreeing control, 200,000 a side): G4 27,998.3, port 27,869.2 MeV
+(-0.46%: protons -0.47%, deltas -0.60%). Not a tape signal at this count; V341's 30 MeV row (-0.52%,
+-3.8 sigma) is the same size - see V352.
+
+**THE CUT AUDIT** (Geant4: `/run/dumpCouples` after one event; the port: the engine's converted
+cuts, every material of the scene printed to 9 digits by a temporary line in G4RunManager.hh, not
+committed), MeV:
+
+| material | gamma G4 / port | e- G4 / port | e+ G4 / port | proton |
+|---|---|---|---|---|
+| G4_AIR | 0.00099 / 0.00099 | 0.00099 / 0.00099 | 0.00099 / 0.00099 | 0.070 both |
+| G4_WATER | 0.00252521 / 0.00252562 (+1.6e-4) | 0.277633 / 0.277640 (+2.8e-5) | 0.270823 / 0.270815 (-3.0e-5) | 0.070 both |
+| G4_A-150_TISSUE | 0.00228343 / 0.00228364 (+9e-5) | 0.301331 / 0.301335 | 0.293733 / 0.293733 | 0.070 both |
+| G4_BONE_COMPACT_ICRU | 0.00393604 / 0.00393535 (-1.8e-4) | 0.398360 / 0.398373 (+3e-5) | 0.386306 / 0.386308 | 0.070 both |
+| G4_Al | 0.00584707 / 0.00584720 (+2e-5) | 0.461190 / 0.461197 | 0.445100 / 0.445100 | 0.070 both |
+| G4_POLYETHYLENE | 0.00197595 / 0.00197538 (-2.9e-4) | 0.277611 / 0.277619 | 0.271043 / 0.271035 | 0.070 both |
+
+In the gas every cut is the converter's 990 eV floor on both sides, and the proton cut (the hadron
+elastic recoil threshold, `G4RToEConvForProton`: `rangeCut/mm * 100 keV`) is 70 keV in every
+material on both sides - so the cut is not the gas dose, which the brief suspected. In the condensed
+materials the port's converter (data/production_cuts.cuh) differs from Geant4's by 1e-5 to 3e-4: not
+"to the digit". `data::build_b1_materials` carries Geant4's own cuts (9 digits), but the engine's
+scenes are built through G4NistManager and the converter. It moves no gas row; it is left, by name, for
+the package that owns data/ (P43's directory) - see V353.
+
+### V351: the two causes and their fixes - the 10 um range guard removed from step_lepton and step_hadron (Geant4 stops a charged track at 1 keV or at the end of its range and nowhere else), and the e+- discrete rates drawn as Geant4 draws them (eIoni's and eBrem's lambda tables, the integral approach, the annihilation thinned) - one commit each, the tape rerun after both
+
+**CAUSE 1, the range guard (commit "A charged track is stopped only where Geant4 stops it").**
+`step_lepton` killed a lepton whose residual range was under 10 um, and `step_hadron` did the same to
+every hadron, a nucleus included, before geometry was asked anything - docs/RESULT.md's "absolute
+range guard", added for an FP32 stall (`energy_from_range` making no progress) and kept in FP64 for
+1.7x at a time when the last steps of an electron were ground down by the step function. Geant4 has
+no such rule: `G4VEnergyLossProcess::AlongStepDoIt` stops a track when the step reaches its range or
+the energy is at `lowestKinEnergy` (1 keV, LowestElectronEnergy / LowestMuHadEnergy), both already
+transcribed - with the linear loss and the 1 keV line a double-precision step cannot make zero
+progress. Removed; nothing replaces it. The two blocks are delimited `P44` in stepper.cuh; the
+hadron's is the condition every hadron shares, so it is also the GenericIon's (P45's branch) - a
+nucleus with less than 10 um of range now steps to its boundary like any other track.
+
+What it costs: nothing measurable. The all-switches-on process gate's step count moved by +0.02%
+(2,605,456 -> 2,606,008) and the 2M photon gate's rate by -1.8% (5.54M -> 5.44M events/s, within
+the spread of two runs of the same binary) - the "32 of 71 steps per event" the guard once saved
+were the grinding the step function and Urban's `currentRange < presafety` exit have since removed.
+
+**CAUSE 2, the e+- discrete rates (commit "The e+- discrete rates are Geant4's").** V78 refused this
+by name and measured its size in the tables; P44 measured its size in a dose. Transcribed in
+`em/lepton_lambda.cuh`: the lambda vectors of eIoni (G4MollerBhabhaModel, from MinPrimaryEnergy =
+2*cut for e-, cut for e+) and eBrem (the Seltzer-Berger and relativistic models joined at 1 GeV by
+FillLambdaVector's `(1 + del/e)`, from the gamma cut), on `G4EmTableUtil::BuildLambdaTable`'s grid
+(7 bins/decade of 0.1 keV-100 TeV, startNull, splined); `FindCrossSectionMax` (eIoni fEmOnePeak:
+peak 3.8 keV for e- in air, none in water, A-150 or bone) and `FillPeaksStructure` (eBrem
+fEmTwoPeaks); `ComputeLambdaForScaledEnergy`'s majorant; `PostStepDoIt`'s rejection
+`preStepLambda*u >= lambda(E_post)`, its uniform drawn before the model's; the annihilation as
+G4VEmProcess's fEmDecreasing (no table: the model at 0.8E, rejected at E_post). The tables against
+Geant4's own, stored in ASCII by ref/b1mat/store_lambda_tables.mac (tests/test_lepton_lambda.cu):
+every eIoni node to 1.5e-9 (the nine-digit cuts of `build_b1_materials`), every eBrem node in air to
+2.2e-12; in the condensed materials eBrem sits 1.7-2.4e-5 off below 100 GeV and up to 1.1e-3 at
+10-100 TeV, which is the brems MODEL's (data::brems_dedx_xs), not the table's.
+
+THE ONE THING NOT CARRIED: Geant4 caches `preStepLambda`/`mfpKinEnergy` across a track's steps;
+this computes the majorant afresh each step (as Geant4 does on a track's first step and after every
+interaction) and redraws the interaction length each step, as every other discrete length in this
+transport does. Thinning against any majorant samples the same process, so the distribution is
+Geant4's wherever Geant4's own scheme is exact; the test prints where a [0.8E, E] window is not
+majorised (a window straddling eBrem's deep, a spline over its node peak: at most 1.35%, at 0.39
+MeV), which is Geant4's scheme falling short on both sides. `G4GPU_EM_INTEGRAL=0` leaves
+`Scene::lepton_lambda` null and is the pre-P44 arithmetic, uniform for uniform - the switch the
+attribution below is measured with. A Scene built by a driver of its own (b1_gpu_sched,
+tests/test_lepton_transport) has it null too.
+
+**THE TAPE AFTER BOTH** (the engine of both commits, the same 4M neutrons a side):
+
+| neutron 1 MeV into | Geant4 | port before | port after | after - G4 |
+|---|--:|--:|--:|--:|
+| G4_AIR (uGy) | 1.57977 +/- 0.51% | 0.24253 | 1.59120 +/- 0.51% | +0.72% (+1.0 sigma) |
+| G4_N | 1.62272 +/- 0.52% | 0.24441 | 1.63906 +/- 0.52% | +1.01% (+1.4) |
+| G4_O | 1.46369 +/- 0.51% | 0.23658 | 1.45809 +/- 0.51% | -0.38% (-0.5) |
+| G4_WATER (nGy, 500k) | 36.1818 +/- 0.14% | 35.9967 | 35.9965 | -0.51% (-2.5, both sides unchanged by P44) |
+
+In air by species (MeV): proton 10,571.7 / 10,667.6, GenericIon 504.3 / 481.9, neutron 23.9 / 25.6,
+e- 17.9 / 23.5; the port's protons entering the cavity are now 52,301 (11,566 MeV) against Geant4's
+51,552 born on the wall plus 1,347 entering.
+
+| 2,000,000 a side, serial Geant4 | Geant4 | port before | guard only (`G4GPU_EM_INTEGRAL=0`) | both |
+|---|--:|--:|--:|--:|
+| e- 100 keV into air (uGy) | 6.48607 +/- 0.094% | 6.39478 (-1.41%) | 6.44606 (-0.62%) | 6.48484 (-0.02%, -0.14 sigma) |
+| e+ 100 keV into air | 6.77429 +/- 0.094% | - | 6.70541 (-1.02%) | 6.76841 (-0.09%, -0.65 sigma) |
+| e- 100 keV, Geant4 with `/process/em/integral false` | 6.44486 | | 6.44606 (+0.02%) | |
+
+The guard-only port agrees with Geant4 run WITHOUT its integral approach to 0.02%, and the port with
+both agrees with Geant4 as it ships to 0.02%: the two causes, separated, each Geant4's.
+
+Proton 10 MeV into air (200,000): 3.95956 -> 3.96115 uGy against Geant4's 3.97791 (-0.42%, about
+-1.7 sigma at 0.25% a side) - unmoved by either fix; hIoni's delta rays are drawn the way eIoni's
+were (the integral approach is not transcribed for a hadron), which is the next place to look and is
+listed in V353.
+
+### V352: the proof - P27's air rows rerun on the port (61 of tier 2's 63 inside 3 sigma, the two outside the 10 GeV muons; every tier-4 air row inside, the 1 MeV neutron from -84.7% to +1.4%), the water/bone controls unmoved beyond statistics, the eleven gates with every moved digit named, the fifteen GPU tests and the new table test passing
+
+**THE RERUN** (2026-11-23 15:08-17:43; tools/p27_sweep.ps1 unchanged, `-Sides port -Out out\p44`, the
+port's exampleB1 built from the shipped examples/B1 against this branch's engine, every P27 rule:
+the saturation doubling from the class counts, `G4GPU_HADRONIC_STAGE=final` and no other `G4GPU_`
+variable, `out\gpu.lock` per run). Geant4's rows are P27's own (docs/sweep/p27/runs.csv: the box row
+of every key, start-up inside the timer under 5% on each), seeded into out\p44\runs.csv so the
+driver ran nothing on that side. Per event, 3 sigma combined. docs/sweep/p44/air.md has every row;
+docs/sweep/p44/runs.csv every port run.
+
+**Tier 2 in air (21 species x 300 MeV, 1, 10 GeV): 61 of 63 inside** (before: 15 inside, 48 outside
+by the same comparison). Every hadron, anti-hadron, light ion and nucleus row now lies within
+-2.5% to +1.8% and 2.2 sigma; the 45 hadronic rows of V338 moved by +3% to +26% each - neutron 300
+MeV -26.13% -> +0.26%, proton 10 GeV -10.96% -> +0.02%, triton 1 GeV/n -14.80% -> +1.14%, Fe56 10
+GeV/n -7.45% -> -1.62%. The photons and e+- moved by +0.1-0.3%, within their statistics (gamma 1 GeV
++0.04% -> +0.30%, 1.8 sigma). Outside: mu- and mu+ at 10 GeV, -0.48% and -0.49% (-4.8, -4.9 sigma;
+before -0.63%) - the muon's radiative losses of V337, P46's; the 300 MeV muons that sat at -3.3
+sigma are now at -1.7.
+
+**Tier 4, the gun at the face, in air** (before -> after, sigma after): neutron 1 MeV -84.71% ->
++1.44% (+1.7), 10 MeV -33.74% -> -0.65% (-0.6), 30 MeV -10.94% -> -0.07% (-0.1); e- 100 keV -1.53%
+-> -0.05% (-0.6), 1 MeV -0.17% -> -0.11%, 10 MeV -0.22% -> -0.09% (was -3.1 sigma, now -1.0); e+
+100 keV -1.74% -> -0.01% (-0.1), 1 MeV -0.35% -> -0.15% (was -3.2, now -1.4), 10 MeV +0.04% ->
++0.07%; proton 30 MeV -0.52% -> -0.39% (-3.8 -> -2.8 sigma); alpha 10 MeV/n +0.22% -> +0.27%.
+
+**The controls in water and bone, the species touched, at the face**: neutron 1 and 10 MeV in water
++0.04% / +0.07% before and after (the same digits to 1e-4); in bone 1 MeV +0.23% -> -0.01%, 10 MeV
++1.18% -> +1.07% (+6.1 sigma - V340 item 8, not this package's: the water row agrees and the bone
+row's excess is unmoved); e- and e+ at 0.1, 1 and 10 MeV in water and bone, twelve rows, all within
+-0.12% to +0.06% (1.7 sigma at most).
+
+**THE ELEVEN GATES** (build_all.bat's gate section command for command - P42's out\p42\gates.bat
+pointed at this worktree; b1_gpu_sched, g4dose, proton_depth and examples/B1 rebuilt against this
+engine; compared line by line with P42's gate run, whose digits are ba76's): every check rc 0, and
+the digits that moved, each with its cause:
+- b1_gpu_sched 2M (its own Scene, no lepton tables: cause 1 only): 427.699 -> 427.705 pGy, raw edep
+  924,497.34 -> 924,510.50 MeV (+1.4e-5). A 6 MeV photon beam's electrons below ~22 keV within 10
+  um of a surface of the bone trapezoid, the cone or the envelope now cross it, as Geant4's do.
+- exampleB1 -n 2000000: 426.028 -> 426.118 pGy, 1.1045 -> 1.0309 sigma from Geant4 (both causes;
+  with `G4GPU_EM_INTEGRAL=0`, cause 1 alone, 426.017 and 1.1133). The macro run (10k events):
+  426.263 -> 423.240 +/- 12.27 pGy, 0.23 sigma from the batch run - a 10,000-event run's random
+  re-draw (the rejection uniform reorders every electron's stream after its first rejected delta).
+- the mesh gate: B1 vs B1mesh -0.0021 -> -0.0024 pGy, 0.00 sigma; steps -0.0%.
+- the physics switches: all on 427.3899 -> 427.7359 pGy, 2,605,456 -> 2,594,067 steps (-0.44%:
+  rejected deltas and brems end a step without a secondary), every switch still changes the result.
+- the step hook: 43,353 -> 43,208 steps tapped, hook = scorer exactly (rel 0).
+- the pool sizes: 8.0 / 4.0 / 2.5 slots identical to each other (427.7359 each).
+- the two-run sequence: 842.260/871.530 -> 839.270/870.476 pGy (1.27 sigma apart); a second process
+  replays both runs exactly; two runs of N against one run of 2N rel 0.00E+000 -> 2.34E-006 (cause 1
+  alone, integral off: 1.17E-006), check_run_sequence passing. NOT EXPLAINED: the summed and the
+  single run take the same number of track-steps to the step (519,916 = 259,369 + 260,547 with the
+  integral off), so no track is handled differently, yet the printed doses differ by 0.002-0.004
+  pGy, a little more than the three printed values' rounding (0.0015). P42 printed exactly zero.
+- the proton depth-dose: 584,851.12 -> 584,854.27 MeV, port/G4 -0.140% -> -0.139%, plateau 1.00043
+  -> 1.00042, R80 77.694 mm and 80-20 1.200 mm unchanged, OK (the protons' delta rays: cause 2).
+No gate digit moved from a CUT or a GAS: the gates' materials are water, A-150, bone and the air
+world, and every move above is the guard (slow electrons and protons at a boundary of the dense
+volumes) or the e+- integral approach (the delta-ray and brems rates of every electron).
+
+**THE GPU TESTS**: build_all.bat's TESTS_GPU, fifteen, compiled against this branch and run from the
+repository root (the oracle CSVs copied from D:\g4gpu\ref\oracle): fifteen pass.
+tests/test_ion_transport.cu section 5 asserted the guard (a zero path below 10 um) and failed four
+rows by design; it now asserts the range Geant4 runs (commit "test_ion_transport asserts the range
+Geant4 runs"). tests/test_lepton_lambda.cu (new, host only): PASS against Geant4's stored tables.
+
+**THE RATE**: the 2M photon gate 5.54M -> 5.43M events/s (b1_gpu_sched, -2%, the spread of one
+binary run twice); exampleB1 -n 2M 3.21M -> 3.15M events/s; the neutron 1 MeV in air (taped)
+523,776 -> 440,602 events/s, the cavity now stepping 52,000 recoil protons a 4M run where it killed
+them. README's throughput rows (water and bone) are not rerun; nothing in this package moves them
+by more than the run-to-run spread on the beams measured here.
+
+### V353: P44 closed - the docs (B1_SWEEP's P27 section, the plan row, docs/sweep/p44), what was refused or left by name, and the files for the lead
+
+**DOCS.** docs/B1_SWEEP.md's P27 section gains "the air rows after P44"; the plan row of P27 names
+P44; docs/sweep/p44/air.md is the 63 tier-2 air rows and the tier-4 rows rerun, before and after;
+docs/sweep/p44/runs.csv is every port run of the rerun. README's throughput table is not changed: its
+rows are water and bone beams P44 did not rerun, and the beams it did measure moved by the
+run-to-run spread (V352).
+
+**REFUSED OR LEFT, BY NAME.**
+- The cut converter (data/production_cuts.cuh) is 1e-5 to 3e-4 off Geant4's in the condensed
+  materials (V350's audit) - not the gas dose, which has the 990 eV floor on both sides; data/ is
+  P43's directory in this round, and fixing it moves every gate digit. Left, with the table.
+- hIoni's (and ionIoni's, muIoni's) delta rays are still drawn at the pre-step energy: the integral
+  approach is transcribed for e+- only. The 30 MeV proton in air sits at -0.39% (-2.8 sigma), the 10
+  MeV at -0.42%; the hadron's turn is the same transcription on `hadron_delta_xs` with its own lambda
+  tables (G4hIonisation's MinPrimaryEnergy, fEmOnePeak).
+- Geant4's cache of `preStepLambda`/`mfpKinEnergy` across steps is not carried (V351: the same
+  distribution wherever Geant4's own scheme is exact).
+- eBrem's element is chosen by Z^2*n in `step_lepton` (not G4's SelectRandomAtom on the element cross
+  sections) - seen while reading, not touched, not measured.
+- A secondary born on a surface is not relocated by its direction as `SetInitialStep` does; it
+  crosses on a first step of 1e-7 mm (`kPushDistance`), the same dose.
+- The bone neutron rows (+1.07% at 10 MeV, +6.1 sigma) and the 10 GeV muons (-0.5%) are other
+  packages' (V340 item 8; P46).
+- The two-run gate's 2.34e-6 (V352), not explained.
+
+**FOR THE LEAD.** Branch phys/gas_dose: four commits on 04eda72 - the range guard (stepper.cuh, two
+delimited P44 blocks; the hadron's is the condition P45's GenericIon branch shares), the e+- integral
+approach (stepper.cuh's step_lepton, three P44 blocks; physics/scene.cuh one field, last;
+physics/em/lepton_lambda.cuh and host/lepton_lambda_upload.cuh new; host/transport_run.cuh one member;
+host/transport_run_engine.cuh the upload, the free and one assignment, each in a P44 block;
+tests/test_lepton_lambda.cu and ref/b1mat/store_lambda_tables.mac new), test_ion_transport's section 5
+(a P44 block in P45's area), and these docs. Every stepping and interaction unit is stale
+(stepper.cuh, scene.cuh); the gate needs ref/oracle's stored tables for test_lepton_lambda if it goes
+on a TESTS line (it is not on one: it is host-only and needs the Geant4 store first). The deposit
+tapes on both sides are not committed (StepTap through exampleB1.cc; a derived stepping action in
+ref/b1mat) - in the session's scratchpad, p44\tape_src.

@@ -926,7 +926,7 @@ beam, to every digit): `/B1/det/material <NIST name>` - Shape2's material, befor
 - **Hadronic dose in a gas is low**: every hadron and nucleus beam in an air trapezoid -3% to -15%,
   neutrons -16% to -26% (and -85% at 1 MeV, in air, oxygen and nitrogen gas alike), while photons,
   electrons and directly-fired protons and alphas in air agree. Suspected: the slow charged
-  secondaries' transport across a dense-to-gas boundary.
+  secondaries' transport across a dense-to-gas boundary. **Fixed by P44** (below).
 - **A nucleus at 1 MeV/n is deposited where it starts** (C12, Fe56 at 1 MeV/n fired 1 um from the
   trapezoid: one step, nothing in the trapezoid); at 1.5 MeV/n, or started inside, it agrees.
   **FIXED by P45 (V342-V344):** `step_hadron` deposited any nucleus whose residual range was under
@@ -936,7 +936,7 @@ beam, to every digit): `/B1/det/material <NIST name>` - Shape2's material, befor
   every other C12/Fe56 row of tiers 1 and 4 and the light ions at 1 MeV/n inside 1.9 sigma on the
   same binary (docs/sweep/p27/p45/). With them, 553 of the 630 compared rows are inside 3 sigma.
 - **Muons at 3 and 10 GeV**: -0.3% and -0.6% in every material (up to -10 sigma).
-- **e+- at 100 keV in air**: -1.5% and -1.7%.
+- **e+- at 100 keV in air**: -1.5% and -1.7%. **Fixed by P44** (below).
 - **The triton at 100 MeV/n**: -1.4% (a Bragg peak inside the trapezoid).
 - **Fe56 10 GeV/n in Al at 200,000 events**: 5.8M tracks abandoned at the drain loop's bound (the
   100,000-event run agrees to 0.09%).
@@ -947,6 +947,18 @@ Everything else - photons from 10 keV to 10 GeV, electrons from 100 keV to 10 Ge
 kaons, antiprotons, neutrons and anti-neutrons, the light ions and C12/O16/Si28/Fe56 at every energy
 in water, bone, aluminium and polyethylene, the strange species and anti-nuclei - is inside 3
 sigma at 0.01-1% statistics a side.
+
+**The air rows after P44 (2026-11-23, docs/RISK.md V350-V353, docs/sweep/p44/air.md).** The gas
+deficit had two causes, both in the port: a 10 um residual-range guard that deposited slow protons,
+nuclei and electrons where they were born - in a gas cavity's water wall, where Geant4's 1 MeV
+neutrons make 51,552 recoil protons per 4M events that cross into the air (11.1.1's neutron general
+process charges the gas step at the water's mean free path, so the neutron interacts at the wall) -
+and the e+- delta-ray and brems rates drawn at the pre-step energy where Geant4 uses its lambda
+tables and the integral approach. Both fixed with Geant4's formulas; P27's air rows rerun on the
+port against P27's Geant4 rows: tier 2 in air 61 of 63 inside 3 sigma (before 15), the two outside
+the 10 GeV muons (-0.5%, the muon's own); tier 4 in air every row inside - the 1 MeV neutron -84.7%
+-> +1.4%, 10 MeV -33.7% -> -0.7%, 30 MeV -10.9% -> -0.1%, e- and e+ at 100 keV -1.53% / -1.74% ->
+-0.05% / -0.01%. The water and bone rows of the same species did not move beyond statistics.
 
 **The ledgers** are not at zero and every group is named: the ion delta-ray channel per step on
 every nucleus row (V260), 1-60 Bertini refusals a run on the hadron rows from ~1 GeV, the charm and
