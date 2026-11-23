@@ -471,29 +471,16 @@ int main() {
         fail("%s at %g MeV: %.3e of the energy is unaccounted for", io.name, double(io.ekin),
              bal);
       }
-      // THE STOPPING RULE IS PART OF THE ASSERTION, not an excuse for a loose one.
-      //
-      // A REAL NUCLEUS (P45): no range floor, so the path is the range at EVERY range, to
-      // section 2's 2% - including the 1 um oxygen, which before P45 ran a path of exactly zero
-      // (the old assertion here demanded that zero). Its range is under `finalRangeIons`, so its
-      // one step IS the range and `step_len >= range` takes the whole energy; a floor coming
-      // back would fail this row by 100%.
-      //
-      // He3 keeps `step_hadron`'s 10 um floor: it dies once its residual range is under 10 um and
-      // deposits what is left, so its path is the range less at most that - the bound is
-      // 2 x 10 um / range where that is looser than 2%.
-      constexpr double kMinUsefulRange = 1e-2;  // mm, step_hadron's own constant
-      if (!is_he3) {
+      // ---- P44 (docs/RISK.md V351): THERE IS NO STOPPING GUARD, AND THAT IS THE ASSERTION.
+      // Until P44 `step_hadron` killed a track with less than 10 um of residual range where it
+      // stood, and this section asserted it: a zero path on the first step below 10 um, the range
+      // less the guard above. Geant4 stops a track at 1 keV or at the end of its range and
+      // nowhere else, and so does the port now - an O16 recoil at 0.55 MeV (1.3 um) runs its
+      // range in one step (the step function's `x = range` below finalRange) and stops at its
+      // end. So every regime is the same statement: the path is the range, to section 2's 2%.
+      {
         const double dev = mean_path / want - 1.0;
-        if (steps < kN || std::fabs(dev) > 0.02) {
-          fail("%s at %g MeV: a nucleus is stepped to its range at any range - the transport "
-               "ran %.4e mm in %.2f steps and the table says %.4e mm (%+.2f%%)",
-               io.name, double(io.ekin), mean_path, double(steps) / kN, want, 100.0 * dev);
-        }
-      } else {
-        const double dev = mean_path / want - 1.0;
-        const double bound = (0.02 > 2.0 * kMinUsefulRange / want)
-                                 ? 0.02 : 2.0 * kMinUsefulRange / want;
+        const double bound = 0.02;
         if (std::fabs(dev) > bound) {
           fail("%s at %g MeV: the transport ran %.4e mm and the table says %.4e mm (%+.2f%%, "
                "bound %.2f%%)",
