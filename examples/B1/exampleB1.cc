@@ -26,11 +26,69 @@
 #include "G4ios.hh"
 #include "Randomize.hh"
 
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
 using namespace B1;
+
+namespace {
+
+// P27 (docs/RISK.md V336): the one command this example adds to Geant4's B1,
+// /B1/det/material <NIST name>, which DetectorConstruction::ApplyCommand applies. This port's
+// G4UImanager has no G4UImessenger to register it with, so a macro that names it is run here,
+// line by line, by the rules of G4UImanager::ExecuteMacroFile (a '#' starts a comment, the line
+// is trimmed, a blank line is skipped, the line is echoed at /control/verbose 1 or more), each
+// line offered to the detector first and every other one passed to ApplyCommand as
+// /control/execute would pass it. A macro that does NOT name the command - every shipped macro,
+// every gate's - never reaches this code: main() hands it to /control/execute exactly as before.
+// A /B1/ line inside a macro reached through a nested /control/execute is not seen here and fails
+// as an unknown command, loudly; the sweep's macros are flat.
+std::string TrimLine(std::string s) {
+  const std::size_t hash = s.find('#');
+  if (hash != std::string::npos) { s = s.substr(0, hash); }
+  std::size_t a = 0, b = s.size();
+  while (a < b && std::isspace(static_cast<unsigned char>(s[a])) != 0) { ++a; }
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1])) != 0) { --b; }
+  return s.substr(a, b - a);
+}
+
+bool MacroNamesB1Command(const std::string& path) {
+  FILE* f = std::fopen(path.c_str(), "r");
+  if (f == nullptr) { return false; }
+  char line[1024];
+  bool found = false;
+  while (!found && std::fgets(line, sizeof line, f) != nullptr) {
+    found = TrimLine(line).rfind("/B1/", 0) == 0;
+  }
+  std::fclose(f);
+  return found;
+}
+
+G4int RunMacroWithB1Commands(const std::string& path, DetectorConstruction* detector,
+                             G4UImanager* ui) {
+  FILE* f = std::fopen(path.c_str(), "r");
+  if (f == nullptr) {
+    ui->Echo("cannot open macro " + path);
+    return 1;
+  }
+  char line[1024];
+  G4int errors = 0;
+  while (std::fgets(line, sizeof line, f) != nullptr) {
+    const std::string s = TrimLine(line);
+    if (s.empty()) { continue; }
+    if (ui->GetVerbose() > 0) { ui->Echo(s); }
+    G4int rc = detector->ApplyCommand(s);
+    if (rc < 0) { rc = ui->ApplyCommand(s); }
+    errors += (rc != 0) ? 1 : 0;
+  }
+  std::fclose(f);
+  return errors;
+}
+
+}  // namespace
 
 //....oooOO0OOooo........oooOO0OOooo........oooOO0OOooo........oooOO0OOooo......
 
@@ -64,7 +122,8 @@ int main(int argc, char** argv) {
   // Set mandatory initialization classes
   //
   // Detector construction
-  runManager->SetUserInitialization(new DetectorConstruction());
+  auto* detector = new DetectorConstruction();
+  runManager->SetUserInitialization(detector);
 
   // Physics list
   G4VModularPhysicsList* physicsList = new QBBC;
@@ -96,7 +155,9 @@ int main(int argc, char** argv) {
     // not done what the file said, and a program that reports success anyway is how a run
     // gets published with the physics it was supposed to have switched on still off.
     G4String command = "/control/execute ";
-    const G4int errors = UImanager->ApplyCommand(command + macro);
+    const G4int errors = MacroNamesB1Command(macro)
+                             ? RunMacroWithB1Commands(macro, detector, UImanager)
+                             : UImanager->ApplyCommand(command + macro);
     if (errors != 0) {
       G4cout << macro << ": " << errors << " command(s) failed" << G4endl;
       delete visManager;

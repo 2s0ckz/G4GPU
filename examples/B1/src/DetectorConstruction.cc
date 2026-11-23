@@ -17,6 +17,10 @@
 #include "G4SDManager.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4Trd.hh"
+#include "G4ios.hh"
+
+#include <cctype>
+#include <string>
 
 namespace B1 {
 
@@ -64,8 +68,9 @@ G4VPhysicalVolume* DetectorConstruction::Construct() {
   auto* logicShape1 = new G4LogicalVolume(solidShape1, shape1_mat, "Shape1");
   new G4PVPlacement(nullptr, pos1, logicShape1, "Shape1", logicEnv, false, 0, true);
 
-  // Shape 2: a trapezoid of compact bone
-  G4Material* shape2_mat = nist->FindOrBuildMaterial("G4_BONE_COMPACT_ICRU");
+  // Shape 2: a trapezoid of compact bone - or of whatever /B1/det/material named before
+  // /run/initialize (P27's acceptance sweep; the default is the shipped G4_BONE_COMPACT_ICRU).
+  G4Material* shape2_mat = nist->FindOrBuildMaterial(fShape2Material);
   G4ThreeVector pos2 = G4ThreeVector(0, -1 * cm, 7 * cm);
 
   G4double shape2_dxa = 12 * cm, shape2_dxb = 12 * cm;
@@ -78,8 +83,48 @@ G4VPhysicalVolume* DetectorConstruction::Construct() {
 
   // Set Shape2 as the scoring volume
   fScoringVolume = logicShape2;
+  fConstructed = true;
 
   return physWorld;
+}
+
+/// /B1/det/material <NIST name> - Shape2's material, before /run/initialize (P27, V336).
+///
+/// The name is stored, not looked up: Construct() hands it to G4NistManager::FindOrBuildMaterial,
+/// which stops the run with its own FATAL for a name the NIST list does not have. Looking it up
+/// here would BUILD the material at command time and put a material in the table that no volume
+/// uses; the G4UImessenger on the Geant4 side (ref/b1mat) stores the name the same way, so
+/// neither side builds anything the shipped B1 does not before /run/initialize.
+G4int DetectorConstruction::ApplyCommand(const G4String& line) {
+  const std::string kCmd = "/B1/det/material";
+  if (line.compare(0, kCmd.size(), kCmd) != 0
+      || (line.size() > kCmd.size()
+          && std::isspace(static_cast<unsigned char>(line[kCmd.size()])) == 0)) {
+    return -1;
+  }
+  std::string name;
+  for (std::size_t i = kCmd.size(); i < line.size(); ++i) {
+    const char c = line[i];
+    if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+      if (!name.empty()) { break; }
+      continue;
+    }
+    name += c;
+  }
+  if (name.empty()) {
+    G4cout << "/B1/det/material needs a NIST material name, e.g. G4_WATER" << G4endl;
+    return 1;
+  }
+  if (fConstructed) {
+    // Geant4's messenger is available in G4State_PreInit only; after /run/initialize the
+    // geometry is built and on the device, and a material changed now would not reach it.
+    G4cout << "/B1/det/material " << name << " refused: it must come before /run/initialize"
+           << G4endl;
+    return 1;
+  }
+  fShape2Material = name;
+  G4cout << "/B1/det/material: Shape2 (the scoring volume) will be " << name << G4endl;
+  return 0;
 }
 
 /// Attaches the sensitive detector.
