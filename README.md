@@ -114,7 +114,40 @@ ion-inelastic chain (RISK V232).
 
 ### Throughput
 
-Events per second in real time, excluding initialisation - geometry, physics tables, data
+**Measured by P27's acceptance sweep (2026-11-21/22, docs/RISK.md V339, docs/B1_SWEEP.md).** One
+Titan V against one i9-10850K, example B1 with the scoring trapezoid's material set, QBBC as it
+ships on both sides. "port": events/s at the row's first saturated count (the count doubled until
+the rate rose by no more than 3%). "per core": Geant4 serial, events / User. "box": Geant4 on ten
+workers (the ten physical cores), events / Real, its start-up measured inside the timer and under
+5% of User. Every row is a line of `docs/sweep/p27/runs.csv`; 549 of the sweep's 630 compared rows
+agree with Geant4 inside 3 sigma, and the 81 that do not are named in V340.
+
+| class | beam (trapezoid) | port, saturated | per core | box | x core | x box |
+|---|---|--:|--:|--:|--:|--:|
+| photons | 1 GeV (bone) | 438,577 | 9,123 | 57,230 | 48.1 | 7.7 |
+| photons, low end | 1 MeV (water, gun at the face) | 4,392,360 | 158,712 | 255,316 | 27.7 | 17.2 |
+| electrons | 1 GeV (bone) | 139,040 | 3,883 | 27,382 | 35.8 | 5.1 |
+| electrons, low end | 1 MeV (water, at the face) | 4,312,980 | 120,090 | 239,875 | 35.9 | 18.0 |
+| muons | mu- 1 GeV (bone) | 480,533 | 13,529 | 76,828 | 35.5 | 6.3 |
+| protons | 1 GeV (bone) | 55,806 | 4,451 | 30,994 | 12.5 | 1.8 |
+| protons, low end | 10 MeV (water, at the face) | 1,496,920 | 119,739 | 239,089 | 12.5 | 6.3 |
+| pions | pi+ 1 GeV (bone) | 24,507 | 3,645 | 27,893 | 6.7 | 0.88 |
+| kaons | kaon+ 1 GeV (bone) | 34,253 | 5,815 | 38,422 | 5.9 | 0.89 |
+| antiprotons | 1 GeV (bone) | 9,200 | 2,546 | 19,378 | 3.6 | 0.47 |
+| neutrons | 1 GeV (bone) | 27,233 | 4,615 | 34,528 | 5.9 | 0.79 |
+| light ions | alpha 1 GeV/n (bone) | 9,350 | 1,236 | 10,247 | 7.6 | 0.91 |
+| light ions | deuteron 1 GeV/n (bone) | 12,967 | 2,290 | 18,361 | 5.7 | 0.71 |
+| light ions, low end | alpha 10 MeV/n (water, at the face) | 1,597,510 | 94,250 | 228,464 | 16.9 | 7.0 |
+| GCR nuclei | C12 1 GeV/n (bone) | 2,423 | 359 | 2,921 | 6.8 | 0.83 |
+| GCR nuclei | Fe56 1 GeV/n (bone) | 530 | 42.5 | 330 | 12.5 | 1.6 |
+| GCR nuclei, low end | C12 10 MeV/n (water, at the face) | 1,843,060 | 109,103 | 241,611 | 16.9 | 7.6 |
+
+The electron's 1 GeV rate is at 1,000,000 events: past ~1.6M a 1 GeV electron run stops on the
+pool's FATAL at the default live-track count (V336). Geant4's box is 7.9x one core on Fe56 and only
+1.6x one core on a 1 MeV photon, where its event dispatch costs as much as the event. "Gun at the
+face" is tier 4's `/B1/gun/z 39.999 mm`, 1 um upstream of the trapezoid.
+
+**The history, kept as measured.** Events per second in real time, excluding initialisation - geometry, physics tables, data
 loading - and excluding the final dose report. This is host wall clock over generating every
 primary and running every batch, the same scope as Geant4's own `G4Timer`, which brackets
 `InitializeEventLoop` to `TerminateEventLoop`.

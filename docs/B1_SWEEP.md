@@ -885,3 +885,98 @@ port 1,541 s): +0.12 sigma at 0.2% a side. The 50,000-event row's -1.20% (-2.1 s
 **proton_1000 moves**, by 0.04 of its sigma: its 1 GeV cascades make 39 etas (resonance decays
 below FTFP's window, V278), tracks now. **The B1 photon gate is to the digit:** exampleB1
 -n 2000000, 426.028 pGy, 1.10452 sigma.
+
+## P27: the acceptance sweep, 2026-11-21
+
+Every species the port's gun fires, 100 MeV to 10 GeV (per nucleon for a nucleus) and - by the
+user's order of 2026-11-21 - the low end down to 10 keV, with B1's scoring trapezoid in water, bone,
+air, aluminium, polyethylene and lead, the port against Geant4 11.1.1's QBBC as it ships, both
+sides timed. docs/RISK.md V336 (the plan, the two commands, the counts), V337 (tiers 1 and 3), V338
+(tier 2), V339 (the tables), V340 (closed), V341 (tier 4). Every row of every tier is in
+`docs/sweep/p27/tier<N>.md` and every run of both sides in `docs/sweep/p27/runs.csv`; the driver is
+`tools/p27_sweep.ps1`.
+
+**How it ran.** The port: the gate ba75's engine (integ/p42), examples/B1 relinked with the two
+commands, on the Titan V, `G4GPU_HADRONIC_STAGE=final`, every other `G4GPU_` variable unset, the
+default live-track count, `out\gpu.lock` per run; each row's count doubled until events/s rose by no
+more than 3% (the user's rule 1), from its class's saturated count. Geant4: Geant4's own B1 sources
+built with the same two commands (`ref/b1mat`), ten workers for every row (events / Real) and one
+serial core at one energy per species and material (events / User), each run twice in one process
+so that the start-up inside the timer is measured (the user's rule 2: under 5% of User on every
+row; it is ~0). Doses are compared PER EVENT (B1 prints the dose cumulated over a run). Neither side
+ran beside the other.
+
+**The two commands** (the only code; the shipped default proved untouched on build_all's four
+exampleB1 gates, the twelve beams of this file's first sweep, and Geant4's ref10k and a 1 GeV proton
+beam, to every digit): `/B1/det/material <NIST name>` - Shape2's material, before /run/initialize;
+`/B1/gun/z <length>` - the gun's z plane, for tier 4 at 39.999 mm, 1 um upstream of the trapezoid
+(z = +40 to +100 mm), so that a keV photon or a MeV proton reaches it.
+
+| tier | rows | compared | inside 3 sigma | outside |
+|---|--:|--:|--:|--:|
+| 1: 21 species x 100 MeV-10 GeV x water, bone | 210 | 210 | 199 | 11 |
+| 3: the other 23 species the gun fires, 1 GeV x water, bone | 46 | 46 | 43 | 3 |
+| 4: the low end (10 keV-100 MeV), the gun at the trapezoid | 194 | 185 | 172 | 13 |
+| 2: 21 species x 300 MeV, 1, 10 GeV x air, Al, PE, lead | 252 | 189 | 135 | 54 |
+| all | 702 | 630 | 549 | 81 |
+
+**What is outside, and what it is** (V340 has the list with every row):
+- **Lead cannot be run** (72 rows): the port's photoelectric reader holds 12 shells and Pb has 24
+  (`kPeMaxShells`, reported as "data not found").
+- **Hadronic dose in a gas is low**: every hadron and nucleus beam in an air trapezoid -3% to -15%,
+  neutrons -16% to -26% (and -85% at 1 MeV, in air, oxygen and nitrogen gas alike), while photons,
+  electrons and directly-fired protons and alphas in air agree. Suspected: the slow charged
+  secondaries' transport across a dense-to-gas boundary.
+- **A nucleus at 1 MeV/n is deposited where it starts** (C12, Fe56 at 1 MeV/n fired 1 um from the
+  trapezoid: one step, nothing in the trapezoid); at 1.5 MeV/n, or started inside, it agrees.
+- **Muons at 3 and 10 GeV**: -0.3% and -0.6% in every material (up to -10 sigma).
+- **e+- at 100 keV in air**: -1.5% and -1.7%.
+- **The triton at 100 MeV/n**: -1.4% (a Bragg peak inside the trapezoid).
+- **Fe56 10 GeV/n in Al at 200,000 events**: 5.8M tracks abandoned at the drain loop's bound (the
+  100,000-event run agrees to 0.09%).
+- At the 3-4 sigma edge, one material each: kaon- 100 MeV, kaon0L, omega-, anti_xi0, the neutron at
+  300 MeV in Al and at 10 MeV in bone, and five low-end rows at +-0.2-0.3%.
+
+Everything else - photons from 10 keV to 10 GeV, electrons from 100 keV to 10 GeV, protons, pions,
+kaons, antiprotons, neutrons and anti-neutrons, the light ions and C12/O16/Si28/Fe56 at every energy
+in water, bone, aluminium and polyethylene, the strange species and anti-nuclei - is inside 3
+sigma at 0.01-1% statistics a side.
+
+**The ledgers** are not at zero and every group is named: the ion delta-ray channel per step on
+every nucleus row (V260), 1-60 Bertini refusals a run on the hadron rows from ~1 GeV, the charm and
+bottom hadrons FTFP makes at 10 GeV/n, one or two at-rest captures on the 100 MeV pi-/kaon- rows,
+one or two abandoned tracks on twelve rows.
+
+**Timing** (V339; the port at the first saturated count, Geant4's serial row and its ten-worker
+box on the same machine):
+
+| class | beam (trapezoid) | port, saturated | per core | box | x core | x box |
+|---|---|--:|--:|--:|--:|--:|
+| photons | 1 GeV (bone) | 438,577 | 9,123 | 57,230 | 48.1 | 7.7 |
+| photons, low end | 1 MeV (water, gun at the face) | 4,392,360 | 158,712 | 255,316 | 27.7 | 17.2 |
+| electrons | 1 GeV (bone) | 139,040 | 3,883 | 27,382 | 35.8 | 5.1 |
+| electrons, low end | 1 MeV (water, at the face) | 4,312,980 | 120,090 | 239,875 | 35.9 | 18.0 |
+| muons | mu- 1 GeV (bone) | 480,533 | 13,529 | 76,828 | 35.5 | 6.3 |
+| protons | 1 GeV (bone) | 55,806 | 4,451 | 30,994 | 12.5 | 1.8 |
+| protons, low end | 10 MeV (water, at the face) | 1,496,920 | 119,739 | 239,089 | 12.5 | 6.3 |
+| pions | pi+ 1 GeV (bone) | 24,507 | 3,645 | 27,893 | 6.7 | 0.88 |
+| kaons | kaon+ 1 GeV (bone) | 34,253 | 5,815 | 38,422 | 5.9 | 0.89 |
+| antiprotons | 1 GeV (bone) | 9,200 | 2,546 | 19,378 | 3.6 | 0.47 |
+| neutrons | 1 GeV (bone) | 27,233 | 4,615 | 34,528 | 5.9 | 0.79 |
+| light ions | alpha 1 GeV/n (bone) | 9,350 | 1,236 | 10,247 | 7.6 | 0.91 |
+| light ions | deuteron 1 GeV/n (bone) | 12,967 | 2,290 | 18,361 | 5.7 | 0.71 |
+| light ions, low end | alpha 10 MeV/n (water, at the face) | 1,597,510 | 94,250 | 228,464 | 16.9 | 7.0 |
+| GCR nuclei | C12 1 GeV/n (bone) | 2,423 | 359 | 2,921 | 6.8 | 0.83 |
+| GCR nuclei | Fe56 1 GeV/n (bone) | 530 | 42.5 | 330 | 12.5 | 1.6 |
+| GCR nuclei, low end | C12 10 MeV/n (water, at the face) | 1,843,060 | 109,103 | 241,611 | 16.9 | 7.6 |
+
+The electron's 1 GeV rate is at 1,000,000 events: past ~1.6M a 1 GeV electron run stops on the
+pool's FATAL at the default live-track count. Geant4's ten-worker box is 7.9x one core on Fe56 (a
+worker's event costs 1.25x a serial one) and only 1.6x one core on a 1 MeV photon (its dispatch
+costs as much as the event), so the low-end "x box" is against a box that cannot use its cores.
+
+**Saturation, by class:** photons at 2-16M events, muons 4-8M, e+- 2-16M where they run, hadrons
+800k-1.6M, light ions 400k-800k, the nuclei 50k-200k, the low end 1.6M-16M. The port's rate past one
+batch can fall (proton 10 GeV in bone: 15,063 ev/s at 800,000, 9,589 at 1,600,000), and an EM run of
+4M events at the automatic batch, or a hadron run of 3.2M, is refused by the paging guard: EM runs
+past 1M took batches of 1M, the one departure from the defaults.

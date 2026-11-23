@@ -21340,3 +21340,274 @@ box 239k ev/s over 6.4M events; the doses agree to 0.1%.)
 
 **THE ORDER TAKEN:** tier 1, tier 3, tier 4, tier 2 - tier 4 went in front of tier 2 because tier 2
 had not started when the user's tier arrived (tier 1 was at its 68th row of 210).
+
+### V337: P27 tier 1 (and tier 3) - 210 rows in water and bone, 199 inside 3 sigma of QBBC as it ships; the eleven outside are the muons at 3 and 10 GeV (-0.3% and -0.6%, every material), the triton at 100 MeV/n (-1.4%, -7 sigma) and the kaon- at 100 MeV (+2.1%, 3.3 sigma); tier 3's 46 rows of the strange species, the anti-nuclei and the decaying mesons, 43 inside
+
+**WHAT RAN** (2026-11-21 06:12 to 2026-11-22 00:12, interrupted once for tier 4's command and
+resumed from runs.csv): the 21 core species x 100 MeV, 300 MeV, 1, 3, 10 GeV (per nucleon for
+d, t, He3, alpha and the four nuclei) x {water, bone} as the trapezoid's material, both sides, the
+port past saturation (V336's rule) and Geant4's box for every row and serial at 1 GeV; then tier 3
+(23 species x 1 GeV x {water, bone}). Every row of both tiers has a port dose and a Geant4 box dose;
+the tables are docs/sweep/p27/tier1.md and tier3.md (per event, because B1 prints the dose
+cumulated over a run and the two sides run different counts), every run is a line of
+docs/sweep/p27/runs.csv.
+
+**THE COMPARISON.** 199 of 210 tier-1 rows inside 3 sigma, every one of them at 0.01-1% rms a side.
+Outside:
+
+| row | port - QBBC | sigma | what it is |
+|---|--:|--:|---|
+| mu- / mu+ 3 GeV, water and bone | -0.28 to -0.32% | -4.0 to -4.5 | a muon deficit that grows with energy and does not care about the material or the charge - it is the same in air, Al and PE (V338) and absent at 1 GeV and below; the muon's radiative losses (muBrems, muPairProd), whose share of the loss grows from ~1% at 1 GeV to several % at 10 GeV in water, are where it is; not proven here |
+| mu- / mu+ 10 GeV, water and bone | -0.62 to -0.68% | -8.6 to -9.5 | the same, larger |
+| triton 100 MeV/n (300 MeV), water and bone | -1.50%, -1.39% | -7.1, -6.8 | a range row: a 300 MeV triton's range in water is ~23 cm, so its Bragg peak sits in the trapezoid's first centimetres and a 1 mm range difference is a percent of dose; the deuteron (15 cm, stops before) and He3/alpha (8 cm) at the same energy per nucleon do not reach it, so this is the one light-ion Bragg row of the matrix; the triton's dE/dx is the proton's scaled (G4hIonisation) - suspect its range, not proven |
+| kaon- 100 MeV, water | +2.10% | +3.3 | the only row with a sizeable ledger: 56 Bertini interactions refused by name (P10) and one at-rest capture of 1.6M events; the bone row (+1.5%) is inside |
+
+The deep rows - the charged primaries at 100 MeV (per nucleon) that never reach the trapezoid
+(V336) - are all inside: proton -3.2% (-2.5 sigma) and -1.5%, the four nuclei at 100 MeV/n -0.3% to
++3.5% (inside 2.5 sigma, but seven of eight positive: a coherent +2% the next sweep should watch).
+
+**Tier 3** (46 rows): 43 inside. kaon0L 1 GeV in water +1.43% (+3.4, with 25 Bertini refusals of
+3.2M events), omega- in bone +0.84% (+3.3, 49 Bertini refusals), anti_xi0 in water -1.14% (-3.4) - each
+at the edge, each with its other material inside. The gun fires every one of the 23; pi0, eta and
+eta_prime decay at their first step and their rows are their photons' and pions'.
+
+**THE LEDGERS, tier 1.** 123 of 210 rows book nothing. What the others book, by group:
+- an ion's delta-ray channel (G4ionIonisation above ~147 MeV/u), counted PER STEP (V260): every
+  nucleus row from 300 MeV/n up, 1-195 steps a run - it is the nuclides with no G4ENSDFSTATE ground
+  row whose delta rays are not sampled; the energy column is the stepping ion's, not a loss;
+- `bert::apply_yourself` refused by name (P10): 1-60 interactions a run (of millions) on 28 rows -
+  pions and kaons from 1 GeV, protons, antiprotons, neutrons and anti-neutrons, He3 and alpha at 10
+  GeV/n; the refusal is either Bertini's interface refusal or Geant4's own
+  throwNonConservationFailure (which ends a Geant4 job); the ledger does not say which;
+- a charm or bottom hadron made by FTFP or a decay (no ParticleType, P23a): 6 rows at 10 GeV/n;
+- a stopped negative hadron's at-rest capture with no final state (stopping::at_rest, P12): 6
+  rows, one or two captures each (pi- and kaon- at 100 MeV, kaon- 300 MeV, triton and Si28 at 10
+  GeV/n through their secondaries);
+- 3 rows with one track abandoned at the drain loop's iteration bound (e+ 1 and 3 GeV in water,
+  Fe56 10 GeV/n in bone).
+Never booked on any row: a refused species, the eta/eta' group (P31), a light-ion cascade refusal.
+
+**GEANT4 STOPPED THREE TIMES** on its own: `G4BinaryLightIonReaction.cc: Cannot correct 4-momentum
+of cascade particles`, a FatalException (had006) in G4HadronicProcess::PostStepDoIt, for a ~3 GeV
+triton on hydrogen (triton 1 GeV/n in water and in bone, and in air, Al and PE in tier 2) and a 577
+MeV Be9 fragment of a C12 100 MeV/n beam on hydrogen. One event in some hundred thousand on ten
+workers; the driver reruns the same count on `/random/setSeeds 20261121 27` and the row is that
+run (each passed). The port has no such abort: its light-ion reaction is the one P30/P36 rebuilt.
+
+### V338: P27 tier 2 - the four other materials at 300 MeV, 1 and 10 GeV: lead cannot be run on the port at all (the photoelectric reader holds 12 shells and lead has 24), and in AIR every hadron and nucleus beam is 3-26% low while photons, electrons and directly-fired protons and alphas agree; Al and polyethylene agree but for the muons and one Fe56 run that abandoned 5.8M tracks
+
+**WHAT RAN** (2026-11-22 06:36-20:38): 21 species x {300 MeV, 1, 10 GeV} x {G4_AIR, G4_Al,
+G4_POLYETHYLENE, G4_Pb}, 252 rows, docs/sweep/p27/tier2.md.
+
+**LEAD: 63 rows with no port dose, refused at start-up by the engine.** Every port run with a lead
+trapezoid stops before the first event: `photoelectric: cannot read pe-high-82.dat ... FATAL:
+photoelectric (G4EMLOW epics2017/phot) data not found`. The file is there; the reader
+(`data/photoelectric_data.cuh`, `load_param_file`) refuses a parameter file with more than
+`kPeMaxShells` = 12 shells ("Ca has 8; 12 leaves headroom"), and G4LivermorePhotoElectricModel's
+pe-high-82.dat has 24. So no element past the twelve-shell ones (Z above ~30) can be in a port
+geometry today - the lead rows of tiers 2 and 4 (72 rows) and any shielding problem with W, Pb, Ta,
+Au. The message misnames it ("data not found"). Geant4's 63 rows ran and are in the table for the
+fix to be judged against. The driver halved each lead row down to a sixteenth of its floor before
+closing it, which is where the five failed runs a row in runs.csv come from.
+
+**AIR: 45 rows outside 3 sigma, all hadronic.** Every hadron and nucleus beam in an air trapezoid
+reads low: protons -3.4% (300 MeV) to -11.0% (10 GeV), pions and kaons -1.8% to -10.6%,
+antiprotons -5.6% to -10.1%, d/t/He3/alpha -2.6% to -14.8%, the nuclei -4% to -10% (C12 and O16 at 300 MeV/n,
+Si28 and Fe56 at 1 GeV/n inside 3 sigma, but at -1.6% to -3.3%: every nucleus row in air is low), neutrons -26.1%, -23.7%, -16.1%, anti-neutrons -12% to
+-15%. The EM rows in air agree (photons and electrons at 300 MeV-10 GeV inside 3 sigma), and so do
+directly-fired charged hadrons at the low end (V341: a 30 MeV proton fired into the air trapezoid
+-0.5%, a 10 MeV/n alpha +0.2%). What does NOT agree is the NEUTRON in a gas: fired 1 um upstream of
+the trapezoid (V341's gun), a neutron deposits -85% (1 MeV), -34% (10 MeV), -11% (30 MeV) of
+Geant4's dose in air, and the same -84% / -85% at 1 MeV in pure oxygen gas (G4_O) and pure nitrogen
+gas (G4_N) - so it is not the nitrogen (n,p) channel, it is a GAS. In water and bone the same
+neutrons agree (tier 4). So the deficit is in how the dose of a low-density volume is fed by what
+the neutrons and the hadronic interactions make around and in it: in water a neutron's kerma is
+its recoil protons, which both sides transport; in a gas it is the recoil and evaporation nuclei
+and the slow charged particles crossing in from the water, whose transport across the boundary is
+what V341 found broken for a nucleus at ~1 MeV/n (it deposits everything in place in its first
+step, never crossing a boundary 1 um away). No ledger books anything on these rows. SUSPECT, not
+proven: the port's in-place deposit of short-range charged secondaries (nuclei, and perhaps slow
+protons and alphas) near a dense-to-gas boundary; the experiment that would settle it is a
+per-species energy-deposit tape in the air trapezoid on both sides for 1 MeV neutrons.
+
+**Al and polyethylene: 9 rows outside.** The muons at 10 GeV (-0.6% to -0.7%, -7.7 to -10 sigma, as
+V337) and mu+-/mu- 300 MeV in air (-0.35%, -3.3); neutron 300 MeV in Al +1.63% (+4.4); and Fe56 10
+GeV/n in Al -53.5%, which is not physics: its 200,000-event run ABANDONED 5,810,582 tracks at the
+drain loop's iteration bound (V277's 20,000), the dose of a row stopped half-way. Its 100,000-event
+run abandoned nothing and reads 3.2209e-10 Gy an event against Geant4's 3.2238e-10, -0.09%. The
+rule that took it to 200,000 was the rate (+4.6% from 50k to 100k); the bound is the engine's.
+
+**Ledgers, tier 2:** as tier 1 (V337): the ion delta-ray steps on every nucleus row, 1-60 Bertini
+refusals, charm/bottom from FTFP at 10 GeV/n; abandoned tracks (1-2) on eight rows besides the Fe56 one.
+Geant4 stopped on G4BinaryLightIonReaction's 4-momentum abort for the triton 1 GeV/n in air, Al and
+polyethylene, each rerun on the second seed.
+
+### V339: the tables - per class, the port's saturated rate against one core and the ten-core box of the same machine, measured on every row; README's headline replaced, docs/B1_SWEEP.md's P27 section, the CSVs committed
+
+**THE HEADLINE** (README's throughput table now; every number is one row of docs/sweep/p27/runs.csv,
+the Titan V against the i9-10850K; "per core" is the serial row, events / User; "box" is ten
+workers, events / Real; the port is "event loop ... events/s" at the row's first saturated count):
+
+| class | beam (trapezoid) | port, saturated | per core | box | x core | x box |
+|---|---|--:|--:|--:|--:|--:|
+| photons | 1 GeV (bone) | 438,577 | 9,123 | 57,230 | 48.1 | 7.7 |
+| photons, low end | 1 MeV (water, gun at the face) | 4,392,360 | 158,712 | 255,316 | 27.7 | 17.2 |
+| electrons | 1 GeV (bone) | 139,040 * | 3,883 | 27,382 | 35.8 | 5.1 |
+| electrons, low end | 1 MeV (water, at the face) | 4,312,980 | 120,090 | 239,875 | 35.9 | 18.0 |
+| muons | mu- 1 GeV (bone) | 480,533 | 13,529 | 76,828 | 35.5 | 6.3 |
+| protons | 1 GeV (bone) | 55,806 | 4,451 | 30,994 | 12.5 | 1.8 |
+| protons, low end | 10 MeV (water, at the face) | 1,496,920 | 119,739 | 239,089 | 12.5 | 6.3 |
+| pions | pi+ 1 GeV (bone) | 24,507 | 3,645 | 27,893 | 6.7 | 0.88 |
+| kaons | kaon+ 1 GeV (bone) | 34,253 | 5,815 | 38,422 | 5.9 | 0.89 |
+| antiprotons | 1 GeV (bone) | 9,200 | 2,546 | 19,378 | 3.6 | 0.47 |
+| neutrons | 1 GeV (bone) | 27,233 | 4,615 | 34,528 | 5.9 | 0.79 |
+| light ions | alpha 1 GeV/n (bone) | 9,350 | 1,236 | 10,247 | 7.6 | 0.91 |
+| light ions | deuteron 1 GeV/n (bone) | 12,967 | 2,290 | 18,361 | 5.7 | 0.71 |
+| light ions, low end | alpha 10 MeV/n (water, at the face) | 1,597,510 | 94,250 | 228,464 | 16.9 | 7.0 |
+| GCR nuclei | C12 1 GeV/n (bone) | 2,423 | 359 | 2,921 | 6.8 | 0.83 |
+| GCR nuclei | Fe56 1 GeV/n (bone) | 530 | 42.5 | 330 | 12.5 | 1.6 |
+| GCR nuclei, low end | C12 10 MeV/n (water, at the face) | 1,843,060 | 109,103 | 241,611 | 16.9 | 7.6 |
+
+\* the electron's rate at 1,000,000 events, below the 2,000,000 floor: at 1 GeV and above in bone a
+run past ~1.6M events stops on the pool FATAL (V336), and its curve falls past 500,000 (176,609 ->
+139,040).
+
+**WHAT THE TABLE SAYS.** On one Titan V against one i9-10850K: the EM classes 5-8x the box at
+1-10 GeV and 17-18x at the low end; protons 1.8x; the GCR workhorse Fe56 1.6x; the pions, kaons,
+neutrons, light ions and C12 0.7-0.9x of the box - 6-8x a core; the antiproton 0.47x. Against one
+core the port is 3.6-48x on every beam. Two cautions the rows carry: (1) Geant4's box is not ten
+cores on light events - on a 1 MeV photon it is 1.6x one serial core (G4TaskRunManager's dispatch
+costs as much as the event, V341), so the low-end "x box" is against a box that cannot use its
+cores; (2) the port's rate past one batch can FALL (proton 10 GeV in bone 15,063 at 800,000, 9,589 at
+1,600,000; proton 1 GeV in water 76,041 at 1.6M, 54,629 at 3.2M), which is why the rate quoted is
+the first saturated count's and not the largest run's.
+
+**THE SATURATION CURVES, by class** (V336 has the six curves from below the floor; every row's
+curve is in tier<N>.md): photons saturate at 2-16M events at 100 MeV-10 GeV (the 100 MeV and 3 GeV
+rows needed 16-32M), muons at 4-8M, e+- at 2-16M where they run (e- above ~300 MeV in bone stops at
+1.6-2M, the pool FATAL), hadrons at 800k-1.6M (a 3.2M run is refused by the paging guard on the
+heavier ones), light ions at 400k-800k, the nuclei at 50k-200k, the low end at 1.6M-16M (and a 1.5
+MeV/n C12 still rising at 51M). The GPU floors of the user's rule (2M / 200k / 50k) are under the
+saturated counts for the hadrons (4-8x) and the light ions (8-16x); the nuclei saturate at the floor.
+
+**THE CPU FIGURES THAT REPLACE out/lead/cpu_rates.md** (the same machine, QBBC as it ships, this
+package's rule: start-up measured inside the timer, under 5% of User on every row, and in fact
+~0 - G4TaskRunManager builds its workers at /run/initialize): Fe56 1 GeV/n, box 326.8 ev/s in water
+(16,040 events, User 479.3 s, Real 49.1 s) and 329.8 in bone; serial 41.6 and 42.5 a core-second. The
+box is 7.9x one core, not 10x: a worker's event costs 1.25x a serial one (33.5 against 41.6 events a
+core-second in water). cpu_rates.md's 218 ev/s from 500 events was a run too short for ten workers
+(its Real carried the last events of each worker), not a start-up: 50% low. The proton at 1 GeV:
+box 30,994 (bone) / 34,351 (water), serial 4,451 / 4,817; cpu_rates.md had 31,905 and 3,291.
+
+**FILES.** docs/sweep/p27/runs.csv (every run of both sides: 4,000-odd lines, the log path on each),
+tier1.md-tier4.md (doses per event, sigma, ledgers; the timing table with every row's curve),
+saturation.csv, four sample macros and ion_inside.sh; docs/B1_SWEEP.md's P27 section;
+tools/p27_sweep.ps1 (the driver, -Plan, -Report).
+
+### V340: P27 closed - 702 rows a side, 549 of the 630 compared inside 3 sigma of QBBC as it ships, 81 outside and every one named, 72 lead rows the port cannot run; what is refused or left, and the list for the next physics packages
+
+**THE MATRIX RUN.** Tier 1: 210 rows (21 species x 5 energies x water, bone). Tier 3: 46 (23 more
+species at 1 GeV x water, bone). Tier 4: 194 (the low end, the gun at the trapezoid). Tier 2: 252
+(21 x 300 MeV, 1, 10 GeV x air, Al, PE, lead). 702 rows, each with a Geant4 box row; 214 serial rows
+(one energy per species per material, every tier-3 row); 630 rows with a port dose (the 72 lead rows have none). 549
+of those inside 3 sigma; 81 outside - 11 in tier 1, 3 in tier 3, 13 in tier 4, 54 in tier 2 (V337,
+V338, V341 name each). Wall time: 2026-11-21 06:12 to
+2026-11-22 20:52, the machine never shared.
+
+**EVERY ROW OUTSIDE 3 SIGMA, with its suspected cause** - the lead's input for the next packages:
+1. **Lead in any geometry** (72 rows, no port dose): `kPeMaxShells` = 12 in data/photoelectric_data.cuh
+   against Pb's 24 photoelectric shells; any element past ~Z 30. A capacity, mis-reported as "data
+   not found" (V338).
+2. **Hadronic dose in a gas** (45 tier-2 air rows, -3% to -26%; neutrons in air, O and N gas -11% to
+   -85% at 1-30 MeV): not the element, not EM, not the directly-fired charged hadron; the slow
+   charged secondaries' transport near a dense-to-gas boundary is the suspect (V338, V341).
+3. **A nucleus at ~1 MeV/n deposited in place** (C12, Fe56 at 1 MeV/n, -100%): one track-step, the
+   energy left 1 um before the boundary; d/t/He3/alpha and nuclei at 1.5 MeV/n cross (V341).
+4. **Muons at 3 and 10 GeV, every material** (12 rows, -0.3% to -0.7%, up to -10 sigma), and at 300
+   MeV in air (-0.35%): grows with energy - the muon's radiative losses (V337).
+5. **e+- at 100 keV in air** (-1.5%, -1.7%, -20 sigma), and e+- at 1-10 MeV in air and Al at the 3
+   sigma edge (-0.17% to -0.35%): slow electrons in a gas (V341).
+6. **The triton at 100 MeV/n** (-1.4%, -7 sigma, water and bone): a Bragg peak in the trapezoid's
+   first centimetres - its range (V337).
+7. **Fe56 10 GeV/n in Al at 200,000 events**: 5,810,582 tracks abandoned at the drain loop's 20,000
+   iterations - the dose halved; the 100,000-event run is -0.09% (V338).
+8. **The neutron at 300 MeV in Al (+1.6%, +4.4) and 10 MeV in bone (+1.2%, +6.8)** - the water rows
+   agree; not diagnosed.
+9. **At the 3-sigma edge, one material each**: kaon- 100 MeV water (+2.1%, 56 Bertini refusals),
+   kaon0L 1 GeV water (+1.4%), omega- 1 GeV bone (+0.8%), anti_xi0 1 GeV water (-1.1%), kaon+ 100 MeV
+   and deuteron 100 MeV/n in water at the face (+0.3%), e+ 30 MeV bone (+0.2%), all 3.0-3.6 sigma.
+
+**THE LEDGERS.** Not at zero, and every group named (V337): the ion delta-ray steps (V260, the
+nuclides with no G4ENSDFSTATE ground row, counted per step - every nucleus row from 300 MeV/n),
+1-60 Bertini refusals a run on the hadron rows from ~1 GeV (P10's refusal by name, or Geant4's own
+non-conservation abort - the ledger does not separate them), the charm/bottom hadrons FTFP makes at
+10 GeV/n (no ParticleType), 1-2 at-rest captures on the 100 MeV pi-/kaon- rows, and 1-2 tracks
+abandoned on twelve rows (5.8M on the one of item 7). No refused species, no eta/eta' (P31), no light-ion cascade refusal.
+
+**ENGINE REFUSALS THE SWEEP RAN INTO, none of them physics** (V336, V338): the paging guard at the
+device-stack raise refuses an EM run of 4,000,000 events at the automatic batch and a hadron run of
+3,200,000 (what a run holds per event grows with the run; "GB left" falls from 0.3 to 0.05) - EM runs
+past 1M take batches of 1M, the one departure from the defaults; the pool FATAL "no track can be
+stepped without overrunning the pool" for e- above ~300 MeV past ~1.6M events at the default 4 live
+tracks an event, at any batch; the drain loop's iteration bound (item 7). Geant4's own: the
+G4BinaryLightIonReaction 4-momentum abort (had006), five times, each rerun on a second seed.
+
+**REFUSED OR LEFT, BY NAME.**
+- Species the gun cannot fire: the six neutrinos, the bare GenericIon, excited ions and /gun/ionL,
+  the b/c hadrons (no ParticleType). Every other species was fired (tier 3 has all 23).
+- Energies a side cannot run: none refused on Geant4's side; the port's lead rows (item 1) and its
+  1 MeV/n nuclei (item 3, which run but deposit elsewhere).
+- Rows that did not reach 1% rms: the port's proton 100 MeV in bone (1.02% at 12.8M events, the
+  deep row the 5 min cap closed); Geant4's box rows of pi+ and pi- 1 GeV, antiproton 10 GeV, He3
+  and alpha 1 GeV/n in air (1.00-1.06%, the 10 min cap). Every other row of both sides is at or
+  under 1%.
+- Rows not saturated by the rule: 25 (the e- rows above 300 MeV stopped by the pool FATAL, pi0 at 1
+  GeV, kaon+ and pi+ low-end rows whose 3.2M run the paging guard refused); each is marked "NOT
+  SATURATED" with its curve.
+- The tiers' reduced matrices: tier 2 at 300 MeV, 1 and 10 GeV only; tier 3 at 1 GeV only; the full
+  6 x 5 matrix for every species was not run (V336's estimate, past 48 h).
+- Not done: the per-species deposit tape in a gas that would settle item 2; the muon's radiative
+  split (item 4); the triton's range (item 6).
+
+### V341: P27 tier 4, the low end with the gun at the trapezoid - 172 of the 185 rows that ran inside 3 sigma, keV photons and electrons and MeV hadrons in water and bone among them; outside: a nucleus at 1 MeV/n deposits NOTHING in the trapezoid (it is deposited where it starts, 1 um upstream), e+- at 100 keV in air -1.5% and -1.7% (-20 sigma), the 10 MeV neutron in bone +1.2%; lead refused as in V338
+
+**WHAT RAN** (2026-11-22 00:12-06:36, and the diagnostics after the chain, 20:55-21:20): V336's
+tier 4 - photons 10 keV to 30 MeV, e+- 100 keV to 30 MeV, the charged hadrons, light ions, C12 and
+Fe56 at 1-100 MeV (per nucleon), the neutron at 1-30 MeV, in water and bone, and the photons and
+electrons at 100 keV, 1 and 10 MeV in air, Al, PE and lead - fired from z = 39.999 mm by
+`/B1/gun/z`, 1 um upstream of the trapezoid's upstream face. 194 rows, docs/sweep/p27/tier4.md.
+
+**THE COMPARISON.** 9 rows are the lead rows (V338's reader, no port dose). Of the other 185, 172
+inside 3 sigma. Outside:
+
+| row | port - QBBC | sigma | what it is |
+|---|--:|--:|---|
+| C12 1 MeV/n (12 MeV), water and bone | -100% | -839 | the port deposits nothing in the trapezoid: every event is ONE track-step, the whole 12 MeV deposited where the nucleus starts - in the envelope's water, 1 um before the face. Fired from inside the trapezoid the same C12 deposits Geant4's dose to -0.6% (diagnostic below), and at 1.5 MeV/n from 1 um upstream it crosses and agrees (-0.2%). So a GenericIon at ~1 MeV/n (range ~20 um in water) is stopped in place in its first step instead of being stepped to a boundary 1 um away; d, t, He3 and alpha at 1 MeV/n (their own species) cross and agree |
+| Fe56 1 MeV/n (56 MeV), water and bone | -100% | -568, -839 | the same |
+| e- 100 keV, air | -1.53% | -22.1 | a slow electron in a gas: in Al and PE and water the same electron agrees, at 1 and 10 MeV in air it is -0.2% / -0.35% (e- 10 MeV air -3.1, e+ 1 MeV air -3.2 sigma); not diagnosed - the multiple scattering and step limitation of a 100 keV electron over centimetres of gas is the place to look |
+| e+ 100 keV, air | -1.74% | -20.0 | the same |
+| e- 10 MeV in Al, e+ 30 MeV in bone | -0.17%, +0.22% | -3.3, +3.2 | at the edge, at 0.01-0.03% statistics a side |
+| kaon+ 100 MeV, deuteron 100 MeV/n, water | +0.30%, +0.30% | +3.6, +3.0 | at the edge |
+| neutron 10 MeV, bone | +1.18% | +6.8 | the water row agrees; not diagnosed |
+
+**THE GAS DIAGNOSTICS** (runs.csv keys z_*_G4_AIR, G4_O, G4_N; ion_inside.sh in
+docs/sweep/p27): a 30 MeV proton fired into the air trapezoid -0.52% (-3.8 sigma), a 10 MeV/n alpha
++0.22%; a neutron -84.7% at 1 MeV, -33.7% at 10, -10.9% at 30 MeV in air, -83.6% and -85.0% at 1
+MeV in oxygen and in nitrogen gas. Fired from INSIDE a water trapezoid (z = 70 mm, Geant4 serial
+against the port, 100,000 events): C12 at 1 MeV/n -0.56%, at 1.5 MeV/n -0.26%, N14 at 0.5 MeV/n
+-0.62%, N14 at 7 keV/n -0.50% - a slow nucleus that starts inside a volume deposits its energy
+there correctly; one that must cross a boundary at ~1 MeV/n does not. (All four inside rows sit -0.5% low at
+0.25% a side - a slow-ion stopping difference worth a look of its own.) V338's air deficit is
+suspected to be the same class of thing; its size grows as the neutron's energy falls.
+
+**THE LEDGERS, tier 4:** 10 rows book anything - the Bertini refusals and the at-rest captures of
+the 100 MeV pions and kaons, and two abandoned tracks; the low-energy photon, electron, proton and
+light-ion rows book nothing.
+
+**SATURATION AT THE LOW END** is in the millions: a 10 keV photon saturates at 2-4M events (5.8-6.0M
+ev/s), a 1 MeV electron at 2-8M (4.1-4.3M ev/s), a 10 MeV proton at 1.6M (1.5M ev/s), a C12 at 1.5 MeV/n
+was still rising at 51.2M (3.3M ev/s, the host process at 4.5 GB, stopped). And Geant4's box on
+these rows is not ten cores: a 1 MeV photon serial is 158,712 ev/s on one core and the ten-worker
+box 255,316 - 1.6x - because G4TaskRunManager's dispatch of an event costs as much as the event;
+the photon, electron and light-hadron box rows of tier 4 sit at 115,000-290,000 ev/s. The port is 4.4M ev/s on that beam: 28x one
+core, 17x the box.
