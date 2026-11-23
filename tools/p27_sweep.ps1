@@ -115,16 +115,35 @@ $extra += (S "anti_He3" @("/gun/particle anti_He3") 3 "hadron")
 $extra += (S "anti_alpha" @("/gun/particle anti_alpha") 4 "hadron")
 
 $allE = @(100, 300, 1000, 3000, 10000)
+$wb = @("G4_WATER", "G4_BONE_COMPACT_ICRU"); $four = @("G4_AIR", "G4_Al", "G4_POLYETHYLENE", "G4_Pb")
+function Pick([string[]]$names) { @($core | Where-Object { $names -contains $_.Name }) }
+# A group: species, energies (per nucleon, MeV), materials, the serial row's energy, the gun plane.
+function G($sp, $en, $ma, $se, $z) { [pscustomobject]@{ Spec = $sp; Ens = $en; Mats = $ma; SerialE = $se; GunZ = $z } }
+# TIER 4 (the user, 2026-11-21: G4GPU is for every Geant4 user, medical physics included): the low
+# end, with the gun moved by /B1/gun/z to 1 um upstream of the trapezoid's upstream face (Shape2
+# spans z = +40 to +100 mm: B1 places it at +7 cm with a 6 cm length), so that the primary enters
+# the scoring volume directly - a 10 keV photon or a 10 MeV proton fired from B1's -15 cm never
+# reaches it. Its rows are keyed "z_" so that no tier-1 row (same species, energy and material,
+# B1's gun plane) is mistaken for one of them.
+$zFace = "39.999 mm"
 switch ($Tier) {
-  1 { $spec = $core;  $mats = @("G4_WATER", "G4_BONE_COMPACT_ICRU"); $ens = $allE }
-  2 { $spec = $core;  $mats = @("G4_AIR", "G4_Al", "G4_POLYETHYLENE", "G4_Pb"); $ens = @(300, 1000, 10000) }
-  3 { $spec = $extra; $mats = @("G4_WATER", "G4_BONE_COMPACT_ICRU"); $ens = @(1000) }
-  default { throw "tier ${Tier}: 1, 2 or 3" }
+  1 { $groups = @(G $core $allE $wb 1000 "") }
+  2 { $groups = @(G $core @(300, 1000, 10000) $four 1000 "") }
+  3 { $groups = @(G $extra @(1000) $wb 1000 "") }
+  4 { $groups = @(
+        (G (Pick @("gamma")) @(0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30) $wb 1 $zFace),
+        (G (Pick @("e-", "e+")) @(0.1, 0.3, 1, 3, 10, 30) $wb 1 $zFace),
+        (G (Pick @("gamma", "e-", "e+")) @(0.1, 1, 10) $four 1 $zFace),
+        (G (Pick @("proton", "pi+", "pi-", "kaon+", "kaon-", "deuteron", "triton", "He3", "alpha", "C12", "Fe56")) @(1, 3, 10, 30, 100) $wb 10 $zFace),
+        (G (Pick @("neutron")) @(1, 3, 10, 30) $wb 10 $zFace)) }
+  default { throw "tier ${Tier}: 1, 2, 3 or 4" }
 }
-if ($Species -ne "")   { $w = $Species -split ","; $spec = @($spec + $core + $extra | Where-Object { $w -contains $_.Name } | Sort-Object Name -Unique) }
-if ($Materials -ne "") { $mats = $Materials -split "," }
-if ($Energies -ne "")  { $ens = @($Energies -split "," | ForEach-Object { [int]$_ }) }
-$serialE = 1000   # the serial row's energy per nucleon (MeV) for every species and material
+foreach ($g in $groups) {
+  if ($Species -ne "")   { $w = $Species -split ","; $g.Spec = @($g.Spec + $core + $extra | Where-Object { $w -contains $_.Name } | Sort-Object Name -Unique) }
+  if ($Materials -ne "") { $g.Mats = $Materials -split "," }
+  if ($Energies -ne "")  { $g.Ens = @($Energies -split "," | ForEach-Object { [double]$_ }) }
+}
+if ($Species -ne "" -or $Materials -ne "" -or $Energies -ne "") { $groups = @($groups[0]) }
 
 $floor = @{ em = 2000000; hadron = 200000; lightion = 50000; gcr = 50000 }
 $start = @{} + $floor
@@ -132,9 +151,12 @@ if (Test-Path $satFile) { foreach ($r in Import-Csv $satFile) { $start[$r.Class]
 $pilotN = @{ em = 20000; hadron = 5000; lightion = 2000; gcr = 200 }
 
 $rows = @()
-foreach ($s in $spec) { foreach ($e in $ens) { foreach ($m in $mats) {
-  $rows += [pscustomobject]@{ Key = ("{0}_{1}_{2}" -f $s.Name, $e, $m); Sp = $s; EperA = $e; ETot = $e * $s.A; Mat = $m }
-} } }
+foreach ($g in $groups) { foreach ($s in $g.Spec) { foreach ($e in $g.Ens) { foreach ($m in $g.Mats) {
+  $pre = if ($g.GunZ -ne "") { "z_" } else { "" }
+  $rows += [pscustomobject]@{ Key = ("{0}{1}_{2}_{3}" -f $pre, $s.Name, $e, $m); Sp = $s; EperA = $e; ETot = $e * $s.A; Mat = $m
+                              GunZ = $g.GunZ; Serial = ($e -eq $g.SerialE) }
+} } } }
+$spec = @($groups | ForEach-Object { $_.Spec }); $ens = @($groups | ForEach-Object { $_.Ens } | Sort-Object -Unique); $mats = @($groups | ForEach-Object { $_.Mats } | Sort-Object -Unique)
 
 # ---------------------------------------------------------------------------------------- the CSV
 $cols = "side,tier,key,species,class,e_per_a_mev,e_total_mev,material,events,dose_gy,rms_gy,rel_rms," +
@@ -161,6 +183,7 @@ function New-Macro([pscustomobject]$row, [string]$side, [long[]]$counts) {
   # runs past a million take batches of a million. The 4M photon run so made reads 436,445 ev/s
   # against 438,577 for 2M at the automatic batch: the batch does not set the rate.
   if ($side -eq "port" -and $row.Sp.Class -eq "em" -and $counts[0] -gt 1000000) { $l += "/run/setBatchSize 1000000" }
+  if ($row.GunZ -ne "") { $l += "/B1/gun/z $($row.GunZ)" }
   $l += @("/run/initialize", "/control/verbose 0", "/run/verbose 1")
   $l += $row.Sp.Gun
   $l += ("/gun/energy {0} MeV" -f $row.ETot)
@@ -414,7 +437,7 @@ function Invoke-G4Row([pscustomobject]$row, [string]$mode) {
 $sideList = $Sides -split ","
 Write-Host ("P27 tier {0}: {1} rows ({2} species x {3} energies x {4} materials), sides {5}" -f $Tier, $rows.Count, @($spec).Count, @($ens).Count, @($mats).Count, $Sides)
 foreach ($k in $start.Keys) { Write-Host ("  start count {0}: {1:N0} (floor {2:N0})" -f $k, $start[$k], $floor[$k]) }
-if ($Plan) { foreach ($r in $rows) { Write-Host ("  {0,-34} {1,8} MeV total  {2}" -f $r.Key, $r.ETot, $r.Sp.Class) }; exit 0 }
+if ($Plan) { foreach ($r in $rows) { Write-Host ("  {0,-34} {1,8} MeV total  {2} {3}" -f $r.Key, $r.ETot, $r.Sp.Class, $(if ($r.Serial) { "+serial" } else { "" })) }; exit 0 }
 
 # ---------------------------------------------------------------------------------------- report
 # -Report writes out\p27\tier<N>.md from runs.csv and runs nothing: the comparison (the port's
@@ -478,6 +501,6 @@ foreach ($r in $rows) {
   Write-Host ("=== {0}  ({1} MeV total, {2})  {3}" -f $r.Key, $r.ETot, $r.Sp.Class, (Get-Date -Format "MM-dd HH:mm"))
   if ($sideList -contains "port") { Invoke-PortRow $r }
   if ($sideList -contains "box") { Invoke-G4Row $r "box" }
-  if ($sideList -contains "serial" -and $r.EperA -eq $serialE) { Invoke-G4Row $r "serial" }
+  if ($sideList -contains "serial" -and $r.Serial) { Invoke-G4Row $r "serial" }
 }
 Write-Host "DONE $(Get-Date -Format 'yyyy-MM-dd HH:mm')"

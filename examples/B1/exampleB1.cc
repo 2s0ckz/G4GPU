@@ -14,6 +14,7 @@
 
 #include "ActionInitialization.hh"
 #include "DetectorConstruction.hh"
+#include "PrimaryGeneratorAction.hh"
 
 #include "G4RunManagerFactory.hh"
 #include "G4SteppingVerbose.hh"
@@ -36,8 +37,9 @@ using namespace B1;
 
 namespace {
 
-// P27 (docs/RISK.md V336): the one command this example adds to Geant4's B1,
-// /B1/det/material <NIST name>, which DetectorConstruction::ApplyCommand applies. This port's
+// P27 (docs/RISK.md V336): the two commands this example adds to Geant4's B1,
+// /B1/det/material <NIST name> (DetectorConstruction::ApplyCommand) and /B1/gun/z <length> (tier 4,
+// PrimaryGeneratorAction::ApplyCommand). This port's
 // G4UImanager has no G4UImessenger to register it with, so a macro that names it is run here,
 // line by line, by the rules of G4UImanager::ExecuteMacroFile (a '#' starts a comment, the line
 // is trimmed, a blank line is skipped, the line is echoed at /control/verbose 1 or more), each
@@ -81,6 +83,7 @@ G4int RunMacroWithB1Commands(const std::string& path, DetectorConstruction* dete
     if (s.empty()) { continue; }
     if (ui->GetVerbose() > 0) { ui->Echo(s); }
     G4int rc = detector->ApplyCommand(s);
+    if (rc < 0) { rc = PrimaryGeneratorAction::ApplyCommand(s); }  // /B1/gun/z, tier 4
     if (rc < 0) { rc = ui->ApplyCommand(s); }
     errors += (rc != 0) ? 1 : 0;
   }
