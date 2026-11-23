@@ -74,6 +74,7 @@ $satFile = Join-Path $Out "saturation.csv"
 $portExe = Join-Path $Out "bin\exampleB1.exe"
 $g4Run = Join-Path $root "ref\b1mat\run.bat"
 $gpuLock = "D:\g4gpu\out\gpu.lock"
+$script:SeedLine = ""
 
 # ---------------------------------------------------------------------------------------- matrix
 # Name, the gun commands (the same on both sides: G4ParticleGunMessenger's), A (the energy is per
@@ -187,6 +188,7 @@ function New-Macro([pscustomobject]$row, [string]$side, [long[]]$counts) {
   $l += @("/run/initialize", "/control/verbose 0", "/run/verbose 1")
   $l += $row.Sp.Gun
   $l += ("/gun/energy {0} MeV" -f $row.ETot)
+  if ($side -ne "port" -and $script:SeedLine -ne "") { $l += $script:SeedLine }
   foreach ($n in $counts) { $l += ("/run/printProgress {0}" -f [math]::Max(1000, [long]($n / 4))); $l += "/run/beamOn $n" }
   $p = Join-Path $macDir ("{0}_{1}_{2}.mac" -f $row.Key, $side, ($counts -join "-"))
   Set-Content -Path $p -Value $l -Encoding ASCII
@@ -366,8 +368,8 @@ function Invoke-G4([pscustomobject]$row, [string]$mode, [long]$n1, [long]$n2, [s
           wall_s = [math]::Round($sw.Elapsed.TotalSeconds, 2); g4_warnings = $warn; log = $log
           when = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); run2_events = $n2 }
   $status = "ok"
-  if ($d.Count -lt 2 -or $tm.Count -lt 2) { $status = "parse-fail(doses $($d.Count), timers $($tm.Count))" }
-  elseif (@($t | Where-Object { $_ -match 'Fatal Exception' }).Count -gt 0) { $status = "fatal" }
+  if (@($t | Where-Object { $_ -match "Fatal Exception" }).Count -gt 0) { $status = "fatal" }
+  elseif ($d.Count -lt 2 -or $tm.Count -lt 2) { $status = "parse-fail(doses $($d.Count), timers $($tm.Count))" }
   if ($mode -eq "serial" -and @($t | Where-Object { $_ -match '^G4WT\d' }).Count -gt 0) { $status = "ran-multithreaded" }
   if ($status -eq "ok") {
     $h.dose_gy = $d[0].Dose; $h.rms_gy = $d[0].Rms; if ($d[0].Dose -gt 0) { $h.rel_rms = $d[0].Rms / $d[0].Dose }
@@ -386,7 +388,14 @@ function Invoke-G4Row([pscustomobject]$row, [string]$mode) {
   $done = @(Get-Runs | Where-Object { $_.side -eq $mode -and $_.key -eq $row.Key })
   $good = @($done | Where-Object { $_.status -eq "ok" -and $_.log -notlike "*_pilot_*" -and [double]$_.init_frac -lt 0.05 })
   if ($good.Count -gt 0) { Write-Host ("  {0}: on record, {1:N0} events, init {2:P1}" -f $mode, [long]$good[-1].events, [double]$good[-1].init_frac); return }
-  if (@($done | Where-Object { $_.status -ne "ok" }).Count -gt 0) { Write-Host "  ${mode}: a failed run is on record; row left for inspection"; return }
+  $failed = @($done | Where-Object { $_.status -ne "ok" })
+  $retrySeed = $false
+  if ($failed.Count -gt 0) {
+    $onlyFatal = @($failed | Where-Object { $_.status -ne "fatal" }).Count -eq 0
+    $seeded = @($done | Where-Object { $_.log -like "*_rowseed_*" }).Count -gt 0
+    if ($onlyFatal -and -not $seeded) { $retrySeed = $true }
+    else { Write-Host "  ${mode}: a failed run is on record; row left for inspection"; return }
+  }
   # The rms per event: the port's largest run, else this row's pilot.
   $port = (Get-PortState $row).Last
   # A serial row is sized from the same row's box run when there is one - its second run's User
@@ -425,7 +434,18 @@ function Invoke-G4Row([pscustomobject]$row, [string]$mode) {
   if ($n -gt $nCap) { $n = [long]$nCap; $capped = $true }
   $n = [long]([math]::Ceiling($n / 40.0) * 40)
   Write-Host ("  {0}: pilot {1:N4} core-s an event, start-up {2:N1} core-s; rms needs {3:N0}, start-up {4:N0}, cap {5:N0} -> {6:N0}{7}" -f $mode, $c, $init, $nRms, $nInit, $nCap, $n, $(if ($capped) { " (CAPPED)" } else { "" }))
-  $h = Invoke-G4 $row $mode $n ([long]($n / 4)) "row"
+  $tag = if ($retrySeed) { "rowseed" } else { "row" }
+  $script:SeedLine = if ($retrySeed) { "/random/setSeeds 20261121 27" } else { "" }
+  $h = Invoke-G4 $row $mode $n ([long]($n / 4)) $tag
+  if ($h.status -eq "fatal" -and -not $retrySeed) {
+    # GEANT4 ITSELF STOPPED: 11.1.1's G4BinaryLightIonReaction "Cannot correct 4-momentum of cascade
+    # particles" is a FatalException (had006) for a triton on hydrogen near 3 GeV (V337). One event
+    # in some hundred thousand; the same count on another seed is the row.
+    Write-Host "  ${mode}: Geant4 stopped on a fatal exception - the same count once more on /random/setSeeds 20261121 27"
+    $script:SeedLine = "/random/setSeeds 20261121 27"
+    $h = Invoke-G4 $row $mode $n ([long]($n / 4)) "rowseed"
+  }
+  $script:SeedLine = ""
   if ($h.status -eq "ok" -and $h.init_frac -ge 0.05) {
     $n2 = [long]([math]::Ceiling($n * $h.init_frac / 0.04 / 40.0) * 40)
     Write-Host ("  {0}: start-up {1:P1} of User - rerun at {2:N0}" -f $mode, $h.init_frac, $n2)
