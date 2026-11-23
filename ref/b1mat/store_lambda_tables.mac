@@ -4,7 +4,8 @@
 # G4_BONE_COMPACT_ICRU), one event so the tables exist, then the store. Serial:
 #   set G4FORCE_RUN_MANAGER_TYPE=Serial
 #   ref\b1mat\run.bat <absolute path of this file>    (from the directory to hold g4tables\)
-#   tests\test_lepton_lambda.exe g4tables
+#   tests\test_lepton_lambda.exe g4tables     (or move g4tables\ to ref\oracle\g4tables\, the test's
+#                                              default and what build_all's host-test list runs; gitignored)
 /run/initialize
 /run/particle/setStoredInAscii 1
 /run/beamOn 1

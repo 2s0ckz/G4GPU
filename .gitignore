@@ -32,6 +32,7 @@
 /ref/oracle/*.csv
 /ref/oracle/*.hh
 /ref/oracle/*.txt
+/ref/oracle/g4tables/
 
 # Viewer output. The offscreen renderer writes these next to the example.
 *.png

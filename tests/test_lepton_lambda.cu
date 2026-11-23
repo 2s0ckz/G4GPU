@@ -55,11 +55,10 @@ static bool read_table(const std::string& path, std::vector<G4Vec>& out) {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::printf("usage: test_lepton_lambda <dir of Geant4's Lambda.e*.asc>\n");
-    return 2;
-  }
-  const std::string dir = argv[1];
+  // The lead (P44's restack): with no argument the tables are read from ref/oracle/g4tables, where
+  // ref/b1mat/store_lambda_tables.mac puts Geant4's store (gitignored like the other oracle files),
+  // so build_all's host-test list runs this one from the repo root like the rest.
+  const std::string dir = (argc >= 2) ? argv[1] : "ref/oracle/g4tables";
   data::Material<real_t> mats[data::kNumMaterials];
   data::build_b1_materials<real_t>(mats);
   int nz = 0;
