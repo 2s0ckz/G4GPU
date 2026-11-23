@@ -21156,3 +21156,118 @@ two hook units together, which is why ba74's first stage passed and why P37's ow
 it. The fix is two words: both kernels are `static __global__`, so each translation unit that launches
 them - the engine's transport_run unit, the hook projects' host unit - keeps its own copy and nothing is
 exported. No formula, no launch, no digit changes; the gate ba75 proves it on the whole chain.
+
+### V336: P27's plan - 21 species (and 23 more the gun fires) x 5 energies x 6 materials, the trapezoid's material set by one macro command on both sides, the port's counts doubled past saturation, Geant4's sized for a 1% rms with its own start-up measured under 5%, and three tiers because the full matrix is past 48 h
+
+**THE SPECIES.** Every `ParticleType` whose `species_disposition` is kStepped is a primary the
+port's gun fires: `G4ParticleTable` resolves every enum name, and `G4RunManager::CheckSpecies`
+refuses only a neutrino and the bare GenericIon placeholder. That is 44 species and every real
+nuclide:
+- **the core set (tiers 1 and 2), 21:** gamma, e-, e+, mu-, mu+, pi+, pi-, kaon+, kaon-, proton,
+  anti_proton, neutron, anti_neutron, deuteron, triton, He3, alpha, and the galactic-cosmic-ray
+  nuclei C12, O16, Si28, Fe56 through `/gun/particle ion` + `/gun/ion Z A` (P30, V274);
+- **the rest the gun accepts (tier 3), 23:** kaon0L, kaon0S, lambda, sigma+, sigma-, sigma0, xi-,
+  xi0, omega-, the seven anti-hyperons (P23a, V240), anti_deuteron, anti_triton, anti_He3,
+  anti_alpha (P23c), and pi0, eta, eta_prime, which decay where they are made (P31);
+- **refused by the port's gun, by name:** the six neutrinos (QBBC gives them no process, so the
+  dose would be exactly zero and look like a measurement), the bare `GenericIon` (a placeholder
+  of unknown Z and A), an excited ion and `/gun/ionL` (ground states only, V274), and every
+  species with no `ParticleType` row - the b/c hadrons `EnableBCParticles` builds, which no B1
+  beam below 10 GeV makes.
+
+**THE ENERGIES.** 100, 300, 1000, 3000 and 10000 MeV kinetic; for d, t, He3, alpha, the four
+nuclei and the four anti-nuclei PER NUCLEON, with `/gun/energy` given the TOTAL (A x E/A) on
+both sides, which is what it means in Geant4 and in the port (G4ParticleGun, V274): Fe56 at 10
+GeV/n is `/gun/energy 560000 MeV`.
+
+**THE MATERIALS, AND WHAT "IN" MEANS.** The material is the SCORING VOLUME's - B1's Shape2
+trapezoid, 6 cm thick, behind 19 cm of the water envelope and the A-150 cone - with the envelope
+(water) and the world (air) as B1 ships them: G4_WATER, G4_BONE_COMPACT_ICRU (B1's own), G4_AIR,
+G4_Al, G4_POLYETHYLENE, G4_Pb. The question is whether the port's physics in a material gives
+Geant4's dose there, and the trapezoid is the only place B1 scores. Making the ENVELOPE the
+material instead would change what reaches the trapezoid (30 cm of lead stops every hadron
+below a GeV and absorbs every shower) and still score in bone, which tests the material only
+through what survives it. Every earlier sweep varied the beam and kept the geometry; this one
+keeps the beam's geometry and varies the material where the dose is read. A consequence stated
+now: a charged primary whose range in water is under ~19 cm (protons, pions, kaons and every
+nucleus at 100 MeV per nucleon; the nuclei heavier than C12 at 300 MeV/n) never reaches the
+trapezoid, so its row is the dose of what the stopping primary SENDS there - neutrons, photons,
+fragments. That is a legitimate acceptance row, and an expensive one to bring to 1%.
+
+**THE COMMAND.** Neither B1 accepted a material command. Added: ONE command, the same way on both
+sides, applied before /run/initialize.
+- The port: `examples/B1/DetectorConstruction` stores `/B1/det/material <NIST name>` and
+  Construct() hands it to G4NistManager where the literal "G4_BONE_COMPACT_ICRU" was (the
+  default). The port's G4UImanager has no G4UImessenger, so `exampleB1.cc` runs a macro that
+  names a `/B1/` command line by line (ExecuteMacroFile's rules), offering each line to the
+  detector first; a macro that does NOT name one - every shipped macro, every gate - still goes
+  to `/control/execute` unchanged, so the default path is the same code, not only the same answer.
+- Geant4: ref/B1build compiles the Geant4 SOURCE TREE's examples/basic/B1, the user's install,
+  which nothing here edits. So the command lives in a new build, `ref/b1mat` (b1mat.cc, ref/b1ion's
+  CMakeLists, build.bat, run.bat): Geant4's own B1 sources compiled unchanged, a class derived
+  from B1::DetectorConstruction whose Construct() calls B1's and then, only if the command was
+  given, sets the material on B1's `fScoringVolume`, and a G4UIcmdWithAString available in
+  G4State_PreInit only and not broadcast (only the master constructs). The main is exampleB1.cc's
+  batch path less the visualisation manager; run.bat is runb1.bat's environment and leaves the
+  run manager to the caller.
+- THE PROOF that the shipped default is untouched, measured 2026-11-21 06:10-06:50. The port:
+  ba75's own exampleB1 against this package's relink of the same engine (ba75's
+  transport_run.lib and vis_manager.obj, the seven B1 objects recompiled), and the relink again
+  with `/B1/det/material G4_BONE_COMPACT_ICRU` in front of /run/initialize, on build_all's four
+  exampleB1 gates (-n 2000000: 85.2055 nGy; gunstate.mac: 426.263 pGy; two_runs.mac;
+  two_runs_one.mac) and docs/B1_SWEEP.md's twelve beams at the sweep's configuration (final
+  stage, default live count): 28 comparisons, every dose, rms and "total track-steps" count the
+  same to the printed digit (out\p27\proof.log). The one field that moved is "max iterations per
+  batch" (e- 20 MeV 79/78, proton 400 MeV 647/645/653, alpha 4000 MeV 906/973), which moves
+  between two runs of the SAME gate binary too: the species' launches run on their own streams
+  (V304), so how many iterations a batch's last track needs is scheduling, not physics.
+  Geant4, serial: ref/B1build's exampleB1 (runb1.bat), b1mat, and b1mat naming bone -
+  ref/run/ref10k.mac 422.05 pGy rms 12.122 pGy and a 20,000-event 1 GeV proton beam 38.7807 nGy
+  rms 412.114 pGy, three times each, the same digits.
+
+**THE PORT SIDE: the counts (the user's rule 1).** A row is SATURATED at N when its events/s at
+2N is no more than 3% above its rate at N and N is at or above the floor (photons, e+-, muons
+2,000,000; hadrons 200,000; every nucleus 50,000). The class curves come first - one beam a
+class (gamma, e-, proton, alpha, C12, Fe56 at 1 GeV per nucleon in bone) doubled from a sixteenth
+of the floor - and set each class's starting count (out\p27\saturation.csv). Every row then runs
+its start N and 2N and doubles again while its rate still rises (a run may take up to 45 min) or,
+once saturated, while its dose's rms is above 1% (up to 5 min a run; past that the row is closed
+at the rms it has and listed by name). The row's dose is its largest run's; its rate is that
+run's "event loop ... events/s", the host clock over the whole loop. Every run: the gate's
+engine (out\p27\bin, below), CUDA_VISIBLE_DEVICES=1, G4GPU_HADRONIC_STAGE=final and every other
+G4GPU_ variable removed (the chain at its defaults: G4GPU_CASCADE_FLAT on, both factories on, the
+tail pool, G4GPU_DRAIN_STREAMS off), the default live-track count, out\gpu.lock per run, the host
+killed past 6 GB, the "GB left" line and the ledgers recorded.
+
+**THE GEANT4 SIDE: the counts (the user's rule 2).** For EVERY row the box (ten workers,
+G4FORCENUMBEROFTHREADS=10: events / Real of the master's G4Timer, which runs from
+InitializeEventLoop through G4TaskRunManager::CreateAndStartWorkers - the workers' start-up is
+inside it); for one energy per species per material (1 GeV, per nucleon for a nucleus) the serial
+row (G4FORCE_RUN_MANAGER_TYPE=Serial: events / User). Each macro runs the beam twice in one
+process, N then N/4: the workers exist and are initialised after the first run, so
+init = User1 - 4 x User2 is the start-up the first run's timer carried, and the row - the FIRST
+run: dose, rms, User, Real - stands only when init / User1 < 5%, else it is rerun at the count
+that makes it so. N = max(the count for a 0.95% rms from the port's rms per event; 25 x init /
+cost of an event, both from a pilot of P events run twice, P = 20,000 / 5,000 / 2,000 / 200 for
+EM / hadron / light ion / nucleus), capped at 10 min of Real (box) or 20 min of User (serial); a
+capped row is listed by name with its rms. The Fe56 figure of out/lead/cpu_rates.md (218 ev/s
+from 500 events, User 16.2 s) is what this rule replaces: 500 events at 40.3 a core-second are
+12.4 core-s of physics, so about 4 s of its 16.2 were start-up - a quarter.
+
+**THE ESTIMATE, before any run** (the gate ba75 held the machine): the port's measured rates on
+record (proton 1 GeV 45k ev/s, C12 1 GeV/n 2.3k, Fe56 1 GeV/n 460 - V333; the 6 MeV photon gate
+4.9M) and Geant4's per core (cpu_rates.md), scaled with energy as the step count scales:
+
+| | rows | port | Geant4 box | Geant4 serial | total |
+|---|--:|--:|--:|--:|--:|
+| tier 1: 21 species x 5 energies x {water, bone} | 210 | ~8 h | ~5 h | ~3 h | ~16 h, + ~6 h of deep rows |
+| tier 2: 21 x {300 MeV, 1 GeV, 10 GeV} x {air, Al, PE, Pb} | 252 | ~10 h | ~6 h | ~4 h | ~20 h |
+| tier 3: 23 x 1 GeV x {water, bone} | 46 | ~1 h | ~1 h | ~1 h | ~3 h |
+| the full core matrix, 21 x 5 x 6 | 630 | ~24 h | ~15 h | ~9 h | ~48 h, + ~20 h of deep rows |
+
+"Deep rows" are the ones whose primary cannot reach the trapezoid (above), which run to their
+caps. The nuclei are half of every port column: Fe56 at 10 GeV/n is ~50 ev/s, so its 50,000 and
+100,000 events take ~50 min a row. The full matrix is past the brief's 48 h, so THE TIERING:
+tier 1 first and reported (V337), then tier 2 (V338: the four other materials at 300 MeV, 1 GeV
+and 10 GeV - 100 MeV and 3 GeV dropped because the first is the deep rows', where a material is
+seen least, and the second sits between two that are run), then tier 3 if the time allows.
