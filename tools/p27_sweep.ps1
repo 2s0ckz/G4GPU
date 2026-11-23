@@ -470,7 +470,7 @@ if ($Plan) { foreach ($r in $rows) { Write-Host ("  {0,-34} {1,8} MeV total  {2}
 # G4FORCENUMBEROFTHREADS is the physical core count - the box, x core, x box).
 if ($Report) {
   $all = Get-Runs
-  $md = @("| row | port (Gy) | G4 box (Gy) | diff | sigma | port events | G4 events | ledgers |",
+  $md = @("| row | port (Gy an event) | G4 box (Gy an event) | diff | sigma | port events | G4 events | ledgers |",
           "|---|--:|--:|--:|--:|--:|--:|---|")
   $tm = @("| row | port ev/s | the port's curve (events: ev/s) | per core | box | x core | x box | GB left |",
           "|---|--:|---|--:|--:|--:|--:|--:|")
@@ -479,13 +479,15 @@ if ($Report) {
     $b = @($all | Where-Object { $_.side -eq "box" -and $_.key -eq $r.Key -and $_.status -eq "ok" -and $_.log -notlike "*_pilot_*" })
     $s = @($all | Where-Object { $_.side -eq "serial" -and $_.key -eq $r.Key -and $_.status -eq "ok" -and $_.log -notlike "*_pilot_*" })
     $bx = if ($b.Count -gt 0) { $b[-1] } else { $null }
-    $pd = if ($p) { "{0:E4} +/- {1:E1}" -f [double]$p.dose_gy, [double]$p.rms_gy } else { "-" }
-    $bd = if ($bx) { "{0:E4} +/- {1:E1}" -f [double]$bx.dose_gy, [double]$bx.rms_gy } else { "-" }
+    # B1 prints the dose CUMULATED over the run, so two runs of different counts compare per event.
+    $pn = if ($p) { [double]$p.events } else { 1 }; $bn = if ($bx) { [double]$bx.events } else { 1 }
+    $pd = if ($p) { "{0:E4} +/- {1:E1}" -f ([double]$p.dose_gy / $pn), ([double]$p.rms_gy / $pn) } else { "-" }
+    $bd = if ($bx) { "{0:E4} +/- {1:E1}" -f ([double]$bx.dose_gy / $bn), ([double]$bx.rms_gy / $bn) } else { "-" }
     $diff = "-"; $sig = "-"
     if ($p -and $bx -and [double]$bx.dose_gy -gt 0) {
-      $dd = [double]$p.dose_gy - [double]$bx.dose_gy
-      $diff = "{0:+0.00%;-0.00%}" -f ($dd / [double]$bx.dose_gy)
-      $q = [math]::Sqrt([math]::Pow([double]$p.rms_gy, 2) + [math]::Pow([double]$bx.rms_gy, 2))
+      $dd = [double]$p.dose_gy / $pn - [double]$bx.dose_gy / $bn
+      $diff = "{0:+0.00%;-0.00%}" -f ($dd / ([double]$bx.dose_gy / $bn))
+      $q = [math]::Sqrt([math]::Pow([double]$p.rms_gy / $pn, 2) + [math]::Pow([double]$bx.rms_gy / $bn, 2))
       if ($q -gt 0) { $sv = $dd / $q; $sig = if ([math]::Abs($sv) -gt 3) { "**{0:+0.0;-0.0}**" -f $sv } else { "{0:+0.0;-0.0}" -f $sv } }
     }
     $led = @()
