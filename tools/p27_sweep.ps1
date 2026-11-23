@@ -502,7 +502,10 @@ if ($Report) {
     $md += "| $($r.Key) | $pd | $bd | $diff | $sig | $pe | $be | $ledS |"
     $curve = ($st.Runs | ForEach-Object { "{0:N0}: {1:N0}" -f [long]$_.events, [double]$_.ev_s }) -join ", "
     if ($st.Runs.Count -gt 0 -and $null -eq $st.Sat) { $curve += " (NOT SATURATED)" }
-    $pr = if ($p) { [double]$p.ev_s } else { [double]::NaN }
+    # The rate quoted is the one at the FIRST SATURATED count (the user's rule 1): a run past it that
+    # crosses into a second batch can be slower (the batch refill does not hide the second batch's
+    # start), and the dose comes from the largest run regardless. Unsaturated: the largest run's.
+    $pr = if ($st.Sat) { [double]$st.Sat.ev_s } elseif ($p) { [double]$p.ev_s } else { [double]::NaN }
     $core = [double]::NaN; $coreS = "-"
     if ($s.Count -gt 0) { $core = [double]$s[-1].ev_s; $coreS = "{0:N1}" -f $core }
     elseif ($bx) { $core = [double]$bx.events / [double]$bx.user_s; $coreS = "{0:N1}*" -f $core }
