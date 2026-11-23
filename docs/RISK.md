@@ -21271,3 +21271,72 @@ caps. The nuclei are half of every port column: Fe56 at 10 GeV/n is ~50 ev/s, so
 tier 1 first and reported (V337), then tier 2 (V338: the four other materials at 300 MeV, 1 GeV
 and 10 GeV - 100 MeV and 3 GeV dropped because the first is the deep rows', where a material is
 seen least, and the second sits between two that are run), then tier 3 if the time allows.
+
+**THE CLASS CURVES (2026-11-21 06:12-06:31), and the start counts they set.** One beam a class at
+1 GeV per nucleon in bone, doubled from below the floor (events: events/s):
+- gamma: 125k 183,014; 250k 285,385; 500k 389,836; 1M 420,680; 2M 438,577; 4M 436,445 (batches of
+  1M, below) - saturated at 2M.
+- e-: 125k 127,829; 250k 157,154; 500k 176,609; 1M 139,040; 2M FATAL (below) - the rate falls
+  past 500k and the floor cannot be run.
+- proton: 12.5k 11,162; 25k 18,877; 50k 25,010; 100k 35,096; 200k 44,349; 400k 47,553; 800k
+  55,806; 1.6M 57,125 - saturated at 800k, not at the 200k floor (+7% and +17% at the next two).
+- alpha: 6.25k 2,607; 12.5k 4,160; 25k 5,423; 50k 6,243; 100k 7,152; 200k 8,658; 400k 9,350;
+  800k 9,211 - saturated at 400k.
+- C12: 3,125 1,066; 6,250 1,544; 12.5k 2,084; 25k 2,265; 50k 2,310; 100k 2,423; 200k 2,455 -
+  saturated at 100k (+4.9% from 50k).
+- Fe56: 3,125 203; 6,250 278; 12.5k 395; 25k 479; 50k 530; 100k 544 - saturated at 50k.
+So every row starts at: EM 2,000,000, hadrons 800,000, light ions 400,000, nuclei 50,000 (the
+floor: Fe56 is saturated there and a C12 row doubles once more by the rule).
+
+**TWO THINGS THE CURVES FOUND, and what the sweep does about them (V337 names them).** (1) A
+4,000,000-event photon run at the automatic batch (1,678,752 events on the Titan V) is refused by
+the paging guard at the device-stack raise: 1.875 GB asked, 1.848 GB free - what a run holds per
+EVENT grows with the run (2M events left 0.06 GB, 1M 0.22 GB), and the automatic batch does not
+count it. So every EM port run past 1,000,000 events carries `/run/setBatchSize 1000000`, the one
+departure from the default (4M photons so: 436,445 ev/s against 2M's 438,577 at the automatic
+batch). (2) A 1 GeV electron run of 1,600,000 or 2,000,000 events stops with "FATAL: no track can be
+stepped without overrunning the pool" at the default 4 live tracks an event, at any batch tried
+(500k, 2M, automatic); 1,000,000 runs. The driver never repeats a failed count: a row whose
+doubling reaches a failure while unsaturated halves below its lowest good count to put the shape
+of the rate on record, and is reported "saturated below the floor" or "not saturated".
+
+**THE GEANT4 START-UP, measured.** On the first rows the box's start-up inside the timer is ~0
+(the workers are built at /run/initialize, before G4TaskRunManager's timer starts; the two-run
+difference scatters by +-15 core-s on a 200 core-s row, which is the noise of ten workers, not a
+start-up). A box row is therefore sized to at least 200 core-s of User (~20 s of Real) - what keeps
+it from being a second long, where the last events of ten workers and the timer's resolution
+would be the measurement - and a serial row to at least 60 s of User.
+
+**TIER 4 (the user, 2026-11-21: G4GPU is for any Geant4 user, medical physics included).** The low
+end: (a) photons at 10, 30, 100, 300 keV, 1, 3, 10, 30 MeV; (b) e- and e+ at 100, 300 keV, 1, 3,
+10, 30 MeV; (c) proton, pi+, pi-, kaon+, kaon-, deuteron, triton, He3, alpha, C12, Fe56 at 1, 3,
+10, 30, 100 MeV (per nucleon for the nuclei), the neutron at 1, 3, 10, 30 MeV; (d) water and bone
+for all, and air, Al, polyethylene and lead for the photons and electrons at 100 keV, 1 and 10 MeV
+- 194 rows, the serial row at 1 MeV (photons, e+-) and 10 MeV (per nucleon) for every species and
+material. B1's gun on the envelope's -z face is 19 cm of water from the trapezoid, which no primary
+below ~200 MeV crosses and no keV photon survives, so tier 4 needs the same kind of change as the
+material command: ONE more command on both B1s, `/B1/gun/z <length>` - the z plane the gun fires
+from, the x-y randomisation (80% of the envelope's width, B1's two draws in B1's order) and the +z
+direction as shipped. Shape2 is placed at z = +7 cm with a 6 cm length, so it spans z = +40 to
++100 mm (x +-60 mm; y from -60 to +40 mm at its upstream face, -90 to +70 at its downstream one);
+tier 4 fires from z = 39.999 mm, 1 um of water upstream of that face, so that no primary starts on
+the boundary itself and every one that hits the face enters the scoring volume directly (a 16 x 16
+cm gun on a 12 x 10 cm face: 47% of them). The port: `PrimaryGeneratorAction::ApplyCommand`, offered
+each macro line after the detector's; Geant4: ref/b1mat's generator derives from
+B1::PrimaryGeneratorAction and calls B1's own GeneratePrimaries when the command is unset. THE PROOF
+(2026-11-21 08:45-08:57, after the rebuild of both executables): the 28 port comparisons again with
+both commands naming the defaults (`/B1/det/material G4_BONE_COMPACT_ICRU`, `/B1/gun/z -150 mm`):
+every dose and step count the gate's (out\p27\cmp_proof.sh; "max iterations per batch" again the
+only field that moves). Geant4 serial: ref10k.mac 422.05 pGy and 1 GeV protons 38.7807 nGy from
+B1build, b1mat, b1mat naming bone and b1mat at -150 mm - the same digits. Tier 4's rows are keyed
+`z_<species>_<E>_<material>`.
+
+| tier | rows | port | Geant4 box | Geant4 serial | total |
+|---|--:|--:|--:|--:|--:|
+| tier 4: the low end, the gun at the trapezoid | 194 | ~4 h | ~4 h | ~1.5 h | ~10 h |
+
+(The first tier-4 row, 10 MeV protons in water: the port saturated at 1.6M events, 1.50M ev/s; the
+box 239k ev/s over 6.4M events; the doses agree to 0.1%.)
+
+**THE ORDER TAKEN:** tier 1, tier 3, tier 4, tier 2 - tier 4 went in front of tier 2 because tier 2
+had not started when the user's tier arrived (tier 1 was at its 68th row of 210).
