@@ -415,7 +415,9 @@ function Invoke-G4Row([pscustomobject]$row, [string]$mode) {
     }
     $pl = $pilot[-1]
   }
-  $c = [double]$pl.run2_user_s / [double]$pl.run2_events          # core-seconds an event
+  # A pilot whose second run took under the timer's 0.05 s resolution (200 nuclei at 100 MeV/n, which
+  # stop in a centimetre) is read at that resolution, not as zero: a zero cost made the count infinite.
+  $c = [math]::Max(0.05, [double]$pl.run2_user_s) / [double]$pl.run2_events   # core-seconds an event
   # The start-up the 4% is taken of. Measured, the box's is ~0 on the first rows (the workers are
   # built at /run/initialize, before the timer starts) - so the floor is what keeps a box row
   # from being a second long, where ten workers' last events and the timer's resolution are the
@@ -423,7 +425,7 @@ function Invoke-G4Row([pscustomobject]$row, [string]$mode) {
   $init = if ($fromBox) { 2.4 } elseif ($mode -eq "box") { [math]::Max(8.0, [double]$pl.user_s - [double]$pl.run2_user_s) } else { [math]::Max(2.4, [double]$pl.user_s - [double]$pl.run2_user_s) }
   $relVar = if ($null -ne $port -and [double]$port.rel_rms -gt 0) { [math]::Pow([double]$port.rel_rms, 2) * [double]$port.events } `
             elseif ([double]$pl.rel_rms -gt 0) { [math]::Pow([double]$pl.rel_rms, 2) * [double]$pl.events } else { 1e9 }
-  $nRms = [math]::Ceiling($relVar / ($RmsTarget * $RmsTarget))
+  $nRms = [math]::Min(1e12, [math]::Ceiling($relVar / ($RmsTarget * $RmsTarget)))
   $nInit = [math]::Ceiling(25.0 * $init / $c)                      # start-up at 4% of User
   $cores = if ($mode -eq "box") { 10.0 * [math]::Max(0.5, [double]$pl.user_s / [double]$pl.real_s / 10.0) } else { 1.0 }
   $capMin = if ($mode -eq "box") { $CpuCapMin } else { $SerialCapMin }
