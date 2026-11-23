@@ -400,11 +400,15 @@ int main() {
   // 100 MeV proton's oxygen recoils run to a few MeV) plus one above it.
   //
   // WHAT THE RANGE IS AT THESE ENERGIES IS THE POINT of the whole exercise: a 0.55 MeV oxygen
-  // ion goes about a micrometre, which is three decades under `step_hadron`'s 10 um
-  // `kMinUsefulRange` guard, so it stops on its first step and its energy is deposited where
-  // the scatter happened. That is also what Geant4 does with it, and it is why 929 refused
-  // GenericIon secondaries carrying 515 MeV was a 0.086% hole in `build_all.bat`'s
-  // energy-balance check rather than a redistribution.
+  // ion goes about a micrometre. Until P45 that was three decades under `step_hadron`'s 10 um
+  // `kMinUsefulRange` guard, so the ion died on its first step with a zero path and its energy
+  // was deposited where the scatter happened. Inside one volume that is the same deposit, which
+  // is why this section passed with the guard in place; at a boundary it is not - P27's C12 and
+  // Fe56 at 1 MeV/n fired 1 um before the trapezoid (ranges 9.3 and 6.4 um) left all of their
+  // energy in the envelope, where Geant4 crosses (docs/RISK.md V342). `G4VEnergyLossProcess` has
+  // no range floor, only the 1 keV `lowestKinEnergy`, so a real nucleus is now STEPPED to its
+  // range at any range, and the assertion below says so; He3 keeps the floor with the other
+  // species that have kernels of their own.
   std::printf("\n-- 5. a nucleus stepped to a stop in water --\n");
   {
     struct Ion { int z, a; const char* name; real_t ekin; };
@@ -467,22 +471,24 @@ int main() {
         fail("%s at %g MeV: %.3e of the energy is unaccounted for", io.name, double(io.ekin),
              bal);
       }
-      // THE STOPPING GUARD IS PART OF THE ASSERTION, not an excuse for a loose one.
-      // `step_hadron` kills a track once its residual range falls under 10 um and deposits what
-      // is left, so the path it runs is the range less at most that - which for these ions is
-      // most of it. Three regimes, and each is a statement:
+      // THE STOPPING RULE IS PART OF THE ASSERTION, not an excuse for a loose one.
       //
-      //   range < 10 um       dies on its FIRST step, path exactly zero. Every elastic recoil
-      //                       of a proton beam is here; it is why 515 MeV of refused
-      //                       GenericIons was an energy hole and not a redistribution.
-      //   10 um .. 0.5 mm     stepped, and the path is the range within the guard's own bound.
-      //   above that          the guard is negligible and the bound is section 2's 2%.
+      // A REAL NUCLEUS (P45): no range floor, so the path is the range at EVERY range, to
+      // section 2's 2% - including the 1 um oxygen, which before P45 ran a path of exactly zero
+      // (the old assertion here demanded that zero). Its range is under `finalRangeIons`, so its
+      // one step IS the range and `step_len >= range` takes the whole energy; a floor coming
+      // back would fail this row by 100%.
+      //
+      // He3 keeps `step_hadron`'s 10 um floor: it dies once its residual range is under 10 um and
+      // deposits what is left, so its path is the range less at most that - the bound is
+      // 2 x 10 um / range where that is looser than 2%.
       constexpr double kMinUsefulRange = 1e-2;  // mm, step_hadron's own constant
-      if (want < kMinUsefulRange) {
-        if (mean_path != 0.0 || steps != kN) {
-          fail("%s at %g MeV: range %.3e mm is under the 10 um stopping guard, so every track "
-               "should die on its first step with a zero path - it ran %.3e mm in %.1f steps",
-               io.name, double(io.ekin), want, mean_path, double(steps) / kN);
+      if (!is_he3) {
+        const double dev = mean_path / want - 1.0;
+        if (steps < kN || std::fabs(dev) > 0.02) {
+          fail("%s at %g MeV: a nucleus is stepped to its range at any range - the transport "
+               "ran %.4e mm in %.2f steps and the table says %.4e mm (%+.2f%%)",
+               io.name, double(io.ekin), mean_path, double(steps) / kN, want, 100.0 * dev);
         }
       } else {
         const double dev = mean_path / want - 1.0;
@@ -604,6 +610,98 @@ int main() {
         if (worst[k] > limit[k]) {
           fail("%s worst deviation %.4e exceeds %.0e - %s", qn[k], worst[k], limit[k], where[k]);
         }
+      }
+    }
+  }
+
+  // ----------------------------------- 7. a nucleus 1 um before a boundary crosses it (P45)
+  //
+  // docs/RISK.md V342: P27's C12 and Fe56 at 1 MeV/n, fired 1 um before B1's trapezoid, were
+  // deposited where they started - `step_hadron`'s 10 um range floor stopped them in place, ranges
+  // 9.32 and 6.40 um - and the trapezoid read -100% against Geant4. Geant4's own step tape of the
+  // same primaries (ref/b1mat, /tracking/verbose 1, Geant4 11.1.1 QBBC, three tracks each):
+  //
+  //     Fe56 56 MeV -> water:  step 1  1 um   Transportation  dE 5.097 / 4.972 / 5.064 MeV
+  //                            step 2  5.787-5.802 um  ionIoni in Shape2, the rest deposited
+  //     Fe56 56 MeV -> bone:   step 2  3.425-3.434 um in Shape2
+  //     C12  12 MeV -> water:  step 1  1 um   dE 752.1 / 713.2 / 741.7 keV
+  //                            step 2  8.525-8.565 um in Shape2
+  //
+  // So the geometry here is that: a water world, and a box of water or bone whose face is 1 um
+  // ahead. The assertions are the tape's: every track takes a 1 um Transportation step first, the
+  // envelope keeps the 1 um's loss (Geant4's three tracks are 4.97-5.10 MeV and 0.71-0.75 MeV; the
+  // mean here must be within 5% of their mean), and the box receives the rest. With the floor
+  // back the box receives NOTHING and every row fails by 100%.
+  std::printf("\n-- 7. a nucleus fired 1 um before a boundary crosses it --\n");
+  {
+    geom::Volume<real_t> fv[2] = {
+        {{geom::SolidType::kBox, {kHalf, kHalf, kHalf}},
+         geom::make_translation<real_t>({0, 0, 0}), 0, data::kWater, /*score_index=*/-1},
+        {{geom::SolidType::kBox, {50, 50, 30}}, geom::make_translation<real_t>({0, 0, 30.001}), 1,
+         data::kWater, /*score_index=*/0},
+    };
+    struct Row { int z, a; const char* name; real_t ekin; int mat; double g4_env; };
+    // Geant4's envelope loss, the mean of the tape's three tracks.
+    const Row rows[] = {
+        {26, 56, "Fe56 water", real_t(56), data::kWater, (5.097 + 4.972 + 5.064) / 3.0},
+        {26, 56, "Fe56 bone", real_t(56), data::kBoneCompact, (5.097 + 4.972 + 5.064) / 3.0},
+        {6, 12, "C12 water", real_t(12), data::kWater, (0.7521 + 0.7132 + 0.7417) / 3.0},
+    };
+    constexpr int kN = 200;
+    for (const Row& r : rows) {
+      fv[1].material = r.mat;
+      Scene<real_t> fs = scene;
+      fs.geometry = geom::Geometry<real_t>{fv, 2, 0};
+      fs.scoring_volume = 1;
+      double box = 0, env = 0;
+      int first_not_boundary = 0;
+      for (int i = 0; i < kN; ++i) {
+        TrackState<real_t> p{};
+        p.species = ParticleType::kGenericIon;
+        p.ion_za = ion_za_of(r.z, r.a);
+        p.pos = Vec3<real_t>{0, 0, 0};
+        p.dir = Vec3<real_t>{0, 0, 1};
+        p.ekin = r.ekin;
+        p.volume = 0;
+        p.rng_key = 0x45F0u + 7919u * unsigned(i);
+        p.begin(p.pos, p.dir, p.ekin, 0, 0u, ProcessId::fNotDefined, real_t(0), real_t(1));
+        CountingEmitter em;
+        bool alive = true;
+        int n = 0;
+        while (alive && n < kMaxStepsPerTrack) {
+          StepReport<real_t> rep;
+          Philox<real_t> rng(p.rng_key, p.step, 0xB19Du);
+          em.pos = p.pos;
+          em.volume = p.volume;
+          em.event = p.event;
+          const real_t e0 = p.ekin;
+          const int v0 = p.volume;
+          real_t ed = 0;
+          alive = step_hadron(fs, p, ParticleType::kGenericIon, had, rng, em, ed, rep);
+          ++p.step;
+          if (n == 0 && rep.status != StepStatus::fGeomBoundary) { ++first_not_boundary; }
+          ++n;
+          box += static_cast<double>(ed);
+          // The envelope is not scored, so its share is what the ion lost while in it.
+          if (v0 == 0) { env += static_cast<double>(e0 - (alive ? p.ekin : real_t(0))); }
+          if (p.volume == geom::kOutsideWorld) { break; }
+        }
+      }
+      box /= kN;
+      env /= kN;
+      std::printf("  %-11s %5.4g MeV  envelope %8.5f MeV (Geant4 %8.5f)  box %9.5f MeV\n",
+                  r.name, double(r.ekin), env, r.g4_env, box);
+      if (first_not_boundary > 0) {
+        fail("%s: %d of %d tracks did not end their first step on the boundary 1 um ahead",
+             r.name, first_not_boundary, kN);
+      }
+      if (std::fabs(env / r.g4_env - 1.0) > 0.05) {
+        fail("%s: the 1 um before the face kept %.4f MeV and Geant4's tape %.4f MeV", r.name,
+             env, r.g4_env);
+      }
+      if (std::fabs(box + env - double(r.ekin)) > 1e-9 * double(r.ekin)) {
+        fail("%s: box %.6f + envelope %.6f MeV is not the %g MeV fired", r.name, box, env,
+             double(r.ekin));
       }
     }
   }

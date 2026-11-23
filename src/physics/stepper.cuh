@@ -1556,8 +1556,31 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // The same two termination guards step_lepton needs, for the same reason: without them a
   // track can stop making progress near the end of its range and never fall below the cut, and
   // the drain loop never empties. 10 um of residual range is a few tens of keV for a proton.
+  //
+  // A REAL NUCLEUS (`kGenericIon`) HAS NO RANGE GUARD, ONLY GEANT4'S ENERGY ONE (P45,
+  // docs/RISK.md V342-V343). `G4VEnergyLossProcess` has no residual-range floor: its only stop
+  // is `AlongStepDoIt`'s `length >= fRange || preStepKinEnergy <= lowestKinEnergy`
+  // (G4VEnergyLossProcess.cc:812), with `lowestKinEnergy` = `LowestMuHadEnergy()` = 1 keV for
+  // anything heavier than an electron (:261). Below `finalRangeIons` (0.1 mm) its step limit is
+  // the whole range (:583-584), so a nucleus whose range is under 10 um is STEPPED: it runs its
+  // range and stops, or a boundary closer than that cuts the step and it crosses. The 10 um floor
+  // here deposited it where it stood instead, and a nucleus's range is that short at the low end
+  // - Fe56 at 1 MeV/n has 6.40 um in water (`range_for`, and Geant4's own 6.4 um step), C12 at
+  // 1 MeV/n 9.32 um - so P27's C12 and Fe56 fired 1 um before the trapezoid left all of their
+  // energy in the envelope where Geant4 takes a 1 um Transportation step, loses ~5 MeV and
+  // deposits the other ~51 MeV of the Fe56 in the trapezoid (V342's tape). The guard's own
+  // worry - a track that makes no progress - does not arise without it: with the range under
+  // `finalRange` the physics step IS the range, `step_len >= range` takes the whole energy, and a
+  // step a boundary cuts short crosses the boundary.
+  //
+  // ONLY THE NUCLEUS, BY ITS OWN COMPILE-TIME NAME. `kt` is `run_step_hadron`'s template
+  // parameter, so this folds to the old test in every other kernel and the proton, pion, kaon,
+  // muon and light-ion steps are the same code they were. The floor is just as un-Geant4 there
+  // (a proton under ~0.5 MeV within 10 um of a boundary is deposited on the wrong side of it),
+  // and is left to a package of its own because removing it moves the hadron gates; V343 names it.
   const real_t kMinUsefulRange = real_t(1e-2);  // mm
-  if (p.ekin >= em::kHadronTrackingCut<real_t>() && range >= kMinUsefulRange) {
+  const bool range_floor = (kt != ParticleType::kGenericIon);
+  if (p.ekin >= em::kHadronTrackingCut<real_t>() && (!range_floor || range >= kMinUsefulRange)) {
     const real_t cut = mm.cut_electron;
 
     int next_volume = geom::kOutsideWorld;
@@ -2385,7 +2408,8 @@ __host__ __device__ inline bool step_hadron(const Scene<real_t>& s, TrackState<r
   // that crossed the world boundary is gone with its energy; a track that ran out of range
   // STOPPED, and a stopped unstable particle is what `G4Decay`'s at-rest branch and P12's
   // stopping processes compete for. The port's stop is at `kHadronTrackingCut` or 10 um of
-  // residual range rather than at exactly zero energy, so the residual kinetic energy is
+  // residual range (the latter not for a real nucleus since P45: see `range_floor`), so the
+  // residual kinetic energy is
   // deposited - which is also `G4Decay::DecayIt`'s own `energyDeposit` on the at-rest branch
   // (the parent is at rest by definition, so it is normally zero).
   const bool stopped_in_world = (p.volume >= 0) && (p.volume != geom::kOutsideWorld);
