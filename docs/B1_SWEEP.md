@@ -921,8 +921,9 @@ beam, to every digit): `/B1/det/material <NIST name>` - Shape2's material, befor
 | all | 702 | 630 | 549 | 81 |
 
 **What is outside, and what it is** (V340 has the list with every row):
-- **Lead cannot be run** (72 rows): the port's photoelectric reader holds 12 shells and Pb has 24
-  (`kPeMaxShells`, reported as "data not found").
+- **Lead could not be run** (72 rows): the port's photoelectric reader held 12 shells and Pb has 24
+  (`kPeMaxShells`, reported as "data not found"). **Since P43 it runs** - the lead rows are in the
+  P43 subsection below: 70 of 72 have a port dose, 55 of them inside 3 sigma.
 - **Hadronic dose in a gas is low**: every hadron and nucleus beam in an air trapezoid -3% to -15%,
   neutrons -16% to -26% (and -85% at 1 MeV, in air, oxygen and nitrogen gas alike), while photons,
   electrons and directly-fired protons and alphas in air agree. Suspected: the slow charged
@@ -1015,3 +1016,33 @@ reran the 38 muon rows against the same Geant4 box rows (V348's table):
 At 10 GeV the rows read +0.01% to +0.05% where they read -0.60% to -0.74%. The muon rate above 1
 GeV is 0.57-0.76x what it was - the pair cross section integrated on every step; mu- 1 GeV in bone
 480,533 -> 297,578 ev/s (22.0x one core, 3.9x the box). The rows are in V348.
+## P43: lead, and every element to uranium (2026-11-23)
+
+The photoelectric table held 12 shells and refused every element past krypton as "data not found";
+it now holds 29 (the most any G4EMLOW 8.2 file holds, Pa and U), and a scene may hold 100 distinct
+elements where it was 16 (docs/RISK.md V354-V357). Every element from H to Cf matches Geant4's own
+photoelectric and Rayleigh models to 4.4e-16, the shell walk exactly; B1's gates are bit-identical.
+Then P27's 72 lead rows, on the port side (Geant4's are P27's), and a uranium scan run on both
+sides. The tables are `docs/sweep/p27/lead.md`, every run `docs/sweep/p27/runs_p43.csv`.
+
+| rows | run | inside 3 sigma | outside |
+|---|--:|--:|--:|
+| tier 2: 21 species x 300 MeV, 1, 10 GeV (per nucleon), lead | 61 of 63 | 48 | 13 |
+| tier 4: photons, e-, e+ at 100 keV, 1, 10 MeV from the face, lead | 9 of 9 | 7 | 2 |
+| uranium: photons, e- at 100 keV, 1, 10 MeV from the face | 6 of 6 | 4 | 2 |
+
+**What the lead rows say.** Every photon row agrees (100 keV +0.07%, 1 MeV +0.02%, 10 MeV -0.06%,
+300 MeV -0.13%, 1 GeV +0.08%), and so do the electrons and positrons above 100 keV, the protons,
+antiprotons, anti-neutrons, pi+, the light ions and the four nuclei at every energy (Fe56 +2.7%,
+-0.7%, -1.2%). Outside, and none of it the photoelectric table:
+- **e- at 100 keV from the face: +5.6% in lead, +15.6% in uranium** (e+ +0.5%); at 1 and 10 MeV
+  the same electrons agree to 0.1%. A slow electron entering a high-Z volume - the EM owner's.
+- **muons at 10 GeV -3.1%** (-0.6% in water): radiative losses, Z^2 - P46's.
+- **kaons +0.6% to +6.3%**: hundreds of Bertini refusals a run, disposed of inside the trapezoid.
+- **neutrons +2.3% to +3.7%, pi- 300 MeV +1.3%, d 1 GeV/n +2.0%, t 300 MeV/n +1.1%**: not diagnosed.
+- **Engine limits, no physics:** the 10 GeV photon and electron hit the pool FATAL at every count
+  down to 125,000 (no port dose); the drain loop's 20,000-iteration bound abandons the whole pool on
+  the neutron rows past 800,000 events and on He3 at 10 GeV/n.
+
+The port's lead rates are in lead.md but not in README's table: they ran beside other packages'
+compiles and sweeps.

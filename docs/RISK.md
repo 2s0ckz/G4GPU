@@ -22280,3 +22280,202 @@ tests/test_lepton_lambda.cu and ref/b1mat/store_lambda_tables.mac new), test_ion
 on a TESTS line (it is not on one: it is host-only and needs the Geant4 store first). The deposit
 tapes on both sides are not committed (StepTap through exampleB1.cc; a derived stepping action in
 ref/b1mat) - in the session's scratchpad, p44\tape_src.
+### V354: P43's measurement - every per-Z table the port loads from Geant4's data, its cap against what the files hold for Z = 1 .. 100: the photoelectric shell cap of 12 broke at rubidium (Z = 37), the files hold up to 29 (Pa, U); three per-scene element caps of 16 (photoelectric, Rayleigh, Seltzer-Berger); every refusal printed as "data not found"
+
+**THE FINDING (P27, V338 item 1, V340).** A lead trapezoid stopped every port run at start-up with
+`photoelectric: cannot read pe-high-82.dat ... FATAL: photoelectric (G4EMLOW epics2017/phot) data
+not found`. The file was there: `load_param_file` refused any parameter file of more than
+`kPeMaxShells` = 12 shells, and returned the same `false` it returns for a missing file.
+
+**THE CAPS, MEASURED** (2026-11-23, G4EMLOW 8.2 as the oracle reads it; every file's header read for
+Z = 1 .. 100, the range G4LivermorePhotoElectricModel and G4LivermoreRayleighModel read - their
+`maxZ` is 100):
+
+| file family (what reads it) | the port's cap | what the files hold, Z = 1 .. 100 | where the cap broke | what a refusal printed |
+|---|--:|---|---|---|
+| epics2017/phot pe-high-Z.dat, pe-low-Z.dat (parameterisation, `load_param_file`) | 12 shells (`kPeMaxShells`) | 1 to 29 shells: 12 up to Kr (36), 13 at Rb (37), 24 at Pb (Tl-Rn), 29 at Pa, U, Np, Cm, Bk; n1 = n2 in every file | Z = 37 and every Z above it (64 elements of 100; 56 of the 92 to uranium) | "photoelectric: cannot read pe-high-37.dat in DIR", then "FATAL: photoelectric ... data not found" |
+| pe-ss-cs-Z.dat (per-shell, the shell walk below 5 keV) | the same 12 (`ss_*[kPeMaxShells]`) | one block a shell, 1 to 29 | never reached: the parameter file is refused first | (a short block: silently truncated, `break`) |
+| pe-cs-Z.dat, pe-le-cs-Z.dat (tabulated total) | none (shared vectors) | up to 1,146 points (pe-cs, Ta) and 6,422 (pe-le-cs, Pa) | - | a missing file: NOTHING - loaded as an empty block, its branch of the cross section zero (Geant4: em0003 FatalException) |
+| elements a scene may hold, photoelectric (`kPeMaxElements`) | 16 | up to 100 | a seventeenth distinct element | nothing; then "FATAL: ... data not found" |
+| epics2017/rayl re-cs-Z.dat (`load_rayleigh`) | none on points; 16 elements (`kRayleighMaxElements`); no bound on Z at all (`z_to_index[101]` indexed by any Z) | up to 548 points | a seventeenth element | nothing; then "FATAL: Rayleigh ... data not found" |
+| brem_SB/br<Z> (`load_sb_tables`) | 64 x 64 grid; 16 elements (`kSbMaxElements`) | at most 32 x 57 nodes | a seventeenth element | nothing for the grid, the element count or a short file; only a missing file printed ("brems: cannot open") |
+| Cullen fit PP0-PP8 (Rayleigh angle, `rayleigh_angular_tables.cuh`) | 101 entries | Z = 0 .. 100 | - | - |
+| the material's own elements (`materials.cuh` `kMaxElements`) | 16 a material | NIST's largest compound has 10 | - | already says what and why ("raise kMaxElements") |
+
+Not per-Z caps of the port's, and so left as they are: G4PARTICLEXS (Z = 1 .. 92, 94 for the
+photon - Geant4's own files, all loaded at start), the level data (`kLevelZMax` 118 =
+G4NuclearLevelData::ZMAX), the isotope tables (G4NistManager's 108), the atomic masses (Z <= 98),
+and the stopping tables (ICRU49 to 92, NIST's 74 materials, ICRU73's 26 elements, ICRU90's three
+materials - each Geant4's own coverage, with Geant4's own fallback transcribed beside it). The
+fluorescence, Auger, Compton-profile and EPICS pair data are not loaded at all: QBBC's
+G4EmStandardPhysics has fluorescence off, and its Compton and pair models read no per-element file.
+
+So the port could not run 64 of the 100 elements Geant4's photoelectric model reads - tungsten,
+lead and uranium among them, every shielding, collimator and brachytherapy material - nor any
+scene of more than 16 distinct elements, and said "data not found" for both.
+
+A RANGE OF GEANT4'S OWN, found while dumping the oracle (V356): G4LivermorePhotoElectricModel's
+`maxZ` is 100, but its ReadData calls `fShellCrossSection->InitialiseForComponent(Z, n2)` and
+11.1.1's G4ElementData holds `Z < maxNumElm = 99`, so the first photon on einsteinium (99) or
+fermium (100) stops Geant4 with mat602 "Wrong data handling". Geant4 11.1.1 runs the Livermore
+photoelectric effect to Z = 98. The port loads 99 and 100 (the files are there) and has nothing to
+compare them to; every element a NIST material is made of is below.
+
+### V355: P43's change - the photoelectric table holds 29 shells and every table 100 distinct elements, sized by the measurement and fixed in the element so the gamma step reads exactly what it read; every refusal names the file or element and the reason
+
+**THE CAPACITIES** (src/data):
+- `kPeMaxShells` 12 -> 29, the largest count of V354's scan, so `kPeParamStride` 85 -> 204. The
+  arrays stay fixed-size inside `PhotoElectricElement`, read through Scene's one table pointer, and
+  not device allocations sized at run start: the gamma step's reads (`t.elements[i].param_high[idx]`,
+  the shell walk's `p[shell*7+2]`) are the same instructions on a longer stride, so the change is a
+  capacity and not arithmetic. An element is 3,640 B against 1,536 B.
+- `kPeMaxElements`, `kRayleighMaxElements`, `kSbMaxElements` 16 -> 100, every Z the files cover,
+  so no scene can reach them. Device memory: the photoelectric table of 100 slots 364,432 B
+  (before: 25,008), Rayleigh 1,632 B, Seltzer-Berger 3,381,208 B (before: 541,336) - about 3.2 MB
+  more of the 12 GB card, whichever elements the scene holds. The host copies moved off the stack: the two
+  photoelectric uploads (host/pe_upload.cuh) and table 9's (host/transport_run_engine.cuh) on the
+  heap, test_brems's Seltzer-Berger set static.
+- The 64 x 64 Seltzer-Berger grid, the tabulated vectors and the Cullen tables are unchanged: V354
+  found nothing past them.
+
+**THE REFUSALS.** Each loader prints one line naming what it refused and why before the caller's
+FATAL, which now reads "data could not be loaded - the line above names what was refused and why"
+instead of "data not found":
+- `load_param_file`: the file does not open; the header does not parse; "it holds N shells and this
+  port's table holds 1 to kPeMaxShells = 29"; the header's two counts differ (Geant4 walks the
+  second, the port the first: equal in every file of G4EMLOW 8.2, refused by name if a future set
+  breaks it); a short row.
+- `load_photoelectric`: a Z outside 1 .. 100; the element count; pe-high and pe-low disagreeing on
+  the shells; and, as Geant4's ReadData stops on them (em0003), a missing pe-cs-Z.dat, and a missing
+  pe-le-cs-Z.dat or pe-ss-cs-Z.dat for an element of more than one shell, and an incomplete per-shell
+  block. Before, the first two loaded as an empty block - a zero branch of the cross section - and
+  the third as no shell walk.
+- `load_rayleigh`: a Z outside 1 .. 100 (before: an index past `z_to_index[101]`), the element
+  count, the file.
+- `load_sb_tables`: a Z outside 1 .. 100, the element count, the grid against 64 x 64, a short
+  table (before: nothing printed for any of these).
+
+**WHAT STALES.** `physics/scene.cuh` includes `data/photoelectric_data.cuh`, so every engine unit
+and every test that includes the scene rebuilds: a header this widely read cannot change its
+capacity without that, and the change is confined to the data loaders, their upload and the tests.
+
+### V356: P43's proof - every element from H to Cf against Geant4's own models (the cross sections to 4.4e-16, the shell walk exactly), the 108 tests and the eleven dose gates to the digit, and lead in the B1 trapezoid: tier 2's 63 lead rows: 61 run, 48 inside 3 sigma, the 13 outside named (none photoelectric); tier 4's 9 all run, the photons inside; uranium's photons inside 0.2%
+
+**THE ORACLE** (ref/dump/dump_pe_shells.cc, registered as `pe_shells`): fresh
+G4LivermorePhotoElectricModel and G4LivermoreRayleighModel instances - their data are class statics,
+read for any Z on first use - give `pe_atom.csv` (the cross section per atom of both, Z = 1 .. 98,
+441 energies from 1 keV to 10 GeV) and `pe_shell.csv` (SampleSecondaries on a one-element material,
+the first deviate scripted: 20 elements from H to U x 25 energies from 1 keV to 10 MeV x 19 deviates,
+the photoelectron's energy naming the shell). Two things the dump found:
+- Z = 98 and not 100: the first photon on Es (99) stops Geant4 11.1.1 with mat602 (V354's note).
+- A constant tail deviate hangs Geant4: G4SauterGavrilaAngularDistribution's rejection loop has no
+  bound, and a deviate it rejects once it rejects for ever. The tail is the real engine; only the
+  shell is compared.
+
+**THE Z SCAN** (tests/test_photoelectric.cu, tests/test_rayleigh.cu; one table of all 100 Z - the
+scene no geometry can exceed now):
+- photoelectric, 43,218 points: the worst relative difference 4.4e-16 (Cu at 4.7 keV); Fe 2.2e-16
+  (10 shells), Cu 4.4e-16 (10), Ag 2.2e-16 (15), W 2.2e-16 (22), Pb 3.3e-16 (24), U 3.3e-16 (29) -
+  the last bits of two algebraically equal interpolations, nothing else. ONE point apart, by name:
+  Cs at exactly 1 keV, where pe-le-cs-55.dat gives the M3 edge as two points at one energy
+  (1.8216e-3 and 2.0865e-3 barn); G4PhysicsVector::Value returns the value below the edge there and
+  `interp_block` the value above it. Measure zero (a transported photon is never on a node), and not
+  changed: this package changes capacities, not arithmetic.
+- the shell walk, 9,500 (Z, E, r0): every one the same shell and the same photoelectron energy to
+  the bit; lead selected 23 of its 24 shells over the grid, uranium 26 of 29.
+- Rayleigh, 43,218 points: worst 4.4e-16 (Li); Fe 3.3e-16, Pb 2.2e-16, U 2.2e-16.
+- test_brems: unchanged (0.000% over 0.1-100 MeV).
+
+**THE TESTS AND THE GATES** (this worktree, every engine unit rebuilt - scene.cuh includes the
+photoelectric header - under CUDA 12.9 at sm_70 + compute_70, the Titan V): 93 host tests and 15
+kernel tests, 108 of 108 passed. The eleven dose gates of build_all.bat against gate ba76 (main
+04eda72): every dose, rms, step count and process count the same to the printed digit - B1 2M
+427.699 pGy, exampleB1 426.028 pGy (1.10452 sigma), gunstate 426.263, B1/B1mesh 427.3055 /
+427.3033, the eight process switches, the step hook (9092.74676606292 MeV both ways), the pool at
+8.0/4.0/2.5 (427.3899 three times), the two-run sequence (842.260 then 871.530 pGy; 1,713.790 against
+1,713.790), and the proton depth-dose (port_depth.csv byte-identical to ba76's). What moved is
+scheduling only: the wall-clock milliseconds, and in the proton gate the iteration and throttle
+counters (950 -> 952 iterations, 442,867 -> 442,935 deferrals), which move between two runs of one
+binary (V336). The capacity change is bit-identical for water, A-150, bone and air.
+
+**LEAD IN THE TRAPEZOID** (P27's driver, tools/p27_sweep.ps1, unchanged rules: V336's counts, the
+port's largest good run against Geant4's box row per event; Geant4's 72 lead rows of
+docs/sweep/p27/runs.csv reused - every one passes the 5% start-up rule, two through their reruns;
+this package's port runs and the uranium rows are docs/sweep/p27/runs_p43.csv, the tables
+docs/sweep/p27/lead.md). Every run starts: `photoelectric: 8 elements` (H, C, N, O, F, Ar, Ca, Pb).
+
+Tier 4 (the gun 1 um from the face; photons, e- and e+ at 100 keV, 1 and 10 MeV): 9 of 9 run, 7
+inside 3 sigma. The photons - the rows the photoelectric table decides - are +0.07% (100 keV, 2.5
+sigma), +0.02%, -0.06%. Outside: **e- at 100 keV +5.61% (+66 sigma)** and e+ at 100 keV +0.49%
+(+11.5). Not photoelectric (the same electrons at 1 and 10 MeV agree to 0.05-0.13%, and the 100 keV
+photon, which is ~all photoelectric in lead, agrees): a slow electron entering a high-Z volume -
+backscatter and multiple scattering at the face. It grows with Z: uranium +15.6% (below), and
+V341 found the same electron -1.5% in AIR. Not diagnosed; for the EM owner.
+
+Tier 2 (21 species x 300 MeV, 1, 10 GeV per nucleon; B1's gun): 63 rows, 61 with a
+port dose (the 10 GeV photon and electron: the pool FATAL, below), **48 inside 3 sigma**. Inside:
+every photon, electron and positron row that ran (-0.17% to +0.08%; the photoelectric effect is
+most of a photon's attenuation in lead below ~500 keV), the muons at 300 MeV and 1 GeV, pi+ at every energy, protons (+0.3% to +1.0%),
+antiprotons, anti-neutrons, He3 to 1 GeV/n and alpha, and the four GCR nuclei at every energy (C12 +0.3% to
++0.6%, O16 +0.3% to +1.4%, Si28 -0.2% to +1.0%, Fe56 +2.7%, -0.7%, -1.2%). Outside, 13:
+
+| row | port - QBBC | sigma | what it is |
+|---|--:|--:|---|
+| mu- / mu+ 10 GeV | -3.08%, -3.11% | -24, -25 | the muon's radiative losses (V337's -0.6% in water): they go as Z^2, and lead is where they are largest - P46's package |
+| kaon+ 300 MeV, 1 GeV; kaon- 300 MeV, 1 GeV | +0.6%, +4.3%, +4.0%, +6.3% | +4 to +15 | Bertini refusals by name, 62-1,192 a run, whose disposal deposits the refused hadron's energy inside the scoring volume (the ledger says so on each row) |
+| neutron 300 MeV, 1 GeV | +3.7%, +2.3% (the 800,000-event run) | +7.8, +4.2 | not diagnosed; the 1 GeV row's 1,600,000-event run abandoned 6.7M tracks (below) |
+| neutron 10 GeV, He3 10 GeV/n | -76%, -23% | - | runs stopped part-way by the drain loop's bound, not physics |
+| pi- 300 MeV, deuteron 1 GeV/n, triton 300 MeV/n | +1.3%, +2.0%, +1.1% | +5.2, +3.9, +3.7 | with the neutrons, a +1-4% excess on some hadron rows in lead; not diagnosed |
+
+
+THE ENGINE REFUSALS AND ABANDONMENTS LEAD FOUND, none of them in this package's code:
+- **The pool FATAL** ("no track can be stepped without overrunning the pool", V336) for a 10 GeV
+  photon and a 10 GeV electron at every count down to 125,000 (lead's radiation length is 5.6
+  mm; 6 cm is 10.7 X0, and a 10 GeV shower in it holds more live tracks an event than the
+  default 4 slots allow at any batch): no port dose. At 1 GeV the photon and e- rows run at
+  500,000 and 250,000 and agree (+0.08%, -0.13%).
+- **The drain loop's iteration bound** (V277, 20,000 iterations) abandoned 6.69-6.70 million tracks
+  - the whole pool - on three runs: neutron 1 GeV at 1,600,000 events, neutron 10 GeV at 800,000,
+  He3 10 GeV/n at 400,000. Their doses are of runs stopped part-way (-26%, -76%, -23%) and are NOT physics: the
+  neutron 1 GeV row at 800,000 events (1 track abandoned) reads +2.26% (+4.2 sigma). Lead holds
+  slow neutrons through thousands of elastic steps; what the bound should be is the engine's.
+- Bertini refusals by name (P10), now in their hundreds on the kaon rows in lead (kaon- 300 MeV:
+  404 interactions in 800,000 events) - and the disposal deposits the refused hadron's kinetic
+  energy where it stands, INSIDE the scoring volume, so these rows read high: kaon+ 1 GeV +4.3%,
+  kaon- 300 MeV +4.0%, 1 GeV +6.3%. The ledger says so on each row.
+
+RATES: every lead and uranium run of this package ran beside other packages' compiles, host tests
+and sweeps (P44, P46), on a shared card queue, so the ev/s are quoted in lead.md but are not a
+class of their own for README's table; the doses and sigmas are unaffected. Rough scale: photons in
+lead 1 GeV 78,000-97,000 ev/s at 0.5-1M events, the low end 1.3-5.5M ev/s, pions 3,500-6,000, Fe56
+1 GeV/n 59.
+
+**URANIUM** (G4_U in the trapezoid, the same nine-element scene, photons and e- at 100 keV, 1 and
+10 MeV from the face; Geant4's box and serial rows run here with ref/b1mat built in this worktree):
+photons +0.21% (100 keV, +4.6 sigma at 0.03% a side), +0.03%, +0.14%; e- +15.55% (100 keV, +131
+sigma), +0.01%, +0.00%. The uranium photoelectric table (29 shells, the largest) gives Geant4's
+photon dose to 0.2% at 100 keV, where the photoelectric effect is most of the attenuation; the 100
+keV electron is the same high-Z face effect as lead's.
+
+### V357: P43's docs - B1_SWEEP's P27 section carries the lead rows and the uranium scan, the plan row, and what is left for other owners
+
+**WHAT CHANGED IN THE DOCS.** docs/B1_SWEEP.md: the P27 section's "Lead cannot be run" bullet
+replaced by the lead rows and a P43 subsection; docs/sweep/p27/lead.md (both lead tiers and the
+uranium scan, doses per event and every run's curve) and runs_p43.csv (every run behind them, the
+Geant4 lead rows as P27 recorded them included); docs/HADRONIC_PLAN.md's plan table, a P43 row.
+README's throughput table is NOT given a lead row: the lead rates ran beside three other packages'
+compiles, tests and sweeps, and a rate measured on a shared machine is not one to headline (V356);
+lead is no class of its own in any case - its photons run at the photon class's rate order.
+
+**LEFT FOR OTHER OWNERS, BY NAME** (each found by the lead rows, none of it in data/):
+1. e- (and e+) at 100 keV entering a high-Z volume: +5.6% in lead, +15.6% in uranium (and -1.5% in
+   air, V341) - the EM step at a boundary for a slow electron.
+2. The pool FATAL for 10 GeV photons and electrons in 6 cm of lead at the default 4 live tracks an
+   event, at every count tried.
+3. The drain loop's 20,000-iteration bound abandoning the whole pool on lead's neutron and He3 rows
+   past ~800,000 events.
+4. Bertini's refusals disposing of the refused hadron's energy inside the scoring volume - kaons in
+   lead read +4% to +6% on that, with hundreds of refusals a run.
+5. The muons at 10 GeV, -3.1% in lead against -0.6% in water (P46's radiative losses: Z^2, so lead
+   is where it is largest).
+6. The Cs M3 edge node (V356): measure zero, recorded.
