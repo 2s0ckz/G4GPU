@@ -18,7 +18,12 @@
 
 namespace g4gpu::data {
 
-constexpr int kRayleighMaxElements = 16;
+/// How many DISTINCT elements one scene may hold: 100, every Z G4LivermoreRayleighModel reads
+/// (its maxZ), so no scene can reach it - 1.2 KB of table. It was 16, and a scene of seventeen
+/// elements was refused as missing data (docs/RISK.md V354, V355). The per-element data are the
+/// shared point arrays, sized by what is read; re-cs-Z.dat holds 548 points at most for Z = 1 ..
+/// 100 in G4EMLOW 8.2 and nothing here caps that.
+constexpr int kRayleighMaxElements = 100;
 
 template <typename real_t>
 struct RayleighElement {
@@ -46,14 +51,27 @@ __host__ inline bool load_rayleigh(const std::string& dir, const int* zs, int n_
   tv.clear();
   for (int i = 0; i < n_z; ++i) {
     const int z = zs[i];
+    // Every refusal says what and why (docs/RISK.md V355): z_to_index has 101 entries, and a Z
+    // past it used to index out of bounds here instead of being refused.
+    if (z < 1 || z > 100) {
+      std::printf("rayleigh: refused Z = %d: G4LivermoreRayleighModel reads Z = 1 to 100 (its "
+                  "maxZ), and so does this port\n", z);
+      return false;
+    }
     if (out.z_to_index[z] >= 0) { continue; }
-    if (out.n_elements >= kRayleighMaxElements) { return false; }
+    if (out.n_elements >= kRayleighMaxElements) {
+      std::printf("rayleigh: refused Z = %d: the scene's %dth distinct element, and the table "
+                  "holds kRayleighMaxElements = %d (src/data/rayleigh_data.cuh)\n",
+                  z, out.n_elements + 1, kRayleighMaxElements);
+      return false;
+    }
     RayleighElement<real_t>& e = out.elements[out.n_elements];
     e.z = z;
     // The files are already in Geant4 internal units, so no barn rescaling: pass 1.
     if (!load_cs_file_scaled<real_t>(dir + "/re-cs-" + std::to_string(z) + ".dat", te, tv,
                                      e.offset, e.count, real_t(1))) {
-      std::printf("rayleigh: cannot read re-cs-%d.dat in %s\n", z, dir.c_str());
+      std::printf("rayleigh: refused re-cs-%d.dat in %s: it does not open, or holds no point "
+                  "(Geant4 stops on it: em0003)\n", z, dir.c_str());
       return false;
     }
     out.z_to_index[z] = out.n_elements;

@@ -4,6 +4,7 @@
 // the struct is patched to point at device memory before it is itself copied over.
 #pragma once
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 #include <cstdlib>
@@ -21,11 +22,18 @@ namespace g4gpu::host {
 /// still produces a plausible-looking dose - about half a percent low for B1 - which is far
 /// worse than not running at all, because nothing downstream flags it. This is how a shell
 /// with G4LEDATA pointing at an old G4EMLOW quietly turned two processes off.
+///
+/// NOT "data not found" any more, because a missing file is only one of the ways a load is
+/// refused: P27 read "photoelectric: cannot read pe-high-82.dat ... FATAL: photoelectric data
+/// not found" for a file that was there and had been refused for holding 24 shells against a
+/// table of 12 (docs/RISK.md V338, V355). Every loader now prints the file or the element it
+/// refused and the reason on the line before this one, and this says only that the run stops.
 [[noreturn]] inline void fatal_missing_data(const char* what, const std::string& dir) {
-  std::printf("\nFATAL: %s data not found.\n  looked in: %s\n", what,
+  std::printf("\nFATAL: %s data could not be loaded - the line above names what was refused "
+              "and why.\n  data directory: %s\n", what,
               dir.empty() ? "(no G4EMLOW directory located)" : dir.c_str());
-  std::printf("  Set G4LEDATA to a G4EMLOW 8.x directory, or GEANT4_DATA_DIR to the\n"
-              "  share/Geant4/data folder that contains it.\n");
+  std::printf("  If a file does not open, set G4LEDATA to a G4EMLOW 8.x directory, or\n"
+              "  GEANT4_DATA_DIR to the share/Geant4/data folder that contains it.\n");
   std::exit(2);
 }
 
@@ -70,7 +78,9 @@ inline data::PhotoElectricTable<real_t>* upload_photoelectric(const std::string&
   int n_z = 0;
   const int* zs = b1_elements(n_z);
 
-  data::PhotoElectricTable<real_t> host_table{};
+  // On the heap: 364 KB since kPeMaxElements is 100 (docs/RISK.md V355), too much for a stack.
+  const auto owner = std::make_unique<data::PhotoElectricTable<real_t>>();
+  data::PhotoElectricTable<real_t>& host_table = *owner;
   std::vector<real_t> te, tv;
   if (!data::load_photoelectric<real_t>(dir, zs, n_z, host_table, te, tv)) {
     fatal_missing_data("photoelectric (G4EMLOW epics2017/phot)", dir);
@@ -241,7 +251,9 @@ inline em::WentzelLeptonTable<real_t>* upload_wv_lepton(const data::Material<rea
 template <typename real_t>
 inline data::PhotoElectricTable<real_t>* upload_photoelectric_for(const std::string& dir,
                                                                   const std::vector<int>& zs) {
-  data::PhotoElectricTable<real_t> host_table{};
+  // On the heap: 364 KB since kPeMaxElements is 100 (docs/RISK.md V355), too much for a stack.
+  const auto owner = std::make_unique<data::PhotoElectricTable<real_t>>();
+  data::PhotoElectricTable<real_t>& host_table = *owner;
   std::vector<real_t> te, tv;
   if (!data::load_photoelectric<real_t>(dir, zs.data(), static_cast<int>(zs.size()), host_table,
                                         te, tv)) {

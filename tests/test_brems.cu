@@ -31,7 +31,8 @@ int main() {
   data::build_b1_materials<real_t>(mats);
 
   const int zs[10] = {1, 6, 7, 8, 9, 12, 15, 16, 18, 20};
-  data::SBTableSet<real_t> sb{};
+  // Static: 3.4 MB since kSbMaxElements is 100 (docs/RISK.md V355), past a default stack.
+  static data::SBTableSet<real_t> sb{};
   if (!data::load_sb_tables<real_t>(kSbDir, zs, 10, sb)) {
     std::printf("FAILED to load Seltzer-Berger tables from %s\n", kSbDir);
     return 1;

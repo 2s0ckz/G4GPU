@@ -25,9 +25,15 @@
 
 namespace g4gpu::data {
 
+// The capacities against the data (docs/RISK.md V354, V355). Every brem_SB/br<Z> of G4EMLOW 8.2,
+// Z = 1 .. 100, has at most nx = 32 and ny = 57 nodes, so the 64 x 64 grid holds every element.
+// kSbMaxElements is how many DISTINCT elements one scene may hold: 100, every Z the files cover,
+// so no scene can reach it. It was 16, and a seventeenth element was refused with nothing said;
+// the table of 100 is 3.4 MB (33,808 B an element), which is why every host copy of it is
+// static (host/pe_upload.cuh, the tests) rather than on a stack.
 constexpr int kSbMaxX = 64;
 constexpr int kSbMaxY = 64;
-constexpr int kSbMaxElements = 16;
+constexpr int kSbMaxElements = 100;
 
 /// One element's scaled DCS table.
 template <typename real_t>
@@ -89,12 +95,24 @@ __host__ inline bool load_sb_tables(const std::string& dir, const int* zs, int n
   out.n_elements = 0;
   for (int i = 0; i < n_z; ++i) {
     const int z = zs[i];
+    // Every refusal says what and why (docs/RISK.md V355): before, four of the five returned
+    // false with nothing printed, and the caller's FATAL called it missing data.
+    if (z < 1 || z > 100) {
+      std::printf("brems: refused Z = %d: brem_SB has br1 to br100, and the table indexes Z to "
+                  "100\n", z);
+      return false;
+    }
     if (out.z_to_index[z] >= 0) { continue; }
-    if (out.n_elements >= kSbMaxElements) { return false; }
+    if (out.n_elements >= kSbMaxElements) {
+      std::printf("brems: refused Z = %d: the scene's %dth distinct element, and the table holds "
+                  "kSbMaxElements = %d (src/data/brems_data.cuh)\n",
+                  z, out.n_elements + 1, kSbMaxElements);
+      return false;
+    }
     const std::string path = dir + "/br" + std::to_string(z);
     FILE* f = std::fopen(path.c_str(), "r");
     if (f == nullptr) {
-      std::printf("brems: cannot open %s\n", path.c_str());
+      std::printf("brems: refused %s: it does not open (missing?)\n", path.c_str());
       return false;
     }
     SBElement<real_t>& e = out.elements[out.n_elements];
@@ -103,6 +121,9 @@ __host__ inline bool load_sb_tables(const std::string& dir, const int* zs, int n
     if (std::fscanf(f, "%d %d %d", &k, &nx, &ny) != 3 || nx < 2 || ny < 2 || nx > kSbMaxX
         || ny > kSbMaxY) {
       std::fclose(f);
+      std::printf("brems: refused %s: its header gives a %d x %d grid, and the table holds 2 to "
+                  "kSbMaxX = %d by 2 to kSbMaxY = %d (src/data/brems_data.cuh)\n",
+                  path.c_str(), nx, ny, kSbMaxX, kSbMaxY);
       return false;
     }
     e.nx = nx;
@@ -112,7 +133,12 @@ __host__ inline bool load_sb_tables(const std::string& dir, const int* zs, int n
     for (int j = 0; j < ny; ++j) {
       for (int a = 0; a < nx; ++a) {
         double t = 0;
-        if (std::fscanf(f, "%lf", &t) != 1) { std::fclose(f); return false; }
+        if (std::fscanf(f, "%lf", &t) != 1) {
+          std::fclose(f);
+          std::printf("brems: refused %s: the table ends at row %d of %d\n", path.c_str(), j + 1,
+                      ny);
+          return false;
+        }
         e.v[j * nx + a] = real_t(t);
       }
     }

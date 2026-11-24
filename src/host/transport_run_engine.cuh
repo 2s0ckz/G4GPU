@@ -821,7 +821,9 @@ void TransportEngine<real_t, StepHook>::Upload(const g4::FlatScene& scene, int b
     // section as well as the store's - so the photoelectric data are read once more here, onto
     // the HOST, for the scene's elements. A missing file is fatal exactly as it is above.
     {
-      data::PhotoElectricTable<real_t> pe_host{};
+      // On the heap: 364 KB since kPeMaxElements is 100 (docs/RISK.md V355).
+      const auto pe_owner = std::make_unique<data::PhotoElectricTable<real_t>>();
+      data::PhotoElectricTable<real_t>& pe_host = *pe_owner;
       std::vector<real_t> pe_e, pe_v;
       if (!data::load_photoelectric<real_t>(default_phot_dir(), zs.data(),
                                             static_cast<int>(zs.size()), pe_host, pe_e, pe_v)) {

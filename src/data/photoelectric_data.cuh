@@ -29,7 +29,8 @@
 //   pe-high-Z.dat / pe-low-Z.dat : "nShells nShells Eboundary", then nShells rows of
 //                                  [binding_MeV, c1..c6 in barn]
 //   pe-cs-Z.dat / pe-le-cs-Z.dat : "emin emax n", then "n", then n rows of "E value"
-//   pe-cs-Z.dat / pe-le-cs-Z.dat : "emin emax n", then "n", then n rows of "E value"
+//   pe-ss-cs-Z.dat               : nShells blocks of "emin emax n shell_id", then n rows of
+//                                  "E value"
 #pragma once
 #include <cstdio>
 #include <cstdlib>
@@ -40,8 +41,31 @@
 
 namespace g4gpu::data {
 
-constexpr int kPeMaxShells = 12;      ///< Ca has 8; 12 leaves headroom
-constexpr int kPeMaxElements = 16;
+// THE CAPACITIES, AND THEY ARE MEASUREMENTS OF THE DATA (docs/RISK.md V354, V355).
+//
+// kPeMaxShells is the largest shell count any pe-high-Z.dat / pe-low-Z.dat / pe-ss-cs-Z.dat holds
+// for Z = 1 .. 100 in G4EMLOW 8.2 epics2017/phot - every Z G4LivermorePhotoElectricModel reads
+// (its maxZ is 100). Read off the files' headers: 1 (H, He), 2, 4, 5, 7, 8 (Ca), 10 (Sc-Zn), 12
+// (Ga-Kr), 13, 14 (Pd), 15, 17, 18, 20, 21 (Ir), 22 (Gd, Lu-Os, Pt-Hg), 24 (Tl-Rn: lead is 24),
+// 25 (Fr, Ra), 27 (Ac, Th, Pu, Am, Cf-Fm) and 29 (Pa, U, Np, Cm, Bk). It was 12 - "Ca has 8; 12
+// leaves headroom" - which held every element up to krypton and refused rubidium (13 shells) and
+// everything heavier, tungsten, lead and uranium among them, as "cannot read pe-high-37.dat": the
+// file had been read, and refused for its size. P27 ran 72 lead rows into that (V338).
+//
+// The arrays stay fixed-size, inside the element, rather than becoming device allocations sized
+// at run start, because the gamma step reads them through the one table pointer Scene carries
+// (`t.elements[i].param_high[idx]`), and a fixed stride keeps that read - and so every
+// instruction of the cross section and the shell walk - what it was: the change is a capacity,
+// not arithmetic. The cost is 2 x 204 doubles and 87 ints an element against 2 x 85 and 36:
+// 3,640 B an element against 1,536 B.
+//
+// kPeMaxElements is how many DISTINCT elements one scene may hold. It was 16 - water, bone, lead
+// and a stainless holder already make 14 - and running out of it was reported as missing data.
+// It is now 100, every Z the model reads, so no scene can reach it: the table of all 100 is 364
+// KB of device memory beside the tabulated points. The host copies of the table are on the heap
+// or in static storage for that reason (host/pe_upload.cuh, the tests).
+constexpr int kPeMaxShells = 29;
+constexpr int kPeMaxElements = 100;
 constexpr int kPeParamStride = kPeMaxShells * 7 + 1;
 
 /// One element's photoelectric parameterization. Tabulated points live in shared arrays.
@@ -75,21 +99,50 @@ struct PhotoElectricTable {
 
 /// Reads "nShells nShells Eboundary" then nShells rows of 7. Values are scaled to Geant4
 /// internal units exactly as ReadData does: column 0 by MeV, the rest by barn.
+///
+/// A refusal says WHAT and WHY through @p why, because the caller's message is the only thing a
+/// user sees: "cannot read pe-high-82.dat" for a file that had been opened, parsed and found to
+/// hold 24 shells against a table of 12 sent P27 looking for a missing file (docs/RISK.md V338).
+///
+/// The two counts of the header are Geant4's n1 (fNShells, the rows that follow) and n2
+/// (fNShellsUsed, the shells SampleSecondaries walks and pe-ss-cs-Z.dat holds). This port walks
+/// n1. They are equal in every file of G4EMLOW 8.2 for Z = 1 .. 100 (V354), so a file where they
+/// differ is one this port would sample differently from Geant4, and it is refused by name.
 template <typename real_t>
-__host__ inline bool load_param_file(const std::string& path, real_t* out, int& n_shells) {
+__host__ inline bool load_param_file(const std::string& path, real_t* out, int& n_shells,
+                                     std::string* why = nullptr) {
+  auto refuse = [&](FILE* f, const std::string& w) {
+    if (f != nullptr) { std::fclose(f); }
+    if (why != nullptr) { *why = w; }
+    return false;
+  };
   FILE* f = std::fopen(path.c_str(), "r");
-  if (f == nullptr) { return false; }
+  if (f == nullptr) { return refuse(nullptr, "the file does not open (missing?)"); }
   int n1 = 0, n2 = 0;
   double x = 0;
-  if (std::fscanf(f, "%d %d %lf", &n1, &n2, &x) != 3) { std::fclose(f); return false; }
-  if (n1 < 1 || n1 > kPeMaxShells) { std::fclose(f); return false; }
+  if (std::fscanf(f, "%d %d %lf", &n1, &n2, &x) != 3) {
+    return refuse(f, "its header \"nShells nShellsUsed Eboundary\" does not parse");
+  }
+  if (n1 < 1 || n1 > kPeMaxShells) {
+    return refuse(f, "it holds " + std::to_string(n1) + " shells and this port's table holds "
+                         "1 to kPeMaxShells = " + std::to_string(kPeMaxShells)
+                         + " (src/data/photoelectric_data.cuh)");
+  }
+  if (n2 != n1) {
+    return refuse(f, "its header gives " + std::to_string(n1) + " shells and "
+                         + std::to_string(n2) + " used; Geant4 samples over the second and "
+                         "this port over the first, so they must agree");
+  }
   n_shells = n1;
   out[0] = real_t(x);  // already MeV
   int k = 1;
   for (int i = 0; i < n1; ++i) {
     for (int j = 0; j < 7; ++j) {
       double v = 0;
-      if (std::fscanf(f, "%lf", &v) != 1) { std::fclose(f); return false; }
+      if (std::fscanf(f, "%lf", &v) != 1) {
+        return refuse(f, "shell row " + std::to_string(i + 1) + " of " + std::to_string(n1)
+                             + " ends after " + std::to_string(j) + " of its 7 values");
+      }
       // j == 0 is a binding energy in MeV; the rest are barn.
       out[k++] = (j == 0) ? real_t(v) : real_t(v) * units::barn<real_t>();
     }
@@ -148,8 +201,14 @@ __host__ inline bool load_cs_file(const std::string& path, std::vector<real_t>& 
 }
 
 /// Loads the given Z values from `dir` (the epics2017/phot directory).
-/// Returns false if any file is missing, so a bad data path fails loudly rather than
-/// silently producing zero cross sections.
+///
+/// Returns false on any refusal, so a bad data path fails loudly rather than silently producing
+/// zero cross sections - and every refusal prints one line saying which file was refused and
+/// why, before the caller's FATAL (host/pe_upload.cuh). The files Geant4's ReadData opens are
+/// required where it requires them, with its em0003 FatalException as the precedent: pe-cs-Z.dat
+/// always; pe-le-cs-Z.dat and pe-ss-cs-Z.dat when the element has more than one shell (an H or He
+/// atom reads neither). Before V355 a missing pe-cs or pe-le-cs file loaded as an empty block and
+/// its branch of the cross section as zero, and a missing pe-ss-cs file as no shell walk.
 template <typename real_t>
 __host__ inline bool load_photoelectric(const std::string& dir, const int* zs, int n_z,
                                         PhotoElectricTable<real_t>& out,
@@ -162,49 +221,94 @@ __host__ inline bool load_photoelectric(const std::string& dir, const int* zs, i
 
   for (int i = 0; i < n_z; ++i) {
     const int z = zs[i];
-    if (z < 1 || z > 100 || out.n_elements >= kPeMaxElements) { return false; }
+    if (z < 1 || z > 100) {
+      std::printf("photoelectric: refused Z = %d: G4LivermorePhotoElectricModel reads Z = 1 to "
+                  "100 (its maxZ), and so does this port\n", z);
+      return false;
+    }
     if (out.z_to_index[z] >= 0) { continue; }  // already loaded
+    if (out.n_elements >= kPeMaxElements) {
+      std::printf("photoelectric: refused Z = %d: the scene's %dth distinct element, and the "
+                  "table holds kPeMaxElements = %d (src/data/photoelectric_data.cuh)\n",
+                  z, out.n_elements + 1, kPeMaxElements);
+      return false;
+    }
 
     PhotoElectricElement<real_t>& e = out.elements[out.n_elements];
     e.z = z;
     int ns_high = 0, ns_low = 0;
     const std::string zs_str = std::to_string(z);
-    if (!load_param_file<real_t>(dir + "/pe-high-" + zs_str + ".dat", e.param_high, ns_high)) {
-      std::printf("photoelectric: cannot read pe-high-%d.dat in %s\n", z, dir.c_str());
+    std::string why;
+    if (!load_param_file<real_t>(dir + "/pe-high-" + zs_str + ".dat", e.param_high, ns_high,
+                                 &why)) {
+      std::printf("photoelectric: refused pe-high-%d.dat in %s: %s\n", z, dir.c_str(),
+                  why.c_str());
       return false;
     }
-    if (!load_param_file<real_t>(dir + "/pe-low-" + zs_str + ".dat", e.param_low, ns_low)) {
-      std::printf("photoelectric: cannot read pe-low-%d.dat in %s\n", z, dir.c_str());
+    if (!load_param_file<real_t>(dir + "/pe-low-" + zs_str + ".dat", e.param_low, ns_low,
+                                 &why)) {
+      std::printf("photoelectric: refused pe-low-%d.dat in %s: %s\n", z, dir.c_str(),
+                  why.c_str());
       return false;
     }
-    if (ns_high != ns_low) { return false; }
+    if (ns_high != ns_low) {
+      std::printf("photoelectric: refused Z = %d: pe-high-%d.dat holds %d shells and "
+                  "pe-low-%d.dat %d; both index the same shells\n",
+                  z, z, ns_high, z, ns_low);
+      return false;
+    }
     e.n_shells = ns_high;
 
-    load_cs_file<real_t>(dir + "/pe-cs-" + zs_str + ".dat", table_e, table_v, e.cs_offset,
-                         e.cs_count);
-    load_cs_file<real_t>(dir + "/pe-le-cs-" + zs_str + ".dat", table_e, table_v, e.le_offset,
-                         e.le_count);
+    if (!load_cs_file<real_t>(dir + "/pe-cs-" + zs_str + ".dat", table_e, table_v, e.cs_offset,
+                              e.cs_count)) {
+      std::printf("photoelectric: refused pe-cs-%d.dat in %s: it does not open, or holds no "
+                  "point (Geant4 stops on it: em0003)\n", z, dir.c_str());
+      return false;
+    }
+    if (!load_cs_file<real_t>(dir + "/pe-le-cs-" + zs_str + ".dat", table_e, table_v,
+                              e.le_offset, e.le_count)
+        && e.n_shells > 1) {
+      std::printf("photoelectric: refused pe-le-cs-%d.dat in %s: it does not open, or holds no "
+                  "point, and Z = %d has %d shells (Geant4 stops on it: em0003)\n",
+                  z, dir.c_str(), z, e.n_shells);
+      return false;
+    }
 
     // Per-shell cross sections: n_shells blocks of "emin emax npoints shell_id" then points.
     e.n_ss = 0;
     {
       FILE* fs = std::fopen((dir + "/pe-ss-cs-" + zs_str + ".dat").c_str(), "r");
+      if (fs == nullptr && e.n_shells > 1) {
+        std::printf("photoelectric: refused pe-ss-cs-%d.dat in %s: it does not open, and Z = %d "
+                    "has %d shells (Geant4 stops on it: em0003)\n",
+                    z, dir.c_str(), z, e.n_shells);
+        return false;
+      }
       if (fs != nullptr) {
-        for (int s = 0; s < e.n_shells && s < kPeMaxShells; ++s) {
+        for (int s = 0; s < e.n_shells; ++s) {
           double emin = 0, emax = 0;
           int np = 0, sid = 0;
-          if (std::fscanf(fs, "%lf %lf %d %d", &emin, &emax, &np, &sid) != 4) { break; }
-          e.ss_offset[s] = static_cast<int>(table_e.size());
-          e.ss_id[s] = sid;
-          int got = 0;
-          for (int k = 0; k < np; ++k) {
-            double ee = 0, vv = 0;
-            if (std::fscanf(fs, "%lf %lf", &ee, &vv) != 2) { break; }
-            table_e.push_back(real_t(ee));
-            table_v.push_back(real_t(vv) * units::barn<real_t>());
-            ++got;
+          bool whole = std::fscanf(fs, "%lf %lf %d %d", &emin, &emax, &np, &sid) == 4;
+          if (whole) {
+            e.ss_offset[s] = static_cast<int>(table_e.size());
+            e.ss_id[s] = sid;
+            int got = 0;
+            for (int k = 0; k < np; ++k) {
+              double ee = 0, vv = 0;
+              if (std::fscanf(fs, "%lf %lf", &ee, &vv) != 2) { break; }
+              table_e.push_back(real_t(ee));
+              table_v.push_back(real_t(vv) * units::barn<real_t>());
+              ++got;
+            }
+            e.ss_count[s] = got;
+            whole = (got == np);
           }
-          e.ss_count[s] = got;
+          if (!whole) {
+            std::fclose(fs);
+            std::printf("photoelectric: refused pe-ss-cs-%d.dat in %s: shell block %d of %d is "
+                        "incomplete\n", z, dir.c_str(), s + 1, e.n_shells);
+            return false;
+          }
           ++e.n_ss;
         }
         std::fclose(fs);
