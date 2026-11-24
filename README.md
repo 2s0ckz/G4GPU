@@ -120,7 +120,26 @@ ships on both sides. "port": events/s at the row's first saturated count (the co
 the rate rose by no more than 3%). "per core": Geant4 serial, events / User. "box": Geant4 on ten
 workers (the ten physical cores), events / Real, its start-up measured inside the timer and under
 5% of User. Every row is a line of `docs/sweep/p27/runs.csv`; 549 of the sweep's 630 compared rows
-agree with Geant4 inside 3 sigma, and the 81 that do not are named in V340 (P46 brought 14 muon rows inside: 563 and 67, V348).
+agreed with Geant4 inside 3 sigma when the sweep ran, and the 81 that did not are named in V340.
+
+**The four packages that answered V340 (2026-11-23/24, V342-V357), each proved on its own branch
+against the same Geant4 rows:** P45 and P44 found the port stopping any charged track with less than
+10 um of residual range where it stood, a floor `G4VEnergyLossProcess` does not have - it left a 1 MeV/n
+nucleus in the envelope 1 um before the trapezoid (C12 and Fe56 from -839 sigma to inside 1) and killed
+the recoil protons a 1 MeV neutron makes on an air cavity's water wall (the air dose from -85% to +1.4%;
+61 of the 63 air rows at 300 MeV-10 GeV inside 3 sigma, from 15); P44 also gave the e+- discrete rates
+Geant4's lambda tables with the integral approach (e- 100 keV in air from -1.5% to -0.05%), which moved
+the gates at the fourth digit (V351: exampleB1 426.028 -> 426.118 pGy). P46 found the muon's delta
+rays drawn from `G4BetheBlochModel` instead of `G4MuBetheBlochModel` and `muBrems`/`muPairProd` never
+sampled: 36 of the 38 muon rows inside 3 sigma, from 22, at the cost of the muon rate above 1 GeV
+(the row below; V348 names the remedy). P43 lifted the photoelectric table's 12-shell cap and every
+per-Z cap, so every element to Z = 98 loads (Geant4 11.1.1 itself holds Z < 99) exact to 4e-16, and
+ran P27's 72 lead rows: 70 have a dose and 55 are inside 3 sigma, every photon row among them; the
+lead rows outside (kaons on Bertini-refusal disposal, neutrons and pions at 300 MeV-1 GeV, the slow
+electron at a high-Z face, the 10 GeV rows at the engine's limits) are V357's list. The four counts
+do not add: each branch was swept alone, and P43's lead rows ran without P44's and P46's fixes. The
+sweep is rerun whole on this tree next; until it is, V340's 81 and the four packages' own tables are
+the record.
 
 | class | beam (trapezoid) | port, saturated | per core | box | x core | x box |
 |---|---|--:|--:|--:|--:|--:|
